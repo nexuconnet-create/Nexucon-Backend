@@ -33,16 +33,23 @@ if os.getenv("CELERY_BROKER_URL"):
 # ALLOWED_HOSTS is loaded from base.py via the DJANGO_ALLOWED_HOSTS env var
 
 # CORS and CSRF for Vercel
+try:
+    CSRF_TRUSTED_ORIGINS = list(CSRF_TRUSTED_ORIGINS)
+except NameError:
+    CSRF_TRUSTED_ORIGINS = []
+
 if os.getenv("FRONTEND_URL"):
     frontend_url = os.getenv("FRONTEND_URL")
     CORS_ALLOWED_ORIGINS.append(frontend_url)
-    CSRF_TRUSTED_ORIGINS = [frontend_url]
+    if frontend_url not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(frontend_url)
 
 # Allow any Vercel domain dynamically to support preview deployments
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.vercel\.app$",
 ]
-CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
+if "https://*.vercel.app" not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
 
 # Alternatively, allow all if explicitly set (useful for initial Vercel setup)
 if os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True":
