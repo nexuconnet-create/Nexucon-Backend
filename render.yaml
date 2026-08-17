@@ -3,7 +3,7 @@ services:
     name: nexucon-backend
     env: docker
     region: frankfurt
-    plan: starter
+    plan: free
     dockerCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:8000"
     envVars:
       - key: DATABASE_URL
@@ -33,7 +33,7 @@ services:
     name: nexucon-celery
     env: docker
     region: frankfurt
-    plan: starter
+    plan: free
     dockerCommand: "celery -A config worker -l INFO"
     envVars:
       - key: DATABASE_URL
@@ -66,5 +66,5 @@ databases:
     databaseName: nexucon
     user: nexucon
     region: frankfurt
-    plan: starter
+    plan: free
     # Render's PostgreSQL supports PostGIS natively via 'CREATE EXTENSION postgis;'
