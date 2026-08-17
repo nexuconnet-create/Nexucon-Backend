@@ -31,3 +31,13 @@ if os.getenv("CELERY_BROKER_URL"):
 # Allowed Hosts - ensure Render domain is included
 # The render.yaml sets DJANGO_ALLOWED_HOSTS to nexucon-backend.onrender.com
 # ALLOWED_HOSTS is loaded from base.py via the DJANGO_ALLOWED_HOSTS env var
+
+# CORS and CSRF for Vercel
+if os.getenv("FRONTEND_URL"):
+    frontend_url = os.getenv("FRONTEND_URL")
+    CORS_ALLOWED_ORIGINS.append(frontend_url)
+    CSRF_TRUSTED_ORIGINS = [frontend_url]
+    
+# Alternatively, allow all if explicitly set (useful for initial Vercel setup)
+if os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True":
+    CORS_ALLOW_ALL_ORIGINS = True
