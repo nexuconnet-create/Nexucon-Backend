@@ -1,0 +1,342 @@
+{
+  "dataset_name": "Nexucon Government Agency Test Projects",
+  "version": "1.0",
+  "generated_for": "Government Dashboard Backend and Frontend Testing",
+  "project_count": 10,
+  "notes": [
+    "All organizations, contacts, references, and email addresses are synthetic test data.",
+    "Coordinates are sample data intended for UI/API testing and should not be treated as authoritative survey data.",
+    "Regulatory references are synthetic and should not be used as real government records."
+  ],
+  "projects": [
+    {
+      "project_reference": "NXC-GOV-2026-0048",
+      "project_name": "Ikeja Civic Centre Redevelopment",
+      "project_type": "Institutional",
+      "development_category": "Public Civic Infrastructure",
+      "status": "ACTIVE",
+      "priority": "High",
+      "description": "Redevelopment of an existing civic centre into a modern multi-purpose government facility with administrative offices, public service halls, meeting rooms, parking, and supporting infrastructure.",
+      "estimated_project_value_ngn": 1850000000,
+      "current_progress_percent": 58,
+      "estimated_start_date": "2026-01-20",
+      "expected_completion_date": "2027-03-31",
+      "developer": {
+        "name": "Lagos Public Infrastructure Development Agency",
+        "registration_number": "GOV/LAG/INF/2026/118",
+        "contact_person": "Amina Balogun",
+        "email": "projects@example.test",
+        "phone": "+2348000004801"
+      },
+      "location": {
+        "address": "12 Oba Akran Avenue, Ikeja",
+        "state": "Lagos",
+        "lga": "Ikeja",
+        "area": "Ikeja GRA",
+        "plot_number": "Plot 18",
+        "latitude": 6.6018,
+        "longitude": 3.3515,
+        "site_area_sqm": 7200
+      },
+      "development_details": {
+        "primary_use": "Institutional",
+        "proposed_use": "Government Civic Facility",
+        "gross_floor_area_sqm": 12400,
+        "building_height_m": 22.4,
+        "number_of_floors": 5,
+        "number_of_units": 34,
+        "construction_method": "Reinforced Concrete Frame"
+      },
+      "regulatory": {
+        "planning_permit": "LASPPPA/PP/2026/02114",
+        "building_control_reference": "LASBCA/BC/2026/01108",
+        "permit_status": "Approved",
+        "planning_approval_date": "2026-01-12",
+        "permit_expiry_date": "2028-01-12",
+        "environmental_approval": "EIA/LAG/2026/0912"
+      }
+    },
+    {
+      "project_reference": "NXC-GOV-2026-0049",
+      "project_name": "Ikorodu Industrial Park Phase II",
+      "project_type": "Industrial",
+      "development_category": "Industrial Infrastructure",
+      "status": "ACTIVE",
+      "priority": "Critical",
+      "description": "Expansion of an industrial park comprising light manufacturing facilities, warehouses, internal roads, drainage systems, utility corridors, and logistics infrastructure.",
+      "estimated_project_value_ngn": 6400000000,
+      "current_progress_percent": 31,
+      "estimated_start_date": "2026-03-10",
+      "expected_completion_date": "2028-02-28",
+      "developer": {
+        "name": "Ikorodu Industrial Development Consortium",
+        "registration_number": "RC 1964281",
+        "contact_person": "Tunde Akinwale",
+        "email": "development@example.test",
+        "phone": "+2348000004902"
+      },
+      "location": {
+        "address": "Industrial Layout, Ikorodu",
+        "state": "Lagos",
+        "lga": "Ikorodu",
+        "area": "Agbowa Industrial Corridor",
+        "plot_number": "Blocks 21-34",
+        "latitude": 6.6197,
+        "longitude": 3.5106,
+        "site_area_sqm": 28500
+      },
+      "development_details": {
+        "primary_use": "Industrial",
+        "proposed_use": "Light Manufacturing and Logistics",
+        "gross_floor_area_sqm": 46200,
+        "building_height_m": 18.2,
+        "number_of_floors": 3,
+        "number_of_units": 22,
+        "construction_method": "Steel Frame and Reinforced Concrete"
+      },
+      "regulatory": {
+        "planning_permit": "LASPPPA/PP/2026/02471",
+        "building_control_reference": "LASBCA/BC/2026/01341",
+        "permit_status": "Approved",
+        "planning_approval_date": "2026-02-22",
+        "permit_expiry_date": "2029-02-22",
+        "environmental_approval": "EIA/LAG/2026/1137"
+      }
+    },
+    {
+      "project_reference": "NXC-GOV-2026-0050",
+      "project_name": "Yaba Affordable Housing Estate",
+      "project_type": "Residential",
+      "development_category": "Affordable Housing",
+      "status": "ACTIVE",
+      "priority": "High",
+      "description": "Construction of a multi-block affordable housing estate comprising residential units, community facilities, access roads, drainage, water infrastructure, and recreational areas.",
+      "estimated_project_value_ngn": 3900000000,
+      "current_progress_percent": 67,
+      "estimated_start_date": "2025-11-15",
+      "expected_completion_date": "2027-01-31",
+      "developer": {
+        "name": "Lagos Housing Development Corporation",
+        "registration_number": "GOV/LAG/HSG/2025/074",
+        "contact_person": "Kemi Oladipo",
+        "email": "housing@example.test",
+        "phone": "+2348000005013"
+      },
+      "location": {
+        "address": "Herbert Macaulay Way Extension, Yaba",
+        "state": "Lagos",
+        "lga": "Lagos Mainland",
+        "area": "Yaba",
+        "plot_number": "Estate Parcel 07",
+        "latitude": 6.5094,
+        "longitude": 3.3732,
+        "site_area_sqm": 16200
+      },
+      "development_details": {
+        "primary_use": "Residential",
+        "proposed_use": "Affordable Housing",
+        "gross_floor_area_sqm": 30800,
+        "building_height_m": 16.8,
+        "number_of_floors": 4,
+        "number_of_units": 192,
+        "construction_method": "Reinforced Concrete Frame"
+      },
+      "regulatory": {
+        "planning_permit": "LASPPPA/PP/2025/01984",
+        "building_control_reference": "LASBCA/BC/2025/00842",
+        "permit_status": "Approved",
+        "planning_approval_date": "2025-10-20",
+        "permit_expiry_date": "2028-10-20",
+        "environmental_approval": "EIA/LAG/2025/0673"
+      }
+    },
+    {
+      "project_reference": "NXC-GOV-2026-0051",
+      "project_name": "Victoria Island Waterfront Office Tower",
+      "project_type": "Commercial",
+      "development_category": "High-Rise Office Development",
+      "status": "PLANNING",
+      "priority": "Critical",
+      "description": "Proposed 14-storey Grade A office development with retail frontage, basement parking, mechanical plant areas, pedestrian access, and waterfront landscaping.",
+      "estimated_project_value_ngn": 8700000000,
+      "current_progress_percent": 4,
+      "estimated_start_date": "2026-10-01",
+      "expected_completion_date": "2029-03-31",
+      "developer": {
+        "name": "Atlantic Development Partners Ltd.",
+        "registration_number": "RC 2037814",
+        "contact_person": "Chuka Nwosu",
+        "email": "development@example.test",
+        "phone": "+2348000005124"
+      },
+      "location": {
+        "address": "Waterfront District, Victoria Island",
+        "state": "Lagos",
+        "lga": "Eti-Osa",
+        "area": "Victoria Island",
+        "plot_number": "Plot W-14",
+        "latitude": 6.4281,
+        "longitude": 3.4218,
+        "site_area_sqm": 6100
+      },
+      "development_details": {
+        "primary_use": "Commercial",
+        "proposed_use": "Grade A Office",
+        "gross_floor_area_sqm": 35400,
+        "building_height_m": 61.5,
+        "number_of_floors": 14,
+        "number_of_units": 28,
+        "construction_method": "Reinforced Concrete Core and Composite Structure"
+      },
+      "regulatory": {
+        "planning_permit": "LASPPPA/PP/2026/02891",
+        "building_control_reference": "Pending Assignment",
+        "permit_status": "Under Review",
+        "planning_approval_date": null,
+        "permit_expiry_date": null,
+        "environmental_approval": "EIA/LAG/2026/1422"
+      }
+    },
+    {
+      "project_reference": "NXC-GOV-2026-0052",
+      "project_name": "Badagry Coastal Road Rehabilitation",
+      "project_type": "Infrastructure",
+      "development_category": "Road and Drainage Infrastructure",
+      "status": "ACTIVE",
+      "priority": "High",
+      "description": "Rehabilitation and drainage improvement of a strategic coastal road corridor, including pavement reconstruction, drainage upgrades, culvert works, pedestrian facilities, and road safety improvements.",
+      "estimated_project_value_ngn": 5200000000,
+      "current_progress_percent": 49,
+      "estimated_start_date": "2026-02-01",
+      "expected_completion_date": "2027-06-30",
+      "developer": {
+        "name": "Lagos State Transport Infrastructure Directorate",
+        "registration_number": "GOV/LAG/TRN/2026/044",
+        "contact_person": "Musa Ibrahim",
+        "email": "infrastructure@example.test",
+        "phone": "+2348000005235"
+      },
+      "location": {
+        "address": "Badagry Coastal Corridor",
+        "state": "Lagos",
+        "lga": "Badagry",
+        "area": "Badagry",
+        "plot_number": "Corridor Section A-C",
+        "latitude": 6.4217,
+        "longitude": 2.8856,
+        "site_area_sqm": 98000
+      },
+      "development_details": {
+        "primary_use": "Infrastructure",
+        "proposed_use": "Road Rehabilitation",
+        "gross_floor_area_sqm": null,
+        "building_height_m": null,
+        "number_of_floors": null,
+        "number_of_units": null,
+        "construction_method": "Flexible Pavement and Reinforced Concrete Drainage"
+      },
+      "regulatory": {
+        "planning_permit": "INFRA/LAG/2026/00482",
+        "building_control_reference": "N/A",
+        "permit_status": "Approved",
+        "planning_approval_date": "2026-01-14",
+        "permit_expiry_date": "2028-01-14",
+        "environmental_approval": "EIA/LAG/2026/0734"
+      }
+    },
+    {
+      "project_reference": "NXC-GOV-2026-0053",
+      "project_name": "Surulere General Hospital Expansion",
+      "project_type": "Institutional",
+      "development_category": "Healthcare Infrastructure",
+      "status": "SUSPENDED",
+      "priority": "Critical",
+      "description": "Expansion of a public hospital through construction of a new specialist care wing, diagnostic facilities, service areas, parking, and supporting utility infrastructure.",
+      "estimated_project_value_ngn": 4600000000,
+      "current_progress_percent": 36,
+      "estimated_start_date": "2026-01-05",
+      "expected_completion_date": "2027-12-15",
+      "developer": {
+        "name": "Lagos State Health Infrastructure Programme",
+        "registration_number": "GOV/LAG/HIP/2026/019",
+        "contact_person": "Dr. Funmi Adeola",
+        "email": "healthprojects@example.test",
+        "phone": "+2348000005346"
+      },
+      "location": {
+        "address": "Adeniran Ogunsanya Street, Surulere",
+        "state": "Lagos",
+        "lga": "Surulere",
+        "area": "Surulere",
+        "plot_number": "Hospital Extension Parcel 03",
+        "latitude": 6.5007,
+        "longitude": 3.3512,
+        "site_area_sqm": 11200
+      },
+      "development_details": {
+        "primary_use": "Institutional",
+        "proposed_use": "Healthcare Facility",
+        "gross_floor_area_sqm": 22600,
+        "building_height_m": 25.7,
+        "number_of_floors": 6,
+        "number_of_units": 72,
+        "construction_method": "Reinforced Concrete Frame"
+      },
+      "regulatory": {
+        "planning_permit": "LASPPPA/PP/2025/03182",
+        "building_control_reference": "LASBCA/BC/2026/00612",
+        "permit_status": "Conditional Approval",
+        "planning_approval_date": "2025-12-18",
+        "permit_expiry_date": "2028-12-18",
+        "environmental_approval": "EIA/LAG/2025/0982"
+      }
+    },
+    {
+      "project_reference": "NXC-GOV-2026-0054",
+      "project_name": "Epe Waterfront Market and Transport Hub",
+      "project_type": "Mixed-Use",
+      "development_category": "Market and Transport Infrastructure",
+      "status": "COMPLETED",
+      "priority": "Normal",
+      "description": "Completed development of a public market and transport interchange integrating retail stalls, passenger facilities, parking, drainage, pedestrian circulation, and public amenities.",
+      "estimated_project_value_ngn": 2250000000,
+      "current_progress_percent": 100,
+      "estimated_start_date": "2025-02-01",
+      "expected_completion_date": "2026-07-31",
+      "developer": {
+        "name": "Epe Urban Renewal Authority",
+        "registration_number": "GOV/LAG/EURA/2025/027",
+        "contact_person": "Bola Martins",
+        "email": "urbanrenewal@example.test",
+        "phone": "+2348000005457"
+      },
+      "location": {
+        "address": "Marina Road, Epe",
+        "state": "Lagos",
+        "lga": "Epe",
+        "area": "Epe Waterfront",
+        "plot_number": "Market Parcel 11",
+        "latitude": 6.5841,
+        "longitude": 3.9834,
+        "site_area_sqm": 15400
+      },
+      "development_details": {
+        "primary_use": "Mixed-Use",
+        "proposed_use": "Public Market and Transport Hub",
+        "gross_floor_area_sqm": 18700,
+        "building_height_m": 14.2,
+        "number_of_floors": 3,
+        "number_of_units": 260,
+        "construction_method": "Reinforced Concrete and Steel Canopy"
+      },
+      "regulatory": {
+        "planning_permit": "LASPPPA/PP/2025/00872",
+        "building_control_reference": "LASBCA/BC/2025/00391",
+        "permit_status": "Closed",
+        "planning_approval_date": "2025-01-10",
+        "permit_expiry_date": "2026-12-31",
+        "environmental_approval": "EIA/LAG/2025/0318"
+      }
+    }
+  ]
+}
