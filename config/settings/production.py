@@ -37,7 +37,13 @@ if os.getenv("FRONTEND_URL"):
     frontend_url = os.getenv("FRONTEND_URL")
     CORS_ALLOWED_ORIGINS.append(frontend_url)
     CSRF_TRUSTED_ORIGINS = [frontend_url]
-    
+
+# Allow any Vercel domain dynamically to support preview deployments
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https:\/\/.*\.vercel\.app$",
+]
+CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
+
 # Alternatively, allow all if explicitly set (useful for initial Vercel setup)
 if os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True":
     CORS_ALLOW_ALL_ORIGINS = True
