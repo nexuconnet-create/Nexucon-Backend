@@ -29,31 +29,7 @@ services:
       - key: DEBUG
         value: "False"
 
-  - type: worker
-    name: nexucon-celery
-    env: docker
-    region: frankfurt
-    plan: free
-    dockerCommand: "celery -A config worker -l INFO"
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: nexucon-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: nexucon-redis
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: nexucon-redis
-          property: connectionString
-      - key: DJANGO_SETTINGS_MODULE
-        value: config.settings.production
-      - key: DJANGO_SECRET_KEY
-        generateValue: true
+
 
   - type: redis
     name: nexucon-redis
