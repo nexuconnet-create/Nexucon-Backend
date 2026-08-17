@@ -59,6 +59,7 @@ services:
     name: nexucon-redis
     region: frankfurt
     plan: free
+    ipAllowList: []
 
 databases:
   - name: nexucon-db
