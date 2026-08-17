@@ -51,6 +51,17 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 if "https://*.vercel.app" not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
 
+# Cross-Origin Cookie Settings for Vercel -> Render communication
+SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = True
+
+# Update SIMPLE_JWT settings for cross-origin cookies
+if 'SIMPLE_JWT' in locals():
+    SIMPLE_JWT['AUTH_COOKIE_SAMESITE'] = 'None'
+    SIMPLE_JWT['AUTH_COOKIE_SECURE'] = True
+
 # Alternatively, allow all if explicitly set (useful for initial Vercel setup)
 if os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True":
     CORS_ALLOW_ALL_ORIGINS = True
