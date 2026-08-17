@@ -1,0 +1,69 @@
+services:
+  - type: web
+    name: nexucon-backend
+    env: docker
+    region: frankfurt
+    plan: starter
+    dockerCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:8000"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexucon-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nexucon-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: nexucon-redis
+          property: connectionString
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.production
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_ALLOWED_HOSTS
+        value: nexucon-backend.onrender.com
+      - key: DEBUG
+        value: "False"
+
+  - type: worker
+    name: nexucon-celery
+    env: docker
+    region: frankfurt
+    plan: starter
+    dockerCommand: "celery -A config worker -l INFO"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexucon-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nexucon-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: nexucon-redis
+          property: connectionString
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.production
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+
+  - type: redis
+    name: nexucon-redis
+    region: frankfurt
+    plan: free
+
+databases:
+  - name: nexucon-db
+    databaseName: nexucon
+    user: nexucon
+    region: frankfurt
+    plan: starter
+    # Render's PostgreSQL supports PostGIS natively via 'CREATE EXTENSION postgis;'

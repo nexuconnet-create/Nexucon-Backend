@@ -1,2 +1,33 @@
 from .base import *
-DEBUG = False
+import dj_database_url
+import os
+
+DEBUG = os.getenv("DEBUG", "False") == "True"
+
+# Security
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = 'DENY'
+
+# Database
+# If DATABASE_URL is set, use dj_database_url to parse it
+if os.getenv("DATABASE_URL"):
+    DATABASES['default'] = dj_database_url.config(
+        default=os.getenv("DATABASE_URL"),
+        conn_max_age=600,
+        conn_health_checks=True,
+    )
+    # Ensure postgis engine is used
+    DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
+
+# Static files (WhiteNoise)
+MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# Celery
+if os.getenv("CELERY_BROKER_URL"):
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
+
+# Allowed Hosts - ensure Render domain is included
+# The render.yaml sets DJANGO_ALLOWED_HOSTS to nexucon-backend.onrender.com
+# ALLOWED_HOSTS is loaded from base.py via the DJANGO_ALLOWED_HOSTS env var
