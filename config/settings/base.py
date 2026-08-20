@@ -116,9 +116,13 @@ SIMPLE_JWT = {
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Nexucon API',
-    'DESCRIPTION': 'Government Agency Dashboard API',
+    'TITLE': 'Nexucon Government Agency API',
+    'DESCRIPTION': 'Enterprise Building Collapse Prevention & Digital Regulatory Agency API',
     'VERSION': '1.0.0',
+    'SERVERS': [
+        {'url': 'https://nexucon-backend.onrender.com', 'description': 'Live Production (Render)'},
+        {'url': 'http://127.0.0.1:8000', 'description': 'Local Development'},
+    ],
 }
 
 AUTH_USER_MODEL = 'accounts.User'
