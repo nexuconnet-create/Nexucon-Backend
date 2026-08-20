@@ -14,8 +14,17 @@ urlpatterns = [
     path('api/v1/applications/', include('apps.applications.urls')),
     path('api/v1/permits/', include('apps.permits.urls')),
     path('api/v1/inspections/', include('apps.inspections.urls')),
+    path('api/v1/monitoring/', include('apps.monitoring.urls')),
+    path('api/v1/bim/', include('apps.bim.urls')),
     path('api/v1/documents/', include('apps.documents.urls')),
+    path('api/v1/compliance/', include('apps.compliance.urls')),
+    path('api/v1/approvals/', include('apps.approvals.urls')),
+    path('api/v1/analytics/', include('apps.analytics.urls')),
+    path('api/v1/notifications/', include('apps.notifications.urls')),
+    path('api/v1/audit/', include('apps.audit.urls')),
     path('api/v1/stakeholders/', include('apps.stakeholders.urls')),
+    path('api/v1/integrations/', include('apps.settings.urls')),
+    path('api/v1/settings/', include('apps.settings.urls')),
     
     # New Client Requests Apps
     path('api/v1/emergency/', include('apps.emergency.urls')),

@@ -1,15 +1,359 @@
-from rest_framework import viewsets
-from .models import Inspection, Checklist, Finding
-from .serializers import InspectionSerializer, ChecklistSerializer, FindingSerializer
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Q
+from django.utils import timezone
+from django.contrib.auth import get_user_model
+import datetime
+from .models import Inspection, Checklist, Finding, StopWorkOrder
+from .serializers import (
+    InspectionSerializer, CreateInspectionSerializer,
+    ChecklistSerializer, FindingSerializer, StopWorkOrderSerializer
+)
+from .services import InspectionService
+
+User = get_user_model()
 
 class InspectionViewSet(viewsets.ModelViewSet):
-    queryset = Inspection.objects.all().order_by('-scheduled_date')
+    queryset = Inspection.objects.all().select_related('project', 'inspector', 'permit', 'parent_inspection').prefetch_related('findings', 'stop_work_orders')
     serializer_class = InspectionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CreateInspectionSerializer
+        return InspectionSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        status_param = self.request.query_params.get('status')
+        project_param = self.request.query_params.get('project')
+        inspector_param = self.request.query_params.get('inspector')
+        priority_param = self.request.query_params.get('priority')
+        type_param = self.request.query_params.get('type')
+        search_param = self.request.query_params.get('search')
+
+        if status_param:
+            status_param = status_param.lower()
+            if status_param == 'requests':
+                queryset = queryset.filter(status='REQUESTED')
+            elif status_param == 'schedule':
+                queryset = queryset.filter(status='SCHEDULED')
+            elif status_param == 'active':
+                queryset = queryset.filter(status='IN_PROGRESS')
+            elif status_param == 'findings':
+                queryset = queryset.filter(findings__isnull=False).distinct()
+            elif status_param == 'stop-work':
+                queryset = queryset.filter(Q(status='FAILED') | Q(stop_work_orders__status='ACTIVE')).distinct()
+            elif status_param == 're-inspections':
+                queryset = queryset.filter(Q(status='RE_INSPECTION_REQUIRED') | Q(inspection_type='Re-Inspection')).distinct()
+            elif status_param == 'reports':
+                queryset = queryset.filter(status='COMPLETED')
+            else:
+                queryset = queryset.filter(status=status_param.upper())
+
+        if project_param:
+            queryset = queryset.filter(project_id=project_param)
+
+        if inspector_param:
+            queryset = queryset.filter(Q(inspector_id=inspector_param) | Q(inspector_name__icontains=inspector_param))
+
+        if priority_param:
+            queryset = queryset.filter(priority__iexact=priority_param)
+
+        if type_param:
+            queryset = queryset.filter(inspection_type__icontains=type_param)
+
+        if search_param:
+            queryset = queryset.filter(
+                Q(inspection_reference__icontains=search_param) |
+                Q(project__name__icontains=search_param) |
+                Q(inspector_name__icontains=search_param) |
+                Q(inspection_type__icontains=search_param)
+            )
+
+        return queryset
+
+    def perform_create(self, serializer):
+        return InspectionService.create_inspection_request(
+            data=serializer.validated_data,
+            user=self.request.user
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        inspection = self.perform_create(serializer)
+        out_serializer = InspectionSerializer(inspection)
+        return Response({
+            'success': True,
+            'message': 'Inspection request created successfully',
+            'data': out_serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """Return counts for all 7 inspection tabs."""
+        today = timezone.now().date()
+
+        requests_count = Inspection.objects.filter(status='REQUESTED').count()
+        schedule_count = Inspection.objects.filter(status='SCHEDULED').count()
+        active_count = Inspection.objects.filter(status='IN_PROGRESS').count()
+        findings_count = Finding.objects.filter(is_resolved=False).count()
+        stop_work_count = StopWorkOrder.objects.filter(status='ACTIVE').count()
+        re_inspections_count = Inspection.objects.filter(Q(status='RE_INSPECTION_REQUIRED') | Q(inspection_type='Re-Inspection')).distinct().count()
+        reports_count = Inspection.objects.filter(status='COMPLETED').count()
+        total = Inspection.objects.count()
+
+        return Response({
+            'success': True,
+            'data': {
+                'requests': requests_count,
+                'schedule': schedule_count,
+                'active': active_count,
+                'findings': findings_count,
+                'stop_work': stop_work_count,
+                're_inspections': re_inspections_count,
+                'reports': reports_count,
+                'total': total
+            }
+        })
+
+    @action(detail=True, methods=['post'], url_path='assign')
+    def assign_inspector(self, request, pk=None):
+        """Assign inspector and set schedule date/time."""
+        inspection = self.get_object()
+        inspector_id = request.data.get('inspector_id')
+        inspector_name = request.data.get('inspector_name')
+        scheduled_date = request.data.get('scheduled_date') or timezone.now()
+
+        inspector_user = None
+        if inspector_id:
+            try:
+                inspector_user = User.objects.get(pk=inspector_id)
+            except User.DoesNotExist:
+                pass
+
+        if not inspector_user:
+            inspector_user = request.user
+
+        updated = InspectionService.assign_and_schedule(
+            inspection=inspection,
+            inspector_user=inspector_user,
+            scheduled_date=scheduled_date,
+            actor=request.user
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Inspection assigned and scheduled for {scheduled_date}",
+            'data': InspectionSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='checkin')
+    def checkin(self, request, pk=None):
+        """Inspector GPS check-in at site."""
+        inspection = self.get_object()
+        lat = request.data.get('latitude') or request.data.get('lat')
+        lng = request.data.get('longitude') or request.data.get('lng')
+
+        updated = InspectionService.check_in(
+            inspection=inspection,
+            lat=lat,
+            lng=lng,
+            actor=request.user
+        )
+
+        return Response({
+            'success': True,
+            'message': 'Inspector check-in verified via GPS',
+            'data': InspectionSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='complete')
+    def complete(self, request, pk=None):
+        """Complete inspection with pass/fail/conditional outcome."""
+        inspection = self.get_object()
+        outcome = request.data.get('outcome', 'PASSED')
+        checklist_results = request.data.get('checklist_results')
+        summary_notes = request.data.get('summary_notes', '')
+
+        updated = InspectionService.complete_inspection(
+            inspection=inspection,
+            outcome=outcome,
+            checklist_results=checklist_results,
+            summary_notes=summary_notes,
+            actor=request.user
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Inspection completed with outcome: {outcome}",
+            'data': InspectionSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='log-finding')
+    def log_finding(self, request, pk=None):
+        """Log defect / finding on this inspection."""
+        inspection = self.get_object()
+        finding = InspectionService.log_finding(
+            inspection=inspection,
+            data=request.data,
+            actor=request.user
+        )
+        return Response({
+            'success': True,
+            'message': 'Inspection finding logged successfully',
+            'data': FindingSerializer(finding).data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='issue-stop-work')
+    def issue_stop_work(self, request, pk=None):
+        """Issue Stop-Work Order directly from inspection."""
+        inspection = self.get_object()
+        reason = request.data.get('reason', 'Critical safety or structural non-conformance.')
+        severity = request.data.get('severity', 'CRITICAL')
+
+        swo = InspectionService.issue_stop_work(
+            project=inspection.project,
+            reason=reason,
+            severity=severity,
+            actor=request.user,
+            inspection=inspection
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Stop-Work Order {swo.order_number} issued. Project suspended.",
+            'data': StopWorkOrderSerializer(swo).data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='create-reinspection')
+    def create_reinspection(self, request, pk=None):
+        """Create a follow-up re-inspection."""
+        inspection = self.get_object()
+        scheduled_date = request.data.get('scheduled_date') or (timezone.now() + datetime.timedelta(days=7))
+
+        reinspection = InspectionService.create_reinspection(
+            original_inspection=inspection,
+            scheduled_date=scheduled_date,
+            actor=request.user
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Re-Inspection {reinspection.inspection_reference} scheduled.",
+            'data': InspectionSerializer(reinspection).data
+        }, status=status.HTTP_201_CREATED)
+
+
+class StopWorkOrderViewSet(viewsets.ModelViewSet):
+    queryset = StopWorkOrder.objects.all().select_related('project', 'inspection', 'finding')
+    serializer_class = StopWorkOrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        status_param = self.request.query_params.get('status')
+        project_param = self.request.query_params.get('project')
+        search_param = self.request.query_params.get('search')
+
+        if status_param:
+            queryset = queryset.filter(status=status_param.upper())
+
+        if project_param:
+            queryset = queryset.filter(project_id=project_param)
+
+        if search_param:
+            queryset = queryset.filter(
+                Q(order_number__icontains=search_param) |
+                Q(project__name__icontains=search_param) |
+                Q(reason__icontains=search_param)
+            )
+
+        return queryset
+
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """Return SWO metrics."""
+        thirty_days_ago = timezone.now() - datetime.timedelta(days=30)
+        active_count = StopWorkOrder.objects.filter(status='ACTIVE').count()
+        appeals_count = StopWorkOrder.objects.filter(status='APPEALED').count()
+        lifted_count = StopWorkOrder.objects.filter(status='LIFTED', lifted_at__gte=thirty_days_ago).count()
+        total = StopWorkOrder.objects.count()
+
+        return Response({
+            'success': True,
+            'data': {
+                'active': active_count,
+                'pending_appeals': appeals_count,
+                'lifted_30d': lifted_count,
+                'total': total
+            }
+        })
+
+    @action(detail=True, methods=['post'], url_path='lift')
+    def lift(self, request, pk=None):
+        """Lift Stop-Work Order with signature justification."""
+        swo = self.get_object()
+        justification = request.data.get('justification') or request.data.get('reason', 'Corrective action verified.')
+
+        updated = InspectionService.lift_stop_work(
+            swo=swo,
+            justification=justification,
+            actor=request.user
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Stop-Work Order {swo.order_number} lifted. Site activities reinstated.",
+            'data': StopWorkOrderSerializer(updated).data
+        })
+
+
+class FindingViewSet(viewsets.ModelViewSet):
+    queryset = Finding.objects.all().select_related('inspection', 'project')
+    serializer_class = FindingSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        severity_param = self.request.query_params.get('severity')
+        resolved_param = self.request.query_params.get('is_resolved')
+        project_param = self.request.query_params.get('project')
+
+        if severity_param:
+            queryset = queryset.filter(severity=severity_param.upper())
+
+        if resolved_param in ['true', 'True', '1']:
+            queryset = queryset.filter(is_resolved=True)
+        elif resolved_param in ['false', 'False', '0']:
+            queryset = queryset.filter(is_resolved=False)
+
+        if project_param:
+            queryset = queryset.filter(project_id=project_param)
+
+        return queryset
+
+    @action(detail=True, methods=['post'], url_path='resolve')
+    def resolve(self, request, pk=None):
+        """Mark finding resolved."""
+        finding = self.get_object()
+        notes = request.data.get('notes', 'Defect rectified and verified.')
+        finding.is_resolved = True
+        finding.resolved_at = timezone.now()
+        finding.resolution_notes = notes
+        finding.save()
+
+        return Response({
+            'success': True,
+            'message': f"Finding {finding.finding_reference} marked as resolved.",
+            'data': FindingSerializer(finding).data
+        })
+
 
 class ChecklistViewSet(viewsets.ModelViewSet):
     queryset = Checklist.objects.all()
     serializer_class = ChecklistSerializer
-
-class FindingViewSet(viewsets.ModelViewSet):
-    queryset = Finding.objects.all().order_by('-created_at')
-    serializer_class = FindingSerializer
+    permission_classes = [IsAuthenticated]
