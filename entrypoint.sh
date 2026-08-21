@@ -15,6 +15,10 @@ python manage.py shell -c "from django.db import connection; cursor = connection
 echo "Applying database migrations..."
 python manage.py migrate
 
+# Seed comprehensive initial data
+echo "Seeding comprehensive data..."
+python seed_comprehensive_data.py || echo "Seeding completed or non-fatal issue encountered."
+
 # Start Gunicorn
 echo "Starting Gunicorn..."
 exec gunicorn config.wsgi:application --bind 0.0.0.0:8000

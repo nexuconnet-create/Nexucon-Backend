@@ -24,8 +24,11 @@ class CookieJWTAuthentication(JWTAuthentication):
         if raw_token is None:
             return None
 
-        validated_token = self.get_validated_token(raw_token)
-        user = self.get_user(validated_token)
+        try:
+            validated_token = self.get_validated_token(raw_token)
+            user = self.get_user(validated_token)
+        except Exception:
+            return None
         
         # Verify if session is still active
         refresh_token = request.COOKIES.get(settings.SIMPLE_JWT.get('AUTH_COOKIE_REFRESH', 'refresh_token'))

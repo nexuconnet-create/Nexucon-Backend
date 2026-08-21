@@ -10,8 +10,20 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_HEADERS = True
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
     "http://192.168.0.196:3000",
 ]
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "https://*.vercel.app",
+    "https://nexucon-backend.onrender.com",
+]
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -81,8 +93,8 @@ TEMPLATES = [
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.contrib.gis.db.backends.postgis',
-        'NAME': os.getenv('DATABASE_NAME', 'nexucon'),
+        'ENGINE': os.getenv('DATABASE_ENGINE', 'django.db.backends.sqlite3' if not os.getenv('DATABASE_URL') and not os.getenv('POSTGRES_DB') else 'django.db.backends.postgresql'),
+        'NAME': os.getenv('DATABASE_NAME', str(BASE_DIR / 'db.sqlite3')),
         'USER': os.getenv('DATABASE_USER', 'postgres'),
         'PASSWORD': os.getenv('DATABASE_PASSWORD', ''),
         'HOST': os.getenv('DATABASE_HOST', 'localhost'),

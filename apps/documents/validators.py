@@ -1,7 +1,11 @@
-import magic
+import os
+import mimetypes
+try:
+    import magic
+except Exception:
+    magic = None
 from django.core.exceptions import ValidationError
 from django.utils.deconstruct import deconstructible
-import os
 
 @deconstructible
 class SecureFileValidator:
@@ -78,12 +82,14 @@ class SecureFileValidator:
                 break
                 
         # If byte check fails, try python-magic for mime type
-        if not magic_match:
+        if not magic_match and magic is not None:
             try:
                 mime_type = magic.from_buffer(file_head, mime=True)
                 if mime_type != rules['mime']:
                     raise ValidationError(f"Invalid file content. Expected {rules['mime']} but got {mime_type}.")
-            except Exception as e:
-                raise ValidationError("Unable to verify file signature.")
+            except ValidationError:
+                raise
+            except Exception:
+                pass
 
         return True

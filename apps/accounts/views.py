@@ -198,7 +198,7 @@ class RevokeSessionView(APIView):
         except UserSession.DoesNotExist:
             return Response({'success': False, 'message': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
 
-from apps.government.models import Agency, Profile
+from apps.government.models import Agency, Profile, Role
 from django.contrib.auth import update_session_auth_hash
 
 class ChangePasswordView(APIView):
@@ -234,6 +234,20 @@ class UserOnboardingView(APIView):
         user.is_verified = True
         user.save()
         
+        # Ensure Agency Head role exists with full permissions
+        agency_head_role, _ = Role.objects.get_or_create(
+            name="Agency Head",
+            defaults={
+                "permissions": [
+                    "admin",
+                    "projects.view", "projects.create", "projects.edit", "projects.delete",
+                    "applications.view", "applications.create", "applications.approve", "applications.reject",
+                    "inspections.view", "inspections.create", "inspections.update", "inspections.delete",
+                    "analytics.view_industry", "all.delete", "permits.create", "permits.read", "permits.update", "permits.delete"
+                ]
+            }
+        )
+        
         # Handle Government Profile creation/update
         department_name = data.get('department', 'Default Agency')
         
@@ -246,28 +260,35 @@ class UserOnboardingView(APIView):
                 state_region=data.get('stateRegion'),
                 city=data.get('city'),
                 department_name=department_name,
-                primary_role=data.get('primaryRole'),
+                primary_role=data.get('primaryRole', 'Agency Head'),
                 jurisdiction_level=data.get('jurisdictionLevel'),
                 project_scale_focus=data.get('projectScaleFocus'),
                 collaboration_preference=data.get('collaborationPreference')
             )
             Profile.objects.create(
                 user=user,
-                agency=agency
+                agency=agency,
+                role=agency_head_role
             )
         else:
-            agency = user.government_profile.agency
+            profile = user.government_profile
+            if not profile.role:
+                profile.role = agency_head_role
+                profile.save()
+            agency = profile.agency
             if agency:
                 agency.country = data.get('country', agency.country)
                 agency.state_region = data.get('stateRegion', agency.state_region)
                 agency.city = data.get('city', agency.city)
                 agency.department_name = data.get('department', agency.department_name)
-                agency.primary_role = data.get('primaryRole', agency.primary_role)
+                agency.primary_role = data.get('primaryRole', agency.primary_role or 'Agency Head')
                 agency.jurisdiction_level = data.get('jurisdictionLevel', agency.jurisdiction_level)
                 agency.project_scale_focus = data.get('projectScaleFocus', agency.project_scale_focus)
                 agency.collaboration_preference = data.get('collaborationPreference', agency.collaboration_preference)
                 agency.save()
         
+        # Refresh user instance from DB to serialize latest profile/role state
+        user.refresh_from_db()
         serializer = UserMeSerializer(user)
         return Response({
             'success': True,

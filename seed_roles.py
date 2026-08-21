@@ -12,15 +12,28 @@ from apps.government.models import Role
 roles = [
     {
         "name": "Agency Head",
-        "permissions": ["permits.create", "permits.read", "permits.update", "permits.delete", "inspections.create", "inspections.read", "inspections.update", "inspections.delete", "all.delete"]
+        "permissions": [
+            "admin",
+            "projects.view", "projects.create", "projects.edit", "projects.delete",
+            "applications.view", "applications.create", "applications.approve", "applications.reject",
+            "inspections.view", "inspections.create", "inspections.update", "inspections.delete",
+            "analytics.view_industry", "all.delete", "permits.create", "permits.read", "permits.update", "permits.delete"
+        ]
     },
     {
         "name": "Director",
-        "permissions": ["permits.create", "permits.read", "permits.update", "inspections.create", "inspections.read", "inspections.update"]
+        "permissions": [
+            "projects.view", "projects.create", "projects.edit",
+            "applications.view", "applications.create", "applications.approve",
+            "inspections.view", "inspections.create", "inspections.update",
+            "analytics.view_industry", "permits.create", "permits.read", "permits.update"
+        ]
     },
     {
         "name": "Inspector",
-        "permissions": ["inspections.create", "inspections.read", "inspections.update"]
+        "permissions": [
+            "projects.view", "applications.view", "inspections.view", "inspections.create", "inspections.update", "inspections.read"
+        ]
     }
 ]
 
