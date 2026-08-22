@@ -174,7 +174,7 @@ class InspectionService:
             category=data.get('category', 'STRUCTURAL'),
             photos=data.get('photos', []),
             corrective_action_required=data.get('corrective_action_required', ''),
-            resolution_deadline=data.get('resolution_deadline'),
+            resolution_deadline=data.get('resolution_deadline') if data.get('resolution_deadline') else None,
             requires_reinspection=data.get('requires_reinspection', False)
         )
 
