@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from django.db.models import Q
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -18,7 +18,7 @@ User = get_user_model()
 class InspectionViewSet(viewsets.ModelViewSet):
     queryset = Inspection.objects.all().select_related('project', 'inspector', 'permit', 'parent_inspection').prefetch_related('findings', 'stop_work_orders')
     serializer_class = InspectionSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -275,7 +275,7 @@ class InspectionViewSet(viewsets.ModelViewSet):
 class StopWorkOrderViewSet(viewsets.ModelViewSet):
     queryset = StopWorkOrder.objects.all().select_related('project', 'inspection', 'finding')
     serializer_class = StopWorkOrderSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
