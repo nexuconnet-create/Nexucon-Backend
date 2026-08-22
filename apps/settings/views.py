@@ -170,6 +170,28 @@ class StaffUserViewSet(viewsets.ViewSet):
         u = SettingsService.toggle_user_status(pk, request.user)
         return Response({"id": str(u.id), "is_active": u.is_active, "message": f"User status toggled to {u.is_active}"}, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny], url_path='accept-invite')
+    def accept_invite(self, request):
+        email = request.data.get('email')
+        token = request.data.get('token')
+        password = request.data.get('password')
+        full_name = request.data.get('name') or request.data.get('full_name')
+
+        if not email:
+            return Response({"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = SettingsService.accept_invitation(
+            email=email,
+            token=token,
+            password=password,
+            full_name=full_name
+        )
+
+        if not result.get('success'):
+            return Response({"error": result.get('message')}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result, status=status.HTTP_200_OK)
+
 
 class CustomRoleViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]

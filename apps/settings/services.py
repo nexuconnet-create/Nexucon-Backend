@@ -279,6 +279,8 @@ class SettingsService:
         users_qs = User.objects.all().order_by('-date_joined')
         
         results = []
+        user_emails = set()
+
         for u in users_qs:
             dept = getattr(u, 'department', 'Urban Planning')
             user_role = getattr(u, 'role', 'Reviewer') if getattr(u, 'role', None) else ('System Administrator' if u.is_superuser else 'Reviewer')
@@ -294,6 +296,7 @@ class SettingsService:
             if role and role.lower() not in user_role.lower():
                 continue
 
+            user_emails.add(u.email.lower())
             results.append({
                 "id": str(u.id),
                 "name": f"{u.first_name} {u.last_name}".strip() or u.username,
@@ -303,21 +306,74 @@ class SettingsService:
                 "status": "Active" if u.is_active else "Inactive",
                 "lastLogin": "2 mins ago" if u.last_login else "Never"
             })
+
+        # Also include Pending User Invitations
+        pending_invitations = UserInvitation.objects.filter(status='Pending').order_by('-created_at')
+        for inv in pending_invitations:
+            if inv.email.lower() in user_emails:
+                continue
+
+            if search:
+                s = search.lower()
+                if s not in inv.name.lower() and s not in inv.email.lower() and s not in inv.role.lower():
+                    continue
+            if department and department.lower() not in inv.department.lower():
+                continue
+            if role and role.lower() not in inv.role.lower():
+                continue
+
+            results.append({
+                "id": str(inv.id),
+                "name": inv.name,
+                "email": inv.email,
+                "role": inv.role,
+                "department": inv.department,
+                "status": "Pending",
+                "lastLogin": "Invite Sent",
+                "invited_at": inv.created_at.isoformat() if inv.created_at else None
+            })
+
         return results
 
     @classmethod
     def invite_user(cls, email: str, name: str, role: str = "Reviewer", department: str = "Urban Planning", invited_by=None):
-        if User.objects.filter(email=email).exists():
-            raise ValidationError(f"User with email {email} is already registered in the system.")
+        import uuid
+        # Generate temporary secure password
+        temp_password = f"Nexucon@{uuid.uuid4().hex[:4].upper()}2026!"
 
-        invitation = UserInvitation.objects.create(
+        invitation, _ = UserInvitation.objects.update_or_create(
             email=email,
-            name=name,
-            role=role,
-            department=department,
-            invited_by=invited_by,
-            expires_at=timezone.now() + timezone.timedelta(days=7)
+            defaults={
+                'name': name,
+                'role': role,
+                'department': department,
+                'invited_by': invited_by if getattr(invited_by, 'is_authenticated', False) else None,
+                'status': 'Pending',
+                'expires_at': timezone.now() + timezone.timedelta(days=7)
+            }
         )
+
+        # Pre-provision User in Django Database with temporary password
+        name_parts = name.strip().split(' ', 1)
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else ''
+
+        user = User.objects.filter(email=email).first()
+        if not user:
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                password=temp_password,
+                is_active=True,
+                is_verified=False
+            )
+        else:
+            user.first_name = first_name or user.first_name
+            user.last_name = last_name or user.last_name
+            user.set_password(temp_password)
+            user.save()
 
         if getattr(invited_by, 'is_authenticated', False):
             AuditEvent.objects.create(
@@ -326,10 +382,10 @@ class SettingsService:
                 action="INVITE_STAFF_USER",
                 resource_type="UserInvitation",
                 resource_id=str(invitation.id),
-                new_state={"email": email, "role": role, "department": department}
+                new_state={"email": email, "role": role, "department": department, "temp_password": temp_password}
             )
 
-        # Dispatch Resend HTML Invitation Email
+        # Dispatch Resend HTML Invitation Email with Temporary Passcode
         try:
             from apps.notifications.email_service import EmailService
             EmailService.send_invitation_email(
@@ -338,12 +394,71 @@ class SettingsService:
                 role=role,
                 department=department,
                 invite_token=str(invitation.id),
-                invited_by=invited_by
+                invited_by=invited_by,
+                temp_password=temp_password
             )
         except Exception as e:
             logger.warning(f"Failed to dispatch invitation email via Resend: {e}")
 
         return invitation
+
+    @classmethod
+    def accept_invitation(cls, email: str, token: str = None, password: str = None, full_name: str = None):
+        """Finalize invite acceptance, activate user with permanent password, and return JWT credentials."""
+        user = User.objects.filter(email=email).first()
+        invitation = UserInvitation.objects.filter(email=email).first()
+
+        if not user and not invitation:
+            return {"success": False, "message": f"No invitation found for {email}."}
+
+        name_parts = (full_name or (invitation.name if invitation else '')).strip().split(' ', 1)
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else ''
+
+        if not user:
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                password=password or 'Nexucon@2026!',
+                is_active=True,
+                is_verified=True
+            )
+        else:
+            if first_name: user.first_name = first_name
+            if last_name: user.last_name = last_name
+            if password: user.set_password(password)
+            user.is_active = True
+            user.is_verified = True
+            user.save()
+
+        # Mark invitation as Accepted
+        if invitation:
+            invitation.status = 'Accepted'
+            invitation.save()
+
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(user)
+
+        user_role = invitation.role if invitation else 'Government Agency Head'
+        user_dept = invitation.department if invitation else 'Urban Planning'
+
+        return {
+            "success": True,
+            "message": "Account successfully activated.",
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "role_name": user_role,
+                "department": user_dept,
+                "is_verified": True
+            }
+        }
 
     @classmethod
     def toggle_user_status(cls, user_id: str, actor=None):

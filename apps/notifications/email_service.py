@@ -65,17 +65,19 @@ class EmailService:
             return {"success": False, "error": str(ex)}
 
     @classmethod
-    def send_invitation_email(cls, email: str, name: str, role: str, department: str = "Urban Planning", invite_token: str = None, invited_by=None, base_url: str = None) -> dict:
+    def send_invitation_email(cls, email: str, name: str, role: str, department: str = "Urban Planning", invite_token: str = None, invited_by=None, base_url: str = None, temp_password: str = None) -> dict:
         """
         Dispatch a tailored, role-specific HTML invitation email.
         """
         base = base_url or DEFAULT_FRONTEND_URL
         token = invite_token or "invite-token-sample"
-        invite_url = f"{base}/auth/accept-invite?token={token}&email={email}"
+        invite_url = f"{base}/auth/accept-invite?token={token}&email={encodeURIComponent(email) if 'encodeURIComponent' in locals() else email}&role={role}"
+        if temp_password:
+            invite_url += f"&temp={temp_password}"
 
         # Choose template based on designated authority role
         role_lower = (role or '').lower()
-        if any(keyword in role_lower for keyword in ['director', 'commissioner', 'permanent secretary', 'executive']):
+        if any(keyword in role_lower for keyword in ['director', 'commissioner', 'permanent secretary', 'executive', 'head']):
             template_name = 'emails/invite_director.html'
             subject = f"🏛️ Directorate Appointment & Onboarding: {role} - Nexucon"
         elif any(keyword in role_lower for keyword in ['inspector', 'site officer', 'hse', 'surveillance']):
@@ -96,6 +98,7 @@ class EmailService:
             'name': name or email.split('@')[0].capitalize(),
             'role': role,
             'department': department,
+            'temp_password': temp_password,
             'invite_url': invite_url,
             'invited_by': invited_by.get_full_name() if hasattr(invited_by, 'get_full_name') and invited_by.get_full_name() else str(invited_by) if invited_by else 'System Administrator',
             'current_year': timezone.now().year

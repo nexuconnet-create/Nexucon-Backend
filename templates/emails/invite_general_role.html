@@ -80,6 +80,20 @@
                 </tr>
               </table>
 
+              {% if temp_password %}
+              <div style="background-color: #F8FAFC; border: 1.5px dashed #0284C7; border-radius: 14px; padding: 16px; margin-bottom: 24px; text-align: center;">
+                <div style="font-size: 11px; font-weight: 800; color: #0369A1; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">
+                  Temporary Access Passcode
+                </div>
+                <div style="font-family: monospace; font-size: 18px; font-weight: 900; color: #022C4F; letter-spacing: 2px;">
+                  {{ temp_password }}
+                </div>
+                <div style="font-size: 11px; color: #64748B; margin-top: 4px;">
+                  Use this passcode to log in immediately or set your permanent password via the button below.
+                </div>
+              </div>
+              {% endif %}
+
               <!-- CTA BUTTON -->
               <div style="text-align: center; margin-bottom: 32px;">
                 <a href="{{ invite_url }}" class="btn" style="color: #FFFFFF !important;">
