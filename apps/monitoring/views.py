@@ -299,22 +299,37 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_201_CREATED)
 
 
+from apps.projects.models import Project
+
 class MonitoringStatsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
+    def list(self, request):
+        return self.overview(request)
+
     @action(detail=False, methods=['get'], url_path='overview')
     def overview(self, request):
-        """Return aggregated stats across all 6 monitoring tabs."""
+        """Return real-time aggregated stats across all 6 monitoring tabs."""
         today = timezone.now().date()
         week_ahead = today + datetime.timedelta(days=7)
 
         # Tab 1: Live Site View
-        active_sites_count = DailySiteUpdate.objects.values('project').distinct().count()
-        daily_photos_count = DailySiteUpdate.objects.filter(update_type='DAILY_PHOTO').count()
+        active_sites_count = Project.objects.filter(status__in=['ACTIVE', 'IN_PROGRESS', 'UNDER_CONSTRUCTION']).count()
+        if active_sites_count == 0:
+            active_sites_count = Project.objects.exclude(status__in=['SUSPENDED', 'CANCELLED', 'ARCHIVED']).count()
+
+        daily_updates = list(DailySiteUpdate.objects.all())
+        daily_photos_count = sum(len(u.photos or []) for u in daily_updates if u.update_type == 'DAILY_PHOTO')
+        if daily_photos_count == 0:
+            daily_photos_count = DailySiteUpdate.objects.filter(update_type='DAILY_PHOTO').count()
+        
         drone_surveys_count = DailySiteUpdate.objects.filter(update_type='DRONE_SURVEY').count()
         active_observations_count = FieldObservation.objects.filter(status__in=['OPEN', 'UNDER_REVIEW', 'ACTION_REQUIRED']).count()
 
         # Tab 2: Site Progress
+        delayed_milestones = ConstructionMilestone.objects.filter(Q(status='DELAYED') | Q(is_delayed=True)).count()
+        on_schedule_sites = max(0, active_sites_count - delayed_milestones) if active_sites_count > 0 else 0
+        verified_milestones = ConstructionMilestone.objects.filter(status='VERIFIED').count()
         progress_reports_count = DailySiteUpdate.objects.count()
 
         # Tab 3: Field Observations
@@ -330,53 +345,51 @@ class MonitoringStatsViewSet(viewsets.ViewSet):
 
         # Tab 5: Construction Milestones
         milestones_due_this_week = ConstructionMilestone.objects.filter(target_date__gte=today, target_date__lte=week_ahead).count()
-        milestones_verified = ConstructionMilestone.objects.filter(status='VERIFIED').count()
-        milestones_delayed = ConstructionMilestone.objects.filter(Q(status='DELAYED') | Q(is_delayed=True)).count()
         milestones_upcoming = ConstructionMilestone.objects.filter(status='UPCOMING').count()
 
         # Tab 6: Site Verification
         pending_verifications = SiteVerification.objects.filter(status='PENDING_VERIFICATION').count()
         verified_verifications = SiteVerification.objects.filter(status='VERIFIED').count()
         variance_detected = SiteVerification.objects.filter(Q(status='VARIANCE_DETECTED') | Q(variance_detected=True)).count()
-        active_devices = SiteVerification.objects.values('device_identifier').distinct().count() or 6
+        active_devices = SiteVerification.objects.values('device_identifier').distinct().count()
 
         return Response({
             'success': True,
             'data': {
                 'live': {
-                    'active_sites': active_sites_count or 12,
-                    'daily_photos': daily_photos_count or 8,
-                    'drone_surveys': drone_surveys_count or 4,
-                    'active_observations': active_observations_count or 6
+                    'active_sites': active_sites_count,
+                    'daily_photos': daily_photos_count,
+                    'drone_surveys': drone_surveys_count,
+                    'active_observations': active_observations_count
                 },
                 'progress': {
-                    'on_schedule': 32,
-                    'delayed': milestones_delayed or 5,
-                    'milestone_reached': milestones_verified or 12,
-                    'progress_reports': progress_reports_count or 18
+                    'on_schedule': on_schedule_sites,
+                    'delayed': delayed_milestones,
+                    'milestone_reached': verified_milestones,
+                    'progress_reports': progress_reports_count
                 },
                 'observations': {
-                    'active': active_observations_count or 8,
-                    'quality': quality_obs_count or 5,
-                    'safety': safety_obs_count or 3,
-                    'resolved': resolved_obs_count or 24
+                    'active': active_observations_count,
+                    'quality': quality_obs_count,
+                    'safety': safety_obs_count,
+                    'resolved': resolved_obs_count
                 },
                 'issues': {
-                    'open': open_issues_count or 6,
-                    'critical': critical_issues_count or 2,
-                    'under_review': under_review_issues_count or 4,
-                    'resolved': resolved_issues_count or 36
+                    'open': open_issues_count,
+                    'critical': critical_issues_count,
+                    'under_review': under_review_issues_count,
+                    'resolved': resolved_issues_count
                 },
                 'milestones': {
-                    'due_this_week': milestones_due_this_week or 4,
-                    'verified': milestones_verified or 15,
-                    'delayed': milestones_delayed or 3,
-                    'upcoming': milestones_upcoming or 18
+                    'due_this_week': milestones_due_this_week,
+                    'verified': verified_milestones,
+                    'delayed': delayed_milestones,
+                    'upcoming': milestones_upcoming
                 },
                 'verification': {
-                    'pending': pending_verifications or 3,
-                    'verified': verified_verifications or 28,
-                    'variance_detected': variance_detected or 2,
+                    'pending': pending_verifications,
+                    'verified': verified_verifications,
+                    'variance_detected': variance_detected,
                     'active_devices': active_devices
                 }
             }

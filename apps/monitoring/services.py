@@ -3,8 +3,22 @@ from django.utils import timezone
 from .models import DailySiteUpdate, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
 from apps.projects.models import Project
 from apps.audit.models import AuditEvent
+from django.db.models import Q
 
 class MonitoringService:
+    @staticmethod
+    def get_project_instance(project_id):
+        if not project_id:
+            return Project.objects.first()
+        p = Project.objects.filter(Q(id=str(project_id)) | Q(reference_number=str(project_id))).first()
+        return p or Project.objects.first()
+
+    @staticmethod
+    def get_actor_name(user, default="Site Engineer / Officer"):
+        if user and getattr(user, 'is_authenticated', False):
+            return user.get_full_name() or getattr(user, 'email', default)
+        return default
+
     @staticmethod
     def log_audit(user, action, resource_id, previous_state=None, new_state=None):
         try:
@@ -23,29 +37,30 @@ class MonitoringService:
     def log_daily_update(data, user):
         """Create daily photo update, drone survey or progress log."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        project = MonitoringService.get_project_instance(project_id)
         
         progress = int(data.get('progress_percentage', 0))
         update_type = data.get('update_type', 'DAILY_PHOTO')
+        author_name = data.get('reported_by_name') or MonitoringService.get_actor_name(user, "Site Supervisor")
 
         update = DailySiteUpdate.objects.create(
             project=project,
             update_type=update_type,
             reported_by=user if getattr(user, 'is_authenticated', False) else None,
-            reported_by_name=data.get('reported_by_name') or (user.get_full_name() or user.email),
+            reported_by_name=author_name,
             progress_percentage=progress,
             work_summary=data.get('work_summary', ''),
             photos=data.get('photos', []),
             drone_survey_data=data.get('drone_survey_data', {}),
             weather_condition=data.get('weather_condition', 'Clear / Sunny'),
-            workforce_count=int(data.get('workforce_count', 0)),
+            workforce_count=int(data.get('workforce_count', 0) or 0),
             gps_coordinates=data.get('gps_coordinates', {}),
             status=data.get('status', 'Active'),
             priority=data.get('priority', 'Medium')
         )
 
         # Update Project progress if progress was reported
-        if progress > 0 and hasattr(project, 'progress'):
+        if progress > 0 and project and hasattr(project, 'progress'):
             try:
                 project.progress = max(getattr(project, 'progress', 0) or 0, progress)
                 project.save()
@@ -64,7 +79,8 @@ class MonitoringService:
     def create_observation(data, user):
         """Record field observation from site visit."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        project = MonitoringService.get_project_instance(project_id)
+        author_name = data.get('observed_by_name') or MonitoringService.get_actor_name(user, "Regulatory Monitoring Officer")
 
         obs = FieldObservation.objects.create(
             project=project,
@@ -75,7 +91,7 @@ class MonitoringService:
             status=data.get('status', 'OPEN'),
             assigned_officer_id=data.get('assigned_officer_id'),
             assigned_officer_name=data.get('assigned_officer_name'),
-            observed_by_name=data.get('observed_by_name') or (user.get_full_name() or user.email),
+            observed_by_name=author_name,
             gps_coordinates=data.get('gps_coordinates', {}),
             evidence_photos=data.get('evidence_photos', []),
             corrective_action=data.get('corrective_action', '')
@@ -109,7 +125,8 @@ class MonitoringService:
     def report_issue(data, user):
         """Report site defect, safety hazard or regulatory issue."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        project = MonitoringService.get_project_instance(project_id)
+        author_name = data.get('reported_by_name') or MonitoringService.get_actor_name(user, "Site Inspector")
 
         issue = SiteIssue.objects.create(
             project=project,
@@ -118,7 +135,7 @@ class MonitoringService:
             severity=data.get('severity', 'MEDIUM'),
             status=data.get('status', 'OPEN'),
             assigned_to_name=data.get('assigned_to_name', 'Site Engineer'),
-            reported_by_name=data.get('reported_by_name') or (user.get_full_name() or user.email),
+            reported_by_name=author_name,
             due_date=data.get('due_date'),
             resolution_evidence=data.get('resolution_evidence', []),
             is_escalated=data.get('is_escalated', False)
@@ -168,14 +185,14 @@ class MonitoringService:
     def create_milestone(data, user):
         """Create a construction milestone schedule."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        project = MonitoringService.get_project_instance(project_id)
 
         milestone = ConstructionMilestone.objects.create(
             project=project,
             name=data.get('name', 'Milestone'),
             target_date=data.get('target_date', timezone.now().date()),
             status=data.get('status', 'UPCOMING'),
-            progress_percentage=int(data.get('progress_percentage', 0)),
+            progress_percentage=int(data.get('progress_percentage', 0) or 0),
             evidence_documents=data.get('evidence_documents', [])
         )
 
@@ -194,7 +211,7 @@ class MonitoringService:
         milestone.progress_percentage = 100
         milestone.actual_completion_date = timezone.now().date()
         milestone.verified_at = timezone.now()
-        milestone.verified_by_name = actor.get_full_name() or actor.email
+        milestone.verified_by_name = MonitoringService.get_actor_name(actor, "Building Control Officer")
         milestone.save()
 
         MonitoringService.log_audit(
@@ -225,7 +242,7 @@ class MonitoringService:
     def record_site_verification(data, user):
         """Record GNSS/Tersus rover verification and compute coordinate variance."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        project = MonitoringService.get_project_instance(project_id)
 
         captured_coords = data.get('captured_coordinates', {})
         approved_coords = data.get('approved_coordinates', {})
@@ -249,6 +266,7 @@ class MonitoringService:
 
         variance_detected = variance > 0.5 or data.get('variance_detected', False)
         status = 'VARIANCE_DETECTED' if variance_detected else 'VERIFIED'
+        verifier_name = data.get('verified_by_name') or MonitoringService.get_actor_name(user, "Field Surveyor")
 
         verification = SiteVerification.objects.create(
             project=project,
@@ -260,7 +278,7 @@ class MonitoringService:
             variance_meters=variance,
             variance_detected=variance_detected,
             status=data.get('status', status),
-            verified_by_name=user.get_full_name() or user.email if user else 'Field Officer',
+            verified_by_name=verifier_name,
             verified_at=timezone.now(),
             notes=data.get('notes', '')
         )
