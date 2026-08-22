@@ -394,3 +394,53 @@ class MonitoringStatsViewSet(viewsets.ViewSet):
                 }
             }
         })
+
+
+class SiteProgressViewSet(viewsets.ViewSet):
+    """
+    Endpoints for physical construction progress, programme breakdowns, 
+    and schedule tracking across active projects.
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        """Get physical construction progress details across all active projects."""
+        project_param = request.query_params.get('project')
+        data = MonitoringService.get_project_progress_details(project_param)
+        return Response({
+            'success': True,
+            'data': data
+        })
+
+    def retrieve(self, request, pk=None):
+        """Get deep progress details for a specific project."""
+        data = MonitoringService.get_project_progress_details(pk)
+        return Response({
+            'success': True,
+            'data': data
+        })
+
+    @action(detail=False, methods=['post'], url_path='update')
+    def update_progress(self, request):
+        """Update progress percentage and create a progress log in database."""
+        data = MonitoringService.update_project_progress(request.data, request.user)
+        return Response({
+            'success': True,
+            'message': 'Project progress updated successfully',
+            'data': data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='flag-delay')
+    def flag_delay(self, request):
+        """Flag construction delay and record a non-conformance notice."""
+        issue = MonitoringService.flag_project_schedule_delay(request.data, request.user)
+        return Response({
+            'success': True,
+            'message': 'Schedule delay notice recorded',
+            'data': {
+                'issue_id': str(issue.id),
+                'reference': issue.issue_reference,
+                'title': issue.title
+            }
+        }, status=status.HTTP_201_CREATED)
+
