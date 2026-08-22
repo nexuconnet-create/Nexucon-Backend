@@ -1,6 +1,8 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from django.db.models import Q
 from .models import Project, ProjectMilestone, ProjectDocument
 from .serializers import ProjectSerializer, ProjectMilestoneSerializer, ProjectDocumentSerializer
 from apps.applications.models import Application
@@ -8,6 +10,25 @@ from apps.applications.models import Application
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all().order_by('-created_at')
     serializer_class = ProjectSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        queryset = Project.objects.all().order_by('-created_at')
+        status_param = self.request.query_params.get('status')
+        search_param = self.request.query_params.get('search')
+
+        if status_param:
+            queryset = queryset.filter(status__iexact=status_param)
+
+        if search_param:
+            queryset = queryset.filter(
+                Q(name__icontains=search_param) |
+                Q(reference_number__icontains=search_param) |
+                Q(site_location__icontains=search_param) |
+                Q(developer_name__icontains=search_param)
+            )
+
+        return queryset
 
     def perform_create(self, serializer):
         # Default new projects to PLANNING status, simulating they are pending review
