@@ -1,7 +1,7 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from django.db.models import Q
 from django.utils import timezone
 import datetime
@@ -17,7 +17,7 @@ from .services import MonitoringService
 class DailySiteUpdateViewSet(viewsets.ModelViewSet):
     queryset = DailySiteUpdate.objects.all().select_related('project', 'reported_by')
     serializer_class = DailySiteUpdateSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -63,7 +63,7 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
 class FieldObservationViewSet(viewsets.ModelViewSet):
     queryset = FieldObservation.objects.all().select_related('project', 'assigned_officer')
     serializer_class = FieldObservationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -128,7 +128,7 @@ class FieldObservationViewSet(viewsets.ModelViewSet):
 class SiteIssueViewSet(viewsets.ModelViewSet):
     queryset = SiteIssue.objects.all().select_related('project')
     serializer_class = SiteIssueSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -196,7 +196,7 @@ class SiteIssueViewSet(viewsets.ModelViewSet):
 class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
     queryset = ConstructionMilestone.objects.all().select_related('project')
     serializer_class = ConstructionMilestoneSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -257,7 +257,7 @@ class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
 class SiteVerificationViewSet(viewsets.ModelViewSet):
     queryset = SiteVerification.objects.all().select_related('project')
     serializer_class = SiteVerificationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -300,7 +300,7 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
 
 
 class MonitoringStatsViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     @action(detail=False, methods=['get'], url_path='overview')
     def overview(self, request):
