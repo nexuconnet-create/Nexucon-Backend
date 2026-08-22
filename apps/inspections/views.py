@@ -144,28 +144,26 @@ class InspectionViewSet(viewsets.ModelViewSet):
         inspection = self.get_object()
         inspector_id = request.data.get('inspector_id')
         inspector_name = request.data.get('inspector_name')
-        scheduled_date = request.data.get('scheduled_date') or timezone.now()
+        scheduled_date = request.data.get('scheduled_date')
 
         inspector_user = None
         if inspector_id:
             try:
-                inspector_user = User.objects.get(pk=inspector_id)
-            except User.DoesNotExist:
+                inspector_user = User.objects.filter(Q(id=inspector_id) | Q(username=inspector_id) | Q(email=inspector_id)).first()
+            except Exception:
                 pass
-
-        if not inspector_user:
-            inspector_user = request.user
 
         updated = InspectionService.assign_and_schedule(
             inspection=inspection,
             inspector_user=inspector_user,
             scheduled_date=scheduled_date,
-            actor=request.user
+            actor=request.user,
+            inspector_name=inspector_name
         )
 
         return Response({
             'success': True,
-            'message': f"Inspection assigned and scheduled for {scheduled_date}",
+            'message': f"Inspection assigned to {updated.inspector_name} and scheduled.",
             'data': InspectionSerializer(updated).data
         })
 
