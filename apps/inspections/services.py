@@ -242,23 +242,51 @@ class InspectionService:
         return swo
 
     @staticmethod
-    def create_reinspection(original_inspection, scheduled_date, actor):
+    def create_reinspection(original_inspection, scheduled_date=None, actor=None, inspector_name=None, inspector_id=None, notes=None, priority='High'):
         """Auto-create a Re-Inspection for an inspection that failed or required verification."""
+        req_name = 'Government Regulatory Desk'
+        if actor and getattr(actor, 'is_authenticated', False):
+            req_name = actor.get_full_name() or getattr(actor, 'email', 'Regulatory Officer')
+
+        chosen_inspector_name = inspector_name or original_inspection.inspector_name or 'Assigned Inspector'
+        chosen_inspector = original_inspection.inspector
+        if inspector_id:
+            try:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                found_user = User.objects.filter(Q(id=inspector_id) | Q(username=inspector_id) | Q(email=inspector_id)).first()
+                if found_user:
+                    chosen_inspector = found_user
+            except Exception:
+                pass
+
+        if not scheduled_date or scheduled_date == '':
+            scheduled_date = timezone.now() + datetime.timedelta(days=7)
+
+        type_label = original_inspection.inspection_type
+        if not type_label.startswith('Re-Inspection'):
+            type_label = f"Re-Inspection: {type_label}"
+
         reinspection = Inspection.objects.create(
             project=original_inspection.project,
             permit=original_inspection.permit,
-            inspector=original_inspection.inspector,
-            inspector_name=original_inspection.inspector_name,
-            inspection_type='Re-Inspection',
+            inspector=chosen_inspector if getattr(chosen_inspector, 'is_authenticated', False) else None,
+            inspector_name=chosen_inspector_name,
+            inspection_type=type_label,
             status='SCHEDULED',
-            priority='High',
-            requested_by_name=actor.get_full_name() or actor.email,
+            priority=priority or 'High',
+            requested_by_name=req_name,
             requested_at=timezone.now(),
             scheduled_date=scheduled_date,
-            summary_notes=f"Re-inspection for {original_inspection.inspection_reference} regarding unresolved findings.",
+            summary_notes=notes or f"Follow-up re-inspection for {original_inspection.inspection_reference} ({original_inspection.inspection_type}) regarding unresolved defect rectification and compliance verification.",
             parent_inspection=original_inspection,
-            checklist_results=original_inspection.checklist_results
+            checklist_results=original_inspection.checklist_results,
+            outcome='PENDING'
         )
+
+        if original_inspection.status != 'FAILED':
+            original_inspection.status = 'RE_INSPECTION_REQUIRED'
+            original_inspection.save()
 
         InspectionService.log_audit(
             user=actor,

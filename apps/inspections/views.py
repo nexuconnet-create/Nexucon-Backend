@@ -249,17 +249,25 @@ class InspectionViewSet(viewsets.ModelViewSet):
     def create_reinspection(self, request, pk=None):
         """Create a follow-up re-inspection."""
         inspection = self.get_object()
-        scheduled_date = request.data.get('scheduled_date') or (timezone.now() + datetime.timedelta(days=7))
+        scheduled_date = request.data.get('scheduled_date')
+        inspector_name = request.data.get('inspector_name')
+        inspector_id = request.data.get('inspector_id')
+        notes = request.data.get('notes') or request.data.get('summary_notes')
+        priority = request.data.get('priority', 'High')
 
         reinspection = InspectionService.create_reinspection(
             original_inspection=inspection,
             scheduled_date=scheduled_date,
-            actor=request.user
+            actor=request.user,
+            inspector_name=inspector_name,
+            inspector_id=inspector_id,
+            notes=notes,
+            priority=priority
         )
 
         return Response({
             'success': True,
-            'message': f"Re-Inspection {reinspection.inspection_reference} scheduled.",
+            'message': f"Re-Inspection {reinspection.inspection_reference} scheduled successfully.",
             'data': InspectionSerializer(reinspection).data
         }, status=status.HTTP_201_CREATED)
 
