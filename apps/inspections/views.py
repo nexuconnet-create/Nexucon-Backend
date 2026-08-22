@@ -303,15 +303,36 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
         if not project_id:
             return Response({'success': False, 'message': 'Target construction project is required'}, status=status.HTTP_400_BAD_REQUEST)
         
-        project = Project.objects.filter(Q(id=str(project_id)) | Q(reference_number=str(project_id))).first()
+        project = None
+        import uuid
+        try:
+            val = uuid.UUID(str(project_id))
+            project = Project.objects.filter(id=val).first()
+        except Exception:
+            pass
+        if not project:
+            project = Project.objects.filter(Q(reference_number=str(project_id)) | Q(name__icontains=str(project_id))).first()
+        if not project:
+            project = Project.objects.first()
+
         if not project:
             return Response({'success': False, 'message': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
 
         inspection_id = request.data.get('inspection') or request.data.get('inspection_id')
-        inspection = Inspection.objects.filter(pk=inspection_id).first() if inspection_id else None
+        inspection = None
+        if inspection_id:
+            try:
+                inspection = Inspection.objects.filter(pk=inspection_id).first()
+            except Exception:
+                pass
 
         finding_id = request.data.get('finding') or request.data.get('finding_id')
-        finding = Finding.objects.filter(pk=finding_id).first() if finding_id else None
+        finding = None
+        if finding_id:
+            try:
+                finding = Finding.objects.filter(pk=finding_id).first()
+            except Exception:
+                pass
 
         reason = request.data.get('reason', 'Critical safety/building code violation.')
         severity = request.data.get('severity', 'CRITICAL')

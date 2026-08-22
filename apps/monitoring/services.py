@@ -138,8 +138,25 @@ class MonitoringService:
             reported_by_name=author_name,
             due_date=data.get('due_date'),
             resolution_evidence=data.get('resolution_evidence', []),
-            is_escalated=data.get('is_escalated', False)
+            is_escalated=data.get('is_escalated', False) or data.get('enforce_stop_work', False)
         )
+
+        # If Stop-Work Order enforcement was requested
+        if data.get('enforce_stop_work') and project:
+            try:
+                from apps.inspections.models import StopWorkOrder
+                StopWorkOrder.objects.create(
+                    project=project,
+                    reason=issue.description or issue.title,
+                    severity=issue.severity or 'CRITICAL',
+                    issued_by_name=author_name,
+                    issued_at=timezone.now(),
+                    status='ACTIVE'
+                )
+                project.status = 'SUSPENDED'
+                project.save()
+            except Exception:
+                pass
 
         MonitoringService.log_audit(
             user=user,

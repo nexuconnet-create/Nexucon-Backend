@@ -33,8 +33,8 @@ def run():
             progress_percentage=68,
             work_summary='Level 14 slab reinforcement placement completed. Concrete pouring scheduled for 08:00 tomorrow morning.',
             photos=[
-                'https://images.unsplash.com/photo-1541888946425-d0fbb180c5f2?auto=format&fit=crop&w=1200&q=80',
-                'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=1200&q=80'
+                'https://res.cloudinary.com/depeqzb6z/image/upload/v1787389721/nexucon/daily_updates/pnfpw6dntxj1jdzmpeeq.jpg',
+                'https://res.cloudinary.com/depeqzb6z/image/upload/v1787389733/nexucon/daily_updates/xiyj7aiv2oyljctn4a4i.jpg'
             ],
             weather_condition='Clear / Sunny (31°C)',
             workforce_count=42,
@@ -50,8 +50,8 @@ def run():
             progress_percentage=82,
             work_summary='Curtain wall facade glazing on North Elevation grid lines 1-6 installed. Fire-stopping sealant inspection in progress.',
             photos=[
-                'https://images.unsplash.com/photo-1503387762-592deb58ef4e?auto=format&fit=crop&w=1200&q=80',
-                'https://images.unsplash.com/photo-1590486803833-1c5dc8ddd4c8?auto=format&fit=crop&w=1200&q=80'
+                'https://res.cloudinary.com/depeqzb6z/image/upload/v1787389749/nexucon/daily_updates/wnri4hhtms4nqzv2pe3s.jpg',
+                'https://res.cloudinary.com/depeqzb6z/image/upload/v1787389760/nexucon/daily_updates/eyzfp1kanw2jswlhwh6a.jpg'
             ],
             weather_condition='Partly Cloudy (29°C)',
             workforce_count=35,
@@ -67,7 +67,7 @@ def run():
             progress_percentage=45,
             work_summary='Automated photogrammetry aerial scan of logistics bay foundations and earthwork compaction grading.',
             photos=[
-                'https://images.unsplash.com/photo-1581094794329-c8112a89af12?auto=format&fit=crop&w=1200&q=80'
+                'https://res.cloudinary.com/depeqzb6z/image/upload/v1787389767/nexucon/daily_updates/y0xd4k45uael2jog0csh.jpg'
             ],
             drone_survey_data={
                 'flight_altitude_m': 75,
@@ -89,7 +89,7 @@ def run():
             progress_percentage=55,
             work_summary='HVAC riser ductwork pressure testing and electrical cable tray trunking installation on Floors 4-7.',
             photos=[
-                'https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1200&q=80'
+                'https://res.cloudinary.com/depeqzb6z/image/upload/v1787389721/nexucon/daily_updates/pnfpw6dntxj1jdzmpeeq.jpg'
             ],
             weather_condition='Clear / Dry (32°C)',
             workforce_count=28,
