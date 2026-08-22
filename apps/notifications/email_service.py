@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 RESEND_API_KEY = getattr(settings, 'RESEND_API_KEY', os.environ.get('RESEND_API_KEY', ''))
 RESEND_API_URL = 'https://api.resend.com/emails'
 DEFAULT_FROM_EMAIL = getattr(settings, 'RESEND_FROM_EMAIL', os.environ.get('RESEND_FROM_EMAIL', 'Nexucon Email notifications <notifications@nexucon.net>'))
-DEFAULT_FRONTEND_URL = getattr(settings, 'FRONTEND_URL', os.environ.get('FRONTEND_URL', 'http://localhost:3000'))
+DEFAULT_FRONTEND_URL = getattr(settings, 'FRONTEND_URL', os.environ.get('FRONTEND_URL', 'https://nexucon-frontend-8x3a.vercel.app'))
 
 class EmailService:
     """
