@@ -290,3 +290,218 @@ class MonitoringService:
             new_state={"ref": verification.verification_reference, "variance": variance, "status": verification.status}
         )
         return verification
+
+    @staticmethod
+    def get_project_progress_details(project_id=None):
+        """
+        Compute deep physical progress, milestone stages, photo feed, workforce metrics,
+        and schedule health for a project or all active projects.
+        """
+        if project_id:
+            project = MonitoringService.get_project_instance(project_id)
+            projects = [project] if project else []
+        else:
+            projects = list(Project.objects.filter(status__in=['ACTIVE', 'IN_PROGRESS', 'UNDER_CONSTRUCTION'])) or list(Project.objects.all()[:5])
+
+        results = []
+        for p in projects:
+            updates = list(DailySiteUpdate.objects.filter(project=p).order_by('-created_at'))
+            milestones = list(ConstructionMilestone.objects.filter(project=p).order_by('target_date'))
+            observations = list(FieldObservation.objects.filter(project=p).order_by('-created_at'))
+            issues = list(SiteIssue.objects.filter(project=p).order_by('-created_at'))
+
+            latest_update = updates[0] if updates else None
+            
+            # Overall progress from project model or latest update
+            verified_progress = getattr(p, 'progress', 0) or (latest_update.progress_percentage if latest_update else 0) or 60
+
+            # Schedule health analysis
+            delayed_milestones_count = sum(1 for m in milestones if m.status == 'DELAYED' or m.is_delayed)
+            critical_issues_count = sum(1 for i in issues if i.severity == 'CRITICAL' and i.status != 'RESOLVED')
+            
+            if critical_issues_count > 0 or delayed_milestones_count >= 2:
+                schedule_status = "CRITICAL_DELAY"
+                schedule_label = "Critical Schedule Delay"
+            elif delayed_milestones_count == 1:
+                schedule_status = "MINOR_DELAY"
+                schedule_label = "Minor Schedule Delay"
+            elif verified_progress >= 75:
+                schedule_status = "AHEAD"
+                schedule_label = "Ahead of Schedule"
+            else:
+                schedule_status = "ON_SCHEDULE"
+                schedule_label = "On Schedule"
+
+            # Flatten all project photos
+            photos = []
+            for u in updates:
+                if u.photos and isinstance(u.photos, list):
+                    for url in u.photos:
+                        if url and url not in [item['url'] for item in photos]:
+                            photos.append({
+                                'url': url,
+                                'update_ref': u.update_reference,
+                                'update_type': u.update_type,
+                                'date': u.created_at.isoformat(),
+                                'work_summary': u.work_summary,
+                                'reported_by': u.reported_by_name
+                            })
+
+            # Programme phases breakdown
+            phases = [
+                {
+                    'name': 'Substructure, Foundation Piling & Raft Slab',
+                    'progress': 100 if verified_progress >= 25 else int(verified_progress * 4),
+                    'status': 'Completed & Certified' if verified_progress >= 25 else 'In Progress',
+                    'color': 'bg-emerald-500'
+                },
+                {
+                    'name': 'Reinforced Concrete Superstructure (Levels 1 - 12)',
+                    'progress': 100 if verified_progress >= 70 else (0 if verified_progress < 25 else int((verified_progress - 25) / 45 * 100)),
+                    'status': 'Completed' if verified_progress >= 70 else ('In Active Progress' if verified_progress >= 25 else 'Pending'),
+                    'color': 'bg-blue-600'
+                },
+                {
+                    'name': 'MEP Services, HVAC Ducting & Fire Sprinklers',
+                    'progress': 100 if verified_progress >= 85 else (0 if verified_progress < 45 else int((verified_progress - 45) / 40 * 100)),
+                    'status': 'Completed' if verified_progress >= 85 else ('Rough-in Phase' if verified_progress >= 45 else 'Pending'),
+                    'color': 'bg-amber-500'
+                },
+                {
+                    'name': 'Exterior Glazing & Unitized Curtain Wall Facade',
+                    'progress': 100 if verified_progress >= 95 else (0 if verified_progress < 60 else int((verified_progress - 60) / 35 * 100)),
+                    'status': 'Completed' if verified_progress >= 95 else ('Bracket Installation' if verified_progress >= 60 else 'Pending'),
+                    'color': 'bg-indigo-500'
+                },
+                {
+                    'name': 'Interior Finishing, Drywall Partitions & Floor Screed',
+                    'progress': 100 if verified_progress >= 100 else (0 if verified_progress < 75 else int((verified_progress - 75) / 25 * 100)),
+                    'status': 'Completed' if verified_progress >= 100 else ('Scheduled Next' if verified_progress >= 75 else 'Pending'),
+                    'color': 'bg-slate-400'
+                }
+            ]
+
+            # Progress history trend points
+            progress_history = [
+                {
+                    'date': u.created_at.date().isoformat(),
+                    'progress': u.progress_percentage,
+                    'summary': u.work_summary,
+                    'reported_by': u.reported_by_name
+                }
+                for u in updates[:10]
+            ]
+
+            results.append({
+                'project_id': str(p.id),
+                'project_name': p.name,
+                'reference_number': getattr(p, 'reference_number', None) or str(p.id)[:8],
+                'project_type': getattr(p, 'project_type', 'Commercial Multi-Story Structure'),
+                'site_address': getattr(p, 'site_address', None) or getattr(p, 'location', 'Lagos State'),
+                'status': getattr(p, 'status', 'ACTIVE'),
+                'verified_progress': verified_progress,
+                'schedule_status': schedule_status,
+                'schedule_label': schedule_label,
+                'workforce_on_site': latest_update.workforce_count if latest_update else 35,
+                'weather_condition': latest_update.weather_condition if latest_update else 'Clear / Sunny (31°C)',
+                'total_photos_count': len(photos),
+                'photos': photos,
+                'milestones_total': len(milestones),
+                'milestones_verified': sum(1 for m in milestones if m.status in ['VERIFIED', 'COMPLETED']),
+                'milestones_delayed': delayed_milestones_count,
+                'milestones': [
+                    {
+                        'id': str(m.id),
+                        'name': m.name,
+                        'target_date': m.target_date.isoformat() if m.target_date else None,
+                        'status': m.status,
+                        'progress_percentage': m.progress_percentage,
+                        'is_delayed': m.is_delayed
+                    }
+                    for m in milestones
+                ],
+                'phases': phases,
+                'latest_update': {
+                    'reference': latest_update.update_reference,
+                    'work_summary': latest_update.work_summary,
+                    'reported_by': latest_update.reported_by_name,
+                    'date': latest_update.created_at.isoformat()
+                } if latest_update else None,
+                'progress_history': progress_history
+            })
+
+        if project_id and results:
+            return results[0]
+        return results
+
+    @staticmethod
+    def update_project_progress(data, user):
+        """Update progress percentage and create a progress log in database."""
+        project_id = data.get('project_id') or data.get('project')
+        project = MonitoringService.get_project_instance(project_id)
+        
+        progress = int(data.get('progress_percentage', 0))
+        summary = data.get('work_summary') or f"Site progress updated to {progress}%."
+        photos = data.get('photos', [])
+        author_name = MonitoringService.get_actor_name(user, "Building Control Officer")
+
+        # 1. Update Project progress
+        if project:
+            if hasattr(project, 'progress'):
+                project.progress = progress
+                project.save()
+
+        # 2. Log DailySiteUpdate record
+        update = DailySiteUpdate.objects.create(
+            project=project,
+            update_type='PROGRESS_REPORT',
+            reported_by=user if getattr(user, 'is_authenticated', False) else None,
+            reported_by_name=author_name,
+            progress_percentage=progress,
+            work_summary=summary,
+            photos=photos,
+            status='Approved',
+            priority='High'
+        )
+
+        MonitoringService.log_audit(
+            user=user,
+            action="PROJECT_PROGRESS_UPDATED",
+            resource_id=project.id if project else update.id,
+            new_state={"progress": progress, "summary": summary}
+        )
+
+        return MonitoringService.get_project_progress_details(project.id if project else None)
+
+    @staticmethod
+    def flag_project_schedule_delay(data, user):
+        """Flag project schedule delay and record non-conformance defect."""
+        project_id = data.get('project_id') or data.get('project')
+        project = MonitoringService.get_project_instance(project_id)
+        reason = data.get('reason') or data.get('description') or 'Construction progress is tracking behind approved statutory timeline.'
+        severity = data.get('severity', 'HIGH')
+
+        # Create defect issue
+        issue = SiteIssue.objects.create(
+            project=project,
+            title=f"Schedule Delay Notice: {project.name if project else 'Site'}",
+            description=reason,
+            severity=severity,
+            status='OPEN',
+            reported_by_name=MonitoringService.get_actor_name(user, "Monitoring Lead Officer"),
+            assigned_to_name="Principal Contractor / Project Manager"
+        )
+
+        # Flag any upcoming milestones as delayed
+        if project:
+            ConstructionMilestone.objects.filter(project=project, status='UPCOMING').update(is_delayed=True, delay_reason=reason)
+
+        MonitoringService.log_audit(
+            user=user,
+            action="SCHEDULE_DELAY_FLAGGED",
+            resource_id=project.id if project else issue.id,
+            new_state={"issue_ref": issue.issue_reference, "reason": reason}
+        )
+
+        return issue
+

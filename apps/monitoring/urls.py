@@ -3,7 +3,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     DailySiteUpdateViewSet, FieldObservationViewSet,
     SiteIssueViewSet, ConstructionMilestoneViewSet,
-    SiteVerificationViewSet, MonitoringStatsViewSet
+    SiteVerificationViewSet, MonitoringStatsViewSet,
+    SiteProgressViewSet
 )
 
 router = DefaultRouter()
@@ -13,6 +14,7 @@ router.register(r'issues', SiteIssueViewSet, basename='site-issue')
 router.register(r'milestones', ConstructionMilestoneViewSet, basename='construction-milestone')
 router.register(r'verifications', SiteVerificationViewSet, basename='site-verification')
 router.register(r'stats', MonitoringStatsViewSet, basename='monitoring-stats')
+router.register(r'progress', SiteProgressViewSet, basename='site-progress')
 
 urlpatterns = [
     path('', include(router.urls)),
