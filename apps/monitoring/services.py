@@ -10,7 +10,21 @@ class MonitoringService:
     def get_project_instance(project_id):
         if not project_id:
             return Project.objects.first()
-        p = Project.objects.filter(Q(id=str(project_id)) | Q(reference_number=str(project_id))).first()
+        
+        import uuid
+        try:
+            val = uuid.UUID(str(project_id))
+            p = Project.objects.filter(id=val).first()
+            if p:
+                return p
+        except Exception:
+            pass
+
+        p = Project.objects.filter(
+            Q(reference_number=str(project_id)) | 
+            Q(name__icontains=str(project_id))
+        ).first()
+
         return p or Project.objects.first()
 
     @staticmethod
@@ -48,15 +62,11 @@ class MonitoringService:
             update_type=update_type,
             reported_by=user if getattr(user, 'is_authenticated', False) else None,
             reported_by_name=author_name,
-            progress_percentage=progress,
-            work_summary=data.get('work_summary', ''),
+            contractor_notes=data.get('contractor_notes', ''),
+            officer_notes=data.get('officer_notes', ''),
             photos=data.get('photos', []),
-            drone_survey_data=data.get('drone_survey_data', {}),
-            weather_condition=data.get('weather_condition', 'Clear / Sunny'),
-            workforce_count=int(data.get('workforce_count', 0) or 0),
-            gps_coordinates=data.get('gps_coordinates', {}),
-            status=data.get('status', 'Active'),
-            priority=data.get('priority', 'Medium')
+            progress_percentage=progress,
+            recorded_at=timezone.now()
         )
 
         # Update Project progress if progress was reported
@@ -69,39 +79,42 @@ class MonitoringService:
 
         MonitoringService.log_audit(
             user=user,
-            action="DAILY_SITE_UPDATE_LOGGED",
+            action="DAILY_UPDATE_LOGGED",
             resource_id=update.id,
-            new_state={"ref": update.update_reference, "type": update.update_type, "progress": progress}
+            new_state={"type": update_type, "progress": progress}
         )
         return update
 
     @staticmethod
     def create_observation(data, user):
-        """Record field observation from site visit."""
+        """Create/Log field observation or inspection note."""
+        return MonitoringService.log_observation(data, user)
+
+    @staticmethod
+    def log_observation(data, user):
+        """Log field observation or inspection note."""
         project_id = data.get('project_id') or data.get('project')
         project = MonitoringService.get_project_instance(project_id)
-        author_name = data.get('observed_by_name') or MonitoringService.get_actor_name(user, "Regulatory Monitoring Officer")
+        author_name = data.get('observed_by_name') or MonitoringService.get_actor_name(user, "Field Inspector")
 
         obs = FieldObservation.objects.create(
             project=project,
-            category=data.get('category', 'QUALITY'),
             title=data.get('title', 'Field Observation'),
             description=data.get('description', ''),
-            severity=data.get('severity', 'LOW'),
+            category=data.get('category', 'GENERAL'),
             status=data.get('status', 'OPEN'),
-            assigned_officer_id=data.get('assigned_officer_id'),
-            assigned_officer_name=data.get('assigned_officer_name'),
+            observed_by=user if getattr(user, 'is_authenticated', False) else None,
             observed_by_name=author_name,
-            gps_coordinates=data.get('gps_coordinates', {}),
-            evidence_photos=data.get('evidence_photos', []),
-            corrective_action=data.get('corrective_action', '')
+            photos=data.get('photos', []),
+            recommended_action=data.get('recommended_action', ''),
+            observed_at=timezone.now()
         )
 
         MonitoringService.log_audit(
             user=user,
-            action="FIELD_OBSERVATION_RECORDED",
+            action="FIELD_OBSERVATION_LOGGED",
             resource_id=obs.id,
-            new_state={"ref": obs.observation_reference, "category": obs.category, "severity": obs.severity}
+            new_state={"ref": obs.observation_reference, "category": obs.category}
         )
         return obs
 
@@ -128,31 +141,46 @@ class MonitoringService:
         project = MonitoringService.get_project_instance(project_id)
         author_name = data.get('reported_by_name') or MonitoringService.get_actor_name(user, "Site Inspector")
 
+        # Safely parse due_date to avoid format exceptions
+        due_date_raw = data.get('due_date')
+        due_date = None
+        if due_date_raw:
+            try:
+                cleaned = str(due_date_raw).split('T')[0].strip()
+                if len(cleaned) == 10 and cleaned.count('-') == 2:
+                    due_date = cleaned
+            except Exception:
+                due_date = None
+
+        enforce_stop_work = bool(data.get('enforce_stop_work') or data.get('is_escalated'))
+
         issue = SiteIssue.objects.create(
             project=project,
             title=data.get('title', 'Site Issue'),
             description=data.get('description', ''),
-            severity=data.get('severity', 'MEDIUM'),
+            severity='CRITICAL' if enforce_stop_work else data.get('severity', 'MEDIUM'),
             status=data.get('status', 'OPEN'),
             assigned_to_name=data.get('assigned_to_name', 'Site Engineer'),
             reported_by_name=author_name,
-            due_date=data.get('due_date'),
+            due_date=due_date,
             resolution_evidence=data.get('resolution_evidence', []),
-            is_escalated=data.get('is_escalated', False) or data.get('enforce_stop_work', False)
+            is_escalated=enforce_stop_work
         )
 
         # If Stop-Work Order enforcement was requested
-        if data.get('enforce_stop_work') and project:
+        if enforce_stop_work and project:
             try:
                 from apps.inspections.models import StopWorkOrder
-                StopWorkOrder.objects.create(
-                    project=project,
-                    reason=issue.description or issue.title,
-                    severity=issue.severity or 'CRITICAL',
-                    issued_by_name=author_name,
-                    issued_at=timezone.now(),
-                    status='ACTIVE'
-                )
+                existing_swo = StopWorkOrder.objects.filter(project=project, status='ACTIVE').first()
+                if not existing_swo:
+                    StopWorkOrder.objects.create(
+                        project=project,
+                        reason=issue.description or issue.title or "Immediate site safety and building regulation breach.",
+                        severity='CRITICAL',
+                        issued_by_name=author_name,
+                        issued_at=timezone.now(),
+                        status='ACTIVE'
+                    )
                 project.status = 'SUSPENDED'
                 project.save()
             except Exception:
