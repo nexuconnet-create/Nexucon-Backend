@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Staff Role Invitation - Nexucon</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #0A1118; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .btn { display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #022C4F 0%, #03467B 100%); color: #FFFFFF !important; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 14px; letter-spacing: 0.5px; box-shadow: 0 4px 14px rgba(2, 44, 79, 0.4); }
+    .role-badge { display: inline-block; background-color: #F1F5F9; color: #334155; border: 1px solid #CBD5E1; padding: 6px 14px; border-radius: 20px; font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0A1118;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%">
+    <tr>
+      <td align="center" style="padding: 40px 10px;">
+        <table border="0" cellpadding="0" cellspacing="0" width="600" style="max-width: 600px; background-color: #FFFFFF; border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.35);">
+          
+          <!-- HEADER -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #022C4F 0%, #03467B 50%, #0A66C2 100%); padding: 36px 40px; text-align: left;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; padding: 8px 14px; background: rgba(255,255,255,0.12); border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);">
+                      <span style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1.5px;">NEXUCON</span>
+                      <span style="color: #93C5FD; font-size: 11px; font-weight: 700; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 8px; margin-left: 8px;">STAFF PORTAL</span>
+                    </div>
+                  </td>
+                  <td align="right">
+                    <span style="font-size: 10px; font-weight: 800; color: #60A5FA; background: rgba(2, 44, 79, 0.6); padding: 5px 12px; border-radius: 20px; border: 1px solid rgba(96, 165, 250, 0.3); text-transform: uppercase;">
+                      Official Invitation
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- BODY -->
+          <tr>
+            <td style="padding: 40px 40px 32px 40px;">
+              <div style="margin-bottom: 24px;">
+                <span class="role-badge">{{ role|default:"Staff Member" }} &bull; {{ department|default:"Building Control Directorate" }}</span>
+              </div>
+
+              <h1 style="color: #0F172A; font-size: 24px; font-weight: 800; line-height: 32px; margin: 0 0 16px 0;">
+                You've Been Invited to Join Nexucon
+              </h1>
+
+              <p style="color: #334155; font-size: 15px; line-height: 24px; margin: 0 0 20px 0;">
+                Hello <strong>{{ name }}</strong>,
+              </p>
+
+              <p style="color: #475569; font-size: 14px; line-height: 22px; margin: 0 0 24px 0;">
+                An administrator has invited you to join the Nexucon Building Regulatory Management System with the role of <strong>{{ role }}</strong> in the <strong>{{ department }}</strong> department.
+              </p>
+
+              <!-- DETAILS BOX -->
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 16px; margin-bottom: 28px; overflow: hidden;">
+                <tr>
+                  <td style="padding: 20px;">
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="padding: 6px 0; color: #64748B; font-size: 13px; font-weight: 600; width: 140px;">Assigned Role:</td>
+                        <td style="padding: 6px 0; color: #0F172A; font-size: 13px; font-weight: 700;">{{ role }}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 6px 0; color: #64748B; font-size: 13px; font-weight: 600;">Department:</td>
+                        <td style="padding: 6px 0; color: #0F172A; font-size: 13px; font-weight: 700;">{{ department }}</td>
+                      </tr>
+                      {% if invited_by %}
+                      <tr>
+                        <td style="padding: 6px 0; color: #64748B; font-size: 13px; font-weight: 600;">Invited By:</td>
+                        <td style="padding: 6px 0; color: #0F172A; font-size: 13px; font-weight: 700;">{{ invited_by }}</td>
+                      </tr>
+                      {% endif %}
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA BUTTON -->
+              <div style="text-align: center; margin-bottom: 32px;">
+                <a href="{{ invite_url }}" class="btn" style="color: #FFFFFF !important;">
+                  Accept Invitation & Set Password &rarr;
+                </a>
+              </div>
+
+              <!-- NOTICE -->
+              <div style="background-color: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 12px; padding: 14px 16px; margin-bottom: 24px;">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                  <tr>
+                    <td valign="top" style="padding-right: 10px; font-size: 16px; color: #475569;">
+                      &#128274;
+                    </td>
+                    <td style="color: #334155; font-size: 12px; line-height: 18px; font-weight: 500;">
+                      This link is single-use and will expire in <strong>7 days</strong>. Please do not forward this email to anyone else.
+                    </td>
+                  </tr>
+                </table>
+              </div>
+
+              <p style="color: #94A3B8; font-size: 12px; line-height: 18px; margin: 0;">
+                Direct activation URL:<br>
+                <a href="{{ invite_url }}" style="color: #0A66C2; word-break: break-all;">{{ invite_url }}</a>
+              </p>
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 28px 40px; text-align: center;">
+              <p style="color: #64748B; font-size: 11px; margin: 0 0 6px 0; font-weight: 600;">
+                Nexucon Physical Planning & Building Control Authority
+              </p>
+              <p style="color: #94A3B8; font-size: 11px; margin: 0;">
+                &copy; {{ current_year|default:"2026" }} Nexucon System. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

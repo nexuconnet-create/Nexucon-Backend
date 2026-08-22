@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <title>{{ subject|default:"Nexucon Notification" }}</title>
+  <style>
+    /* Client-specific Resets */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; }
+    table { border-collapse: collapse !important; }
+    body { height: 100% !important; margin: 0 !important; padding: 0 !important; width: 100% !important; background-color: #0A1118; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1E293B; }
+    
+    /* Responsive Queries */
+    @media screen and (max-width: 600px) {
+      .email-container { width: 100% !important; margin: auto !important; border-radius: 0 !important; }
+      .fluid { max-width: 100% !important; height: auto !important; margin-left: auto !important; margin-right: auto !important; }
+      .stack-column, .stack-column-center { display: block !important; width: 100% !important; max-width: 100% !important; direction: ltr !important; }
+      .stack-column-center { text-align: center !important; }
+      .mobile-padding { padding-left: 20px !important; padding-right: 20px !important; }
+    }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0A1118; -webkit-font-smoothing: antialiased;">
+  <!-- PREHEADER TRICK FOR EMAIL CLIENT PREVIEW -->
+  <div style="display: none; font-size: 1px; color: #0A1118; line-height: 1px; font-family: sans-serif; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden; mso-hide: all;">
+    {{ preheader|default:"Nexucon Digital Building Regulatory & Construction Management System" }}
+  </div>
+
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed;">
+    <tr>
+      <td align="center" style="padding: 40px 10px 40px 10px; background: linear-gradient(180deg, #0A1118 0%, #0F1D2A 100%);">
+        
+        <!-- MAIN CARD CONTAINER -->
+        <table border="0" cellpadding="0" cellspacing="0" width="600" class="email-container" style="max-width: 600px; width: 100%; background-color: #FFFFFF; border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.1);">
+          
+          <!-- TOP GOVERNMENT HEADER BRANDING -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #022C4F 0%, #03467B 50%, #0A66C2 100%); padding: 36px 40px; text-align: left; position: relative;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td valign="middle">
+                    <div style="display: inline-block; padding: 8px 14px; background: rgba(255, 255, 255, 0.12); backdrop-filter: blur(8px); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.2);">
+                      <table border="0" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1.5px; text-transform: uppercase;">
+                            NEXUCON
+                          </td>
+                          <td style="padding-left: 8px; border-left: 1px solid rgba(255, 255, 255, 0.3); color: #93C5FD; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;">
+                            Building Control & Regulations
+                          </td>
+                        </tr>
+                      </table>
+                    </div>
+                  </td>
+                  <td align="right" valign="middle">
+                    <span style="display: inline-block; font-size: 10px; font-weight: 800; color: #60A5FA; background: rgba(2, 44, 79, 0.6); padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(96, 165, 250, 0.3); text-transform: uppercase; letter-spacing: 0.5px;">
+                      Official Regulatory Portal
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- BODY CONTENT INJECTION -->
+          <tr>
+            <td style="padding: 40px; background-color: #FFFFFF;" class="mobile-padding">
+              {% block content %}
+              <!-- Dynamic Email Body injected here -->
+              {% endblock %}
+            </td>
+          </tr>
+
+          <!-- SECURITY & COMPLIANCE FOOTER -->
+          <tr>
+            <td style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 32px 40px; text-align: center;" class="mobile-padding">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td align="center" style="padding-bottom: 16px;">
+                    <div style="display: inline-flex; align-items: center; gap: 8px; color: #64748B; font-size: 11px; font-weight: 600;">
+                      <span style="display: inline-block; width: 8px; height: 8px; background-color: #10B981; border-radius: 50%;"></span>
+                      256-Bit Encrypted Statutory Government Communication
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="color: #64748B; font-size: 12px; line-height: 18px; font-weight: 400;">
+                    This communication is generated by the Nexucon Physical Planning & Building Control Authority.<br>
+                    If you did not expect this transmission, please notify security immediately at <a href="mailto:security@nexucon.gov.ng" style="color: #0A66C2; text-decoration: none; font-weight: 600;">security@nexucon.gov.ng</a>.
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding-top: 16px; color: #94A3B8; font-size: 11px; font-weight: 500;">
+                    &copy; {{ current_year|default:"2026" }} Nexucon Building Regulatory Management System. All rights reserved.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
