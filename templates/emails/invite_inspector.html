@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Field Inspector Onboarding - Nexucon</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #0A1118; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .btn { display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #0284C7 0%, #0369A1 100%); color: #FFFFFF !important; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 14px; letter-spacing: 0.5px; box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4); }
+    .role-badge { display: inline-block; background-color: #E0F2FE; color: #0369A1; border: 1px solid #BAE6FD; padding: 6px 14px; border-radius: 20px; font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0A1118;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%">
+    <tr>
+      <td align="center" style="padding: 40px 10px;">
+        <table border="0" cellpadding="0" cellspacing="0" width="600" style="max-width: 600px; background-color: #FFFFFF; border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.35);">
+          
+          <!-- HEADER -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #0369A1 0%, #0284C7 50%, #38BDF8 100%); padding: 36px 40px; text-align: left;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; padding: 8px 14px; background: rgba(255,255,255,0.15); border-radius: 12px; border: 1px solid rgba(255,255,255,0.25);">
+                      <span style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1.5px;">NEXUCON</span>
+                      <span style="color: #E0F2FE; font-size: 11px; font-weight: 700; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 8px; margin-left: 8px;">FIELD SURVEILLANCE</span>
+                    </div>
+                  </td>
+                  <td align="right">
+                    <span style="font-size: 10px; font-weight: 800; color: #FFFFFF; background: rgba(3, 105, 161, 0.5); padding: 5px 12px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.4); text-transform: uppercase;">
+                      Field Operations
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- BODY -->
+          <tr>
+            <td style="padding: 40px 40px 32px 40px;">
+              <div style="margin-bottom: 24px;">
+                <span class="role-badge">Field Inspector & Site Compliance Officer</span>
+              </div>
+
+              <h1 style="color: #0F172A; font-size: 24px; font-weight: 800; line-height: 32px; margin: 0 0 16px 0;">
+                Field Inspector Account Provisioned
+              </h1>
+
+              <p style="color: #334155; font-size: 15px; line-height: 24px; margin: 0 0 20px 0;">
+                Hello <strong>{{ name }}</strong>,
+              </p>
+
+              <p style="color: #475569; font-size: 14px; line-height: 22px; margin: 0 0 24px 0;">
+                You have been provisioned as an authorized <strong>{{ role|default:"Field Building Inspector" }}</strong> attached to <strong>{{ department|default:"Building Inspection & Compliance Unit" }}</strong>.
+              </p>
+
+              <!-- FIELD TOOLS GRID -->
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 16px; margin-bottom: 28px; overflow: hidden;">
+                <tr>
+                  <td style="padding: 20px;">
+                    <div style="font-size: 12px; font-weight: 800; color: #0369A1; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">
+                      Field Surveillance Modules
+                    </div>
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="padding: 6px 0; color: #334155; font-size: 13px; font-weight: 600;">
+                          &#128247; Real-Time Camera Telemetry & Cloudinary Defect Uploads
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 6px 0; color: #334155; font-size: 13px; font-weight: 600;">
+                          &#128205; Tersus GNSS RTK Rover Boundary Verification
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 6px 0; color: #334155; font-size: 13px; font-weight: 600;">
+                          &#128721; Immediate Statutory Stop-Work Order & NCR Flagging
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA BUTTON -->
+              <div style="text-align: center; margin-bottom: 32px;">
+                <a href="{{ invite_url }}" class="btn" style="color: #FFFFFF !important;">
+                  Activate Inspector Terminal &rarr;
+                </a>
+              </div>
+
+              <!-- SECURITY NOTICE -->
+              <div style="background-color: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 12px; padding: 14px 16px; margin-bottom: 24px;">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                  <tr>
+                    <td valign="top" style="padding-right: 10px; font-size: 16px; color: #0284C7;">
+                      &#128274;
+                    </td>
+                    <td style="color: #1E40AF; font-size: 12px; line-height: 18px; font-weight: 500;">
+                      Your inspector access token is valid for <strong>7 days</strong>. You can install the Nexucon Field App as a PWA directly from your mobile browser after activating your account.
+                    </td>
+                  </tr>
+                </table>
+              </div>
+
+              <p style="color: #94A3B8; font-size: 12px; line-height: 18px; margin: 0;">
+                Direct activation URL:<br>
+                <a href="{{ invite_url }}" style="color: #0284C7; word-break: break-all;">{{ invite_url }}</a>
+              </p>
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 28px 40px; text-align: center;">
+              <p style="color: #64748B; font-size: 11px; margin: 0 0 6px 0; font-weight: 600;">
+                Nexucon Field Surveillance & Inspection Bureau
+              </p>
+              <p style="color: #94A3B8; font-size: 11px; margin: 0;">
+                &copy; {{ current_year|default:"2026" }} Nexucon System. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

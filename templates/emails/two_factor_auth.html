@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Two-Factor Authentication Code - Nexucon</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #0A1118; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .otp-code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace; font-size: 36px; font-weight: 900; letter-spacing: 12px; color: #022C4F; }
+    .otp-box { background: linear-gradient(135deg, #F0F9FF 0%, #E0F2FE 100%); border: 2px dashed #0284C7; border-radius: 18px; padding: 24px 20px; text-align: center; margin: 28px 0; }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0A1118;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%">
+    <tr>
+      <td align="center" style="padding: 40px 10px;">
+        <table border="0" cellpadding="0" cellspacing="0" width="600" style="max-width: 600px; background-color: #FFFFFF; border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.35);">
+          
+          <!-- HEADER -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #022C4F 0%, #03467B 50%, #0A66C2 100%); padding: 36px 40px; text-align: left;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; padding: 8px 14px; background: rgba(255,255,255,0.12); border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);">
+                      <span style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1.5px;">NEXUCON</span>
+                      <span style="color: #93C5FD; font-size: 11px; font-weight: 700; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 8px; margin-left: 8px;">SECURITY GATEWAY</span>
+                    </div>
+                  </td>
+                  <td align="right">
+                    <span style="font-size: 10px; font-weight: 800; color: #6EE7B7; background: rgba(6, 78, 59, 0.4); padding: 5px 12px; border-radius: 20px; border: 1px solid rgba(110, 231, 183, 0.4); text-transform: uppercase;">
+                      2FA Verification
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- BODY -->
+          <tr>
+            <td style="padding: 40px 40px 32px 40px;">
+              <h1 style="color: #0F172A; font-size: 24px; font-weight: 800; line-height: 32px; margin: 0 0 14px 0;">
+                Two-Factor Security Passcode
+              </h1>
+
+              <p style="color: #334155; font-size: 15px; line-height: 24px; margin: 0 0 16px 0;">
+                Hello <strong>{{ name|default:"User" }}</strong>,
+              </p>
+
+              <p style="color: #475569; font-size: 14px; line-height: 22px; margin: 0 0 20px 0;">
+                We received a sign-in or authorization request for your Nexucon Building Regulatory account. Use the following statutory one-time passcode (OTP) to authenticate:
+              </p>
+
+              <!-- OTP DISPLAY BOX -->
+              <div class="otp-box">
+                <span style="display: block; font-size: 11px; font-weight: 800; color: #0369A1; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px;">
+                  Your Single-Use Authorization Passcode
+                </span>
+                <div class="otp-code">
+                  {{ otp_code|default:"749 203" }}
+                </div>
+                <span style="display: block; font-size: 12px; font-weight: 600; color: #64748B; margin-top: 8px;">
+                  Expires in <strong>{{ expires_minutes|default:"10" }} minutes</strong>
+                </span>
+              </div>
+
+              <!-- SECURITY ADVISORY -->
+              <div style="background-color: #FEF2F2; border: 1px solid #FECACA; border-radius: 14px; padding: 16px 18px; margin-bottom: 24px;">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                  <tr>
+                    <td valign="top" style="padding-right: 12px; font-size: 18px; color: #DC2626;">
+                      &#128737;
+                    </td>
+                    <td style="color: #991B1B; font-size: 12px; line-height: 18px; font-weight: 500;">
+                      <strong>Security Advisory:</strong> Nexucon staff and system administrators will <strong>NEVER</strong> ask for your 2FA passcode via phone, email, or messaging apps. Do not share this code with anyone.
+                    </td>
+                  </tr>
+                </table>
+              </div>
+
+              <p style="color: #64748B; font-size: 13px; line-height: 20px; margin: 0;">
+                If you did not initiate this sign-in attempt, please immediately change your password and notify the IT Security Directorate at <a href="mailto:security@nexucon.gov.ng" style="color: #0284C7; font-weight: 600;">security@nexucon.gov.ng</a>.
+              </p>
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 28px 40px; text-align: center;">
+              <p style="color: #64748B; font-size: 11px; margin: 0 0 6px 0; font-weight: 600;">
+                Nexucon Identity & Access Management (IAM) Gateway
+              </p>
+              <p style="color: #94A3B8; font-size: 11px; margin: 0;">
+                &copy; {{ current_year|default:"2026" }} Nexucon System. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

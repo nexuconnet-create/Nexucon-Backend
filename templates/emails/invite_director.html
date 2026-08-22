@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Directorate Onboarding Invitation - Nexucon</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #0A1118; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .btn { display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #022C4F 0%, #03467B 100%); color: #FFFFFF !important; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 14px; letter-spacing: 0.5px; box-shadow: 0 4px 14px rgba(2, 44, 79, 0.4); }
+    .role-badge { display: inline-block; background-color: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; padding: 6px 14px; border-radius: 20px; font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0A1118;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%">
+    <tr>
+      <td align="center" style="padding: 40px 10px;">
+        <table border="0" cellpadding="0" cellspacing="0" width="600" style="max-width: 600px; background-color: #FFFFFF; border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.35);">
+          
+          <!-- HEADER -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #022C4F 0%, #03467B 50%, #0A66C2 100%); padding: 36px 40px; text-align: left;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; padding: 8px 14px; background: rgba(255,255,255,0.12); border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);">
+                      <span style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1.5px;">NEXUCON</span>
+                      <span style="color: #93C5FD; font-size: 11px; font-weight: 700; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 8px; margin-left: 8px;">GOVERNMENT CONTROL</span>
+                    </div>
+                  </td>
+                  <td align="right">
+                    <span style="font-size: 10px; font-weight: 800; color: #FDE68A; background: rgba(217, 119, 6, 0.25); padding: 5px 12px; border-radius: 20px; border: 1px solid rgba(251, 191, 36, 0.4); text-transform: uppercase;">
+                      Executive Access
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- BODY -->
+          <tr>
+            <td style="padding: 40px 40px 32px 40px;">
+              <div style="margin-bottom: 24px;">
+                <span class="role-badge">Directorate Lead & Executive Sign-off</span>
+              </div>
+
+              <h1 style="color: #0F172A; font-size: 24px; font-weight: 800; line-height: 32px; margin: 0 0 16px 0;">
+                Official Invitation: Directorate Appointment
+              </h1>
+
+              <p style="color: #334155; font-size: 15px; line-height: 24px; margin: 0 0 20px 0;">
+                Dear <strong>{{ name }}</strong>,
+              </p>
+
+              <p style="color: #475569; font-size: 14px; line-height: 22px; margin: 0 0 24px 0;">
+                You have been formally designated as <strong>{{ role|default:"Director / Executive Sign-off Officer" }}</strong> for the <strong>{{ department|default:"Department of Physical Planning & Urban Development" }}</strong> on the Nexucon Regulatory Management System.
+              </p>
+
+              <!-- EXECUTIVE PRIVILEGES BOX -->
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 16px; margin-bottom: 28px; overflow: hidden;">
+                <tr>
+                  <td style="padding: 20px;">
+                    <div style="font-size: 12px; font-weight: 800; color: #022C4F; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">
+                      Executive Directorate Powers
+                    </div>
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="padding: 6px 0; color: #334155; font-size: 13px; font-weight: 600;">
+                          &#10003; Final Statutory Building Approval Sign-offs & Seal Verification
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 6px 0; color: #334155; font-size: 13px; font-weight: 600;">
+                          &#10003; Stop-Work Order Ratification & High-Court Suspension Enforcement
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 6px 0; color: #334155; font-size: 13px; font-weight: 600;">
+                          &#10003; Inter-Agency SLA Performance & Officer Audit Supervision
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA BUTTON -->
+              <div style="text-align: center; margin-bottom: 32px;">
+                <a href="{{ invite_url }}" class="btn" style="color: #FFFFFF !important;">
+                  Activate Directorate Account &rarr;
+                </a>
+              </div>
+
+              <!-- EXPIRATION & SECURITY NOTICE -->
+              <div style="background-color: #FEF3C7; border: 1px solid #FCD34D; border-radius: 12px; padding: 14px 16px; margin-bottom: 24px;">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                  <tr>
+                    <td valign="top" style="padding-right: 10px; font-size: 16px;">
+                      &#9888;
+                    </td>
+                    <td style="color: #92400E; font-size: 12px; line-height: 18px; font-weight: 500;">
+                      This executive onboarding credential is cryptographically signed and expires in <strong>7 days</strong>. Multi-Factor Authentication (2FA) is mandatory upon initial sign-in.
+                    </td>
+                  </tr>
+                </table>
+              </div>
+
+              <p style="color: #94A3B8; font-size: 12px; line-height: 18px; margin: 0;">
+                If the button above does not work, copy and paste this secure link into your browser:<br>
+                <a href="{{ invite_url }}" style="color: #0A66C2; word-break: break-all;">{{ invite_url }}</a>
+              </p>
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 28px 40px; text-align: center;">
+              <p style="color: #64748B; font-size: 11px; margin: 0 0 6px 0; font-weight: 600;">
+                Nexucon Physical Planning & Building Control Authority
+              </p>
+              <p style="color: #94A3B8; font-size: 11px; margin: 0;">
+                &copy; {{ current_year|default:"2026" }} Nexucon System. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

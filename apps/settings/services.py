@@ -329,6 +329,20 @@ class SettingsService:
                 new_state={"email": email, "role": role, "department": department}
             )
 
+        # Dispatch Resend HTML Invitation Email
+        try:
+            from apps.notifications.email_service import EmailService
+            EmailService.send_invitation_email(
+                email=email,
+                name=name,
+                role=role,
+                department=department,
+                invite_token=str(invitation.id),
+                invited_by=invited_by
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch invitation email via Resend: {e}")
+
         return invitation
 
     @classmethod
