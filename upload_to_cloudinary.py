@@ -11,9 +11,9 @@ django.setup()
 from apps.monitoring.models import DailySiteUpdate
 from apps.projects.models import Project
 
-CLOUD_NAME = 'depeqzb6z'
-API_KEY = '829639492126519'
-API_SECRET = '5OnBRRogDwpAasFJFYrXCoeUMLc'
+CLOUD_NAME = 'fspyt1uw'
+API_KEY = '226324943154255'
+API_SECRET = 'xEYPJUsx6Gih1uxUBZhiQ9K7VK0'
 FOLDER = 'nexucon/daily_updates'
 
 # High-res construction site photos to upload to the Cloudinary account
