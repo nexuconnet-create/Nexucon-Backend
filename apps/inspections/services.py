@@ -187,15 +187,19 @@ class InspectionService:
         return finding
 
     @staticmethod
-    def issue_stop_work(project, reason, severity, actor, inspection=None, finding=None):
+    def issue_stop_work(project, reason, severity, actor=None, inspection=None, finding=None):
         """Issue Stop-Work Order and suspend project."""
+        issued_by = 'Government Building Control Authority'
+        if actor and getattr(actor, 'is_authenticated', False):
+            issued_by = actor.get_full_name() or getattr(actor, 'email', 'Regulatory Enforcement Officer')
+
         swo = StopWorkOrder.objects.create(
             project=project,
             inspection=inspection,
             finding=finding,
             reason=reason,
             severity=severity or 'CRITICAL',
-            issued_by_name=actor.get_full_name() or actor.email,
+            issued_by_name=issued_by,
             issued_at=timezone.now(),
             status='ACTIVE'
         )

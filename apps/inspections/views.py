@@ -298,6 +298,39 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+    def create(self, request, *args, **kwargs):
+        project_id = request.data.get('project') or request.data.get('project_id')
+        if not project_id:
+            return Response({'success': False, 'message': 'Target construction project is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        project = Project.objects.filter(Q(id=str(project_id)) | Q(reference_number=str(project_id))).first()
+        if not project:
+            return Response({'success': False, 'message': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        inspection_id = request.data.get('inspection') or request.data.get('inspection_id')
+        inspection = Inspection.objects.filter(pk=inspection_id).first() if inspection_id else None
+
+        finding_id = request.data.get('finding') or request.data.get('finding_id')
+        finding = Finding.objects.filter(pk=finding_id).first() if finding_id else None
+
+        reason = request.data.get('reason', 'Critical safety/building code violation.')
+        severity = request.data.get('severity', 'CRITICAL')
+
+        swo = InspectionService.issue_stop_work(
+            project=project,
+            reason=reason,
+            severity=severity,
+            actor=request.user,
+            inspection=inspection,
+            finding=finding
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Stop-Work Order {swo.order_number} issued. Project {project.name} suspended.",
+            'data': StopWorkOrderSerializer(swo).data
+        }, status=status.HTTP_201_CREATED)
+
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):
         """Return SWO metrics."""
