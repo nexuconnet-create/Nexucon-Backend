@@ -218,12 +218,39 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             application=application,
             document_items=document_items,
             instructions=instructions,
-            actor=request.user
+            actor=request.user,
+            deadline=request.data.get('deadline')
         )
 
         return Response({
             'success': True,
             'message': 'Document request dispatched to applicant',
+            'data': ApplicationSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='update-doc-request')
+    def update_doc_request(self, request, pk=None):
+        """Update progress and item status for a document request."""
+        application = self.get_object()
+        request_id = request.data.get('request_id')
+        item_name = request.data.get('item_name')
+        item_status = request.data.get('item_status')
+        note = request.data.get('note', '')
+        overall_status = request.data.get('overall_status')
+
+        updated = ApplicationService.update_document_request_progress(
+            application=application,
+            request_id=request_id,
+            item_name=item_name,
+            item_status=item_status,
+            note=note,
+            overall_status=overall_status,
+            actor=request.user
+        )
+
+        return Response({
+            'success': True,
+            'message': 'Document request progress updated',
             'data': ApplicationSerializer(updated).data
         })
 

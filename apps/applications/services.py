@@ -199,16 +199,27 @@ class ApplicationService:
         return application
 
     @staticmethod
-    def request_additional_documents(application, document_items, instructions, actor):
+    def request_additional_documents(application, document_items, instructions, actor, deadline=None):
         """Log a formal document request to the applicant."""
         requests = list(application.document_requests or [])
         request_entry = {
-            "id": f"REQ-{len(requests) + 1}",
+            "id": f"REQ-{len(requests) + 1:03d}",
             "requested_items": document_items,
+            "items_progress": {item: "PENDING" for item in document_items},
             "instructions": instructions,
-            "requested_by": actor.get_full_name() or actor.email,
+            "requested_by": (actor.get_full_name() if actor and hasattr(actor, 'get_full_name') and actor.get_full_name() else getattr(actor, 'email', 'Government Regulatory Desk')),
             "requested_at": timezone.now().isoformat(),
-            "status": "OPEN"
+            "deadline": deadline or (timezone.now() + datetime.timedelta(days=7)).strftime("%b %d, %Y"),
+            "status": "PENDING_SUBMISSION",
+            "progress": 0,
+            "status_history": [
+                {
+                    "status": "REQUEST_ISSUED",
+                    "updated_at": timezone.now().isoformat(),
+                    "note": f"Formal requirement notice issued for {len(document_items)} technical documents.",
+                    "updated_by": (actor.get_full_name() if actor and hasattr(actor, 'get_full_name') and actor.get_full_name() else getattr(actor, 'email', 'Regulatory Desk'))
+                }
+            ]
         }
         requests.append(request_entry)
         application.document_requests = requests
@@ -221,4 +232,53 @@ class ApplicationService:
             resource_id=application.id,
             new_state=request_entry
         )
+        return application
+
+    @staticmethod
+    def update_document_request_progress(application, request_id, item_name=None, item_status=None, note=None, overall_status=None, actor=None):
+        """Update progress and verification state for a document request batch."""
+        requests = list(application.document_requests or [])
+        found = False
+        for req in requests:
+            if req.get('id') == request_id or str(req.get('id')) == str(request_id):
+                found = True
+                # Update item progress if provided
+                if item_name:
+                    item_progress = dict(req.get('items_progress') or {})
+                    item_progress[item_name] = item_status or 'VERIFIED'
+                    req['items_progress'] = item_progress
+
+                    # Calculate progress percentage
+                    total_items = len(req.get('requested_items', []))
+                    if total_items > 0:
+                        verified_count = sum(1 for v in item_progress.values() if v in ['VERIFIED', 'PASSED', 'APPROVED'])
+                        req['progress'] = int((verified_count / total_items) * 100)
+                        if req['progress'] == 100:
+                            req['status'] = 'COMPLETED'
+                        elif verified_count > 0 or any(v == 'SUBMITTED' for v in item_progress.values()):
+                            req['status'] = 'IN_PROGRESS'
+
+                if overall_status:
+                    req['status'] = overall_status
+
+                # Append to timeline
+                history = list(req.get('status_history', []))
+                history.append({
+                    "status": req.get('status', 'UPDATED'),
+                    "updated_at": timezone.now().isoformat(),
+                    "note": note or f"Updated {item_name or 'document requirement'} to {item_status or overall_status}",
+                    "updated_by": (actor.get_full_name() if actor and hasattr(actor, 'get_full_name') and actor.get_full_name() else getattr(actor, 'email', 'Regulatory Desk'))
+                })
+                req['status_history'] = history
+                break
+
+        if found:
+            application.document_requests = requests
+            application.save()
+            ApplicationService.log_audit(
+                user=actor,
+                action="DOCUMENT_REQUEST_PROGRESS_UPDATED",
+                resource_id=application.id,
+                new_state={"request_id": request_id, "item": item_name, "status": item_status}
+            )
         return application
