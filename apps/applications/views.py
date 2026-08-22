@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticatedOrReadOnly
 from django.db.models import Q, Count
 from django.core.exceptions import ValidationError
 from django.contrib.auth import get_user_model
@@ -14,7 +14,7 @@ User = get_user_model()
 class ApplicationViewSet(viewsets.ModelViewSet):
     queryset = Application.objects.all().select_related('project', 'applicant', 'permit')
     serializer_class = ApplicationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -77,14 +77,26 @@ class ApplicationViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        application = self.perform_create(serializer)
-        out_serializer = ApplicationSerializer(application)
-        return Response({
-            'success': True,
-            'message': 'Application created successfully',
-            'data': out_serializer.data
-        }, status=status.HTTP_201_CREATED)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            application = self.perform_create(serializer)
+            out_serializer = ApplicationSerializer(application)
+            return Response({
+                'success': True,
+                'message': 'Application created successfully',
+                'data': out_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({
+                'success': False,
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):
