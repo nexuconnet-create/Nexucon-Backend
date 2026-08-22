@@ -283,16 +283,25 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
         project_param = self.request.query_params.get('project')
         search_param = self.request.query_params.get('search')
 
-        if status_param:
+        if status_param and status_param.upper() != 'ALL':
             queryset = queryset.filter(status=status_param.upper())
 
         if project_param:
-            queryset = queryset.filter(project_id=project_param)
+            import uuid
+            try:
+                val = uuid.UUID(str(project_param))
+                queryset = queryset.filter(project_id=val)
+            except Exception:
+                queryset = queryset.filter(
+                    Q(project__reference_number=str(project_param)) |
+                    Q(project__name__icontains=str(project_param))
+                )
 
         if search_param:
             queryset = queryset.filter(
                 Q(order_number__icontains=search_param) |
                 Q(project__name__icontains=search_param) |
+                Q(project__reference_number__icontains=search_param) |
                 Q(reason__icontains=search_param)
             )
 
