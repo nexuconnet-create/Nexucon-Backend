@@ -191,7 +191,7 @@ class InspectionService:
         """Issue Stop-Work Order and suspend project."""
         issued_by = 'Government Building Control Authority'
         if actor and getattr(actor, 'is_authenticated', False):
-            issued_by = actor.get_full_name() or getattr(actor, 'email', 'Regulatory Enforcement Officer')
+            issued_by = actor.get_full_name() or getattr(actor, 'email', issued_by)
 
         swo = StopWorkOrder.objects.create(
             project=project,
@@ -217,16 +217,18 @@ class InspectionService:
         # Automatically sync into Site Monitoring SiteIssue as a CRITICAL issue
         try:
             from apps.monitoring.models import SiteIssue
-            SiteIssue.objects.create(
-                project=project,
-                title=f"🛑 Stop-Work Order Enforced ({swo.order_number}): {project.name if project else 'Site'}",
-                description=f"Statutory Site Suspension Notice: {reason}",
-                severity='CRITICAL',
-                status='OPEN',
-                reported_by_name=issued_by,
-                assigned_to_name="Principal Contractor / Site Manager",
-                is_escalated=True
-            )
+            existing_issue = SiteIssue.objects.filter(project=project, title__contains=swo.order_number).first()
+            if not existing_issue:
+                SiteIssue.objects.create(
+                    project=project,
+                    title=f"🛑 Stop-Work Order Enforced ({swo.order_number}): {project.name if project else 'Site'}",
+                    description=f"Statutory Site Suspension Notice: {reason}",
+                    severity='CRITICAL',
+                    status='OPEN',
+                    reported_by_name=issued_by,
+                    assigned_to_name="Principal Contractor / Site Manager",
+                    is_escalated=True
+                )
         except Exception:
             pass
 
@@ -241,9 +243,13 @@ class InspectionService:
     @staticmethod
     def lift_stop_work(swo, justification, actor):
         """Lift Stop-Work Order and reinstate project if clean."""
+        lifted_by = 'Director of Physical Planning & Building Control'
+        if actor and getattr(actor, 'is_authenticated', False):
+            lifted_by = actor.get_full_name() or getattr(actor, 'email', lifted_by)
+
         swo.status = 'LIFTED'
         swo.lifted_at = timezone.now()
-        swo.lifted_by_name = actor.get_full_name() or actor.email
+        swo.lifted_by_name = lifted_by
         swo.lift_justification = justification
         swo.save()
 
