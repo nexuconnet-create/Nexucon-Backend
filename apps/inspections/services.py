@@ -205,19 +205,36 @@ class InspectionService:
         )
 
         # Suspend project
-        project.status = 'SUSPENDED'
-        project.save()
+        if project:
+            project.status = 'SUSPENDED'
+            project.save()
 
         if inspection:
             inspection.status = 'FAILED'
             inspection.outcome = 'FAILED'
             inspection.save()
 
+        # Automatically sync into Site Monitoring SiteIssue as a CRITICAL issue
+        try:
+            from apps.monitoring.models import SiteIssue
+            SiteIssue.objects.create(
+                project=project,
+                title=f"🛑 Stop-Work Order Enforced ({swo.order_number}): {project.name if project else 'Site'}",
+                description=f"Statutory Site Suspension Notice: {reason}",
+                severity='CRITICAL',
+                status='OPEN',
+                reported_by_name=issued_by,
+                assigned_to_name="Principal Contractor / Site Manager",
+                is_escalated=True
+            )
+        except Exception:
+            pass
+
         InspectionService.log_audit(
             user=actor,
             action="STOP_WORK_ORDER_ISSUED",
             resource_id=swo.id,
-            new_state={"order_number": swo.order_number, "project": project.name, "reason": reason}
+            new_state={"order_number": swo.order_number, "project": project.name if project else "N/A", "reason": reason}
         )
         return swo
 
@@ -232,10 +249,24 @@ class InspectionService:
 
         # Re-activate project if no other active SWOs
         project = swo.project
-        active_swos = StopWorkOrder.objects.filter(project=project, status='ACTIVE').exclude(id=swo.id)
-        if not active_swos.exists():
-            project.status = 'ACTIVE'
-            project.save()
+        if project:
+            active_swos = StopWorkOrder.objects.filter(project=project, status='ACTIVE').exclude(id=swo.id)
+            if not active_swos.exists():
+                project.status = 'ACTIVE'
+                project.save()
+
+        # Update corresponding SiteIssue in Site Monitoring to RESOLVED
+        try:
+            from apps.monitoring.models import SiteIssue
+            SiteIssue.objects.filter(
+                project=project,
+                title__contains=swo.order_number
+            ).update(
+                status='RESOLVED',
+                resolution_notes=f"Stop-Work Order lifted on {timezone.now().strftime('%Y-%m-%d')}: {justification}"
+            )
+        except Exception:
+            pass
 
         InspectionService.log_audit(
             user=actor,
