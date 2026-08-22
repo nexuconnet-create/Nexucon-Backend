@@ -144,28 +144,26 @@ class InspectionViewSet(viewsets.ModelViewSet):
         inspection = self.get_object()
         inspector_id = request.data.get('inspector_id')
         inspector_name = request.data.get('inspector_name')
-        scheduled_date = request.data.get('scheduled_date') or timezone.now()
+        scheduled_date = request.data.get('scheduled_date')
 
         inspector_user = None
         if inspector_id:
             try:
-                inspector_user = User.objects.get(pk=inspector_id)
-            except User.DoesNotExist:
+                inspector_user = User.objects.filter(Q(id=inspector_id) | Q(username=inspector_id) | Q(email=inspector_id)).first()
+            except Exception:
                 pass
-
-        if not inspector_user:
-            inspector_user = request.user
 
         updated = InspectionService.assign_and_schedule(
             inspection=inspection,
             inspector_user=inspector_user,
             scheduled_date=scheduled_date,
-            actor=request.user
+            actor=request.user,
+            inspector_name=inspector_name
         )
 
         return Response({
             'success': True,
-            'message': f"Inspection assigned and scheduled for {scheduled_date}",
+            'message': f"Inspection assigned to {updated.inspector_name} and scheduled.",
             'data': InspectionSerializer(updated).data
         })
 
@@ -251,17 +249,25 @@ class InspectionViewSet(viewsets.ModelViewSet):
     def create_reinspection(self, request, pk=None):
         """Create a follow-up re-inspection."""
         inspection = self.get_object()
-        scheduled_date = request.data.get('scheduled_date') or (timezone.now() + datetime.timedelta(days=7))
+        scheduled_date = request.data.get('scheduled_date')
+        inspector_name = request.data.get('inspector_name')
+        inspector_id = request.data.get('inspector_id')
+        notes = request.data.get('notes') or request.data.get('summary_notes')
+        priority = request.data.get('priority', 'High')
 
         reinspection = InspectionService.create_reinspection(
             original_inspection=inspection,
             scheduled_date=scheduled_date,
-            actor=request.user
+            actor=request.user,
+            inspector_name=inspector_name,
+            inspector_id=inspector_id,
+            notes=notes,
+            priority=priority
         )
 
         return Response({
             'success': True,
-            'message': f"Re-Inspection {reinspection.inspection_reference} scheduled.",
+            'message': f"Re-Inspection {reinspection.inspection_reference} scheduled successfully.",
             'data': InspectionSerializer(reinspection).data
         }, status=status.HTTP_201_CREATED)
 
@@ -291,6 +297,39 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
             )
 
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        project_id = request.data.get('project') or request.data.get('project_id')
+        if not project_id:
+            return Response({'success': False, 'message': 'Target construction project is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        project = Project.objects.filter(Q(id=str(project_id)) | Q(reference_number=str(project_id))).first()
+        if not project:
+            return Response({'success': False, 'message': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        inspection_id = request.data.get('inspection') or request.data.get('inspection_id')
+        inspection = Inspection.objects.filter(pk=inspection_id).first() if inspection_id else None
+
+        finding_id = request.data.get('finding') or request.data.get('finding_id')
+        finding = Finding.objects.filter(pk=finding_id).first() if finding_id else None
+
+        reason = request.data.get('reason', 'Critical safety/building code violation.')
+        severity = request.data.get('severity', 'CRITICAL')
+
+        swo = InspectionService.issue_stop_work(
+            project=project,
+            reason=reason,
+            severity=severity,
+            actor=request.user,
+            inspection=inspection,
+            finding=finding
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Stop-Work Order {swo.order_number} issued. Project {project.name} suspended.",
+            'data': StopWorkOrderSerializer(swo).data
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):
