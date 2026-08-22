@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from django.db.models import Q
 from django.utils import timezone
 import datetime
@@ -17,7 +17,7 @@ from .services import MonitoringService
 class DailySiteUpdateViewSet(viewsets.ModelViewSet):
     queryset = DailySiteUpdate.objects.all().select_related('project', 'reported_by')
     serializer_class = DailySiteUpdateSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -128,7 +128,7 @@ class FieldObservationViewSet(viewsets.ModelViewSet):
 class SiteIssueViewSet(viewsets.ModelViewSet):
     queryset = SiteIssue.objects.all().select_related('project')
     serializer_class = SiteIssueSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
