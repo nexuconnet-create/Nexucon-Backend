@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import Inspection, Checklist, Finding, StopWorkOrder
+from apps.permits.models import Permit
 
 class ChecklistSerializer(serializers.ModelSerializer):
     class Meta:
@@ -52,9 +53,17 @@ class InspectionSerializer(serializers.ModelSerializer):
 
 
 class CreateInspectionSerializer(serializers.ModelSerializer):
+    scheduled_date = serializers.DateTimeField(required=False, allow_null=True)
+    permit = serializers.PrimaryKeyRelatedField(queryset=Permit.objects.all(), required=False, allow_null=True)
+
     class Meta:
         model = Inspection
         fields = (
             'project', 'permit', 'inspection_type', 'priority',
             'scheduled_date', 'summary_notes', 'checklist_results'
         )
+
+    def validate_scheduled_date(self, value):
+        if not value or value == '':
+            return None
+        return value

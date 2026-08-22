@@ -82,15 +82,33 @@ class InspectionViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        inspection = self.perform_create(serializer)
-        out_serializer = InspectionSerializer(inspection)
-        return Response({
-            'success': True,
-            'message': 'Inspection request created successfully',
-            'data': out_serializer.data
-        }, status=status.HTTP_201_CREATED)
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if data.get('scheduled_date') == '':
+            data['scheduled_date'] = None
+        if data.get('permit') == '':
+            data['permit'] = None
+
+        serializer = self.get_serializer(data=data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            inspection = self.perform_create(serializer)
+            out_serializer = InspectionSerializer(inspection)
+            return Response({
+                'success': True,
+                'message': 'Inspection request created successfully',
+                'data': out_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({
+                'success': False,
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):

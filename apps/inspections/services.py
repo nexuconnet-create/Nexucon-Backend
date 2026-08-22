@@ -1,8 +1,10 @@
 import datetime
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from django.db.models import Q
 from .models import Inspection, Finding, StopWorkOrder, Checklist
 from apps.projects.models import Project
+from apps.permits.models import Permit
 from apps.audit.models import AuditEvent
 
 class InspectionService:
@@ -21,11 +23,22 @@ class InspectionService:
             pass
 
     @staticmethod
-    def create_inspection_request(data, user):
+    def create_inspection_request(data, user=None):
         """Create a new inspection request."""
-        project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
-        
+        project_val = data.get('project') or data.get('project_id')
+        if isinstance(project_val, Project):
+            project = project_val
+        elif project_val:
+            project = Project.objects.filter(Q(id=str(project_val)) | Q(reference_number=str(project_val))).first()
+        else:
+            project = Project.objects.first()
+
+        if not project:
+            raise ValidationError("A valid construction project site is required.")
+
+        permit_val = data.get('permit') or data.get('permit_id')
+        permit = permit_val if isinstance(permit_val, Permit) else (Permit.objects.filter(pk=permit_val).first() if permit_val else None)
+
         inspection_type = data.get('inspection_type', 'Foundation Inspection')
         
         # Load default checklist if template exists
@@ -36,15 +49,26 @@ class InspectionService:
             {"id": "chk_4", "item": "Site safety barricades and PPE compliance verified", "status": "PENDING", "notes": ""}
         ]
 
+        req_name = data.get('requested_by_name')
+        if not req_name:
+            if user and getattr(user, 'is_authenticated', False):
+                req_name = user.get_full_name() or getattr(user, 'email', 'Regulatory Officer')
+            else:
+                req_name = 'Government Regulatory Desk'
+
+        scheduled_dt = data.get('scheduled_date')
+        if not scheduled_dt or scheduled_dt == '':
+            scheduled_dt = None
+
         inspection = Inspection.objects.create(
             project=project,
-            permit_id=data.get('permit_id') or data.get('permit'),
+            permit=permit,
             inspection_type=inspection_type,
             status='REQUESTED',
             priority=data.get('priority', 'Normal'),
-            requested_by_name=data.get('requested_by_name') or (user.get_full_name() or user.email),
+            requested_by_name=req_name,
             requested_at=timezone.now(),
-            scheduled_date=data.get('scheduled_date'),
+            scheduled_date=scheduled_dt,
             summary_notes=data.get('summary_notes', ''),
             checklist_results=data.get('checklist_results', default_checklist),
             photos_and_evidence=data.get('photos_and_evidence', [])
