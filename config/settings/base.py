@@ -93,7 +93,7 @@ TEMPLATES = [
 
 # Resend Email Configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Nexucon Email notifications <onboarding@resend.dev>")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Nexucon Email notifications <notifications@nexucon.net>")
 
 DATABASES = {
     'default': {
