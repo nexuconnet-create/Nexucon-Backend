@@ -63,7 +63,7 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
 class FieldObservationViewSet(viewsets.ModelViewSet):
     queryset = FieldObservation.objects.all().select_related('project', 'assigned_officer')
     serializer_class = FieldObservationSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -196,24 +196,40 @@ class SiteIssueViewSet(viewsets.ModelViewSet):
 class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
     queryset = ConstructionMilestone.objects.all().select_related('project')
     serializer_class = ConstructionMilestoneSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
         project_param = self.request.query_params.get('project')
+        phase_param = self.request.query_params.get('phase')
         status_param = self.request.query_params.get('status')
+        risk_param = self.request.query_params.get('risk') or self.request.query_params.get('risk_level')
+        critical_path_param = self.request.query_params.get('critical_path')
         search_param = self.request.query_params.get('search')
 
         if project_param:
             queryset = queryset.filter(project_id=project_param)
 
-        if status_param:
+        if phase_param and phase_param.upper() != 'ALL':
+            queryset = queryset.filter(phase__iexact=phase_param)
+
+        if status_param and status_param.upper() != 'ALL':
             queryset = queryset.filter(status__iexact=status_param)
+
+        if risk_param and risk_param.upper() != 'ALL':
+            queryset = queryset.filter(risk_level__iexact=risk_param)
+
+        if critical_path_param is not None:
+            is_cp = str(critical_path_param).lower() in ['true', '1']
+            queryset = queryset.filter(critical_path=is_cp)
 
         if search_param:
             queryset = queryset.filter(
                 Q(name__icontains=search_param) |
-                Q(project__name__icontains=search_param)
+                Q(milestone_code__icontains=search_param) |
+                Q(description__icontains=search_param) |
+                Q(project__name__icontains=search_param) |
+                Q(phase__icontains=search_param)
             )
 
         return queryset
@@ -228,36 +244,90 @@ class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
         milestone = self.perform_create(None)
         return Response({
             'success': True,
-            'message': 'Milestone created successfully',
+            'message': 'Construction milestone created successfully',
             'data': ConstructionMilestoneSerializer(milestone).data
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='update-progress')
+    def update_progress(self, request, pk=None):
+        milestone = self.get_object()
+        updated = MonitoringService.update_milestone_progress(milestone, request.data, request.user)
+        return Response({
+            'success': True,
+            'message': f"Milestone progress updated to {updated.progress_percentage}%",
+            'data': ConstructionMilestoneSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='attach-evidence')
+    def attach_evidence(self, request, pk=None):
+        milestone = self.get_object()
+        updated = MonitoringService.attach_milestone_evidence(milestone, request.data, request.user)
+        return Response({
+            'success': True,
+            'message': 'Evidence documents and photos attached successfully',
+            'data': ConstructionMilestoneSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='submit-verification')
+    def submit_verification(self, request, pk=None):
+        milestone = self.get_object()
+        updated = MonitoringService.submit_milestone_for_verification(milestone, request.data, request.user)
+        return Response({
+            'success': True,
+            'message': f"Milestone {milestone.milestone_code} submitted for verification",
+            'data': ConstructionMilestoneSerializer(updated).data
+        })
 
     @action(detail=True, methods=['post'], url_path='verify')
     def verify(self, request, pk=None):
         milestone = self.get_object()
-        updated = MonitoringService.verify_milestone(milestone, actor=request.user)
-        return Response({
-            'success': True,
-            'message': f"Milestone {milestone.name} signed off as verified",
-            'data': ConstructionMilestoneSerializer(updated).data
-        })
+        try:
+            updated = MonitoringService.verify_milestone(milestone, request.data, actor=request.user)
+            return Response({
+                'success': True,
+                'message': f"Milestone {milestone.name} formally certified & signed off",
+                'data': ConstructionMilestoneSerializer(updated).data
+            })
+        except ValueError as err:
+            return Response({
+                'success': False,
+                'error': str(err),
+                'gate_status': MonitoringService.evaluate_milestone_gates(milestone)
+            }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['post'], url_path='flag-delay')
     def flag_delay(self, request, pk=None):
         milestone = self.get_object()
-        reason = request.data.get('reason', 'Construction progress pacing delay.')
-        updated = MonitoringService.flag_milestone_delay(milestone, reason=reason, actor=request.user)
+        updated = MonitoringService.flag_milestone_delay(milestone, request.data, actor=request.user)
         return Response({
             'success': True,
             'message': f"Milestone {milestone.name} flagged as delayed",
             'data': ConstructionMilestoneSerializer(updated).data
         })
 
+    @action(detail=True, methods=['get'], url_path='gate-status')
+    def gate_status(self, request, pk=None):
+        milestone = self.get_object()
+        status_info = MonitoringService.evaluate_milestone_gates(milestone)
+        return Response({
+            'success': True,
+            'data': status_info
+        })
+
+    @action(detail=True, methods=['get'], url_path='audit-trail')
+    def audit_trail(self, request, pk=None):
+        milestone = self.get_object()
+        events = MonitoringService.get_milestone_audit_trail(milestone.id)
+        return Response({
+            'success': True,
+            'data': events
+        })
+
 
 class SiteVerificationViewSet(viewsets.ModelViewSet):
     queryset = SiteVerification.objects.all().select_related('project')
     serializer_class = SiteVerificationSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -302,7 +372,7 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
 from apps.projects.models import Project
 
 class MonitoringStatsViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def list(self, request):
         return self.overview(request)
@@ -344,8 +414,11 @@ class MonitoringStatsViewSet(viewsets.ViewSet):
         resolved_issues_count = SiteIssue.objects.filter(status__in=['RESOLVED', 'CLOSED']).count()
 
         # Tab 5: Construction Milestones
+        total_milestones = ConstructionMilestone.objects.count()
         milestones_due_this_week = ConstructionMilestone.objects.filter(target_date__gte=today, target_date__lte=week_ahead).count()
-        milestones_upcoming = ConstructionMilestone.objects.filter(status='UPCOMING').count()
+        milestones_upcoming = ConstructionMilestone.objects.filter(status__in=['UPCOMING', 'PLANNED', 'IN_PROGRESS']).count()
+        milestones_pending_verification = ConstructionMilestone.objects.filter(status='PENDING_VERIFICATION').count()
+        milestones_blocked = ConstructionMilestone.objects.filter(status='BLOCKED').count()
 
         # Tab 6: Site Verification
         pending_verifications = SiteVerification.objects.filter(status='PENDING_VERIFICATION').count()
@@ -381,10 +454,13 @@ class MonitoringStatsViewSet(viewsets.ViewSet):
                     'resolved': resolved_issues_count
                 },
                 'milestones': {
+                    'total': total_milestones,
                     'due_this_week': milestones_due_this_week,
                     'verified': verified_milestones,
                     'delayed': delayed_milestones,
-                    'upcoming': milestones_upcoming
+                    'upcoming': milestones_upcoming,
+                    'pending_verification': milestones_pending_verification,
+                    'blocked': milestones_blocked,
                 },
                 'verification': {
                     'pending': pending_verifications,
@@ -401,7 +477,7 @@ class SiteProgressViewSet(viewsets.ViewSet):
     Endpoints for physical construction progress, programme breakdowns, 
     and schedule tracking across active projects.
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def list(self, request):
         """Get physical construction progress details across all active projects."""

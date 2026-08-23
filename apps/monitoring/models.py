@@ -17,6 +17,9 @@ def generate_iss_ref():
 def generate_vrf_ref():
     return f"VRF-{datetime.datetime.now().year}-{uuid.uuid4().hex[:6].upper()}"
 
+def generate_ms_code():
+    return f"MS-{uuid.uuid4().hex[:4].upper()}"
+
 
 class DailySiteUpdate(models.Model):
     """
@@ -173,40 +176,101 @@ class SiteIssue(models.Model):
 
 class ConstructionMilestone(models.Model):
     """
-    Key construction programme milestones tracked against approved schedules.
+    Key construction programme milestones tracked against approved schedules,
+    statutory inspection gates, BIM/GNSS tolerance checks, and audit trails.
     """
     STATUS_CHOICES = (
-        ('UPCOMING', 'Upcoming'),
+        ('PLANNED', 'Planned'),
+        ('IN_PROGRESS', 'In Progress'),
         ('DUE_THIS_WEEK', 'Due This Week'),
-        ('VERIFIED', 'Verified'),
-        ('DELAYED', 'Delayed'),
+        ('PENDING_VERIFICATION', 'Pending Verification'),
+        ('VERIFIED', 'Verified & Certified'),
         ('COMPLETED', 'Completed'),
+        ('DELAYED', 'Delayed'),
+        ('BLOCKED', 'Blocked / Non-Compliant'),
+        ('ON_HOLD', 'On Hold'),
+        ('UPCOMING', 'Upcoming'),
+    )
+
+    PHASE_CHOICES = (
+        ('SUBSTRUCTURE', 'Substructure & Foundation Piling'),
+        ('STRUCTURAL_FRAME', 'Reinforced Concrete Superstructure Frame'),
+        ('SUPERSTRUCTURE', 'Superstructure & Floor Slabs'),
+        ('MEP_ROUGHIN', 'MEP Services & Conduit Rough-ins'),
+        ('FACADE_ENVELOPE', 'Facade Glazing, Cladding & Building Envelope'),
+        ('FINISHES', 'Internal Partitions, Screed & Architectural Finishes'),
+        ('COMMISSIONING', 'Testing, Statutory Commissioning & Handover'),
+    )
+
+    RISK_CHOICES = (
+        ('LOW', 'Low Risk (On Schedule)'),
+        ('MEDIUM', 'Medium Risk (Approaching Gate)'),
+        ('HIGH', 'High Risk (Slippage / Defect Present)'),
+        ('CRITICAL', 'Critical Risk (Stop-Work / Gate Failed)'),
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    milestone_code = models.CharField(max_length=50, default=generate_ms_code, db_index=True)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='construction_milestones')
     name = models.CharField(max_length=255)
-    
-    target_date = models.DateField()
+    phase = models.CharField(max_length=50, choices=PHASE_CHOICES, default='SUPERSTRUCTURE')
+    description = models.TextField(blank=True, null=True)
+    sequence_order = models.IntegerField(default=1)
+    critical_path = models.BooleanField(default=False, help_text="Designates if milestone is on the project critical path")
+
+    # Schedule & Dates
+    planned_start_date = models.DateField(null=True, blank=True)
+    target_date = models.DateField(help_text="Planned target completion date")
+    actual_start_date = models.DateField(null=True, blank=True)
     actual_completion_date = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='UPCOMING')
-    progress_percentage = models.IntegerField(default=0)
+    baseline_start_date = models.DateField(null=True, blank=True)
+    baseline_end_date = models.DateField(null=True, blank=True)
+    duration_days = models.IntegerField(default=30)
+    variance_days = models.IntegerField(default=0, help_text="Calculated schedule variance in days (+ is delayed, - is ahead)")
+
+    # Status & Progress
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='PLANNED')
+    progress_percentage = models.IntegerField(default=0, help_text="Physical progress 0-100%")
+    physical_progress_notes = models.TextField(blank=True, null=True)
     
+    # Risk Classification
+    risk_level = models.CharField(max_length=20, choices=RISK_CHOICES, default='LOW')
+    risk_factors = models.JSONField(default=list, blank=True, help_text="Dynamic risk justification points")
+
+    # Dependencies & Critical Path
+    dependencies = models.JSONField(default=list, blank=True, help_text="Predecessor milestone objects [{id, code, name, is_blocking}]")
+
+    # Integrated Linkages
+    linked_inspection_ids = models.JSONField(default=list, blank=True, help_text="Linked field inspection records [{id, ref, type, status, outcome}]")
+    linked_issue_ids = models.JSONField(default=list, blank=True, help_text="Linked site issues/defects [{id, ref, title, severity, status}]")
+    linked_bim_model_id = models.CharField(max_length=255, blank=True, null=True)
+    bim_deviation_mm = models.FloatField(default=0.0, help_text="LiDAR/point cloud deviation in mm")
+    bim_tolerance_max_mm = models.FloatField(default=15.0, help_text="Max allowable BIM tolerance in mm")
+    survey_variance_meters = models.FloatField(default=0.0, help_text="GNSS RTK rover coordinate variance in meters")
+    digital_eye_verified = models.BooleanField(default=False)
+
+    # Evidence Vault
+    evidence_documents = models.JSONField(default=list, blank=True, help_text="Uploaded test certs, lab reports, structural signoffs [{name, url, file_type, size, category}]")
+    evidence_photos = models.JSONField(default=list, blank=True, help_text="Progress site photos [{url, caption, timestamp}]")
+
+    # Verification Gates & Digital Sign-off
+    verification_requirements = models.JSONField(default=dict, blank=True, help_text="Configured gate checks required for signoff")
+    verification_signoff = models.JSONField(default=dict, blank=True, help_text="Digital signoff, certificate ref, signature hash")
     verified_by_name = models.CharField(max_length=255, blank=True, null=True)
     verified_at = models.DateTimeField(null=True, blank=True)
-    evidence_documents = models.JSONField(default=list, blank=True)
-    
+
+    # Delay Management
     is_delayed = models.BooleanField(default=False)
     delay_reason = models.TextField(blank=True, null=True)
-    
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['target_date']
+        ordering = ['sequence_order', 'target_date']
 
     def __str__(self):
-        return f"{self.name} - {self.project.name} ({self.status})"
+        return f"[{self.milestone_code}] {self.name} - {self.project.name} ({self.status})"
 
 
 class SiteVerification(models.Model):

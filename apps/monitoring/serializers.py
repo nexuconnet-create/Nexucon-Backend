@@ -37,11 +37,21 @@ class SiteIssueSerializer(serializers.ModelSerializer):
 class ConstructionMilestoneSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
     project_reference = serializers.CharField(source='project.reference_number', read_only=True)
+    project_location = serializers.CharField(source='project.lga', read_only=True)
+    project_status = serializers.CharField(source='project.status', read_only=True)
+    gate_evaluation = serializers.SerializerMethodField()
 
     class Meta:
         model = ConstructionMilestone
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at')
+
+    def get_gate_evaluation(self, obj):
+        try:
+            from .services import MonitoringService
+            return MonitoringService.evaluate_milestone_gates(obj)
+        except Exception:
+            return {'all_gates_passed': False, 'is_blocked': False, 'gates': [], 'blockers': []}
 
 
 class SiteVerificationSerializer(serializers.ModelSerializer):

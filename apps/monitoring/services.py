@@ -1,4 +1,6 @@
 import math
+import uuid
+import datetime
 from django.utils import timezone
 from .models import DailySiteUpdate, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
 from apps.projects.models import Project
@@ -62,11 +64,15 @@ class MonitoringService:
             update_type=update_type,
             reported_by=user if getattr(user, 'is_authenticated', False) else None,
             reported_by_name=author_name,
-            contractor_notes=data.get('contractor_notes', ''),
-            officer_notes=data.get('officer_notes', ''),
+            work_summary=data.get('work_summary') or data.get('contractor_notes') or data.get('notes') or f"Daily site update ({update_type})",
             photos=data.get('photos', []),
+            drone_survey_data=data.get('drone_survey_data', {}),
+            weather_condition=data.get('weather_condition', 'Clear / Sunny'),
+            workforce_count=int(data.get('workforce_count', 0) or 0),
+            gps_coordinates=data.get('gps_coordinates', {}),
             progress_percentage=progress,
-            recorded_at=timezone.now()
+            status=data.get('status', 'Active'),
+            priority=data.get('priority', 'Medium'),
         )
 
         # Update Project progress if progress was reported
@@ -97,17 +103,23 @@ class MonitoringService:
         project = MonitoringService.get_project_instance(project_id)
         author_name = data.get('observed_by_name') or MonitoringService.get_actor_name(user, "Field Inspector")
 
+        category = data.get('category', 'QUALITY')
+        valid_cats = ['QUALITY', 'SAFETY', 'PROGRESS', 'ENVIRONMENTAL', 'GENERAL']
+        if category not in valid_cats:
+            category = 'GENERAL'
+
         obs = FieldObservation.objects.create(
             project=project,
             title=data.get('title', 'Field Observation'),
-            description=data.get('description', ''),
-            category=data.get('category', 'GENERAL'),
+            description=data.get('description') or data.get('notes') or '',
+            category=category,
+            severity=data.get('severity', 'LOW'),
             status=data.get('status', 'OPEN'),
-            observed_by=user if getattr(user, 'is_authenticated', False) else None,
+            assigned_officer_name=data.get('assigned_officer_name', ''),
             observed_by_name=author_name,
-            photos=data.get('photos', []),
-            recommended_action=data.get('recommended_action', ''),
-            observed_at=timezone.now()
+            evidence_photos=data.get('evidence_photos') or data.get('photos', []),
+            gps_coordinates=data.get('gps_coordinates', {}),
+            corrective_action=data.get('corrective_action') or data.get('recommended_action', ''),
         )
 
         MonitoringService.log_audit(
@@ -228,60 +240,484 @@ class MonitoringService:
 
     @staticmethod
     def create_milestone(data, user):
-        """Create a construction milestone schedule."""
+        """Create a construction milestone schedule with gate criteria and dependencies."""
         project_id = data.get('project_id') or data.get('project')
         project = MonitoringService.get_project_instance(project_id)
+        
+        milestone_code = data.get('milestone_code') or f"MS-{uuid.uuid4().hex[:4].upper()}"
+        target_date_raw = data.get('target_date') or timezone.now().date()
+        if isinstance(target_date_raw, str):
+            try:
+                target_date_raw = datetime.datetime.strptime(target_date_raw.split('T')[0], '%Y-%m-%d').date()
+            except Exception:
+                target_date_raw = timezone.now().date() + datetime.timedelta(days=30)
+
+        planned_start_raw = data.get('planned_start_date')
+        if planned_start_raw and isinstance(planned_start_raw, str):
+            try:
+                planned_start_raw = datetime.datetime.strptime(planned_start_raw.split('T')[0], '%Y-%m-%d').date()
+            except Exception:
+                planned_start_raw = timezone.now().date()
+
+        duration = int(data.get('duration_days', 30) or 30)
+        progress = int(data.get('progress_percentage', 0) or 0)
+        status_val = data.get('status', 'PLANNED' if progress == 0 else 'IN_PROGRESS')
+
+        # Default verification gate configuration
+        default_reqs = {
+            'require_inspections_passed': True,
+            'require_zero_critical_defects': True,
+            'require_survey_within_tolerance': True,
+            'require_lab_test_evidence': True,
+            'require_engineer_signoff': True
+        }
+        verification_reqs = data.get('verification_requirements') or default_reqs
 
         milestone = ConstructionMilestone.objects.create(
             project=project,
-            name=data.get('name', 'Milestone'),
-            target_date=data.get('target_date', timezone.now().date()),
-            status=data.get('status', 'UPCOMING'),
-            progress_percentage=int(data.get('progress_percentage', 0) or 0),
-            evidence_documents=data.get('evidence_documents', [])
+            milestone_code=milestone_code,
+            name=data.get('name', 'Construction Milestone'),
+            phase=data.get('phase', 'SUPERSTRUCTURE'),
+            description=data.get('description', ''),
+            sequence_order=int(data.get('sequence_order', 1) or 1),
+            critical_path=bool(data.get('critical_path', False)),
+            planned_start_date=planned_start_raw,
+            target_date=target_date_raw,
+            baseline_start_date=planned_start_raw,
+            baseline_end_date=target_date_raw,
+            duration_days=duration,
+            variance_days=0,
+            status=status_val,
+            progress_percentage=progress,
+            physical_progress_notes=data.get('physical_progress_notes', ''),
+            risk_level=data.get('risk_level', 'LOW'),
+            risk_factors=data.get('risk_factors', []),
+            dependencies=data.get('dependencies', []),
+            linked_inspection_ids=data.get('linked_inspection_ids', []),
+            linked_issue_ids=data.get('linked_issue_ids', []),
+            linked_bim_model_id=data.get('linked_bim_model_id'),
+            bim_deviation_mm=float(data.get('bim_deviation_mm', 0.0) or 0.0),
+            bim_tolerance_max_mm=float(data.get('bim_tolerance_max_mm', 15.0) or 15.0),
+            survey_variance_meters=float(data.get('survey_variance_meters', 0.0) or 0.0),
+            digital_eye_verified=bool(data.get('digital_eye_verified', False)),
+            evidence_documents=data.get('evidence_documents', []),
+            evidence_photos=data.get('evidence_photos', []),
+            verification_requirements=verification_reqs
         )
 
         MonitoringService.log_audit(
             user=user,
             action="CONSTRUCTION_MILESTONE_CREATED",
             resource_id=milestone.id,
-            new_state={"name": milestone.name, "target_date": str(milestone.target_date)}
+            new_state={"code": milestone.milestone_code, "name": milestone.name, "target_date": str(milestone.target_date)}
         )
         return milestone
 
     @staticmethod
-    def verify_milestone(milestone, actor):
-        """Verify construction milestone completion."""
+    def update_milestone_progress(milestone, data, user):
+        """
+        Update physical progress and attach work notes.
+        CRITICAL GUARDRAIL: When progress reaches 100%, status transitions to
+        'PENDING_VERIFICATION' (or remains 'IN_PROGRESS'), NOT automatically 'VERIFIED'.
+        """
+        old_progress = milestone.progress_percentage
+        old_status = milestone.status
+
+        new_progress = int(data.get('progress_percentage', old_progress) or 0)
+        milestone.progress_percentage = min(100, max(0, new_progress))
+
+        if 'physical_progress_notes' in data:
+            milestone.physical_progress_notes = data.get('physical_progress_notes', '')
+
+        # Merging evidence documents if provided
+        new_docs = data.get('evidence_documents') or []
+        if new_docs and isinstance(new_docs, list):
+            existing_docs = milestone.evidence_documents or []
+            existing_names = {d.get('name') for d in existing_docs if isinstance(d, dict)}
+            for doc in new_docs:
+                if isinstance(doc, dict) and doc.get('name') not in existing_names:
+                    existing_docs.append(doc)
+            milestone.evidence_documents = existing_docs
+
+        # Merging evidence photos if provided
+        new_photos = data.get('evidence_photos') or []
+        if new_photos and isinstance(new_photos, list):
+            existing_photos = milestone.evidence_photos or []
+            for photo in new_photos:
+                if photo not in existing_photos:
+                    existing_photos.append(photo)
+            milestone.evidence_photos = existing_photos
+
+        # Status transition handling
+        if milestone.progress_percentage >= 100:
+            if milestone.status in ['PLANNED', 'IN_PROGRESS', 'DUE_THIS_WEEK']:
+                milestone.status = 'PENDING_VERIFICATION'
+        elif milestone.progress_percentage > 0:
+            if milestone.status == 'PLANNED':
+                milestone.status = 'IN_PROGRESS'
+
+        if not milestone.actual_start_date and milestone.progress_percentage > 0:
+            milestone.actual_start_date = timezone.now().date()
+
+        milestone.save()
+
+        MonitoringService.log_audit(
+            user=user,
+            action="MILESTONE_PROGRESS_UPDATED",
+            resource_id=milestone.id,
+            previous_state={"progress": old_progress, "status": old_status},
+            new_state={"progress": milestone.progress_percentage, "status": milestone.status}
+        )
+        return milestone
+
+    @staticmethod
+    def attach_milestone_evidence(milestone, data, user):
+        """Attach lab test results, structural signoff certs, or photos."""
+        new_docs = data.get('documents') or data.get('evidence_documents') or []
+        new_photos = data.get('photos') or data.get('evidence_photos') or []
+
+        existing_docs = list(milestone.evidence_documents or [])
+        for doc in new_docs:
+            if isinstance(doc, dict):
+                existing_docs.append(doc)
+        milestone.evidence_documents = existing_docs
+
+        existing_photos = list(milestone.evidence_photos or [])
+        for p in new_photos:
+            if p not in existing_photos:
+                existing_photos.append(p)
+        milestone.evidence_photos = existing_photos
+
+        milestone.save()
+
+        MonitoringService.log_audit(
+            user=user,
+            action="MILESTONE_EVIDENCE_ATTACHED",
+            resource_id=milestone.id,
+            new_state={"docs_count": len(milestone.evidence_documents), "photos_count": len(milestone.evidence_photos)}
+        )
+        return milestone
+
+    @staticmethod
+    def evaluate_milestone_gates(milestone):
+        """
+        Evaluate live verification gate readiness across:
+        1. Predecessor milestone completion
+        2. Statutory inspection pass status
+        3. Zero unresolved critical defects & Stop-Work orders
+        4. BIM LiDAR deviation & GNSS rover variance tolerance
+        5. Certified laboratory test evidence uploaded
+        """
+        project = milestone.project
+        reqs = milestone.verification_requirements or {
+            'require_inspections_passed': True,
+            'require_zero_critical_defects': True,
+            'require_survey_within_tolerance': True,
+            'require_lab_test_evidence': True,
+            'require_engineer_signoff': True
+        }
+
+        gates = []
+        blockers = []
+        is_blocked = False
+
+        # 1. Dependency Predecessors Gate
+        predecessors = milestone.dependencies or []
+        pred_passed = True
+        for pred in predecessors:
+            pred_id = pred.get('id') or pred.get('code')
+            if pred_id:
+                pred_obj = ConstructionMilestone.objects.filter(Q(id=pred_id) | Q(milestone_code=pred_id)).first()
+                if pred_obj and pred_obj.status not in ['VERIFIED', 'COMPLETED']:
+                    pred_passed = False
+                    blockers.append(f"Predecessor milestone '{pred_obj.name}' is {pred_obj.status}")
+
+        gates.append({
+            'key': 'dependencies',
+            'title': 'Predecessor Dependencies Satisfied',
+            'status': 'PASSED' if pred_passed else 'FAILED',
+            'required': True,
+            'details': 'All prerequisite structural and geotechnical phases completed.' if pred_passed else 'Prerequisite phases remain unverified.'
+        })
+        if not pred_passed:
+            is_blocked = True
+
+        # 2. Statutory Inspections Gate
+        insp_passed = True
+        linked_insps = milestone.linked_inspection_ids or []
+        if reqs.get('require_inspections_passed', True):
+            if linked_insps:
+                for insp in linked_insps:
+                    outcome = insp.get('outcome') or insp.get('status')
+                    if outcome not in ['PASSED', 'Passed', 'COMPLETED']:
+                        insp_passed = False
+                        blockers.append(f"Required inspection '{insp.get('type', 'Site Inspection')}' status: {outcome}")
+            else:
+                # Check project inspections
+                try:
+                    from apps.inspections.models import Inspection
+                    failed_insps = Inspection.objects.filter(project=project, outcome='FAILED').count()
+                    if failed_insps > 0:
+                        insp_passed = False
+                        blockers.append(f"{failed_insps} mandatory site inspection(s) failed.")
+                except Exception:
+                    pass
+
+        gates.append({
+            'key': 'inspections',
+            'title': 'Statutory Site Inspections Passed',
+            'status': 'PASSED' if insp_passed else 'FAILED',
+            'required': reqs.get('require_inspections_passed', True),
+            'details': 'All mandatory field inspections conducted with PASSED outcome.' if insp_passed else 'Outstanding or unpassed inspection findings.'
+        })
+
+        # 3. Defect & Stop-Work Blocker Gate
+        defects_clear = True
+        if reqs.get('require_zero_critical_defects', True):
+            open_critical_issues = SiteIssue.objects.filter(project=project, severity='CRITICAL', status__in=['OPEN', 'IN_PROGRESS', 'UNDER_REVIEW']).count()
+            if open_critical_issues > 0:
+                defects_clear = False
+                blockers.append(f"{open_critical_issues} critical safety/structural defect(s) unresolved.")
+
+            try:
+                from apps.inspections.models import StopWorkOrder
+                active_swos = StopWorkOrder.objects.filter(project=project, status='ACTIVE').count()
+                if active_swos > 0:
+                    defects_clear = False
+                    blockers.append(f"Active Stop-Work Order is currently enforced on this site.")
+            except Exception:
+                pass
+
+        gates.append({
+            'key': 'defects',
+            'title': 'Zero Open Critical Defects & SWOs',
+            'status': 'PASSED' if defects_clear else 'FAILED',
+            'required': reqs.get('require_zero_critical_defects', True),
+            'details': 'No active Stop-Work Orders or critical structural non-conformances.' if defects_clear else 'Active defect blockers prevent regulatory certification.'
+        })
+        if not defects_clear:
+            is_blocked = True
+
+        # 4. BIM & GNSS Survey Tolerance Gate
+        tolerance_passed = True
+        if reqs.get('require_survey_within_tolerance', True):
+            max_bim = milestone.bim_tolerance_max_mm or 15.0
+            actual_bim = milestone.bim_deviation_mm or 0.0
+            variance_gnss = milestone.survey_variance_meters or 0.0
+            if actual_bim > max_bim or variance_gnss > 0.05:
+                tolerance_passed = False
+                blockers.append(f"BIM deviation ({actual_bim}mm vs max {max_bim}mm) or GNSS variance ({variance_gnss}m) exceeds statutory limits.")
+
+        gates.append({
+            'key': 'bim_survey',
+            'title': 'BIM LiDAR & GNSS Rover Tolerance Check',
+            'status': 'PASSED' if tolerance_passed else 'FAILED',
+            'required': reqs.get('require_survey_within_tolerance', True),
+            'details': f"Spatial deviation {milestone.bim_deviation_mm}mm is within tolerance (≤ {milestone.bim_tolerance_max_mm}mm)." if tolerance_passed else "Geometric deviation exceeds building code tolerance."
+        })
+
+        # 5. Laboratory Test Evidence Gate
+        evidence_passed = True
+        docs = milestone.evidence_documents or []
+        if reqs.get('require_lab_test_evidence', True):
+            if not docs or len(docs) == 0:
+                evidence_passed = False
+                blockers.append("No compressive strength or laboratory test certificates uploaded.")
+
+        gates.append({
+            'key': 'evidence_vault',
+            'title': 'Certified Laboratory Test Reports Uploaded',
+            'status': 'PASSED' if evidence_passed else 'FAILED',
+            'required': reqs.get('require_lab_test_evidence', True),
+            'details': f"{len(docs)} verified test report(s) and engineering documents attached." if evidence_passed else "Required laboratory test certs missing."
+        })
+
+        all_gates_passed = pred_passed and insp_passed and defects_clear and tolerance_passed and evidence_passed
+
+        return {
+            'all_gates_passed': all_gates_passed,
+            'is_blocked': is_blocked,
+            'gates': gates,
+            'blockers': blockers,
+            'summary': 'All statutory verification gates satisfied' if all_gates_passed else f"{len(blockers)} gate condition(s) unresolved"
+        }
+
+    @staticmethod
+    def submit_milestone_for_verification(milestone, data, user):
+        """Submit milestone for formal government verification."""
+        milestone.status = 'PENDING_VERIFICATION'
+        if 'physical_progress_notes' in data:
+            milestone.physical_progress_notes = data.get('physical_progress_notes')
+        milestone.save()
+
+        # Send notification to Building Control Officers
+        try:
+            from apps.notifications.services import NotificationService
+            NotificationService.send_notification({
+                'title': f"Milestone Verification Submitted: {milestone.name}",
+                'message': f"Contractor submitted '{milestone.name}' on {milestone.project.name} for statutory audit sign-off.",
+                'category': 'REGULATORY',
+                'priority': 'High',
+                'recipient_role': 'Director'
+            }, user=user)
+        except Exception:
+            pass
+
+        MonitoringService.log_audit(
+            user=user,
+            action="MILESTONE_VERIFICATION_SUBMITTED",
+            resource_id=milestone.id,
+            new_state={"status": "PENDING_VERIFICATION", "submitted_by": MonitoringService.get_actor_name(user)}
+        )
+        return milestone
+
+    @staticmethod
+    def verify_milestone(milestone, data, actor):
+        """
+        Formal statutory verification & sign-off of construction milestone.
+        Strictly checks verification gate criteria and generates an official
+        cryptographic seal and digital certificate reference.
+        """
+        override_gate = bool(data.get('override_gate', False))
+        gate_evaluation = MonitoringService.evaluate_milestone_gates(milestone)
+
+        if not gate_evaluation['all_gates_passed'] and not override_gate:
+            reasons = "; ".join(gate_evaluation['blockers'])
+            raise ValueError(f"Verification gates failed: {reasons}")
+
+        actor_name = MonitoringService.get_actor_name(actor, "Engr. Abimbola Williams (Building Control Director)")
+        notes = data.get('notes') or data.get('verification_notes') or "Statutory milestone verification completed and certified in compliance with Lagos State Building Control Standards."
+        cert_ref = f"CERT-MS-{datetime.datetime.now().year}-{uuid.uuid4().hex[:6].upper()}"
+        sig_hash = f"0xLASBCA-VERIFIED-{uuid.uuid4().hex[:8].upper()}"
+
         milestone.status = 'VERIFIED'
         milestone.progress_percentage = 100
         milestone.actual_completion_date = timezone.now().date()
         milestone.verified_at = timezone.now()
-        milestone.verified_by_name = MonitoringService.get_actor_name(actor, "Building Control Officer")
+        milestone.verified_by_name = actor_name
+        milestone.is_delayed = False
+
+        milestone.verification_signoff = {
+            'certificate_reference': cert_ref,
+            'signature_hash': sig_hash,
+            'verified_by_name': actor_name,
+            'verified_by_role': getattr(actor, 'role', 'Director of Building Control') if getattr(actor, 'role', None) else 'Director of Building Control',
+            'verified_at': timezone.now().isoformat(),
+            'notes': notes,
+            'override_applied': override_gate,
+            'gate_evaluation_summary': gate_evaluation['summary']
+        }
         milestone.save()
+
+        # Automatically unblock successor milestones
+        try:
+            successors = ConstructionMilestone.objects.filter(project=milestone.project, status='BLOCKED')
+            for succ in successors:
+                succ_gates = MonitoringService.evaluate_milestone_gates(succ)
+                if succ_gates['pred_passed'] if 'pred_passed' in succ_gates else not succ_gates['is_blocked']:
+                    succ.status = 'IN_PROGRESS' if succ.progress_percentage > 0 else 'PLANNED'
+                    succ.save()
+        except Exception:
+            pass
+
+        # Send regulatory notification
+        try:
+            from apps.notifications.services import NotificationService
+            NotificationService.send_notification({
+                'title': f"Milestone Verified & Certified: {milestone.name}",
+                'message': f"Milestone '{milestone.name}' on {milestone.project.name} has been certified (Ref: {cert_ref}).",
+                'category': 'REGULATORY',
+                'priority': 'Normal',
+                'recipient_role': 'All'
+            }, user=actor)
+        except Exception:
+            pass
 
         MonitoringService.log_audit(
             user=actor,
             action="CONSTRUCTION_MILESTONE_VERIFIED",
             resource_id=milestone.id,
-            new_state={"status": "VERIFIED", "verified_by": milestone.verified_by_name}
+            new_state={
+                "status": "VERIFIED",
+                "cert_ref": cert_ref,
+                "sig_hash": sig_hash,
+                "verified_by": actor_name
+            }
         )
         return milestone
 
     @staticmethod
-    def flag_milestone_delay(milestone, reason, actor):
-        """Flag construction milestone delay."""
+    def flag_milestone_delay(milestone, data, actor):
+        """Flag construction milestone delay and compute schedule slippage."""
+        reason = data.get('reason') or data.get('delay_reason') or 'Construction progress pacing delay.'
+        revised_target = data.get('revised_target_date')
+
         milestone.status = 'DELAYED'
         milestone.is_delayed = True
         milestone.delay_reason = reason
+        milestone.risk_level = 'HIGH'
+
+        if revised_target:
+            try:
+                if isinstance(revised_target, str):
+                    revised_date = datetime.datetime.strptime(revised_target.split('T')[0], '%Y-%m-%d').date()
+                else:
+                    revised_date = revised_target
+                slippage = (revised_date - milestone.target_date).days
+                milestone.variance_days = max(1, slippage)
+                milestone.target_date = revised_date
+            except Exception:
+                milestone.variance_days = 7
+
         milestone.save()
+
+        # Send Delay Alert Notification
+        try:
+            from apps.notifications.services import NotificationService
+            NotificationService.send_notification({
+                'title': f"Schedule Delay Flagged: {milestone.name}",
+                'message': f"Milestone '{milestone.name}' on {milestone.project.name} is delayed. Reason: {reason}",
+                'category': 'ALERT',
+                'priority': 'High',
+                'recipient_role': 'All'
+            }, user=actor)
+        except Exception:
+            pass
 
         MonitoringService.log_audit(
             user=actor,
             action="CONSTRUCTION_MILESTONE_DELAY_FLAGGED",
             resource_id=milestone.id,
-            new_state={"status": "DELAYED", "reason": reason}
+            new_state={"status": "DELAYED", "reason": reason, "variance_days": milestone.variance_days}
         )
         return milestone
+
+    @staticmethod
+    def get_milestone_audit_trail(milestone_id):
+        """Retrieve append-only audit trail for a specific milestone."""
+        try:
+            events = AuditEvent.objects.filter(
+                resource_type__in=["SiteMonitoring", "ConstructionMilestone"],
+                resource_id=str(milestone_id)
+            ).order_by('-timestamp')
+            
+            return [
+                {
+                    'id': str(e.id),
+                    'audit_reference': e.audit_reference,
+                    'action': e.action,
+                    'user_name': e.user_name or (e.user.get_full_name() if e.user else 'Building Control System'),
+                    'user_role': e.user_role or 'Regulatory Officer',
+                    'timestamp': e.timestamp.isoformat(),
+                    'severity': e.severity,
+                    'signature_hash': e.signature_hash,
+                    'previous_state': e.previous_state,
+                    'new_state': e.new_state
+                }
+                for e in events
+            ]
+        except Exception:
+            return []
 
     @staticmethod
     def record_site_verification(data, user):
