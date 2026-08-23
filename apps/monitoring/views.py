@@ -334,22 +334,34 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
         project_param = self.request.query_params.get('project')
         method_param = self.request.query_params.get('method')
         status_param = self.request.query_params.get('status')
+        variance_detected_param = self.request.query_params.get('variance_detected')
+        encroachment_param = self.request.query_params.get('encroachment_detected')
         search_param = self.request.query_params.get('search')
 
-        if project_param:
+        if project_param and project_param != 'ALL':
             queryset = queryset.filter(project_id=project_param)
 
-        if method_param:
+        if method_param and method_param != 'ALL':
             queryset = queryset.filter(method__iexact=method_param)
 
-        if status_param:
+        if status_param and status_param != 'ALL':
             queryset = queryset.filter(status__iexact=status_param)
+
+        if variance_detected_param is not None:
+            is_vd = str(variance_detected_param).lower() in ['true', '1']
+            queryset = queryset.filter(variance_detected=is_vd)
+
+        if encroachment_param is not None:
+            is_enc = str(encroachment_param).lower() in ['true', '1']
+            queryset = queryset.filter(encroachment_detected=is_enc)
 
         if search_param:
             queryset = queryset.filter(
                 Q(verification_reference__icontains=search_param) |
                 Q(project__name__icontains=search_param) |
-                Q(device_identifier__icontains=search_param)
+                Q(device_identifier__icontains=search_param) |
+                Q(verified_by_name__icontains=search_param) |
+                Q(notes__icontains=search_param)
             )
 
         return queryset
@@ -367,6 +379,62 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
             'message': 'Site verification recorded successfully',
             'data': SiteVerificationSerializer(vrf).data
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='certify')
+    def certify(self, request, pk=None):
+        vrf = self.get_object()
+        try:
+            certified = MonitoringService.certify_site_verification(vrf, request.data, actor=request.user)
+            return Response({
+                'success': True,
+                'message': f"Site verification {vrf.verification_reference} formally certified",
+                'data': SiteVerificationSerializer(certified).data
+            })
+        except ValueError as err:
+            return Response({
+                'success': False,
+                'error': str(err),
+                'measured_variance': vrf.variance_meters,
+                'tolerance_limit': vrf.tolerance_limit_meters
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='flag-encroachment')
+    def flag_encroachment(self, request, pk=None):
+        vrf = self.get_object()
+        flagged = MonitoringService.flag_site_encroachment(vrf, request.data, actor=request.user)
+        return Response({
+            'success': True,
+            'message': f"Boundary encroachment flagged for {vrf.verification_reference}",
+            'data': SiteVerificationSerializer(flagged).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='attach-evidence')
+    def attach_evidence(self, request, pk=None):
+        vrf = self.get_object()
+        updated = MonitoringService.attach_verification_evidence(vrf, request.data, actor=request.user)
+        return Response({
+            'success': True,
+            'message': 'Survey documents and benchmark photos attached',
+            'data': SiteVerificationSerializer(updated).data
+        })
+
+    @action(detail=True, methods=['get'], url_path='telemetry')
+    def telemetry(self, request, pk=None):
+        vrf = self.get_object()
+        telemetry_info = MonitoringService.get_verification_telemetry(vrf.id)
+        return Response({
+            'success': True,
+            'data': telemetry_info
+        })
+
+    @action(detail=True, methods=['get'], url_path='audit-trail')
+    def audit_trail(self, request, pk=None):
+        vrf = self.get_object()
+        events = MonitoringService.get_verification_audit_trail(vrf.id)
+        return Response({
+            'success': True,
+            'data': events
+        })
 
 
 from apps.projects.models import Project
