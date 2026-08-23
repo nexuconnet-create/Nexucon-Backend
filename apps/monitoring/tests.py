@@ -176,20 +176,32 @@ class SiteMonitoringWorkflowTestCase(TestCase):
         self.assertEqual(milestone.risk_level, "HIGH")
 
     def test_site_verification_variance_calculation(self):
-        # 1. Test coordinate variance calculation with matching coords (within 0.5m)
+        # 1. Test coordinate variance calculation with matching coords (within 0.05m tolerance)
         vrf_pass = MonitoringService.record_site_verification(
             data={
                 "project_id": self.project.id,
                 "method": "GNSS_RTK_SURVEY",
-                "captured_coordinates": {"lat": 6.428100, "lng": 3.421900},
-                "approved_coordinates": {"lat": 6.428102, "lng": 3.421901},
+                "captured_coordinates": {"lat": 6.4281001, "lng": 3.4219001, "elevation": 4.15},
+                "approved_coordinates": {"lat": 6.4281000, "lng": 3.4219000, "elevation": 4.15},
+                "tolerance_limit_meters": 0.05
             },
             user=self.officer
         )
         self.assertEqual(vrf_pass.status, "VERIFIED")
         self.assertFalse(vrf_pass.variance_detected)
+        self.assertLess(vrf_pass.variance_meters, 0.05)
 
-        # 2. Test coordinate variance calculation with shifted coords (> 0.5m)
+        # 2. Test formal certification
+        certified = MonitoringService.certify_site_verification(
+            verification=vrf_pass,
+            data={"verified_by_name": "Surv. Olumide Balogun", "notes": "Approved"},
+            actor=self.officer
+        )
+        self.assertEqual(certified.status, "VERIFIED")
+        self.assertIsNotNone(certified.digital_cert_ref)
+        self.assertIsNotNone(certified.signature_hash)
+
+        # 3. Test coordinate variance calculation with shifted coords (> 0.05m)
         vrf_fail = MonitoringService.record_site_verification(
             data={
                 "project_id": self.project.id,
@@ -201,4 +213,13 @@ class SiteMonitoringWorkflowTestCase(TestCase):
         )
         self.assertEqual(vrf_fail.status, "VARIANCE_DETECTED")
         self.assertTrue(vrf_fail.variance_detected)
-        self.assertGreater(vrf_fail.variance_meters, 0.5)
+        self.assertGreater(vrf_fail.variance_meters, 0.05)
+
+        # 4. Test flagging encroachment
+        flagged = MonitoringService.flag_site_encroachment(
+            verification=vrf_fail,
+            data={"reason": "Setback encroachment on North corridor"},
+            actor=self.officer
+        )
+        self.assertEqual(flagged.status, "FLAGGED")
+        self.assertTrue(flagged.encroachment_detected)
