@@ -50,7 +50,11 @@ class CustomLoginView(TokenObtainPairView):
             res = Response({
                 'success': True,
                 'message': 'Login successful',
-                'data': {'user': user_data},
+                'data': {
+                    'user': user_data,
+                    'access': access_token,
+                    'refresh': refresh_token,
+                },
                 'errors': None
             })
             
@@ -107,7 +111,11 @@ class UserRegistrationView(generics.CreateAPIView):
         res = Response({
             'success': True,
             'message': 'User registered successfully',
-            'data': {'user': UserMeSerializer(user).data},
+            'data': {
+                'user': UserMeSerializer(user).data,
+                'access': access_token,
+                'refresh': refresh_token,
+            },
             'errors': None
         }, status=status.HTTP_201_CREATED)
 
