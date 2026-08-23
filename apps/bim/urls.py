@@ -2,7 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     BIMModelViewSet, BIMModelVersionViewSet, BIMClashViewSet,
-    BIMAnnotationViewSet, BIMProgressValidationViewSet, BIMStatsViewSet
+    BIMAnnotationViewSet, BIMProgressValidationViewSet,
+    BIMConstructionMilestoneViewSet, BIMStatsViewSet
 )
 
 router = DefaultRouter()
@@ -11,8 +12,10 @@ router.register(r'versions', BIMModelVersionViewSet, basename='bim-versions')
 router.register(r'clashes', BIMClashViewSet, basename='bim-clashes')
 router.register(r'annotations', BIMAnnotationViewSet, basename='bim-annotations')
 router.register(r'progress-validation', BIMProgressValidationViewSet, basename='bim-progress-validation')
+router.register(r'milestones', BIMConstructionMilestoneViewSet, basename='bim-milestones')
 router.register(r'stats', BIMStatsViewSet, basename='bim-stats')
 
 urlpatterns = [
     path('', include(router.urls)),
 ]
+

@@ -14,7 +14,8 @@ django.setup()
 from django.utils import timezone
 from apps.projects.models import Project
 from apps.bim.models import (
-    BIMModel, BIMModelVersion, BIMClash, BIMAnnotation, BIMProgressValidation
+    BIMModel, BIMModelVersion, BIMClash, BIMAnnotation, 
+    BIMProgressValidation, BIMConstructionMilestone
 )
 from apps.monitoring.models import SiteIssue
 
@@ -473,7 +474,273 @@ def seed_bim_database():
         action_str = "Created" if created else "Updated"
         print(f"  [{action_str}] 4D Validation: {p_obj.project.name} ({p_obj.schedule_status} • {p_obj.days_variance} days)")
 
-    print("\n✅ BIM Models and Review Seeding Completed Successfully!")
+    # --------------------------------------------------------------------------
+    # Seed BIM Construction Milestones & Verification Gates
+    # --------------------------------------------------------------------------
+    print("\nSeeding BIM Construction Milestones & Verification Gates...")
+    milestones_config = [
+        # Eko Atlantic
+        {
+            "project": projects[0],
+            "bim_model": saved_models[1], # Structural
+            "model_version": saved_models[1].versions.filter(is_current=True).first(),
+            "name": "Substructure Foundation Piling & Raft Slab Alignment",
+            "phase": "SUBSTRUCTURE",
+            "description": "Verification of GNSS RTK surveyed pile coordinates and raft foundation slab geometry against approved Structural BIM LOD 400 model.",
+            "sequence_order": 1,
+            "target_date": timezone.now().date() - datetime.timedelta(days=90),
+            "actual_verified_date": timezone.now().date() - datetime.timedelta(days=92),
+            "tolerance_max_mm": 15.0,
+            "bim_deviation_mm": 3.8,
+            "gnss_survey_variance_mm": 4.2,
+            "gpr_clearance_status": "VERIFIED",
+            "gpr_evidence_notes": "GPR subsurface scan confirmed zero underground utility clashes prior to bored piling.",
+            "verification_status": "COMPLETED",
+            "digital_stamp_reference": "0x4a9d7c2e1f0b8e3a5518cc9201948d",
+            "verified_by_name": "Engr. Babatunde Adeleke (Chief Structural Integrity Officer)",
+            "verified_at": timezone.now() - datetime.timedelta(days=92),
+            "bim_elements": [
+                {"id": "STR-PILE-001_048", "name": "Bored Concrete Piles (Dia 1200mm)", "discipline": "Structural", "count": 48, "lod": "LOD 400"},
+                {"id": "STR-RAFT-SLAB-B1", "name": "Raft Foundation Slab (Depth 2500mm)", "discipline": "Structural", "count": 1, "lod": "LOD 400"}
+            ],
+            "linked_clashes": [],
+            "linked_inspections": [
+                {"id": "INS-2026-001", "ref": "INS-2026-9041A", "type": "Substructure Piling Integrity", "outcome": "PASSED", "date": "2026-05-14"}
+            ],
+            "linked_site_verifications": [
+                {"code": "VRF-2026-337574", "type": "GNSS RTK Rover Survey", "status": "COMPLIANT", "variance_mm": 3.8}
+            ],
+            "evidence_vault": [
+                {"name": "Pile RTK Coordinate Audit Certificate", "url": "https://assets.nexucon.com/bim/evidence/pile_audit_rtk.pdf", "file_type": "PDF", "category": "SURVEY", "timestamp": "2026-05-14T10:00:00Z"},
+                {"name": "Raft Slab 3D As-Built LiDAR Mesh", "url": "https://assets.nexucon.com/bim/evidence/raft_lidar_mesh.ply", "file_type": "PLY", "category": "POINT_CLOUD", "timestamp": "2026-05-15T14:30:00Z"}
+            ],
+            "signoff_metadata": {
+                "stamp_hash": "0x4a9d7c2e1f0b8e3a5518cc9201948d",
+                "signed_by": "Engr. Babatunde Adeleke",
+                "signed_at": (timezone.now() - datetime.timedelta(days=92)).isoformat(),
+                "directorate": "Lagos State Physical Planning & BIM Verification Directorate",
+                "notes": "All 48 bored piles surveyed within 4.2mm tolerance. Structural raft slab certified."
+            }
+        },
+        {
+            "project": projects[0],
+            "bim_model": saved_models[1], # Structural
+            "model_version": saved_models[1].versions.filter(is_current=True).first(),
+            "name": "Podium Transfer Slab & Core Shear Wall Casting (Levels 1-4)",
+            "phase": "STRUCTURAL_FRAME",
+            "description": "Validation of heavy loadbearing transfer girders and slipformed central core wall geometry against certified structural model.",
+            "sequence_order": 2,
+            "target_date": timezone.now().date() - datetime.timedelta(days=30),
+            "actual_verified_date": timezone.now().date() - datetime.timedelta(days=28),
+            "tolerance_max_mm": 15.0,
+            "bim_deviation_mm": 9.4,
+            "gnss_survey_variance_mm": 6.8,
+            "gpr_clearance_status": "VERIFIED",
+            "gpr_evidence_notes": "Slab post-tensioning tendon profile checked via GPR prior to core penetration drilling.",
+            "verification_status": "VERIFIED",
+            "digital_stamp_reference": "0x8f4e2c9b1a7d3e5f8842bc0182419a",
+            "verified_by_name": "Director General - LASBCA",
+            "verified_at": timezone.now() - datetime.timedelta(days=28),
+            "bim_elements": [
+                {"id": "STR-PODIUM-GIRDER-L4", "name": "Heavy Transfer Girders (Grid 4-B)", "discipline": "Structural", "count": 8, "lod": "LOD 400"},
+                {"id": "STR-CORE-WALL-L1_L4", "name": "Slipformed Elevator Core Walls", "discipline": "Structural", "count": 4, "lod": "LOD 400"}
+            ],
+            "linked_clashes": [],
+            "linked_inspections": [
+                {"id": "INS-2026-002", "ref": "INS-2026-8819B", "type": "Reinforced Concrete Core Audit", "outcome": "PASSED", "date": "2026-07-20"}
+            ],
+            "linked_site_verifications": [
+                {"code": "VRF-2026-A4F111", "type": "Drone Photogrammetry", "status": "COMPLIANT", "variance_mm": 9.4}
+            ],
+            "evidence_vault": [
+                {"name": "Podium Core Heatmap Point Cloud", "url": "https://assets.nexucon.com/bim/evidence/podium_heatmap.ply", "file_type": "PLY", "category": "POINT_CLOUD", "timestamp": "2026-07-20T11:15:00Z"}
+            ],
+            "signoff_metadata": {
+                "stamp_hash": "0x8f4e2c9b1a7d3e5f8842bc0182419a",
+                "signed_by": "Director General - LASBCA",
+                "signed_at": (timezone.now() - datetime.timedelta(days=28)).isoformat(),
+                "directorate": "Lagos State Physical Planning & BIM Verification Directorate",
+                "notes": "Shear wall plumbness within 9.4mm tolerance. Approved for superstructure continuation."
+            }
+        },
+        {
+            "project": projects[0],
+            "bim_model": saved_models[2], # MEP
+            "model_version": saved_models[2].versions.filter(is_current=True).first(),
+            "name": "MEP Core Vertical Shaft & Central HVAC Risers",
+            "phase": "MEP_ROUGHIN",
+            "description": "Examination of multi-trade vertical MEP risers, fire damper sleeves, and chilled water lines against federated services model.",
+            "sequence_order": 3,
+            "target_date": timezone.now().date() + datetime.timedelta(days=25),
+            "actual_verified_date": None,
+            "tolerance_max_mm": 20.0,
+            "bim_deviation_mm": 8.5,
+            "gnss_survey_variance_mm": 5.0,
+            "gpr_clearance_status": "PENDING",
+            "gpr_evidence_notes": "Pending ultrasonic thickness scan on high-pressure chilled water mains.",
+            "verification_status": "PENDING_REVIEW",
+            "digital_stamp_reference": None,
+            "verified_by_name": None,
+            "verified_at": None,
+            "bim_elements": [
+                {"id": "MEP-HVAC-RISER-01", "name": "Primary HVAC Chilled Water Supply/Return", "discipline": "MEP", "count": 2, "lod": "LOD 300"},
+                {"id": "MEP-FIRE-DAMPER-L8", "name": "Motorized Fire Barrier Dampers", "discipline": "MEP", "count": 14, "lod": "LOD 350"}
+            ],
+            "linked_clashes": [
+                {"ref": "CLS-2026-303699", "title": "Primary HVAC Duct intersecting Transfer Beam", "severity": "CRITICAL", "status": "OPEN"}
+            ],
+            "linked_inspections": [
+                {"id": "INS-2026-003", "ref": "INS-2026-7731C", "type": "MEP Rough-in Verification", "outcome": "CONDITIONAL_PASS", "date": "2026-08-10"}
+            ],
+            "evidence_vault": [],
+            "signoff_metadata": {}
+        },
+        {
+            "project": projects[0],
+            "bim_model": saved_models[1], # Structural
+            "model_version": saved_models[1].versions.filter(is_current=True).first(),
+            "name": "Superstructure Slab Tendon & Sleeve Tolerance (Levels 5-18)",
+            "phase": "SUPERSTRUCTURE",
+            "description": "BIM verification of post-tensioned floor slab tendons and pre-formed MEP core penetrations.",
+            "sequence_order": 4,
+            "target_date": timezone.now().date() + datetime.timedelta(days=60),
+            "actual_verified_date": None,
+            "tolerance_max_mm": 15.0,
+            "bim_deviation_mm": 24.2,
+            "gnss_survey_variance_mm": 8.0,
+            "gpr_clearance_status": "ANOMALY_DETECTED",
+            "gpr_evidence_notes": "Anchor bolt drill path encroaches into 50mm safety buffer of PT live tendon duct at Perimeter Grid F-8.",
+            "verification_status": "DEVIATION_FLAGGED",
+            "digital_stamp_reference": None,
+            "verified_by_name": None,
+            "verified_at": None,
+            "bim_elements": [
+                {"id": "STR-PT-SLAB-L8", "name": "Post-Tensioned Slabs (Levels 5-18)", "discipline": "Structural", "count": 14, "lod": "LOD 400"}
+            ],
+            "linked_clashes": [
+                {"ref": "CLS-2026-CE6940", "title": "Emergency Sprinkler Main intersecting Column C-12", "severity": "HIGH", "status": "IN_REVIEW"}
+            ],
+            "linked_inspections": [],
+            "evidence_vault": [
+                {"name": "Tendon Clash Heatmap & Scan Deviation", "url": "https://assets.nexucon.com/bim/evidence/tendon_deviation.ply", "file_type": "PLY", "category": "SCAN_TO_BIM", "timestamp": "2026-08-18T16:00:00Z"}
+            ],
+            "signoff_metadata": {}
+        },
+
+        # Victoria Island
+        {
+            "project": projects[1] if len(projects) > 1 else projects[0],
+            "bim_model": saved_models[3] if len(saved_models) > 3 else saved_models[0], # Architecture
+            "model_version": (saved_models[3] if len(saved_models) > 3 else saved_models[0]).versions.filter(is_current=True).first(),
+            "name": "Double-Skin Curtain Wall Anchor & Acoustic Glazing",
+            "phase": "FACADE_ENVELOPE",
+            "description": "Validation of external unitized glazing brackets, thermal break alignment, and acoustic performance against certified architectural model.",
+            "sequence_order": 1,
+            "target_date": timezone.now().date() - datetime.timedelta(days=15),
+            "actual_verified_date": timezone.now().date() - datetime.timedelta(days=14),
+            "tolerance_max_mm": 10.0,
+            "bim_deviation_mm": 4.5,
+            "gnss_survey_variance_mm": 3.2,
+            "gpr_clearance_status": "VERIFIED",
+            "gpr_evidence_notes": "Bracket anchor embedment depths verified clear of slab reinforcement.",
+            "verification_status": "VERIFIED",
+            "digital_stamp_reference": "0x3c7e9a1b0d2f8e4c7719aa9182341b",
+            "verified_by_name": "Arc. Folashade Okonjo (Principal Planning Officer)",
+            "verified_at": timezone.now() - datetime.timedelta(days=14),
+            "bim_elements": [
+                {"id": "ARC-GLAZ-UNIT-01_180", "name": "Double-Glazed Unitized Panels", "discipline": "Architecture", "count": 180, "lod": "LOD 350"}
+            ],
+            "linked_clashes": [],
+            "linked_inspections": [
+                {"id": "INS-2026-004", "ref": "INS-2026-5521D", "type": "Facade & Glazing Air-Tightness", "outcome": "PASSED", "date": "2026-08-05"}
+            ],
+            "evidence_vault": [],
+            "signoff_metadata": {
+                "stamp_hash": "0x3c7e9a1b0d2f8e4c7719aa9182341b",
+                "signed_by": "Arc. Folashade Okonjo",
+                "signed_at": (timezone.now() - datetime.timedelta(days=14)).isoformat(),
+                "directorate": "Lagos State Physical Planning & BIM Verification Directorate"
+            }
+        },
+        {
+            "project": projects[1] if len(projects) > 1 else projects[0],
+            "bim_model": saved_models[4] if len(saved_models) > 4 else saved_models[0], # MEP
+            "model_version": (saved_models[4] if len(saved_models) > 4 else saved_models[0]).versions.filter(is_current=True).first(),
+            "name": "Central Chiller Plant & Primary Ductwork Distribution",
+            "phase": "MEP_ROUGHIN",
+            "description": "Assessment of central rooftop chiller plant room, vibration isolators, and main supply ducts.",
+            "sequence_order": 2,
+            "target_date": timezone.now().date() + datetime.timedelta(days=40),
+            "actual_verified_date": None,
+            "tolerance_max_mm": 20.0,
+            "bim_deviation_mm": 18.0,
+            "gnss_survey_variance_mm": 6.0,
+            "gpr_clearance_status": "NOT_APPLICABLE",
+            "verification_status": "RE_VERIFICATION_REQUIRED",
+            "digital_stamp_reference": None,
+            "verified_by_name": None,
+            "verified_at": None,
+            "bim_elements": [
+                {"id": "MEP-CHILLER-ROOF-01", "name": "Centrifugal Water-Cooled Chillers", "discipline": "MEP", "count": 3, "lod": "LOD 300"}
+            ],
+            "linked_clashes": [],
+            "linked_inspections": [],
+            "evidence_vault": [],
+            "signoff_metadata": {}
+        },
+
+        # Ikoyi Imperial Heights
+        {
+            "project": projects[3] if len(projects) > 3 else projects[0],
+            "bim_model": saved_models[6] if len(saved_models) > 6 else saved_models[0], # Structural
+            "model_version": (saved_models[6] if len(saved_models) > 6 else saved_models[0]).versions.filter(is_current=True).first(),
+            "name": "Post-Tensioned Floor Slabs & Seismic Damper Verification",
+            "phase": "SUPERSTRUCTURE",
+            "description": "Comprehensive 3D point cloud comparison of tuned mass dampers and post-tensioned slab tendons against certified structural model.",
+            "sequence_order": 1,
+            "target_date": timezone.now().date() - datetime.timedelta(days=10),
+            "actual_verified_date": timezone.now().date() - datetime.timedelta(days=8),
+            "tolerance_max_mm": 12.0,
+            "bim_deviation_mm": 4.8,
+            "gnss_survey_variance_mm": 3.5,
+            "gpr_clearance_status": "VERIFIED",
+            "gpr_evidence_notes": "GPR survey verified zero rebar or tendon clashing around damper anchor baseplates.",
+            "verification_status": "VERIFIED",
+            "digital_stamp_reference": "0x7b2f9e1d0a8c4e6a9921bb0194821a",
+            "verified_by_name": "Engr. Babatunde Adeleke",
+            "verified_at": timezone.now() - datetime.timedelta(days=8),
+            "bim_elements": [
+                {"id": "STR-SEISMIC-DAMPER-L12", "name": "Tuned Mass Liquid Column Dampers", "discipline": "Structural", "count": 2, "lod": "LOD 400"},
+                {"id": "STR-PT-TENDON-L10_18", "name": "Post-Tensioned Unbonded Tendon Profiles", "discipline": "Structural", "count": 96, "lod": "LOD 400"}
+            ],
+            "linked_clashes": [],
+            "linked_inspections": [
+                {"id": "INS-2026-005", "ref": "INS-2026-3392E", "type": "Seismic & Post-Tensioning Stress Audit", "outcome": "PASSED", "date": "2026-08-12"}
+            ],
+            "evidence_vault": [
+                {"name": "Damper Anchor RTK Laser Scan", "url": "https://assets.nexucon.com/bim/evidence/damper_laser_scan.ply", "file_type": "PLY", "category": "SCAN_TO_BIM", "timestamp": "2026-08-12T15:00:00Z"}
+            ],
+            "signoff_metadata": {
+                "stamp_hash": "0x7b2f9e1d0a8c4e6a9921bb0194821a",
+                "signed_by": "Engr. Babatunde Adeleke",
+                "signed_at": (timezone.now() - datetime.timedelta(days=8)).isoformat(),
+                "directorate": "Lagos State Physical Planning & BIM Verification Directorate"
+            }
+        }
+    ]
+
+    for m_cfg in milestones_config:
+        m_name = m_cfg["name"]
+        m_obj, created = BIMConstructionMilestone.objects.update_or_create(
+            name=m_name,
+            project=m_cfg["project"],
+            defaults=m_cfg
+        )
+        action_str = "Created" if created else "Updated"
+        print(f"  [{action_str}] BIM Milestone: {m_obj.milestone_code} - {m_obj.name} ({m_obj.verification_status})")
+
+    print("\n✅ BIM Models, Review & Construction Milestones Seeding Completed Successfully!")
 
 if __name__ == '__main__':
     seed_bim_database()
+
