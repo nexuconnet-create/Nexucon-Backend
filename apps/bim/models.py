@@ -315,7 +315,7 @@ class BIMProgressValidation(models.Model):
     earned_value_usd = models.CharField(max_length=50, default='$2.4M')
     
     planned_vs_actual = models.JSONField(default=list, blank=True)
-    simulation_date = models.DateField(default=timezone.now)
+    simulation_date = models.DateField(default=timezone.localdate)
     
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -325,5 +325,6 @@ class BIMProgressValidation(models.Model):
 
     def __str__(self):
         return f"4D Validation: {self.project.name} ({self.schedule_status})"
+
 
 

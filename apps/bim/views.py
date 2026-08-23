@@ -16,7 +16,7 @@ from .services import BIMService
 class BIMModelViewSet(viewsets.ModelViewSet):
     queryset = BIMModel.objects.all().select_related('project')
     serializer_class = BIMModelSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -77,7 +77,7 @@ class BIMModelViewSet(viewsets.ModelViewSet):
 class BIMModelVersionViewSet(viewsets.ModelViewSet):
     queryset = BIMModelVersion.objects.all().select_related('model')
     serializer_class = BIMModelVersionSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -110,7 +110,7 @@ class BIMModelVersionViewSet(viewsets.ModelViewSet):
 class BIMClashViewSet(viewsets.ModelViewSet):
     queryset = BIMClash.objects.all().select_related('project', 'primary_model', 'secondary_model')
     serializer_class = BIMClashSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -167,7 +167,7 @@ class BIMClashViewSet(viewsets.ModelViewSet):
 class BIMAnnotationViewSet(viewsets.ModelViewSet):
     queryset = BIMAnnotation.objects.all().select_related('model', 'project')
     serializer_class = BIMAnnotationSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -207,7 +207,7 @@ class BIMAnnotationViewSet(viewsets.ModelViewSet):
 class BIMProgressValidationViewSet(viewsets.ModelViewSet):
     queryset = BIMProgressValidation.objects.all().select_related('project', 'model')
     serializer_class = BIMProgressValidationSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -218,11 +218,12 @@ class BIMProgressValidationViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='simulate')
     def simulate(self, request):
-        project_id = request.data.get('project')
-        if not project_id:
-            return Response({"error": "Project ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-        validation = BIMService.run_timeline_simulation(project_id, request.user)
-        return Response(BIMProgressValidationSerializer(validation).data, status=status.HTTP_201_CREATED)
+        project_id = request.data.get('project') or request.data.get('project_id')
+        try:
+            validation = BIMService.run_timeline_simulation(project_id, request.user)
+            return Response(BIMProgressValidationSerializer(validation).data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BIMConstructionMilestoneViewSet(viewsets.ModelViewSet):
@@ -231,7 +232,8 @@ class BIMConstructionMilestoneViewSet(viewsets.ModelViewSet):
     """
     queryset = BIMConstructionMilestone.objects.all().select_related('project', 'bim_model', 'model_version', 'linked_construction_milestone')
     serializer_class = BIMConstructionMilestoneSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
+
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -296,7 +298,7 @@ class BIMConstructionMilestoneViewSet(viewsets.ModelViewSet):
 
 
 class BIMStatsViewSet(viewsets.ViewSet):
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     @action(detail=False, methods=['get'], url_path='overview')
     def overview(self, request):

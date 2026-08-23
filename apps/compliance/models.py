@@ -163,7 +163,7 @@ class RegulatoryRequirement(models.Model):
     description = models.TextField(blank=True, null=True)
     authority = models.CharField(max_length=255, default='EPA')
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Compliant')
-    last_checked = models.DateField(default=timezone.now)
+    last_checked = models.DateField(default=timezone.localdate)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -202,7 +202,7 @@ class ComplianceReview(models.Model):
     stage = models.CharField(max_length=50, choices=STAGE_CHOICES, default='Initiation')
     progress = models.IntegerField(default=10)
     
-    start_date = models.DateField(default=timezone.now)
+    start_date = models.DateField(default=timezone.localdate)
     due_date = models.DateField(null=True, blank=True)
     findings_summary = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(default=timezone.now)
@@ -240,7 +240,7 @@ class ComplianceCertificate(models.Model):
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='Environmental')
     authority = models.CharField(max_length=255, default='Environmental Protection Agency (EPA)')
     
-    issue_date = models.DateField(default=timezone.now)
+    issue_date = models.DateField(default=timezone.localdate)
     expiry_date = models.DateField()
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Active')
     
