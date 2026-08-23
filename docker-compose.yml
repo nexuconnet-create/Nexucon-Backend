@@ -2,15 +2,15 @@ services:
   db:
     image: postgis/postgis:15-3.4
     environment:
-      POSTGRES_DB: nexucon
-      POSTGRES_USER: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-nexucon}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d nexucon"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-nexucon}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -36,15 +36,15 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
-      - POSTGRES_DB=nexucon
-      - DATABASE_NAME=nexucon
-      - DATABASE_USER=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-nexucon}
+      - DATABASE_NAME=${DATABASE_NAME:-nexucon}
+      - DATABASE_USER=${DATABASE_USER:-postgres}
       - DATABASE_PASSWORD=${DATABASE_PASSWORD}
       - DATABASE_HOST=db
       - DATABASE_PORT=5432
       - DATABASE_ENGINE=django.contrib.gis.db.backends.postgis
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
 
   celery:
     build: .
@@ -60,15 +60,15 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
-      - POSTGRES_DB=nexucon
-      - DATABASE_NAME=nexucon
-      - DATABASE_USER=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-nexucon}
+      - DATABASE_NAME=${DATABASE_NAME:-nexucon}
+      - DATABASE_USER=${DATABASE_USER:-postgres}
       - DATABASE_PASSWORD=${DATABASE_PASSWORD}
       - DATABASE_HOST=db
       - DATABASE_PORT=5432
       - DATABASE_ENGINE=django.contrib.gis.db.backends.postgis
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
 
 volumes:
   postgres_data:
