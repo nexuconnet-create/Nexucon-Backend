@@ -287,8 +287,98 @@ def seed_bim_database():
                     "is_current": True
                 }
             ]
+        },
+        {
+            "project": projects[3] if len(projects) > 3 else projects[0],
+            "name": f"{(projects[3] if len(projects) > 3 else projects[0]).name} - Architecture & Luxury Finishes Model",
+            "discipline": "Architecture",
+            "format": "IFC4",
+            "file_size": "240 MB",
+            "current_version": "v1.1",
+            "status": "Approved",
+            "lod": "LOD 350",
+            "element_count": 14200,
+            "is_digitally_certified": True,
+            "certified_by_name": "Arc. Folashade Okonjo",
+            "certified_at": timezone.now() - datetime.timedelta(days=2),
+            "hash_signature": "0x5c8e1a2b9d0f4e3c8811ba9201842a",
+            "coordinate_system": {"crs": "EPSG:32631", "origin": [6.4550, 3.4410, 14.0]},
+            "versions": [
+                {
+                    "version_label": "v1.1",
+                    "commit_hash": "c4d5e6f7",
+                    "changes_summary": "Luxury penthouse balconies, glazing, and marble flooring schedules.",
+                    "author_name": "Arc. Folashade Okonjo",
+                    "author_role": "Lead Architect",
+                    "stats_added": 14200,
+                    "stats_modified": 0,
+                    "stats_removed": 0,
+                    "file_size": "240 MB",
+                    "is_current": True
+                }
+            ]
         }
     ]
+
+    # Add models for any additional projects in the database
+    all_db_projects = list(Project.objects.all())
+    for proj in all_db_projects:
+        proj_in_cfg = any(c["project"].id == proj.id for c in models_config if hasattr(c["project"], "id"))
+        if not proj_in_cfg:
+            models_config.append({
+                "project": proj,
+                "name": f"{proj.name} - Architecture & Master Plan Model",
+                "discipline": "Architecture",
+                "format": "IFC4",
+                "file_size": "275 MB",
+                "current_version": "v1.0",
+                "status": "Active",
+                "lod": "LOD 350",
+                "element_count": 16400,
+                "is_digitally_certified": False,
+                "coordinate_system": {"crs": "EPSG:32631", "origin": [6.5244, 3.3792, 10.0]},
+                "versions": [
+                    {
+                        "version_label": "v1.0",
+                        "commit_hash": f"init_{proj.id.hex[:6]}",
+                        "changes_summary": "Initial baseline architecture model.",
+                        "author_name": "Arc. Folashade Okonjo",
+                        "author_role": "Lead Architect",
+                        "stats_added": 16400,
+                        "stats_modified": 0,
+                        "stats_removed": 0,
+                        "file_size": "275 MB",
+                        "is_current": True
+                    }
+                ]
+            })
+            models_config.append({
+                "project": proj,
+                "name": f"{proj.name} - Structural Engineering Model",
+                "discipline": "Structural",
+                "format": "IFC4",
+                "file_size": "310 MB",
+                "current_version": "v1.0",
+                "status": "Under Review",
+                "lod": "LOD 400",
+                "element_count": 21800,
+                "is_digitally_certified": False,
+                "coordinate_system": {"crs": "EPSG:32631", "origin": [6.5244, 3.3792, 10.0]},
+                "versions": [
+                    {
+                        "version_label": "v1.0",
+                        "commit_hash": f"struct_{proj.id.hex[:6]}",
+                        "changes_summary": "Initial reinforced concrete structural framing schema.",
+                        "author_name": "Engr. Babatunde Adeleke",
+                        "author_role": "Chief Structural Engineer",
+                        "stats_added": 21800,
+                        "stats_modified": 0,
+                        "stats_removed": 0,
+                        "file_size": "310 MB",
+                        "is_current": True
+                    }
+                ]
+            })
 
     saved_models = []
     for cfg in models_config:
@@ -304,10 +394,9 @@ def seed_bim_database():
         print(f"  [{action_str}] Model: {model_obj.name} ({model_obj.discipline} {model_obj.current_version})")
 
         for v_data in versions_data:
-            v_label = v_data["version_label"]
             BIMModelVersion.objects.update_or_create(
                 model=model_obj,
-                version_label=v_label,
+                version_label=v_data["version_label"],
                 defaults=v_data
             )
 
