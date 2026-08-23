@@ -121,6 +121,9 @@ class BIMClashViewSet(viewsets.ModelViewSet):
 
         if project_id:
             qs = qs.filter(project_id=project_id)
+        model_id = self.request.query_params.get('model') or self.request.query_params.get('primary_model')
+        if model_id:
+            qs = qs.filter(Q(primary_model_id=model_id) | Q(secondary_model_id=model_id))
         if severity:
             qs = qs.filter(severity=severity.upper())
         if status_val:

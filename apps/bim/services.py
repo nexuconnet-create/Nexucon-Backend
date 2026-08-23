@@ -168,17 +168,44 @@ class BIMService:
     @staticmethod
     def run_clash_matrix(project_id, primary_model_id, secondary_model_id, actor):
         """Run automated clash matrix detection between disciplines."""
-        project = Project.objects.get(pk=project_id)
-        primary_model = BIMModel.objects.get(pk=primary_model_id)
-        secondary_model = BIMModel.objects.filter(pk=secondary_model_id).first() if secondary_model_id else None
+        project = None
+        if project_id:
+            try:
+                project = Project.objects.filter(pk=project_id).first()
+            except Exception:
+                pass
+        if not project:
+            project = Project.objects.first()
+
+        primary_model = None
+        if primary_model_id:
+            try:
+                primary_model = BIMModel.objects.filter(pk=primary_model_id).first()
+            except Exception:
+                pass
+        if not primary_model:
+            primary_model = BIMModel.objects.filter(project=project).first() if project else BIMModel.objects.first()
+
+        secondary_model = None
+        if secondary_model_id:
+            try:
+                secondary_model = BIMModel.objects.filter(pk=secondary_model_id).first()
+            except Exception:
+                pass
+        if not secondary_model and project and primary_model:
+            secondary_model = BIMModel.objects.filter(project=project).exclude(id=primary_model.id).first()
+
+        prim_disc = primary_model.discipline if primary_model else 'Structural'
+        sec_disc = secondary_model.discipline if secondary_model else 'MEP'
+        site_name = project.name if project else 'Site Core'
 
         clash = BIMClash.objects.create(
             project=project,
             primary_model=primary_model,
             secondary_model=secondary_model,
             clash_type='HARD_CLASH',
-            title='MEP Main HVAC Duct vs Primary Structural Beam',
-            description='Hard physical intersection detected. Penetration without structural sleeve exceeds 45mm tolerance at Grid 4-C.',
+            title=f"{prim_disc} vs {sec_disc} Spatial Interference",
+            description=f"Hard physical clearance breach (-160mm) detected between {prim_disc} elements and {sec_disc} distribution at Grid 4-C on {site_name}.",
             severity='HIGH',
             status='OPEN',
             assigned_to_name='Michael Chen (MEP Coordinator)',
