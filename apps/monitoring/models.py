@@ -275,21 +275,26 @@ class ConstructionMilestone(models.Model):
 
 class SiteVerification(models.Model):
     """
-    Physical site verification, coordinate boundary checking, and GNSS variance tracking.
+    Physical site verification, coordinate boundary checking, GNSS RTK rover telemetry,
+    setback encroachment audit, and statutory digital certification.
     """
     METHOD_CHOICES = (
         ('GNSS_RTK_SURVEY', 'Tersus Oscar GNSS RTK Rover'),
         ('TERSU_ROVER', 'Tersus GNSS Rover Calibration'),
+        ('DRONE_PHOTOGRAMMETRY', 'Aerial Drone Photogrammetry & LiDAR'),
         ('GPR_SCAN', 'Ground Penetrating Radar (GPR) Scan'),
-        ('DRONE_PHOTOGRAMMETRY', 'Aerial Drone Photogrammetry'),
-        ('TOTAL_STATION', 'Total Station Coordinate Survey'),
+        ('TOTAL_STATION', 'Total Station Cadastral Survey'),
+        ('SETBACK_AUDIT', 'Statutory Building Setback Audit'),
+        ('LEVEL_ELEVATION', 'Foundation Datum Elevation Check'),
     )
 
     STATUS_CHOICES = (
         ('PENDING_VERIFICATION', 'Pending Verification'),
-        ('VERIFIED', 'Verified'),
+        ('IN_PROGRESS', 'Survey In Progress'),
+        ('VERIFIED', 'Verified & Certified'),
         ('VARIANCE_DETECTED', 'Variance Detected'),
-        ('FLAGGED', 'Flagged for Review'),
+        ('FLAGGED', 'Flagged for Review / SWO'),
+        ('RESOLVED', 'Resolved & Remediated'),
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -299,15 +304,35 @@ class SiteVerification(models.Model):
     method = models.CharField(max_length=50, choices=METHOD_CHOICES, default='GNSS_RTK_SURVEY')
     device_identifier = models.CharField(max_length=255, default='Tersus Oscar GNSS RTK #042')
     
-    boundary_coordinates = models.JSONField(default=list, blank=True, help_text="Approved site perimeter boundary points")
-    captured_coordinates = models.JSONField(default=dict, blank=True, help_text="Field measured coordinates {lat, lng, elevation}")
-    approved_coordinates = models.JSONField(default=dict, blank=True, help_text="Approved CAD/GIS coordinates {lat, lng, elevation}")
+    # Cadastral Beacons & Coordinates
+    cadastral_beacon_numbers = models.JSONField(default=list, blank=True, help_text="Cadastral beacon pillar IDs e.g. ['BC-LA-2026/089', 'BC-LA-2026/090']")
+    boundary_coordinates = models.JSONField(default=list, blank=True, help_text="Approved site perimeter boundary polygon points")
+    captured_coordinates = models.JSONField(default=dict, blank=True, help_text="Field measured coordinates {lat, lng, elevation, accuracy_horizontal_mm}")
+    approved_coordinates = models.JSONField(default=dict, blank=True, help_text="Approved Masterplan/Planning coordinates {lat, lng, elevation}")
     
-    variance_meters = models.FloatField(default=0.0, help_text="Calculated deviation in meters")
-    variance_detected = models.BooleanField(default=False)
+    # Spatial Tolerances & Displacements
+    variance_meters = models.FloatField(default=0.0, help_text="Calculated horizontal spatial deviation in meters")
+    elevation_variance_meters = models.FloatField(default=0.0, help_text="Calculated vertical elevation offset in meters")
+    tolerance_limit_meters = models.FloatField(default=0.05, help_text="Allowable regulatory threshold in meters (default 50mm)")
+    variance_detected = models.BooleanField(default=False, help_text="True if variance exceeds tolerance limit")
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='PENDING_VERIFICATION')
     
+    # Encroachment & Setback Audit
+    encroachment_detected = models.BooleanField(default=False, help_text="True if structure encroaches beyond approved building boundary line")
+    encroachment_details = models.TextField(blank=True, null=True, help_text="Encroachment specifics and affected boundary offsets")
+
+    # RTK Rover Telemetry
+    telemetry_data = models.JSONField(default=dict, blank=True, help_text="Live RTK rover metrics {satellites, hdop, vdop, rtk_fix, latency_sec}")
+
+    # Evidence Vault
+    evidence_documents = models.JSONField(default=list, blank=True, help_text="Certified survey plans, RINEX raw logs, calibration certs")
+    evidence_photos = models.JSONField(default=list, blank=True, help_text="Benchmark site photos, beacon tripod setups")
+    
+    # Statutory Digital Sign-off & Certification
+    digital_cert_ref = models.CharField(max_length=100, blank=True, null=True, help_text="Statutory certificate reference e.g. CERT-VRF-2026-0042")
+    signature_hash = models.CharField(max_length=255, blank=True, null=True, help_text="SHA-256 cryptographic verification signature")
     verified_by_name = models.CharField(max_length=255, blank=True, null=True)
+    verified_by_role = models.CharField(max_length=255, blank=True, null=True, default='Directorate of Cadastral & Structural Survey')
     verified_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True, null=True)
     

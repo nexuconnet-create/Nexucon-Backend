@@ -58,8 +58,24 @@ class SiteVerificationSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
     project_reference = serializers.CharField(source='project.reference_number', read_only=True)
     project_location = serializers.CharField(source='project.lga', read_only=True)
+    project_status = serializers.CharField(source='project.status', read_only=True)
+    is_within_tolerance = serializers.SerializerMethodField()
+    tolerance_status = serializers.SerializerMethodField()
 
     class Meta:
         model = SiteVerification
         fields = '__all__'
         read_only_fields = ('id', 'verification_reference', 'created_at', 'updated_at')
+
+    def get_is_within_tolerance(self, obj):
+        limit = obj.tolerance_limit_meters or 0.05
+        return (obj.variance_meters or 0.0) <= limit and not obj.encroachment_detected
+
+    def get_tolerance_status(self, obj):
+        limit = obj.tolerance_limit_meters or 0.05
+        variance = obj.variance_meters or 0.0
+        if obj.encroachment_detected:
+            return 'ENCROACHMENT_DETECTED'
+        if variance > limit:
+            return 'EXCEEDS_TOLERANCE'
+        return 'COMPLIANT'

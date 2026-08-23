@@ -378,21 +378,176 @@ def run():
     print("Seeded 6 comprehensive Construction Milestones across projects.")
 
     # 5. Site Verifications
-    if SiteVerification.objects.count() == 0:
-        SiteVerification.objects.create(
-            project=p1,
-            method='GNSS_RTK_SURVEY',
-            device_identifier='Tersus Oscar GNSS RTK #042',
-            captured_coordinates={'lat': 6.425310, 'lng': 3.421920},
-            approved_coordinates={'lat': 6.425308, 'lng': 3.421918},
-            variance_meters=0.08,
-            variance_detected=False,
-            status='VERIFIED',
-            verified_by_name='Surv. Olumide Balogun (Licensed Surveyor)',
-            verified_at=timezone.now(),
-            notes='Setback boundaries conform 100% with Lagos State Urban Planning approval coordinates.'
-        )
-        print("Seeded Site Verifications.")
+    SiteVerification.objects.all().delete()
+    
+    # 1. Eko Atlantic Marina Towers - Tersus Oscar GNSS RTK Survey (Verified)
+    SiteVerification.objects.create(
+        project=p1,
+        method='GNSS_RTK_SURVEY',
+        device_identifier='Tersus Oscar GNSS RTK #042 (Extreme Accuracy)',
+        cadastral_beacon_numbers=['BC-EKO-2026/012', 'BC-EKO-2026/013', 'BC-EKO-2026/014', 'BC-EKO-2026/015'],
+        boundary_coordinates=[
+            {'point': 'P1-NW', 'lat': 6.425310, 'lng': 3.421920, 'elevation': 4.15},
+            {'point': 'P2-NE', 'lat': 6.425850, 'lng': 3.422450, 'elevation': 4.18},
+            {'point': 'P3-SE', 'lat': 6.425120, 'lng': 3.422980, 'elevation': 4.22},
+            {'point': 'P4-SW', 'lat': 6.424680, 'lng': 3.422310, 'elevation': 4.19}
+        ],
+        captured_coordinates={'lat': 6.425312, 'lng': 3.421921, 'elevation': 4.16, 'accuracy_horizontal_mm': 6.2},
+        approved_coordinates={'lat': 6.425310, 'lng': 3.421920, 'elevation': 4.15},
+        variance_meters=0.018,
+        elevation_variance_meters=0.010,
+        tolerance_limit_meters=0.05,
+        variance_detected=False,
+        encroachment_detected=False,
+        status='VERIFIED',
+        telemetry_data={
+            'satellites_tracked': 32,
+            'constellations': ['GPS', 'Galileo', 'GLONASS', 'BeiDou'],
+            'hdop': 0.58,
+            'vdop': 0.74,
+            'rtk_fix_status': 'FIXED_RTK_HIGH_PRECISION',
+            'correction_latency_sec': 0.2,
+            'base_station_ref': 'LASG-CORS-EKO-ATLANTIC-01'
+        },
+        digital_cert_ref='CERT-VRF-2026-LASBCA-00129',
+        signature_hash='0xLASBCA-VRF-SURV-88FA22CD9104',
+        verified_by_name='Surv. Olumide Balogun (Licensed Cadastral Surveyor)',
+        verified_by_role='Directorate of Cadastral & Structural Survey',
+        verified_at=timezone.now() - datetime.timedelta(days=3),
+        evidence_documents=[
+            {'name': 'Certified Cadastral Pillar Traverse Survey Plan.pdf', 'url': 'https://assets.nexucon.gov.ng/surveys/eko-boundary-cert.pdf', 'file_type': 'PDF', 'size': '4.2 MB', 'category': 'Survey Plan', 'verified': True},
+            {'name': 'Tersus RINEX Raw GNSS Observation Log.rnx', 'url': 'https://assets.nexucon.gov.ng/surveys/eko-rinex.rnx', 'file_type': 'RNX', 'size': '18.6 MB', 'category': 'Raw Telemetry', 'verified': True}
+        ],
+        evidence_photos=[
+            'https://res.cloudinary.com/fspyt1uw/image/upload/v1787390542/nexucon/daily_updates/kunjsefjt56iys4pj6sv.jpg'
+        ],
+        notes='Perimeter boundary beacons verified 100% compliant with approved statutory masterplan layout.'
+    )
+
+    # 2. Victoria Island Financial Center - Building Setback Audit (Encroachment Detected)
+    SiteVerification.objects.create(
+        project=p2,
+        method='SETBACK_AUDIT',
+        device_identifier='Leica TS16 Total Station #089',
+        cadastral_beacon_numbers=['BC-VI-2026/044', 'BC-VI-2026/045', 'BC-VI-2026/046'],
+        boundary_coordinates=[
+            {'point': 'B1-North', 'lat': 6.428120, 'lng': 3.424410, 'elevation': 3.85},
+            {'point': 'B2-East', 'lat': 6.428650, 'lng': 3.424980, 'elevation': 3.90},
+            {'point': 'B3-South', 'lat': 6.427980, 'lng': 3.425310, 'elevation': 3.88},
+            {'point': 'B4-West', 'lat': 6.427450, 'lng': 3.424750, 'elevation': 3.82}
+        ],
+        captured_coordinates={'lat': 6.428145, 'lng': 3.424428, 'elevation': 3.89, 'accuracy_horizontal_mm': 12.0},
+        approved_coordinates={'lat': 6.428120, 'lng': 3.424410, 'elevation': 3.85},
+        variance_meters=0.124,
+        elevation_variance_meters=0.040,
+        tolerance_limit_meters=0.05,
+        variance_detected=True,
+        encroachment_detected=True,
+        encroachment_details='0.124m building line encroachment into mandatory 6.0m road setback on North-East corridor.',
+        status='VARIANCE_DETECTED',
+        telemetry_data={
+            'satellites_tracked': 24,
+            'constellations': ['GPS', 'Galileo'],
+            'hdop': 0.88,
+            'vdop': 1.12,
+            'rtk_fix_status': 'TOTAL_STATION_TRAVERSE',
+            'correction_latency_sec': 0.0,
+            'base_station_ref': 'VI-TRAVERSE-CONTROL-04'
+        },
+        verified_by_name='Surv. Folashade Adeleke (Resident Supervisor)',
+        verified_by_role='Building Control Authority',
+        verified_at=timezone.now() - datetime.timedelta(days=1),
+        evidence_documents=[
+            {'name': 'Setback Encroachment Discrepancy Overlay Drawing.pdf', 'url': 'https://assets.nexucon.gov.ng/surveys/vi-setback-deviation.pdf', 'file_type': 'PDF', 'size': '3.1 MB', 'category': 'CAD Deviation Overlay', 'verified': False}
+        ],
+        evidence_photos=[
+            'https://res.cloudinary.com/fspyt1uw/image/upload/v1787390550/nexucon/daily_updates/ikalmpfdz59w8hbaxstv.jpg'
+        ],
+        notes='Encroachment flagged. Contractor notified to adjust cantilevered facade bracket anchors.'
+    )
+
+    # 3. Lekki Free Trade Zone Warehouse Complex - Aerial Drone Photogrammetry (Verified)
+    SiteVerification.objects.create(
+        project=p3,
+        method='DRONE_PHOTOGRAMMETRY',
+        device_identifier='DJI Matrice 350 RTK + Zenmuse L2 LiDAR',
+        cadastral_beacon_numbers=['BC-LEK-2026/801', 'BC-LEK-2026/802', 'BC-LEK-2026/803', 'BC-LEK-2026/804'],
+        boundary_coordinates=[
+            {'point': 'GCP-01', 'lat': 6.442100, 'lng': 3.612000, 'elevation': 2.45},
+            {'point': 'GCP-02', 'lat': 6.443500, 'lng': 3.613800, 'elevation': 2.48},
+            {'point': 'GCP-03', 'lat': 6.441800, 'lng': 3.614500, 'elevation': 2.52},
+            {'point': 'GCP-04', 'lat': 6.440900, 'lng': 3.612500, 'elevation': 2.46}
+        ],
+        captured_coordinates={'lat': 6.442102, 'lng': 3.612001, 'elevation': 2.46, 'accuracy_horizontal_mm': 8.5},
+        approved_coordinates={'lat': 6.442100, 'lng': 3.612000, 'elevation': 2.45},
+        variance_meters=0.012,
+        elevation_variance_meters=0.010,
+        tolerance_limit_meters=0.05,
+        variance_detected=False,
+        encroachment_detected=False,
+        status='VERIFIED',
+        telemetry_data={
+            'satellites_tracked': 36,
+            'constellations': ['GPS', 'Galileo', 'GLONASS', 'BeiDou'],
+            'hdop': 0.52,
+            'vdop': 0.68,
+            'rtk_fix_status': 'FIXED_UAV_RTK_SURVEY',
+            'correction_latency_sec': 0.1,
+            'base_station_ref': 'LASG-CORS-LEKKI-02'
+        },
+        digital_cert_ref='CERT-VRF-2026-LASBCA-00344',
+        signature_hash='0xLASBCA-VRF-UAV-992144BA2077',
+        verified_by_name='Capt. Tunde Oladipo (UAV Certified Survey Pilot)',
+        verified_by_role='Directorate of Aerial & Spatial Monitoring',
+        verified_at=timezone.now() - datetime.timedelta(days=2),
+        evidence_documents=[
+            {'name': 'Drone High-Density Orthomosaic & Point Cloud Summary.pdf', 'url': 'https://assets.nexucon.gov.ng/surveys/lekki-ortho.pdf', 'file_type': 'PDF', 'size': '12.8 MB', 'category': 'LiDAR Analysis', 'verified': True}
+        ],
+        evidence_photos=[
+            'https://res.cloudinary.com/fspyt1uw/image/upload/v1787390559/nexucon/daily_updates/kzq8zuorwjbhcfsga7lm.jpg'
+        ],
+        notes='Logistics platform earthwork footprint verified within 12mm boundary tolerance.'
+    )
+
+    # 4. Ikoyi Imperial Heights - Ground Penetrating Radar Scan (Pending Verification)
+    SiteVerification.objects.create(
+        project=p4,
+        method='GPR_SCAN',
+        device_identifier='Proceq GS8000 Subsurface GPR Radar',
+        cadastral_beacon_numbers=['BC-IKY-2026/007', 'BC-IKY-2026/008'],
+        boundary_coordinates=[
+            {'point': 'GPR-Grid-A', 'lat': 6.452000, 'lng': 3.435000, 'elevation': 5.10},
+            {'point': 'GPR-Grid-B', 'lat': 6.452400, 'lng': 3.435500, 'elevation': 5.12}
+        ],
+        captured_coordinates={'lat': 6.452005, 'lng': 3.435004, 'elevation': 5.11, 'accuracy_horizontal_mm': 15.0},
+        approved_coordinates={'lat': 6.452000, 'lng': 3.435000, 'elevation': 5.10},
+        variance_meters=0.022,
+        elevation_variance_meters=0.010,
+        tolerance_limit_meters=0.05,
+        variance_detected=False,
+        encroachment_detected=False,
+        status='PENDING_VERIFICATION',
+        telemetry_data={
+            'satellites_tracked': 22,
+            'constellations': ['GPS', 'GLONASS'],
+            'hdop': 0.92,
+            'vdop': 1.05,
+            'rtk_fix_status': 'GPR_SUBSURFACE_CALIBRATED',
+            'correction_latency_sec': 0.5,
+            'base_station_ref': 'LASG-CORS-IKOYI-01'
+        },
+        verified_by_name='Engr. Chukwuma Obi (Geotechnical Specialist)',
+        verified_by_role='Building Control Authority',
+        evidence_documents=[
+            {'name': 'Subsurface Gas & Water Utility Line Radar Scan Report.pdf', 'url': 'https://assets.nexucon.gov.ng/surveys/ikoyi-gpr.pdf', 'file_type': 'PDF', 'size': '7.5 MB', 'category': 'Geotechnical Scan', 'verified': False}
+        ],
+        evidence_photos=[
+            'https://res.cloudinary.com/fspyt1uw/image/upload/v1787390542/nexucon/daily_updates/kunjsefjt56iys4pj6sv.jpg'
+        ],
+        notes='Subsurface high-pressure pipeline clearance verified at 4.2m depth. Ready for statutory sign-off.'
+    )
+
+    print("Seeded comprehensive Site Verifications across projects.")
 
 if __name__ == '__main__':
     run()
