@@ -1,6 +1,7 @@
 import math
 import uuid
 import datetime
+import hashlib
 from django.utils import timezone
 from .models import DailySiteUpdate, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
 from apps.projects.models import Project
@@ -761,7 +762,7 @@ class MonitoringService:
 
         variance_detected = variance > tolerance_limit or encroachment_detected or bool(data.get('variance_detected', False))
         
-        default_status = 'VARIANCE_DETECTED' if variance_detected else 'PENDING_VERIFICATION'
+        default_status = 'VARIANCE_DETECTED' if variance_detected else 'VERIFIED'
         status = data.get('status', default_status)
         verifier_name = data.get('verified_by_name') or MonitoringService.get_actor_name(user, "Field Surveyor")
 
