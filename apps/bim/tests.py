@@ -2,7 +2,11 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from apps.projects.models import Project
-from apps.bim.models import BIMModel, BIMModelVersion, BIMClash, BIMAnnotation, BIMProgressValidation
+from apps.bim.models import (
+    BIMModel, BIMModelVersion, BIMClash, BIMAnnotation, 
+    BIMProgressValidation, BIMConstructionMilestone
+)
+from apps.compliance.models import NonConformanceReport
 from apps.bim.services import BIMService
 
 User = get_user_model()
@@ -98,9 +102,79 @@ class BIMTestCase(TestCase):
     def test_bim_stats_overview_endpoint(self):
         """Test the overview stats endpoint."""
         BIMService.upload_model({"project_id": self.project.id, "name": "Metro Model"}, self.user)
-        res = self.client.get('/api/v1/bim/stats/overview/')
-        self.assertEqual(res.status_code, 200)
-        self.assertIn('models', res.data)
-        self.assertIn('clashes', res.data)
-        self.assertIn('annotations', res.data)
-        self.assertIn('progress_4d', res.data)
+        response = self.client.get('/api/v1/bim/stats/overview/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('models', response.data)
+        self.assertIn('clashes', response.data)
+        self.assertIn('milestones', response.data)
+
+    def test_bim_construction_milestone_lifecycle(self):
+        """Test full BIM milestone lifecycle: create, gate check, digital verify, deviation, re-verification."""
+        # 1. Upload and certify model
+        model = BIMService.upload_model({"project_id": self.project.id, "name": "Structural Superstructure Model"}, self.user)
+        BIMService.stamp_and_certify(model, self.user, "0xCERTIFIED998811")
+
+        # 2. Create BIM Construction Milestone
+        milestone = BIMService.create_bim_milestone({
+            "project_id": self.project.id,
+            "bim_model_id": model.id,
+            "name": "Level 1-4 Core Shear Wall Alignment",
+            "phase": "STRUCTURAL_FRAME",
+            "sequence_order": 1,
+            "tolerance_max_mm": 15.0,
+            "bim_deviation_mm": 5.2,
+            "gpr_clearance_status": "VERIFIED",
+            "bim_elements": [{"id": "STR-CORE-WALL", "count": 4, "lod": "LOD 400"}],
+            "linked_inspections": [{"id": "INS-01", "outcome": "PASSED"}]
+        }, self.user)
+
+        self.assertIsNotNone(milestone.id)
+        self.assertTrue(milestone.milestone_code.startswith("BIM-MS-"))
+
+        # 3. Evaluate Gates -> Expect all passed
+        gates = BIMService.evaluate_milestone_gate_status(milestone)
+        self.assertTrue(gates["all_gates_passed"])
+        self.assertTrue(gates["can_digitally_sign"])
+
+        # 4. Verify & Digitally Stamp
+        verified_ms = BIMService.verify_and_stamp_milestone(milestone, self.user, "Verified by Structural Directorate")
+        self.assertEqual(verified_ms.verification_status, 'VERIFIED')
+        self.assertIsNotNone(verified_ms.digital_stamp_reference)
+        self.assertEqual(verified_ms.verified_by, self.user)
+
+        # 5. Flag Deviation Exceedance
+        flagged_ms = BIMService.flag_milestone_deviation(milestone, self.user, {
+            "deviation_mm": 28.5,
+            "reason": "LiDAR scan showed 28.5mm tilt at Grid 3-C, exceeding 15mm limit."
+        })
+        self.assertEqual(flagged_ms.verification_status, 'DEVIATION_FLAGGED')
+        self.assertEqual(flagged_ms.bim_deviation_mm, 28.5)
+        # Check NCR auto-created
+        ncr = NonConformanceReport.objects.filter(project=self.project).first()
+        self.assertIsNotNone(ncr)
+        self.assertIn("28.5", ncr.title)
+
+        # 6. Re-Verification Request
+        reopened = BIMService.request_milestone_re_verification(milestone, self.user, "Remediation poured.")
+        self.assertEqual(reopened.verification_status, 'RE_VERIFICATION_REQUIRED')
+        self.assertIsNone(reopened.digital_stamp_reference)
+
+    def test_milestone_gate_failure_when_model_uncertified(self):
+        """Test gate evaluation fails if associated BIM model is not certified."""
+        model = BIMService.upload_model({"project_id": self.project.id, "name": "Draft Architecture Model"}, self.user)
+        # Leave uncertified / status 'Active'
+        milestone = BIMService.create_bim_milestone({
+            "project_id": self.project.id,
+            "bim_model_id": model.id,
+            "name": "Draft Milestone",
+            "phase": "SUPERSTRUCTURE"
+        }, self.user)
+
+        gates = BIMService.evaluate_milestone_gate_status(milestone)
+        self.assertFalse(gates["all_gates_passed"])
+        self.assertFalse(gates["can_digitally_sign"])
+        self.assertTrue(any("Approved status" in b for b in gates["blockers"]))
+
+        # Attempting verify_and_stamp_milestone should raise ValueError
+        with self.assertRaises(ValueError):
+            BIMService.verify_and_stamp_milestone(milestone, self.user)

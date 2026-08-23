@@ -2,10 +2,14 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.db.models import Q, Count
-from .models import BIMModel, BIMModelVersion, BIMClash, BIMAnnotation, BIMProgressValidation
+from .models import (
+    BIMModel, BIMModelVersion, BIMClash, BIMAnnotation, 
+    BIMProgressValidation, BIMConstructionMilestone
+)
 from .serializers import (
     BIMModelSerializer, BIMModelVersionSerializer, BIMClashSerializer,
-    BIMAnnotationSerializer, BIMProgressValidationSerializer
+    BIMAnnotationSerializer, BIMProgressValidationSerializer,
+    BIMConstructionMilestoneSerializer
 )
 from .services import BIMService
 
@@ -221,6 +225,76 @@ class BIMProgressValidationViewSet(viewsets.ModelViewSet):
         return Response(BIMProgressValidationSerializer(validation).data, status=status.HTTP_201_CREATED)
 
 
+class BIMConstructionMilestoneViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for BIM & Model Review Construction Milestones and Verification Gates.
+    """
+    queryset = BIMConstructionMilestone.objects.all().select_related('project', 'bim_model', 'model_version', 'linked_construction_milestone')
+    serializer_class = BIMConstructionMilestoneSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        project_id = self.request.query_params.get('project')
+        bim_model_id = self.request.query_params.get('bim_model')
+        phase = self.request.query_params.get('phase')
+        status_val = self.request.query_params.get('status')
+        verification_status = self.request.query_params.get('verification_status')
+        search = self.request.query_params.get('search')
+
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        if bim_model_id:
+            qs = qs.filter(bim_model_id=bim_model_id)
+        if phase:
+            qs = qs.filter(phase__iexact=phase)
+        if status_val:
+            qs = qs.filter(verification_status__iexact=status_val)
+        if verification_status:
+            qs = qs.filter(verification_status__iexact=verification_status)
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) |
+                Q(milestone_code__icontains=search) |
+                Q(bim_model__name__icontains=search) |
+                Q(project__name__icontains=search)
+            )
+        return qs
+
+    def perform_create(self, serializer):
+        milestone = BIMService.create_bim_milestone(serializer.validated_data, self.request.user)
+        serializer.instance = milestone
+
+    @action(detail=True, methods=['get'], url_path='gate-status')
+    def gate_status(self, request, pk=None):
+        milestone = self.get_object()
+        status_data = BIMService.evaluate_milestone_gate_status(milestone)
+        return Response(status_data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='verify')
+    def verify(self, request, pk=None):
+        milestone = self.get_object()
+        notes = request.data.get('notes', '')
+        try:
+            verified_ms = BIMService.verify_and_stamp_milestone(milestone, request.user, notes)
+            return Response(BIMConstructionMilestoneSerializer(verified_ms).data, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='flag-deviation')
+    def flag_deviation(self, request, pk=None):
+        milestone = self.get_object()
+        flagged_ms = BIMService.flag_milestone_deviation(milestone, request.user, request.data)
+        return Response(BIMConstructionMilestoneSerializer(flagged_ms).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='request-re-verification')
+    def request_re_verification(self, request, pk=None):
+        milestone = self.get_object()
+        reason = request.data.get('reason', 'Re-verification required due to design or physical deviation modifications.')
+        reopened_ms = BIMService.request_milestone_re_verification(milestone, request.user, reason)
+        return Response(BIMConstructionMilestoneSerializer(reopened_ms).data, status=status.HTTP_200_OK)
+
+
 class BIMStatsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
@@ -240,6 +314,10 @@ class BIMStatsViewSet(viewsets.ViewSet):
 
         latest_validation = BIMProgressValidation.objects.first()
 
+        total_milestones = BIMConstructionMilestone.objects.count()
+        verified_milestones = BIMConstructionMilestone.objects.filter(verification_status__in=['VERIFIED', 'COMPLETED']).count()
+        deviation_milestones = BIMConstructionMilestone.objects.filter(verification_status='DEVIATION_FLAGGED').count()
+
         data = {
             "models": {
                 "total": total_models,
@@ -258,6 +336,12 @@ class BIMStatsViewSet(viewsets.ViewSet):
                 "resolved": resolved_annotations,
                 "total": BIMAnnotation.objects.count()
             },
+            "milestones": {
+                "total": total_milestones,
+                "verified": verified_milestones,
+                "deviations_flagged": deviation_milestones,
+                "pending_review": BIMConstructionMilestone.objects.filter(verification_status='PENDING_REVIEW').count()
+            },
             "progress_4d": {
                 "schedule_status": latest_validation.schedule_status if latest_validation else "DELAYED",
                 "days_variance": latest_validation.days_variance if latest_validation else -3,
@@ -266,3 +350,4 @@ class BIMStatsViewSet(viewsets.ViewSet):
             }
         }
         return Response(data, status=status.HTTP_200_OK)
+
