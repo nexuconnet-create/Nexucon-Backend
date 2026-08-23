@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from rest_framework.permissions import AllowAny, IsAuthenticatedOrReadOnly
 from django.db.models import Q
 from .models import Project, ProjectMilestone, ProjectDocument
 from .serializers import ProjectSerializer, ProjectMilestoneSerializer, ProjectDocumentSerializer
@@ -10,7 +10,7 @@ from apps.applications.models import Application
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all().order_by('-created_at')
     serializer_class = ProjectSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = Project.objects.all().order_by('-created_at')

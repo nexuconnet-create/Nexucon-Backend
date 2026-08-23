@@ -303,6 +303,7 @@ class SettingsService:
                 "email": u.email,
                 "role": user_role,
                 "department": dept,
+                "phone": getattr(u, 'phone_number', '') or getattr(u, 'phone', '') or "",
                 "status": "Active" if u.is_active else "Inactive",
                 "lastLogin": "2 mins ago" if u.last_login else "Never"
             })
@@ -328,6 +329,7 @@ class SettingsService:
                 "email": inv.email,
                 "role": inv.role,
                 "department": inv.department,
+                "phone": "",
                 "status": "Pending",
                 "lastLogin": "Invite Sent",
                 "invited_at": inv.created_at.isoformat() if inv.created_at else None

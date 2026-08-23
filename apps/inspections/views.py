@@ -7,6 +7,8 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 import datetime
 from .models import Inspection, Checklist, Finding, StopWorkOrder
+from apps.projects.models import Project
+from apps.permits.models import Permit
 from .serializers import (
     InspectionSerializer, CreateInspectionSerializer,
     ChecklistSerializer, FindingSerializer, StopWorkOrderSerializer
@@ -402,7 +404,7 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
 class FindingViewSet(viewsets.ModelViewSet):
     queryset = Finding.objects.all().select_related('inspection', 'project')
     serializer_class = FindingSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -443,4 +445,4 @@ class FindingViewSet(viewsets.ModelViewSet):
 class ChecklistViewSet(viewsets.ModelViewSet):
     queryset = Checklist.objects.all()
     serializer_class = ChecklistSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]

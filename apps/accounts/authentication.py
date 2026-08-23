@@ -41,7 +41,7 @@ class CookieJWTAuthentication(JWTAuthentication):
                 session = UserSession.objects.filter(refresh_jti=jti, user=user).first()
                 if session:
                     if not session.is_active:
-                        raise AuthenticationFailed("Session has been revoked.")
+                        return None
                     
                     # Throttle database updates for last_activity to every 5 minutes to avoid overhead
                     now = timezone.now()

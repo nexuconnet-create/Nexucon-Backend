@@ -43,7 +43,7 @@ class SiteMonitoringWorkflowTestCase(TestCase):
         )
         self.assertIsNotNone(update.update_reference)
         self.assertEqual(update.progress_percentage, 35)
-        self.assertTrue(AuditEvent.objects.filter(resource_id=str(update.id), action="DAILY_SITE_UPDATE_LOGGED").exists())
+        self.assertTrue(AuditEvent.objects.filter(resource_id=str(update.id), action="DAILY_UPDATE_LOGGED").exists())
 
     def test_field_observation_lifecycle(self):
         obs = MonitoringService.create_observation(
@@ -93,30 +93,87 @@ class SiteMonitoringWorkflowTestCase(TestCase):
         issue.refresh_from_db()
         self.assertEqual(issue.status, "RESOLVED")
 
-    def test_construction_milestone_workflow(self):
+    def test_construction_milestone_lifecycle_and_guardrails(self):
+        # 1. Create Milestone
         milestone = MonitoringService.create_milestone(
             data={
                 "project_id": self.project.id,
-                "name": "Substructure & Basement Pour",
+                "name": "Substructure Raft Pour",
+                "phase": "SUBSTRUCTURE",
+                "milestone_code": "MS-01",
                 "target_date": timezone.now().date() + datetime.timedelta(days=14),
+                "duration_days": 20,
+                "critical_path": True,
+                "progress_percentage": 50
+            },
+            user=self.officer
+        )
+        self.assertEqual(milestone.status, "IN_PROGRESS")
+        self.assertEqual(milestone.progress_percentage, 50)
+        self.assertTrue(milestone.critical_path)
+
+        # 2. Update Progress to 100% -> Guardrail: Must be PENDING_VERIFICATION, NOT VERIFIED
+        MonitoringService.update_milestone_progress(
+            milestone=milestone,
+            data={
+                "progress_percentage": 100,
+                "physical_progress_notes": "Raft foundation pour completed and cube test samples cast.",
+                "evidence_documents": [
+                    {"name": "Concrete Cube Test 28-day.pdf", "url": "https://assets.nexucon.gov.ng/test.pdf", "category": "Laboratory Test Report"}
+                ]
+            },
+            user=self.officer
+        )
+        milestone.refresh_from_db()
+        self.assertEqual(milestone.progress_percentage, 100)
+        self.assertEqual(milestone.status, "PENDING_VERIFICATION")
+        self.assertFalse(milestone.status == "VERIFIED")
+
+        # 3. Evaluate Gates
+        gates = MonitoringService.evaluate_milestone_gates(milestone)
+        self.assertTrue(gates['all_gates_passed'])
+
+        # 4. Sign off & Verify
+        verified_ms = MonitoringService.verify_milestone(
+            milestone=milestone,
+            data={"notes": "All concrete strength benchmarks verified."},
+            actor=self.officer
+        )
+        self.assertEqual(verified_ms.status, "VERIFIED")
+        self.assertIsNotNone(verified_ms.verified_at)
+        self.assertIsNotNone(verified_ms.verification_signoff)
+        self.assertIn("0xLASBCA-VERIFIED-", verified_ms.verification_signoff['signature_hash'])
+
+        # 5. Check Audit Trail
+        trail = MonitoringService.get_milestone_audit_trail(milestone.id)
+        self.assertGreater(len(trail), 0)
+
+    def test_milestone_delay_flagging(self):
+        milestone = MonitoringService.create_milestone(
+            data={
+                "project_id": self.project.id,
+                "name": "Superstructure Frame Level 10",
+                "phase": "SUPERSTRUCTURE",
+                "target_date": timezone.now().date() + datetime.timedelta(days=10),
                 "progress_percentage": 60
             },
             user=self.officer
         )
-        self.assertEqual(milestone.status, "UPCOMING")
 
-        # Flag delay
-        MonitoringService.flag_milestone_delay(milestone, reason="Heavy rainfall delayed curing.", actor=self.officer)
+        revised = timezone.now().date() + datetime.timedelta(days=24)
+        MonitoringService.flag_milestone_delay(
+            milestone=milestone,
+            data={
+                "reason": "Custom curved facade panels delayed at port.",
+                "revised_target_date": revised
+            },
+            actor=self.officer
+        )
         milestone.refresh_from_db()
         self.assertEqual(milestone.status, "DELAYED")
         self.assertTrue(milestone.is_delayed)
-
-        # Verify milestone
-        MonitoringService.verify_milestone(milestone, actor=self.officer)
-        milestone.refresh_from_db()
-        self.assertEqual(milestone.status, "VERIFIED")
-        self.assertEqual(milestone.progress_percentage, 100)
-        self.assertEqual(milestone.verified_by_name, self.officer.get_full_name())
+        self.assertEqual(milestone.variance_days, 14)
+        self.assertEqual(milestone.risk_level, "HIGH")
 
     def test_site_verification_variance_calculation(self):
         # 1. Test coordinate variance calculation with matching coords (within 0.5m)

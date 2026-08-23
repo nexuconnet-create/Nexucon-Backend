@@ -31,6 +31,13 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+]
+
+# Conditionally add GIS if GDAL/PostGIS is available
+if os.getenv("ENABLE_GIS", "False").lower() in ("true", "1"):
+    INSTALLED_APPS.append('django.contrib.gis')
+
+INSTALLED_APPS += [
     # Third party
     'rest_framework',
     'rest_framework_simplejwt',
@@ -98,7 +105,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "https://nexucon-frontend-8x3a.vercel.a
 
 DATABASES = {
     'default': {
-        'ENGINE': os.getenv('DATABASE_ENGINE', 'django.db.backends.sqlite3' if not os.getenv('DATABASE_URL') and not os.getenv('POSTGRES_DB') else 'django.db.backends.postgresql'),
+        'ENGINE': os.getenv('DATABASE_ENGINE', 'django.contrib.gis.db.backends.postgis' if (os.getenv('DATABASE_URL') or os.getenv('POSTGRES_DB')) else 'django.db.backends.sqlite3'),
         'NAME': os.getenv('DATABASE_NAME', str(BASE_DIR / 'db.sqlite3')),
         'USER': os.getenv('DATABASE_USER', 'postgres'),
         'PASSWORD': os.getenv('DATABASE_PASSWORD', ''),

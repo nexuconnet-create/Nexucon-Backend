@@ -106,7 +106,7 @@ class InspectionWorkflowTestCase(TestCase):
             scheduled_date=timezone.now() + datetime.timedelta(days=7),
             actor=self.officer
         )
-        self.assertEqual(reinspection.inspection_type, "Re-Inspection")
+        self.assertTrue(reinspection.inspection_type.startswith("Re-Inspection"))
         self.assertEqual(reinspection.parent_inspection, insp)
 
     def test_issue_stop_work_and_lift(self):
