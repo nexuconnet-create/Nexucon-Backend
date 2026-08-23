@@ -431,48 +431,79 @@ def seed_bim_database():
         print(f"  [{action_str}] Annotation: {a_obj.author_name} - {a_obj.text[:45]}...")
 
     # --------------------------------------------------------------------------
-    # Seed 4D Progress Validations
+    # --------------------------------------------------------------------------
+    # 4. Seed 4D Progress Validations
     # --------------------------------------------------------------------------
     print("\nSeeding 4D Progress Validations...")
     progress_config = [
         {
             "project": projects[0],
-            "model": saved_models[0],
+            "model": saved_models[1] if len(saved_models) > 1 else saved_models[0],
             "schedule_status": "DELAYED",
             "days_variance": -3,
-            "completed_elements_count": 4205,
-            "total_elements_count": 9500,
-            "earned_value_usd": "$2.4M",
+            "completed_elements_count": 36880,
+            "total_elements_count": 56750,
+            "earned_value_usd": "₦29.77B",
             "planned_vs_actual": [
-                {"phase": "Substructure & Deep Piling", "planned": 100, "actual": 100, "status": "Completed"},
-                {"phase": "Podium Slab Casting (Levels 1-4)", "planned": 100, "actual": 92, "status": "Delayed"},
-                {"phase": "Tower Core Slipform (Levels 5-18)", "planned": 45, "actual": 38, "status": "In Progress"},
-                {"phase": "Façade Glazing Installation", "planned": 20, "actual": 12, "status": "Pending"}
+                {"phase": "Substructure Foundation Raft & Bored Piling", "planned": 100, "actual": 100, "status": "Completed"},
+                {"phase": "Podium Transfer Slab & Shear Core (Levels 1-4)", "planned": 100, "actual": 95, "status": "In Progress"},
+                {"phase": "Superstructure Post-Tensioned Slabs (Levels 5-18)", "planned": 60, "actual": 48, "status": "Delayed - 3 Days"},
+                {"phase": "MEP Core Vertical Shaft & HVAC Risers", "planned": 25, "actual": 15, "status": "In Progress"},
+                {"phase": "Unitized Curtain Wall & Double Glazed Envelope", "planned": 10, "actual": 0, "status": "Planned"}
             ]
         },
         {
             "project": projects[1] if len(projects) > 1 else projects[0],
-            "model": saved_models[3] if len(saved_models) > 3 else saved_models[0],
+            "model": saved_models[4] if len(saved_models) > 4 else saved_models[0],
+            "schedule_status": "DELAYED",
+            "days_variance": -10,
+            "completed_elements_count": 21065,
+            "total_elements_count": 38300,
+            "earned_value_usd": "₦17.60B",
+            "planned_vs_actual": [
+                {"phase": "Substructure & Basement Excavation", "planned": 100, "actual": 100, "status": "Completed"},
+                {"phase": "Reinforced Concrete Frame (Floors 1-24)", "planned": 100, "actual": 100, "status": "Completed"},
+                {"phase": "Double-Skin Unitized Curtain Wall & Glazing", "planned": 85, "actual": 70, "status": "Delayed - 10 Days"},
+                {"phase": "Central Chiller Plant & Primary Air Ductwork", "planned": 50, "actual": 40, "status": "In Progress"},
+                {"phase": "Internal Architectural Fit-out & Raised Flooring", "planned": 20, "actual": 0, "status": "Planned"}
+            ]
+        },
+        {
+            "project": projects[2] if len(projects) > 2 else projects[0],
+            "model": saved_models[5] if len(saved_models) > 5 else saved_models[0],
             "schedule_status": "ON_TRACK",
             "days_variance": 0,
-            "completed_elements_count": 6120,
-            "total_elements_count": 12000,
-            "earned_value_usd": "$3.8M",
+            "completed_elements_count": 32470,
+            "total_elements_count": 38200,
+            "earned_value_usd": "₦15.72B",
             "planned_vs_actual": [
-                {"phase": "Foundation & Basement Excavation", "planned": 100, "actual": 100, "status": "Completed"},
-                {"phase": "Superstructure Frame", "planned": 65, "actual": 65, "status": "On Track"},
-                {"phase": "MEP Rough-Ins", "planned": 40, "actual": 40, "status": "On Track"}
+                {"phase": "Site Grading, Soil Stabilization & Deep Piling", "planned": 100, "actual": 100, "status": "Completed"},
+                {"phase": "High-Tolerance Industrial Floor Laser Screed Slab", "planned": 100, "actual": 100, "status": "Completed"},
+                {"phase": "Structural Steel Portal Frame & Insulated Roofing", "planned": 90, "actual": 90, "status": "On Track"},
+                {"phase": "Automated High-Bay Racking & Loading Levelers", "planned": 50, "actual": 50, "status": "On Track"}
+            ]
+        },
+        {
+            "project": projects[3] if len(projects) > 3 else projects[0],
+            "model": saved_models[6] if len(saved_models) > 6 else saved_models[0],
+            "schedule_status": "AHEAD",
+            "days_variance": 4,
+            "completed_elements_count": 14850,
+            "total_elements_count": 19800,
+            "earned_value_usd": "₦18.00B",
+            "planned_vs_actual": [
+                {"phase": "Marine Geotechnical Foundation & Deep Bored Piling", "planned": 100, "actual": 100, "status": "Completed"},
+                {"phase": "Post-Tensioned Floor Slabs & Seismic Dampers", "planned": 70, "actual": 75, "status": "Ahead of Schedule"},
+                {"phase": "MEP High-Pressure Water Reticulation & Fire Risers", "planned": 45, "actual": 45, "status": "On Track"},
+                {"phase": "Architectural Luxury Finishes & Balcony Glazing", "planned": 20, "actual": 10, "status": "In Progress"}
             ]
         }
     ]
 
     for p_cfg in progress_config:
-        p_obj, created = BIMProgressValidation.objects.update_or_create(
-            project=p_cfg["project"],
-            defaults=p_cfg
-        )
-        action_str = "Created" if created else "Updated"
-        print(f"  [{action_str}] 4D Validation: {p_obj.project.name} ({p_obj.schedule_status} • {p_obj.days_variance} days)")
+        BIMProgressValidation.objects.filter(project=p_cfg["project"]).delete()
+        p_obj = BIMProgressValidation.objects.create(**p_cfg)
+        print(f"  [Seeded] 4D Validation: {p_obj.project.name} ({p_obj.schedule_status} • {p_obj.days_variance} days • {p_obj.earned_value_usd})")
 
     # --------------------------------------------------------------------------
     # Seed BIM Construction Milestones & Verification Gates
