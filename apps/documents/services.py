@@ -128,16 +128,32 @@ class DocumentService:
         Upload and register a new project or regulatory document into Cloudflare R2 storage.
         """
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.filter(pk=project_id).first()
+        if isinstance(project_id, list) and project_id:
+            project_id = project_id[0]
+            
+        project = None
+        if project_id and str(project_id).lower() not in ('undefined', 'null', 'none', ''):
+            try:
+                project = Project.objects.filter(pk=project_id).first()
+            except Exception:
+                project = None
         if not project:
             project = Project.objects.first()
 
         folder_name = data.get('folder', '01_Architectural')
+        if isinstance(folder_name, list) and folder_name:
+            folder_name = folder_name[0]
         
         # Handle file upload to Cloudflare R2 if file was submitted
         file_meta = None
         if file_obj:
-            file_meta = DocumentStorageService.upload_file_to_r2(file_obj, folder_prefix=f"projects/{project.reference_number or project.id}")
+            prefix = project.reference_number if project and project.reference_number else (str(project.id) if project else "general")
+            file_meta = DocumentStorageService.upload_file_to_r2(file_obj, folder_prefix=f"projects/{prefix}")
+
+        raw_title = data.get('title')
+        if isinstance(raw_title, list) and raw_title:
+            raw_title = raw_title[0]
+        title_val = raw_title or (f"{project.name} - Document" if project else "Project Document")
 
         file_url = file_meta['file_url'] if file_meta else data.get('file_url') or f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}/documents/{uuid.uuid4().hex[:8]}_document.pdf"
         file_size = file_meta['file_size'] if file_meta else data.get('file_size', '12.4 MB')
@@ -145,29 +161,48 @@ class DocumentService:
         sig_hash = file_meta['signature_hash'] if file_meta else data.get('signature_hash')
 
         uploader_name = data.get('uploader_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else 'S. Jenkins')
+        if isinstance(uploader_name, list) and uploader_name:
+            uploader_name = uploader_name[0]
+
+        doc_type = data.get('document_type', 'PROJECT_DOCUMENT')
+        if isinstance(doc_type, list) and doc_type:
+            doc_type = doc_type[0]
+
+        discipline = data.get('discipline', 'Architecture')
+        if isinstance(discipline, list) and discipline:
+            discipline = discipline[0]
+
+        pages_count = 12
+        try:
+            raw_pages = data.get('pages_count', 12)
+            pages_count = int(raw_pages[0] if isinstance(raw_pages, list) else raw_pages)
+        except (ValueError, TypeError):
+            pages_count = 12
+
+        expiry_date = data.get('expiry_date')
+        if isinstance(expiry_date, list) and expiry_date:
+            expiry_date = expiry_date[0]
+        if expiry_date in ('', 'null', 'undefined', None):
+            expiry_date = None
 
         document = Document.objects.create(
             project=project,
             folder=folder_name,
-            title=data.get('title', f"{project.name} - Document"),
-            document_type=data.get('document_type', 'PROJECT_DOCUMENT'),
-            discipline=data.get('discipline', 'Architecture'),
+            title=title_val,
+            document_type=doc_type,
+            discipline=discipline,
             status=data.get('status', 'APPROVED'),
             current_version='v1.0',
             file_url=file_url,
             file_size=file_size,
             file_format=file_format,
-            pages_count=int(data.get('pages_count', 12)),
+            pages_count=pages_count,
             is_starred=bool(data.get('is_starred', False)),
             is_shared=bool(data.get('is_shared', True)),
-            expiry_date=data.get('expiry_date') or None,
+            expiry_date=expiry_date,
             uploader=user if getattr(user, 'is_authenticated', False) else None,
             uploader_name=uploader_name,
-            signature_hash=sig_hash,
-            linked_bim_model_id=data.get('linked_bim_model') or None,
-            linked_inspection_id=data.get('linked_inspection') or None,
-            linked_compliance_case_id=data.get('linked_compliance_case') or None,
-            linked_approval_id=data.get('linked_approval') or None,
+            signature_hash=sig_hash
         )
 
         # Create immutable baseline Version v1.0
