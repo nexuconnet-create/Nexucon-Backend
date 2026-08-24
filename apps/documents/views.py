@@ -4,6 +4,7 @@ from rest_framework.decorators import action
 from django.db.models import Q
 from django.utils import timezone
 import datetime
+import uuid
 from .models import (
     Document, Version, Approval, DocumentReview, 
     DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder
@@ -14,6 +15,17 @@ from .serializers import (
     DocumentTemplateSerializer, DocumentFolderSerializer
 )
 from .services import DocumentService
+
+
+def is_valid_uuid(val):
+    if not val or str(val).lower() in ('undefined', 'null', 'none', ''):
+        return False
+    try:
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
 
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all().select_related('project', 'linked_bim_model', 'linked_inspection', 'linked_compliance_case')
@@ -32,13 +44,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
         bim_model_id = self.request.query_params.get('bim_model')
         inspection_id = self.request.query_params.get('inspection')
 
-        if project_id:
+        if is_valid_uuid(project_id):
             qs = qs.filter(project_id=project_id)
-        if folder:
+        if folder and str(folder).lower() not in ('undefined', 'null', 'none', ''):
             qs = qs.filter(folder__iexact=folder)
-        if discipline and discipline.lower() != 'all':
+        if discipline and str(discipline).lower() not in ('undefined', 'null', 'none', '', 'all'):
             qs = qs.filter(discipline__iexact=discipline)
-        if doc_type:
+        if doc_type and str(doc_type).lower() not in ('undefined', 'null', 'none', '', 'all'):
             if doc_type.upper() in ('DRAWING', 'SUBMITTED_DRAWING'):
                 qs = qs.filter(document_type__in=['DRAWING', 'SUBMITTED_DRAWING'])
             elif doc_type.upper() in ('REPORT', 'TECHNICAL_REPORT'):
@@ -49,15 +61,15 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(document_type='INSPECTION_REPORT')
             else:
                 qs = qs.filter(document_type__iexact=doc_type)
-        if status_val:
+        if status_val and str(status_val).lower() not in ('undefined', 'null', 'none', '', 'all'):
             qs = qs.filter(status__iexact=status_val)
-        if starred is not None:
-            qs = qs.filter(is_starred=starred.lower() in ('true', '1'))
-        if bim_model_id:
+        if starred is not None and str(starred).lower() not in ('undefined', 'null', 'none', ''):
+            qs = qs.filter(is_starred=str(starred).lower() in ('true', '1'))
+        if is_valid_uuid(bim_model_id):
             qs = qs.filter(linked_bim_model_id=bim_model_id)
-        if inspection_id:
+        if is_valid_uuid(inspection_id):
             qs = qs.filter(linked_inspection_id=inspection_id)
-        if search:
+        if search and str(search).lower() not in ('undefined', 'null', 'none', ''):
             qs = qs.filter(
                 Q(title__icontains=search) |
                 Q(document_reference__icontains=search) |
@@ -160,7 +172,7 @@ class VersionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         document_id = self.request.query_params.get('document')
-        if document_id:
+        if is_valid_uuid(document_id):
             qs = qs.filter(document_id=document_id)
         return qs
 
@@ -193,9 +205,9 @@ class ApprovalViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         status_val = self.request.query_params.get('status')
         project_id = self.request.query_params.get('project')
-        if status_val:
+        if status_val and str(status_val).lower() not in ('undefined', 'null', 'none', '', 'all'):
             qs = qs.filter(status__iexact=status_val)
-        if project_id:
+        if is_valid_uuid(project_id):
             qs = qs.filter(document__project_id=project_id)
         return qs
 
@@ -221,7 +233,7 @@ class DocumentReviewViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         doc_id = self.request.query_params.get('document')
-        if doc_id:
+        if is_valid_uuid(doc_id):
             qs = qs.filter(document_id=doc_id)
         return qs
 
@@ -234,7 +246,7 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         project_id = self.request.query_params.get('project')
-        if project_id:
+        if is_valid_uuid(project_id):
             qs = qs.filter(project_id=project_id)
         return qs
 
@@ -247,7 +259,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         category = self.request.query_params.get('category')
-        if category:
+        if category and str(category).lower() not in ('undefined', 'null', 'none', '', 'all'):
             qs = qs.filter(category__iexact=category)
         return qs
 
@@ -270,7 +282,7 @@ class DocumentStatsViewSet(viewsets.ViewSet):
         project_id = request.query_params.get('project')
         qs = Document.objects.all()
         folder_qs = DocumentFolder.objects.all()
-        if project_id:
+        if is_valid_uuid(project_id):
             qs = qs.filter(project_id=project_id)
             folder_qs = folder_qs.filter(project_id=project_id)
 
@@ -310,4 +322,3 @@ class DocumentStatsViewSet(viewsets.ViewSet):
             "storage_bucket": "nexucondocument",
             "storage_provider": "Cloudflare R2"
         }, status=status.HTTP_200_OK)
-
