@@ -3,6 +3,23 @@ from pathlib import Path
 from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+# Zero-dependency .env loader
+env_file = BASE_DIR / '.env'
+if env_file.exists():
+    try:
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        pass
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dummy-secret-key-for-dev")
 DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
