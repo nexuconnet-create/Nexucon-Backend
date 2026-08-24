@@ -73,11 +73,16 @@ class DocumentStorageService:
                     config=Config(signature_version='s3v4'),
                     region_name='auto'
                 )
-                content_type, _ = mimetypes.guess_type(clean_name)
+                if hasattr(uploaded_file, 'seek'):
+                    try:
+                        uploaded_file.seek(0)
+                    except Exception:
+                        pass
+                file_body = uploaded_file.read() if hasattr(uploaded_file, 'read') else uploaded_file
                 s3_client.put_object(
                     Bucket=R2_BUCKET_NAME,
                     Key=unique_key,
-                    Body=uploaded_file.read(),
+                    Body=file_body,
                     ContentType=content_type or 'application/octet-stream'
                 )
             except Exception as e:
