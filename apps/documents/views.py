@@ -27,10 +27,27 @@ def is_valid_uuid(val):
         return False
 
 
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all().select_related('project', 'linked_bim_model', 'linked_inspection', 'linked_compliance_case')
     serializer_class = DocumentSerializer
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
     permission_classes = [permissions.AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        file_obj = request.FILES.get('file')
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        
+        project_val = data.get('project_id') or data.get('project')
+        if isinstance(project_val, list) and project_val:
+            project_val = project_val[0]
+        data['project'] = project_val
+        data['project_id'] = project_val
+
+        doc = DocumentService.upload_document(data, request.user, file_obj=file_obj)
+        serializer = self.get_serializer(doc)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -78,11 +95,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 Q(folder__icontains=search)
             )
         return qs
-
-    def perform_create(self, serializer):
-        file_obj = self.request.FILES.get('file')
-        doc = DocumentService.upload_document(self.request.data, self.request.user, file_obj=file_obj)
-        serializer.instance = doc
 
     @action(detail=True, methods=['post'], url_path='star')
     def toggle_star(self, request, pk=None):
