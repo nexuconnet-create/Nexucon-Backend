@@ -2,7 +2,6 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from apps.projects.models import Project
-from apps.government.models import Profile
 import uuid
 import datetime
 
@@ -12,10 +11,13 @@ def generate_doc_ref():
 def generate_app_ref():
     return f"APP-DOC-{datetime.datetime.now().year}-{uuid.uuid4().hex[:4].upper()}"
 
+def generate_review_ref():
+    return f"REV-DOC-{datetime.datetime.now().year}-{uuid.uuid4().hex[:4].upper()}"
+
 
 class DocumentFolder(models.Model):
     """
-    Project document organization folders (e.g. 01_Architectural, 02_Structural).
+    Project document organization folders (e.g. 01_Architectural, 02_Structural, 03_MEP_Systems).
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
@@ -29,12 +31,12 @@ class DocumentFolder(models.Model):
         ordering = ['name']
 
     def __str__(self):
-        return self.name
+        return f"{self.project.name if self.project else 'General'} / {self.name}"
 
 
 class Document(models.Model):
     """
-    Metadata for project and regulatory documents (drawings, reports, permits, contracts).
+    Metadata for project and regulatory documents (drawings, reports, permits, contracts, certificates).
     """
     DISCIPLINE_CHOICES = (
         ('Architecture', 'Architecture'),
@@ -43,13 +45,20 @@ class Document(models.Model):
         ('Planning', 'Planning & Urban Design'),
         ('Legal', 'Contracts & Legal'),
         ('Environmental', 'Environmental & Geotechnical'),
+        ('Civil', 'Civil & Infrastructure'),
         ('General', 'General / Administrative'),
     )
 
     DOCUMENT_TYPES = (
+        ('PROJECT_DOCUMENT', 'Project Document / Administrative'),
+        ('SUBMITTED_DRAWING', 'Submitted 2D Drawing / Blueprint'),
+        ('TECHNICAL_REPORT', 'Technical Engineering Report / Study'),
+        ('COMPLIANCE_DOCUMENT', 'Statutory Compliance Document / Certificate'),
+        ('INSPECTION_REPORT', 'Site Inspection & QA/QC Report'),
+        ('APPROVAL_RECORD', 'Official Government Approval Record'),
+        # Backward compatibility aliases
         ('DRAWING', '2D Architectural / Structural Drawing'),
         ('CONTRACT', 'Contract & Legal Agreement'),
-        ('INSPECTION_REPORT', 'Site Inspection Report'),
         ('COMPLIANCE_CERTIFICATE', 'Compliance Certificate'),
         ('SITE_PHOTO', 'Site Photograph'),
         ('REPORT', 'Technical Report'),
@@ -61,9 +70,11 @@ class Document(models.Model):
         ('PENDING_REVIEW', 'Pending Review'),
         ('UNDER_REVIEW', 'Under Review'),
         ('APPROVED', 'Approved'),
+        ('CHANGES_REQUESTED', 'Changes Requested'),
         ('REJECTED', 'Rejected'),
         ('EXPIRED', 'Expired'),
         ('EXPIRING_SOON', 'Expiring Soon'),
+        ('ARCHIVED', 'Archived'),
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -72,7 +83,7 @@ class Document(models.Model):
     folder = models.CharField(max_length=100, default='01_Architectural')
     
     title = models.CharField(max_length=255)
-    document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPES, default='DRAWING')
+    document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPES, default='PROJECT_DOCUMENT')
     discipline = models.CharField(max_length=50, choices=DISCIPLINE_CHOICES, default='Architecture')
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='APPROVED')
     
@@ -95,6 +106,20 @@ class Document(models.Model):
     stamped_at = models.DateTimeField(null=True, blank=True)
     stamp_reference = models.CharField(max_length=255, blank=True, null=True)
     signature_hash = models.CharField(max_length=255, blank=True, null=True)
+
+    # Cross-Module Statutory Linkages
+    linked_bim_model = models.ForeignKey(
+        'bim.BIMModel', on_delete=models.SET_NULL, null=True, blank=True, related_name='linked_documents'
+    )
+    linked_inspection = models.ForeignKey(
+        'inspections.Inspection', on_delete=models.SET_NULL, null=True, blank=True, related_name='linked_documents'
+    )
+    linked_compliance_case = models.ForeignKey(
+        'compliance.NonConformanceReport', on_delete=models.SET_NULL, null=True, blank=True, related_name='linked_documents'
+    )
+    linked_approval = models.ForeignKey(
+        'approvals.ApprovalRequest', on_delete=models.SET_NULL, null=True, blank=True, related_name='linked_documents'
+    )
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -122,6 +147,7 @@ class Version(models.Model):
     file_url = models.CharField(max_length=500, blank=True, null=True)
     file_size = models.CharField(max_length=50, default='12.4 MB')
     status = models.CharField(max_length=50, default='Current')
+    signature_hash = models.CharField(max_length=255, blank=True, null=True)
     
     uploaded_at = models.DateTimeField(default=timezone.now)
 
@@ -130,6 +156,9 @@ class Version(models.Model):
 
     def __str__(self):
         return f"{self.document.title} - {self.version_label}"
+
+# Backward and forward compatibility alias
+DocumentVersion = Version
 
 
 class Approval(models.Model):
@@ -159,7 +188,96 @@ class Approval(models.Model):
         ordering = ['-reviewed_at']
 
     def __str__(self):
-        return f"{self.approval_reference} - {self.document.title} ({self.status})"
+        return f"{self.approval_reference} - {self.document.title if self.document else 'Record'} ({self.status})"
+
+
+class DocumentReview(models.Model):
+    """
+    Formal government regulatory review and revision requests.
+    """
+    REVIEW_STATUS = (
+        ('PENDING', 'Pending Review'),
+        ('APPROVED', 'Approved'),
+        ('CHANGES_REQUESTED', 'Changes Requested'),
+        ('REJECTED', 'Rejected'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    review_reference = models.CharField(max_length=100, db_index=True, default=generate_review_ref)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='reviews')
+    version = models.ForeignKey(Version, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviews')
+    
+    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='document_reviews')
+    reviewer_name = models.CharField(max_length=255, default='Government Reviewer')
+    reviewer_role = models.CharField(max_length=255, default='Senior Plan Reviewer')
+    
+    status = models.CharField(max_length=50, choices=REVIEW_STATUS, default='PENDING')
+    comments = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(default=timezone.now)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.review_reference} - {self.document.title} ({self.status})"
+
+
+class DocumentAccess(models.Model):
+    """
+    RBAC and Document-level access permissions.
+    """
+    ACCESS_LEVELS = (
+        ('VIEW', 'View Only'),
+        ('EDIT', 'Edit & Revision'),
+        ('STAMP', 'Digital Stamp & Approval'),
+        ('ADMIN', 'Full Administrative Access'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='access_permissions')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='document_permissions')
+    access_level = models.CharField(max_length=50, choices=ACCESS_LEVELS, default='VIEW')
+    granted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='granted_permissions')
+    granted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        unique_together = ('document', 'user')
+
+    def __str__(self):
+        return f"{self.user.email} - {self.document.title} ({self.access_level})"
+
+
+class DocumentAudit(models.Model):
+    """
+    Immutable audit log for document lifecycle events.
+    """
+    ACTION_CHOICES = (
+        ('UPLOAD', 'Document Uploaded'),
+        ('VERSION_CREATED', 'New Revision Created'),
+        ('STAMPED', 'Digitally Stamped'),
+        ('REVIEWED', 'Document Reviewed'),
+        ('DOWNLOADED', 'Document Downloaded'),
+        ('ARCHIVED', 'Document Archived'),
+        ('RESTORED', 'Document Restored'),
+        ('LINKED', 'Cross-Module Linkage Added'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='audit_logs')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    user_name = models.CharField(max_length=255, default='System')
+    action = models.CharField(max_length=50, choices=ACTION_CHOICES)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    timestamp = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"{self.action} on {self.document.title} by {self.user_name} at {self.timestamp}"
 
 
 class DocumentTemplate(models.Model):

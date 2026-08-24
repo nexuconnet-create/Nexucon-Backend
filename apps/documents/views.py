@@ -4,17 +4,21 @@ from rest_framework.decorators import action
 from django.db.models import Q
 from django.utils import timezone
 import datetime
-from .models import Document, Version, Approval, DocumentTemplate, DocumentFolder
+from .models import (
+    Document, Version, Approval, DocumentReview, 
+    DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder
+)
 from .serializers import (
     DocumentSerializer, VersionSerializer, ApprovalSerializer,
+    DocumentReviewSerializer, DocumentAccessSerializer, DocumentAuditSerializer,
     DocumentTemplateSerializer, DocumentFolderSerializer
 )
 from .services import DocumentService
 
 class DocumentViewSet(viewsets.ModelViewSet):
-    queryset = Document.objects.all().select_related('project')
+    queryset = Document.objects.all().select_related('project', 'linked_bim_model', 'linked_inspection', 'linked_compliance_case')
     serializer_class = DocumentSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -25,6 +29,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
         status_val = self.request.query_params.get('status')
         starred = self.request.query_params.get('starred')
         search = self.request.query_params.get('search')
+        bim_model_id = self.request.query_params.get('bim_model')
+        inspection_id = self.request.query_params.get('inspection')
 
         if project_id:
             qs = qs.filter(project_id=project_id)
@@ -33,22 +39,37 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if discipline and discipline.lower() != 'all':
             qs = qs.filter(discipline__iexact=discipline)
         if doc_type:
-            qs = qs.filter(document_type__iexact=doc_type)
+            if doc_type.upper() in ('DRAWING', 'SUBMITTED_DRAWING'):
+                qs = qs.filter(document_type__in=['DRAWING', 'SUBMITTED_DRAWING'])
+            elif doc_type.upper() in ('REPORT', 'TECHNICAL_REPORT'):
+                qs = qs.filter(document_type__in=['REPORT', 'TECHNICAL_REPORT'])
+            elif doc_type.upper() in ('COMPLIANCE', 'COMPLIANCE_DOCUMENT', 'COMPLIANCE_CERTIFICATE'):
+                qs = qs.filter(document_type__in=['COMPLIANCE', 'COMPLIANCE_DOCUMENT', 'COMPLIANCE_CERTIFICATE'])
+            elif doc_type.upper() == 'INSPECTION_REPORT':
+                qs = qs.filter(document_type='INSPECTION_REPORT')
+            else:
+                qs = qs.filter(document_type__iexact=doc_type)
         if status_val:
             qs = qs.filter(status__iexact=status_val)
         if starred is not None:
             qs = qs.filter(is_starred=starred.lower() in ('true', '1'))
+        if bim_model_id:
+            qs = qs.filter(linked_bim_model_id=bim_model_id)
+        if inspection_id:
+            qs = qs.filter(linked_inspection_id=inspection_id)
         if search:
             qs = qs.filter(
                 Q(title__icontains=search) |
                 Q(document_reference__icontains=search) |
                 Q(uploader_name__icontains=search) |
-                Q(discipline__icontains=search)
+                Q(discipline__icontains=search) |
+                Q(folder__icontains=search)
             )
         return qs
 
     def perform_create(self, serializer):
-        doc = DocumentService.upload_document(self.request.data, self.request.user)
+        file_obj = self.request.FILES.get('file')
+        doc = DocumentService.upload_document(self.request.data, self.request.user, file_obj=file_obj)
         serializer.instance = doc
 
     @action(detail=True, methods=['post'], url_path='star')
@@ -69,18 +90,58 @@ class DocumentViewSet(viewsets.ModelViewSet):
         document = self.get_object()
         status_val = request.data.get('status', 'APPROVED')
         comments = request.data.get('comments', '')
-        approval = DocumentService.review_and_decide(document, status_val, comments, request.user)
-        return Response(ApprovalSerializer(approval).data, status=status.HTTP_200_OK)
+        review_obj = DocumentService.review_and_decide(document, status_val, comments, request.user)
+        return Response(DocumentReviewSerializer(review_obj).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='create-version')
     def create_version(self, request, pk=None):
         document = self.get_object()
-        version = DocumentService.create_version(document, request.data, request.user)
+        file_obj = request.FILES.get('file')
+        version = DocumentService.create_version(document, request.data, request.user, file_obj=file_obj)
         return Response(VersionSerializer(version).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='download')
+    def download(self, request, pk=None):
+        document = self.get_object()
+        DocumentService.log_audit(
+            user=request.user,
+            action="DOCUMENT_DOWNLOADED",
+            resource_id=document.id,
+            new_state={"title": document.title, "file_url": document.file_url},
+            document=document
+        )
+        return Response({
+            "download_url": document.file_url,
+            "title": document.title,
+            "file_size": document.file_size,
+            "file_format": document.file_format,
+            "signature_hash": document.signature_hash
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='link-bim')
+    def link_bim(self, request, pk=None):
+        document = self.get_object()
+        bim_id = request.data.get('bim_model_id') or request.data.get('linked_bim_model')
+        doc = DocumentService.link_to_bim_model(document, bim_id, request.user)
+        return Response(DocumentSerializer(doc).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='link-inspection')
+    def link_inspection(self, request, pk=None):
+        document = self.get_object()
+        insp_id = request.data.get('inspection_id') or request.data.get('linked_inspection')
+        doc = DocumentService.link_to_inspection(document, insp_id, request.user)
+        return Response(DocumentSerializer(doc).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='link-compliance')
+    def link_compliance(self, request, pk=None):
+        document = self.get_object()
+        ncr_id = request.data.get('compliance_case_id') or request.data.get('linked_compliance_case')
+        doc = DocumentService.link_to_compliance_case(document, ncr_id, request.user)
+        return Response(DocumentSerializer(doc).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='drawings')
     def drawings(self, request):
-        qs = self.get_queryset().filter(document_type='DRAWING')
+        qs = self.get_queryset().filter(document_type__in=['DRAWING', 'SUBMITTED_DRAWING'])
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
 
@@ -94,7 +155,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 class VersionViewSet(viewsets.ModelViewSet):
     queryset = Version.objects.all().select_related('document')
     serializer_class = VersionSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -103,24 +164,85 @@ class VersionViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_id=document_id)
         return qs
 
+    @action(detail=False, methods=['post'], url_path='compare')
+    def compare(self, request):
+        v_a = request.data.get('version_a')
+        v_b = request.data.get('version_b')
+        if not v_a or not v_b:
+            return Response({"error": "version_a and version_b are required."}, status=status.HTTP_400_BAD_REQUEST)
+        diff = DocumentService.compare_versions(v_a, v_b)
+        return Response(diff, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='download')
+    def download(self, request, pk=None):
+        version = self.get_object()
+        return Response({
+            "download_url": version.file_url or version.document.file_url,
+            "version_label": version.version_label,
+            "file_size": version.file_size,
+            "signature_hash": version.signature_hash
+        }, status=status.HTTP_200_OK)
+
 
 class ApprovalViewSet(viewsets.ModelViewSet):
     queryset = Approval.objects.all().select_related('document', 'version')
     serializer_class = ApprovalSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
         status_val = self.request.query_params.get('status')
+        project_id = self.request.query_params.get('project')
         if status_val:
             qs = qs.filter(status__iexact=status_val)
+        if project_id:
+            qs = qs.filter(document__project_id=project_id)
+        return qs
+
+    @action(detail=True, methods=['get'], url_path='verify')
+    def verify(self, request, pk=None):
+        approval = self.get_object()
+        return Response({
+            "approval_reference": approval.approval_reference,
+            "status": approval.status,
+            "approved_by": approval.approved_by_name,
+            "signature_hash": approval.signature_hash,
+            "reviewed_at": approval.reviewed_at,
+            "is_valid": bool(approval.signature_hash),
+            "document_title": approval.document.title if approval.document else 'Project Document'
+        }, status=status.HTTP_200_OK)
+
+
+class DocumentReviewViewSet(viewsets.ModelViewSet):
+    queryset = DocumentReview.objects.all().select_related('document', 'version', 'reviewer')
+    serializer_class = DocumentReviewSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        doc_id = self.request.query_params.get('document')
+        if doc_id:
+            qs = qs.filter(document_id=doc_id)
+        return qs
+
+
+class DocumentFolderViewSet(viewsets.ModelViewSet):
+    queryset = DocumentFolder.objects.all().select_related('project')
+    serializer_class = DocumentFolderSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            qs = qs.filter(project_id=project_id)
         return qs
 
 
 class DocumentTemplateViewSet(viewsets.ModelViewSet):
     queryset = DocumentTemplate.objects.all()
     serializer_class = DocumentTemplateSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -134,43 +256,58 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         serializer.instance = template
 
 
-class DocumentFolderViewSet(viewsets.ModelViewSet):
-    queryset = DocumentFolder.objects.all()
-    serializer_class = DocumentFolderSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        project_id = self.request.query_params.get('project')
-        if project_id:
-            qs = qs.filter(project_id=project_id)
-        return qs
-
-
 class DocumentStatsViewSet(viewsets.ViewSet):
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
+
+    def list(self, request):
+        return self._compute_stats(request)
 
     @action(detail=False, methods=['get'], url_path='overview')
     def overview(self, request):
+        return self._compute_stats(request)
+
+    def _compute_stats(self, request):
+        project_id = request.query_params.get('project')
+        qs = Document.objects.all()
+        folder_qs = DocumentFolder.objects.all()
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+            folder_qs = folder_qs.filter(project_id=project_id)
+
+        total_docs = qs.count()
+        drawings_count = qs.filter(document_type__in=['DRAWING', 'SUBMITTED_DRAWING']).count()
+        reports_count = qs.filter(document_type__in=['REPORT', 'TECHNICAL_REPORT']).count()
+        compliance_count = qs.filter(document_type__in=['COMPLIANCE', 'COMPLIANCE_DOCUMENT', 'COMPLIANCE_CERTIFICATE']).count()
+        inspection_count = qs.filter(document_type='INSPECTION_REPORT').count()
+        approved_count = qs.filter(status='APPROVED').count()
+        pending_count = qs.filter(status__in=['PENDING_REVIEW', 'UNDER_REVIEW']).count()
+        stamped_count = qs.filter(is_digitally_stamped=True).count()
+        folders_count = folder_qs.count()
+        templates_count = DocumentTemplate.objects.count()
+
         today = timezone.now().date()
-        total_docs = Document.objects.count()
-        drawings_count = Document.objects.filter(document_type='DRAWING').count()
-        approved_count = Document.objects.filter(status='APPROVED').count()
-        stamped_count = Document.objects.filter(is_digitally_stamped=True).count()
-        
-        expired_count = Document.objects.filter(expiry_date__lt=today).count()
-        expiring_soon = Document.objects.filter(expiry_date__gte=today, expiry_date__lte=today + datetime.timedelta(days=30)).count()
+        expired_count = qs.filter(expiry_date__isnull=False, expiry_date__lt=today).count()
+        expiring_soon_count = qs.filter(
+            expiry_date__isnull=False,
+            expiry_date__gte=today,
+            expiry_date__lte=today + datetime.timedelta(days=30)
+        ).count()
 
-        folders_count = DocumentFolder.objects.count()
-
-        data = {
+        return Response({
             "total_documents": total_docs,
-            "folders_count": folders_count,
             "drawings_count": drawings_count,
+            "reports_count": reports_count,
+            "compliance_count": compliance_count,
+            "inspection_reports_count": inspection_count,
             "approved_count": approved_count,
+            "pending_count": pending_count,
+            "stamped_count": stamped_count,
             "stamped_approvals_count": stamped_count,
+            "folders_count": folders_count,
+            "templates_count": templates_count,
             "expired_count": expired_count,
-            "expiring_soon_count": expiring_soon,
-            "templates_count": DocumentTemplate.objects.count()
-        }
-        return Response(data, status=status.HTTP_200_OK)
+            "expiring_soon_count": expiring_soon_count,
+            "storage_bucket": "nexucondocument",
+            "storage_provider": "Cloudflare R2"
+        }, status=status.HTTP_200_OK)
+

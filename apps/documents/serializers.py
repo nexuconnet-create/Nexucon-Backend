@@ -1,10 +1,14 @@
 from rest_framework import serializers
 from django.utils import timezone
 import datetime
-from .models import Document, Version, Approval, DocumentTemplate, DocumentFolder
+from .models import (
+    Document, Version, Approval, DocumentReview, 
+    DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder
+)
 
 class VersionSerializer(serializers.ModelSerializer):
     document_title = serializers.CharField(source='document.title', read_only=True)
+    document_reference = serializers.CharField(source='document.document_reference', read_only=True)
 
     class Meta:
         model = Version
@@ -15,11 +19,43 @@ class VersionSerializer(serializers.ModelSerializer):
 class ApprovalSerializer(serializers.ModelSerializer):
     document_title = serializers.CharField(source='document.title', read_only=True)
     document_reference = serializers.CharField(source='document.document_reference', read_only=True)
+    version_label = serializers.CharField(source='version.version_label', read_only=True)
+    file_url = serializers.CharField(source='document.file_url', read_only=True)
+    file_size = serializers.CharField(source='document.file_size', read_only=True)
 
     class Meta:
         model = Approval
         fields = '__all__'
         read_only_fields = ('id', 'approval_reference', 'reviewed_at')
+
+
+class DocumentReviewSerializer(serializers.ModelSerializer):
+    document_title = serializers.CharField(source='document.title', read_only=True)
+    version_label = serializers.CharField(source='version.version_label', read_only=True)
+
+    class Meta:
+        model = DocumentReview
+        fields = '__all__'
+        read_only_fields = ('id', 'review_reference', 'created_at', 'reviewed_at')
+
+
+class DocumentAccessSerializer(serializers.ModelSerializer):
+    user_email = serializers.CharField(source='user.email', read_only=True)
+    document_title = serializers.CharField(source='document.title', read_only=True)
+
+    class Meta:
+        model = DocumentAccess
+        fields = '__all__'
+        read_only_fields = ('id', 'granted_at')
+
+
+class DocumentAuditSerializer(serializers.ModelSerializer):
+    document_title = serializers.CharField(source='document.title', read_only=True)
+
+    class Meta:
+        model = DocumentAudit
+        fields = '__all__'
+        read_only_fields = ('id', 'timestamp')
 
 
 class DocumentTemplateSerializer(serializers.ModelSerializer):
@@ -30,6 +66,8 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
 
 
 class DocumentFolderSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True)
+
     class Meta:
         model = DocumentFolder
         fields = '__all__'
@@ -41,6 +79,14 @@ class DocumentSerializer(serializers.ModelSerializer):
     project_reference = serializers.CharField(source='project.reference_number', read_only=True)
     versions = VersionSerializer(many=True, read_only=True)
     approvals = ApprovalSerializer(source='approval_records', many=True, read_only=True)
+    reviews = DocumentReviewSerializer(many=True, read_only=True)
+    
+    # Linked Modules
+    bim_model_name = serializers.CharField(source='linked_bim_model.name', read_only=True, default=None)
+    inspection_reference = serializers.CharField(source='linked_inspection.inspection_reference', read_only=True, default=None)
+    compliance_case_reference = serializers.CharField(source='linked_compliance_case.ncr_reference', read_only=True, default=None)
+    approval_request_reference = serializers.CharField(source='linked_approval.request_reference', read_only=True, default=None)
+
     versions_count = serializers.SerializerMethodField()
     expiry_status = serializers.SerializerMethodField()
 
