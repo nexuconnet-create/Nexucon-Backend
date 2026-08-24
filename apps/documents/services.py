@@ -3,6 +3,7 @@ import hashlib
 import uuid
 import datetime
 import mimetypes
+from pathlib import Path
 from django.utils import timezone
 from django.conf import settings
 from .models import (
@@ -12,10 +13,25 @@ from .models import (
 from apps.projects.models import Project
 from apps.audit.models import AuditEvent
 
-# Cloudflare R2 Storage Constants from .env
-R2_BUCKET_NAME = os.environ.get('CLOUDFLARE_R2_BUCKET_NAME', 'nexucondocument')
-R2_ENDPOINT_URL = os.environ.get('CLOUDFLARE_R2_ENDPOINT_URL', 'https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com')
-R2_API_URL = os.environ.get('CLOUDFLARE_R2_API_URL', f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}")
+# Cloudflare R2 Storage Constants from .env or settings
+def _get_env_val(key, default=''):
+    val = os.environ.get(key)
+    if not val:
+        # Check backend/.env
+        env_p = Path(__file__).resolve().parent.parent.parent / '.env'
+        if env_p.exists():
+            try:
+                with open(env_p, 'r') as f:
+                    for line in f:
+                        if line.strip().startswith(f"{key}="):
+                            return line.split('=', 1)[1].strip().strip("'\"")
+            except Exception:
+                pass
+    return val or default
+
+R2_BUCKET_NAME = _get_env_val('CLOUDFLARE_R2_BUCKET_NAME', 'nexucondocument')
+R2_ENDPOINT_URL = _get_env_val('CLOUDFLARE_R2_ENDPOINT_URL', 'https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com')
+R2_API_URL = _get_env_val('CLOUDFLARE_R2_API_URL', f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}")
 
 
 class DocumentStorageService:
@@ -58,8 +74,8 @@ class DocumentStorageService:
         file_url = f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}/{unique_key}"
 
         # Try boto3 S3 upload if AWS / R2 credentials exist in environment
-        access_key = os.environ.get('CLOUDFLARE_R2_ACCESS_KEY_ID') or os.environ.get('AWS_ACCESS_KEY_ID')
-        secret_key = os.environ.get('CLOUDFLARE_R2_SECRET_ACCESS_KEY') or os.environ.get('AWS_SECRET_ACCESS_KEY')
+        access_key = _get_env_val('CLOUDFLARE_R2_ACCESS_KEY_ID') or _get_env_val('AWS_ACCESS_KEY_ID')
+        secret_key = _get_env_val('CLOUDFLARE_R2_SECRET_ACCESS_KEY') or _get_env_val('AWS_SECRET_ACCESS_KEY')
         
         if access_key and secret_key:
             try:
@@ -79,12 +95,17 @@ class DocumentStorageService:
                     except Exception:
                         pass
                 file_body = uploaded_file.read() if hasattr(uploaded_file, 'read') else uploaded_file
+                content_type, _ = mimetypes.guess_type(clean_name)
+                if not content_type:
+                    content_type = getattr(uploaded_file, 'content_type', 'application/octet-stream')
+
                 s3_client.put_object(
                     Bucket=R2_BUCKET_NAME,
                     Key=unique_key,
                     Body=file_body,
                     ContentType=content_type or 'application/octet-stream'
                 )
+                print(f"[R2 Storage] Successfully streamed {unique_key} to Cloudflare R2 bucket: {R2_BUCKET_NAME}")
             except Exception as e:
                 print(f"[R2 Storage] Warning during direct S3 stream: {e}")
 
