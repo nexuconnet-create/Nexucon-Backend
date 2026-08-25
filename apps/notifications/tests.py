@@ -104,3 +104,22 @@ class NotificationTestCase(TestCase):
             entity_id="apr-991"
         )
         self.assertEqual(EmailDelivery.objects.filter(recipient_user=self.user).count(), 1)
+
+    def test_respond_to_notification_directive(self):
+        """Test submitting official directive response from sidepop drawer."""
+        notif = Notification.objects.create(
+            recipient=self.user,
+            category='COMPLIANCE',
+            title='Non-conformance NCR-019 Flagged',
+            message='Rebar spacing defect flagged at Section 3.',
+            priority='High',
+            is_read=False
+        )
+        res = self.client.post(f'/api/v1/notifications/{notif.id}/respond/', {
+            'comment': 'Directing site engineer to re-verify rebar ties before 5 PM.'
+        })
+        self.assertEqual(res.status_code, 200)
+        notif.refresh_from_db()
+        self.assertTrue(notif.is_read)
+        self.assertEqual(notif.metadata.get('last_directive'), 'Directing site engineer to re-verify rebar ties before 5 PM.')
+        self.assertEqual(len(notif.metadata.get('responses', [])), 1)
