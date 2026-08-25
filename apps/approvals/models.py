@@ -13,7 +13,8 @@ def generate_decision_ref():
 
 class ApprovalRequest(models.Model):
     """
-    Core approval instance for Permits, Documents, Technical Reviews, and Escalated Items.
+    Core centralized approval instance for Permits, Documents, Technical Reviews,
+    BIM Versions, GPR findings, Inspections, and Milestones.
     """
     TYPE_CHOICES = (
         ('Document', 'Document Signature'),
@@ -51,6 +52,17 @@ class ApprovalRequest(models.Model):
         ('Escalated', 'Escalated to Director / DG'),
     )
 
+    ENTITY_TYPE_CHOICES = (
+        ('PermitApplication', 'Permit Application'),
+        ('Document', 'Project Document / Version'),
+        ('BIMModel', 'BIM Coordination Model'),
+        ('Inspection', 'Site Inspection Report'),
+        ('Milestone', 'Construction Milestone'),
+        ('ComplianceReview', 'Compliance Review / Audit'),
+        ('GPRFinding', 'GPR Subsurface Finding'),
+        ('General', 'General Entity'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     request_reference = models.CharField(max_length=100, db_index=True, null=True, blank=True, default=generate_request_ref)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='approval_requests')
@@ -68,8 +80,20 @@ class ApprovalRequest(models.Model):
     submitted_by_name = models.CharField(max_length=255, default='Apex Engineering')
     submitter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_approvals')
     
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_approvals')
+    assigned_to_name = models.CharField(max_length=255, blank=True, null=True, default='Lead Government Reviewer')
+    
     due_date = models.DateField(null=True, blank=True)
     description = models.TextField(blank=True, null=True)
+    
+    # Source entity linking and cryptographic version lineage
+    source_entity_type = models.CharField(max_length=50, choices=ENTITY_TYPE_CHOICES, default='General')
+    source_entity_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    source_version_hash = models.CharField(max_length=255, blank=True, null=True)
+    
+    # Compliance gating & condition tracking
+    compliance_gate_status = models.CharField(max_length=50, default='Passed')
+    conditions_met = models.BooleanField(default=False)
     
     # Escalation / Blocker properties
     bottleneck = models.CharField(max_length=255, blank=True, null=True)
@@ -157,3 +181,30 @@ class TechnicalReviewCriteria(models.Model):
 
     def __str__(self):
         return f"{self.approval_request.request_reference} - {self.name}: {self.status}"
+
+
+class ApprovalComment(models.Model):
+    """
+    Review comments, revision requests, condition verifications, and technical findings.
+    """
+    COMMENT_TYPE_CHOICES = (
+        ('General', 'General Review Comment'),
+        ('RevisionRequest', 'Formal Revision Request'),
+        ('ConditionVerification', 'Condition Verification'),
+        ('TechnicalFinding', 'Technical / Site Finding'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    approval_request = models.ForeignKey(ApprovalRequest, on_delete=models.CASCADE, related_name='comments')
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='approval_comments')
+    author_name = models.CharField(max_length=255, default='Reviewing Official')
+    comment_type = models.CharField(max_length=50, choices=COMMENT_TYPE_CHOICES, default='General')
+    content = models.TextField()
+    attachment_url = models.CharField(max_length=500, blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.approval_request.request_reference} - {self.comment_type} by {self.author_name}"

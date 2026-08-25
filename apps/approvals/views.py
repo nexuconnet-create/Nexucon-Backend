@@ -2,9 +2,10 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.db.models import Q
-from .models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria
+from .models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria, ApprovalComment
 from .serializers import (
-    ApprovalRequestSerializer, ApprovalDecisionSerializer, TechnicalReviewCriteriaSerializer
+    ApprovalRequestSerializer, ApprovalDecisionSerializer, 
+    TechnicalReviewCriteriaSerializer, ApprovalCommentSerializer
 )
 from .services import ApprovalService
 
@@ -20,6 +21,7 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
         discipline = self.request.query_params.get('discipline')
         priority = self.request.query_params.get('priority')
         status_val = self.request.query_params.get('status')
+        source_type = self.request.query_params.get('source_entity_type')
         search = self.request.query_params.get('search')
 
         if project_id:
@@ -32,18 +34,29 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
             qs = qs.filter(priority__iexact=priority)
         if status_val and status_val.lower() != 'all':
             qs = qs.filter(status__iexact=status_val)
+        if source_type and source_type.lower() != 'all':
+            qs = qs.filter(source_entity_type__iexact=source_type)
         if search:
             qs = qs.filter(
                 Q(title__icontains=search) |
                 Q(request_reference__icontains=search) |
                 Q(submitted_by_name__icontains=search) |
-                Q(description__icontains=search)
+                Q(description__icontains=search) |
+                Q(source_version_hash__icontains=search)
             )
         return qs
 
     def perform_create(self, serializer):
         request_obj = ApprovalService.create_request(self.request.data, self.request.user)
         serializer.instance = request_obj
+
+    @action(detail=True, methods=['post'], url_path='assign')
+    def assign_reviewer(self, request, pk=None):
+        req_obj = self.get_object()
+        reviewer_name = request.data.get('reviewer_name', 'Government Reviewer')
+        reviewer_user = request.user if getattr(request.user, 'is_authenticated', False) else None
+        updated = ApprovalService.assign_reviewer(req_obj, reviewer_user, reviewer_name, request.user)
+        return Response(ApprovalRequestSerializer(updated).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='approve')
     def approve(self, request, pk=None):
@@ -65,6 +78,18 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
         decision = ApprovalService.reject_request(req_obj, request.user, reason)
         return Response({
             "message": "Request rejected",
+            "decision": ApprovalDecisionSerializer(decision).data,
+            "request": ApprovalRequestSerializer(req_obj).data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='request-revision')
+    def request_revision(self, request, pk=None):
+        req_obj = self.get_object()
+        revision_notes = request.data.get('revision_notes') or request.data.get('notes', 'Revision required.')
+        attachment = request.data.get('attachment_url')
+        decision = ApprovalService.request_revision(req_obj, request.user, revision_notes, attachment)
+        return Response({
+            "message": "Revision requested and notification sent to contractor",
             "decision": ApprovalDecisionSerializer(decision).data,
             "request": ApprovalRequestSerializer(req_obj).data
         }, status=status.HTTP_200_OK)
@@ -97,6 +122,24 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
         req_obj = self.get_object()
         updated = ApprovalService.sign_document(req_obj, request.user)
         return Response(ApprovalRequestSerializer(updated).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='compliance-gate')
+    def compliance_gate(self, request, pk=None):
+        req_obj = self.get_object()
+        gate_result = ApprovalService.evaluate_compliance_gate(req_obj)
+        return Response(gate_result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get', 'post'], url_path='comments')
+    def comments(self, request, pk=None):
+        req_obj = self.get_object()
+        if request.method == 'POST':
+            content = request.data.get('content', '')
+            ctype = request.data.get('comment_type', 'General')
+            attachment = request.data.get('attachment_url')
+            comment = ApprovalService.add_comment(req_obj, request.user, content, ctype, attachment)
+            return Response(ApprovalCommentSerializer(comment).data, status=status.HTTP_201_CREATED)
+        comments_qs = req_obj.comments.all()
+        return Response(ApprovalCommentSerializer(comments_qs, many=True).data, status=status.HTTP_200_OK)
 
 
 class ApprovalDecisionViewSet(viewsets.ReadOnlyModelViewSet):
