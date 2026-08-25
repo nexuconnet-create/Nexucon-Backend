@@ -293,7 +293,8 @@ class DocumentService:
         """
         file_meta = None
         if file_obj:
-            file_meta = DocumentStorageService.upload_file_to_r2(file_obj, folder_prefix=f"projects/{document.project.reference_number}/revisions")
+            prefix = document.project.reference_number if (document.project and document.project.reference_number) else (str(document.project.id) if document.project else "general")
+            file_meta = DocumentStorageService.upload_file_to_r2(file_obj, folder_prefix=f"projects/{prefix}/revisions")
 
         file_url = file_meta['file_url'] if file_meta else data.get('file_url', document.file_url)
         file_size = file_meta['file_size'] if file_meta else data.get('file_size', document.file_size)
