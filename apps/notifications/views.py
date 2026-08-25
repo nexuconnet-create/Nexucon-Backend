@@ -60,9 +60,14 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='read-all')
     def mark_all_read(self, request):
-        qs = self.get_queryset().filter(is_read=False)
+        category = request.data.get('category') or request.query_params.get('category')
+        qs = Notification.objects.filter(is_read=False)
+        if request.user.is_authenticated:
+            qs = qs.filter(Q(recipient=request.user) | Q(recipient__isnull=True))
+        if category and category.lower() != 'all':
+            qs = qs.filter(category__iexact=category)
         qs.update(is_read=True, read_at=timezone.now())
-        return Response({"message": "All notifications marked as read."}, status=status.HTTP_200_OK)
+        return Response({"message": "Notifications marked as read."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='acknowledge')
     def acknowledge(self, request, pk=None):
