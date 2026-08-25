@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Notification, NotificationPreference
+from .models import Notification, EmailDelivery, NotificationPreference
 
 class NotificationSerializer(serializers.ModelSerializer):
     recipient_name = serializers.CharField(source='recipient.get_full_name', read_only=True)
@@ -9,6 +9,13 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = '__all__'
         read_only_fields = ('id', 'notification_reference', 'created_at', 'read_at', 'acknowledged_at')
+
+
+class EmailDeliverySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailDelivery
+        fields = '__all__'
+        read_only_fields = ('id', 'delivery_reference', 'created_at', 'updated_at')
 
 
 class NotificationPreferenceSerializer(serializers.ModelSerializer):

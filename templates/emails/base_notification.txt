@@ -1,0 +1,20 @@
+NEXUCON STATUTORY GOVERNMENT NOTIFICATION
+=========================================
+
+Title: {{ notification_title }}
+Category: {{ category|default:"General" }}
+Priority: {{ priority|default:"Normal" }}
+
+{{ notification_message }}
+
+Project: {{ project_name|default:"N/A" }}
+Reference Code: {{ reference|default:"N/A" }}
+{% if due_date %}Deadline: {{ due_date }}{% endif %}
+{% if assigned_to %}Assigned: {{ assigned_to }}{% endif %}
+
+Access full record on government portal:
+{{ action_url }}
+
+-----------------------------------------
+Official Notification from Nexucon Regulatory Authority.
+Audit Reference: {{ reference|default:"NEX-EVENT" }}

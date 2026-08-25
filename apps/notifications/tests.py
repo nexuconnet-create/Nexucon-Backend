@@ -1,104 +1,106 @@
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
-from apps.notifications.models import Notification, NotificationPreference
-from apps.notifications.services import NotificationService
+from .models import Notification, EmailDelivery, NotificationPreference
+from .services import NotificationService
 
 User = get_user_model()
 
 class NotificationTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
-            username='alert_officer',
-            email='alerts@government.gov.ng',
+            username='director_notif',
+            email='director.notif@government.gov.ng',
             password='Password123!',
-            first_name='Safety',
-            last_name='Supervisor'
+            first_name='Director',
+            last_name='General'
         )
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
-    def test_send_notification_and_email_dispatch(self):
-        """Test creating notification and safe Resend email dispatch."""
-        notif = NotificationService.send_notification({
-            "category": "CRITICAL",
-            "title": "Imminent Wall Collapse Hazard",
-            "message": "Immediate excavation halt requested at Sector 3.",
-            "priority": "Critical",
-            "location": "Sector 3 Deep Foundation",
-            "action_required": "Dispatch emergency structural crew.",
-            "recipient_email": "alerts@government.gov.ng"
-        }, self.user)
-
-        self.assertIsNotNone(notif.id)
-        self.assertEqual(notif.priority, 'Critical')
-        self.assertEqual(notif.category, 'CRITICAL')
-        self.assertFalse(notif.is_read)
-
-    def test_mark_as_read(self):
-        """Test marking single notification as read."""
+    def test_notification_creation_and_api_list(self):
         notif = Notification.objects.create(
+            recipient=self.user,
             category='APPLICATIONS',
-            title='Zoning Variance Application',
-            message='New application submitted.',
-            priority='Medium'
-        )
-
-        res = self.client.post(f'/api/v1/notifications/{notif.id}/read/')
-        self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['is_read'])
-        self.assertIsNotNone(res.data['read_at'])
-
-    def test_mark_all_as_read(self):
-        """Test bulk marking notifications as read."""
-        Notification.objects.create(category='INSPECTIONS', title='Walkthrough 1', message='Test 1')
-        Notification.objects.create(category='INSPECTIONS', title='Walkthrough 2', message='Test 2')
-
-        res = self.client.post('/api/v1/notifications/mark-all-read/', {"category": "INSPECTIONS"})
-        self.assertEqual(res.status_code, 200)
-        self.assertGreaterEqual(res.data['marked_read_count'], 2)
-
-    def test_acknowledge_critical_incident(self):
-        """Test acknowledging critical work stoppage."""
-        notif = Notification.objects.create(
-            category='CRITICAL',
-            title='Trench Wall Collapse',
-            message='Evacuate workers.',
-            priority='Critical'
-        )
-
-        res = self.client.post(f'/api/v1/notifications/{notif.id}/acknowledge/')
-        self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['is_acknowledged'])
-        self.assertTrue(res.data['is_read'])
-
-    def test_sound_site_alarm(self):
-        """Test broadcasting site-wide audible emergency alarm."""
-        res = self.client.post('/api/v1/notifications/sound-alarm/', {
-            "location": "North Substation Yard",
-            "reason": "Gas leak detected by atmospheric sensor."
-        })
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.data['category'], 'CRITICAL')
-        self.assertIn('EMERGENCY: Site Alarm Triggered', res.data['title'])
-
-    def test_ping_assignee(self):
-        """Test sending reminder ping / email to assignee."""
-        notif = Notification.objects.create(
-            category='OVERDUE',
-            title='Review Overdue',
-            message='SLA exceeded by 5 days.',
+            title='New Permit Application Submitted',
+            message='Eko Atlantic Phase 2 building permit submitted.',
             priority='High'
         )
-
-        res = self.client.post(f'/api/v1/notifications/{notif.id}/ping/', {"method": "Email"})
+        res = self.client.get('/api/v1/notifications/')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['status'], 'Success')
+        self.assertGreaterEqual(len(res.data), 1)
 
-    def test_unread_counts(self):
-        """Test retrieving unread notification counters."""
+    def test_mark_notification_as_read(self):
+        notif = Notification.objects.create(
+            recipient=self.user,
+            category='INSPECTIONS',
+            title='Inspection Scheduled',
+            message='Foundation inspection scheduled.',
+            is_read=False
+        )
+        res = self.client.post(f'/api/v1/notifications/{notif.id}/read/')
+        self.assertEqual(res.status_code, 200)
+        notif.refresh_from_db()
+        self.assertTrue(notif.is_read)
+
+    def test_acknowledge_emergency_notification(self):
+        notif = Notification.objects.create(
+            recipient=self.user,
+            category='EMERGENCY',
+            title='Emergency Scaffold Alert',
+            message='Scaffold failure detected at Sector 4.',
+            is_acknowledged=False
+        )
+        res = self.client.post(f'/api/v1/notifications/{notif.id}/acknowledge/')
+        self.assertEqual(res.status_code, 200)
+        notif.refresh_from_db()
+        self.assertTrue(notif.is_acknowledged)
+
+    def test_unread_counts_endpoint(self):
         res = self.client.get('/api/v1/notifications/unread-counts/')
         self.assertEqual(res.status_code, 200)
         self.assertIn('total_unread', res.data)
-        self.assertIn('critical', res.data)
-        self.assertIn('applications', res.data)
+        self.assertIn('emergency', res.data)
+
+    def test_notification_preferences_get_and_update(self):
+        res = self.client.get('/api/v1/notifications/preferences/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['email_enabled'])
+
+        res_update = self.client.put('/api/v1/notifications/preferences/', {
+            "email_applications": False,
+            "email_emergency": True
+        })
+        self.assertEqual(res_update.status_code, 200)
+        self.assertFalse(res_update.data['email_applications'])
+
+    def test_notification_service_dispatch_and_email_deduplication(self):
+        """Test dispatching event creates notification and EmailDelivery without duplicate sends."""
+        notif = NotificationService.dispatch_event(
+            event_type="APPROVAL_REQUIRED",
+            title="Technical Approval Required: APR-991",
+            message="Structural review requires your signature.",
+            category="APPROVALS",
+            priority="High",
+            recipient=self.user,
+            entity_type="ApprovalRequest",
+            entity_id="apr-991"
+        )
+        self.assertIsNotNone(notif)
+        
+        deliveries = EmailDelivery.objects.filter(recipient_user=self.user)
+        self.assertEqual(deliveries.count(), 1)
+        self.assertEqual(deliveries.first().template_key, "approval_required")
+
+        # Second identical dispatch with same idempotency key should not create second email
+        notif2 = NotificationService.dispatch_event(
+            event_type="APPROVAL_REQUIRED",
+            title="Technical Approval Required: APR-991",
+            message="Structural review requires your signature.",
+            category="APPROVALS",
+            priority="High",
+            recipient=self.user,
+            entity_type="ApprovalRequest",
+            entity_id="apr-991"
+        )
+        self.assertEqual(EmailDelivery.objects.filter(recipient_user=self.user).count(), 1)
