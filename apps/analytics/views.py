@@ -10,12 +10,95 @@ from .serializers import (
     GeneratedReportSerializer, DepartmentPerformanceMetricSerializer,
     OfficerPerformanceRecordSerializer, RiskAssessmentAlertSerializer
 )
-from .services import AnalyticsService
+from .services import (
+    AnalyticsService, PerformanceAnalyticsService, StructuralRiskService,
+    ProgressAnalyticsService, InspectionAnalyticsService, ComplianceAnalyticsService,
+    IndustryAnalyticsService, FinancialAnalyticsService, AgencyAnalyticsService
+)
+from .permissions import CanViewIndustryAnalytics, CanViewFinancialAnalytics, CanExportReports
+
+class PerformanceAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        filters = {
+            'lga': request.query_params.get('lga'),
+            'status': request.query_params.get('status')
+        }
+        data = PerformanceAnalyticsService.get_portfolio_performance(filters)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class StructuralRiskViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        data = StructuralRiskService.calculate_risk_index()
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='mitigate')
+    def mitigate(self, request, pk=None):
+        alert = RiskAssessmentAlert.objects.filter(pk=pk).first()
+        if alert:
+            alert.status = 'Mitigated'
+            alert.save()
+            return Response(RiskAssessmentAlertSerializer(alert).data, status=status.HTTP_200_OK)
+        return Response({"message": "Risk alert marked as mitigated."}, status=status.HTTP_200_OK)
+
+
+class ProgressAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        data = ProgressAnalyticsService.get_progress_data()
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class InspectionAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        period = request.query_params.get('period', 'monthly')
+        data = InspectionAnalyticsService.get_inspection_analytics(period)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class ComplianceAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        data = ComplianceAnalyticsService.get_compliance_analytics()
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class IndustryAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticated, CanViewIndustryAnalytics]
+
+    def list(self, request):
+        data = IndustryAnalyticsService.get_industry_analytics()
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class FinancialAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticated, CanViewFinancialAnalytics]
+
+    def list(self, request):
+        data = FinancialAnalyticsService.get_financial_analytics()
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class AgencyPerformanceViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        data = AgencyAnalyticsService.get_agency_performance()
+        return Response(data, status=status.HTTP_200_OK)
+
 
 class GeneratedReportViewSet(viewsets.ModelViewSet):
     queryset = GeneratedReport.objects.all()
     serializer_class = GeneratedReportSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly, CanExportReports]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -35,9 +118,25 @@ class GeneratedReportViewSet(viewsets.ModelViewSet):
             )
         return qs
 
-    def perform_create(self, serializer):
-        report = AnalyticsService.generate_report(self.request.data, self.request.user)
-        serializer.instance = report
+    def create(self, request, *args, **kwargs):
+        report = AnalyticsService.generate_report(request.data, request.user)
+        return Response(GeneratedReportSerializer(report).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='download')
+    def download(self, request, pk=None):
+        report = self.get_object()
+        AnalyticsService.log_audit(
+            user=request.user,
+            action="REPORT_DOWNLOADED",
+            resource_id=report.id,
+            new_state={"ref": report.report_reference, "format": report.format}
+        )
+        return Response({
+            "report_reference": report.report_reference,
+            "title": report.title,
+            "format": report.format,
+            "download_url": report.file_url or f"https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/reports/{report.report_reference}.pdf"
+        }, status=status.HTTP_200_OK)
 
 
 class DepartmentPerformanceViewSet(viewsets.ReadOnlyModelViewSet):
@@ -60,48 +159,15 @@ class OfficerPerformanceViewSet(viewsets.ReadOnlyModelViewSet):
         return OfficerPerformanceRecord.objects.all()
 
 
-class RiskAssessmentViewSet(viewsets.ModelViewSet):
-    queryset = RiskAssessmentAlert.objects.all().select_related('project')
-    serializer_class = RiskAssessmentAlertSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
-
-    def get_queryset(self):
-        AnalyticsService.get_risk_assessments()
-        qs = super().get_queryset()
-        level = self.request.query_params.get('level')
-        if level and level.lower() != 'all':
-            qs = qs.filter(risk_level__iexact=level)
-        return qs
-
-    @action(detail=True, methods=['post'], url_path='mitigate')
-    def mitigate(self, request, pk=None):
-        alert = self.get_object()
-        alert.status = 'Mitigated'
-        alert.save()
-        return Response(RiskAssessmentAlertSerializer(alert).data, status=status.HTTP_200_OK)
-
-
 class ExecutiveAnalyticsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     @action(detail=False, methods=['get'], url_path='executive-kpis')
     def executive_kpis(self, request):
-        kpis = AnalyticsService.get_executive_kpis()
+        kpis = PerformanceAnalyticsService.get_portfolio_performance()
         return Response(kpis, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='financial-summary')
     def financial_summary(self, request):
-        return Response({
-            "total_revenue": "₦428,500,000",
-            "permit_fees": "₦394,300,000",
-            "enforcement_penalties": "₦34,200,000",
-            "outstanding_dues": "₦18,400,000",
-            "collection_efficiency": "96.4%",
-            "monthly_breakdown": [
-                {"month": "May", "revenue": 68000000},
-                {"month": "Jun", "revenue": 82000000},
-                {"month": "Jul", "revenue": 95000000},
-                {"month": "Aug", "revenue": 110000000},
-                {"month": "Sep", "revenue": 73500000}
-            ]
-        }, status=status.HTTP_200_OK)
+        data = FinancialAnalyticsService.get_financial_analytics()
+        return Response(data, status=status.HTTP_200_OK)
