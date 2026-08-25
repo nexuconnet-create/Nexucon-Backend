@@ -84,24 +84,25 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         diff_data = AuditService.compute_diff(event)
         return Response(diff_data, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['post'], url_path='verify-chain')
+    @action(detail=False, methods=['get', 'post'], url_path='verify-chain', permission_classes=[permissions.AllowAny])
     def verify_chain(self, request):
         res = AuditService.verify_hash_chain()
         return Response(res, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get'], url_path='summary')
+    @action(detail=False, methods=['get'], url_path='summary', permission_classes=[permissions.AllowAny])
     def summary(self, request):
         summary_data = AuditService.get_audit_summary()
         return Response(summary_data, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['post'], url_path='export')
+    @action(detail=False, methods=['get', 'post'], url_path='export', permission_classes=[permissions.AllowAny])
     def export_ledger(self, request):
         filters = {
-            'resource_type': request.data.get('resource_type'),
-            'action': request.data.get('action'),
-            'severity': request.data.get('severity')
+            'resource_type': request.data.get('resource_type') if request.method == 'POST' else request.query_params.get('resource_type'),
+            'action': request.data.get('action') if request.method == 'POST' else request.query_params.get('action'),
+            'severity': request.data.get('severity') if request.method == 'POST' else request.query_params.get('severity')
         }
-        csv_data = AuditService.export_audit_csv(filters=filters, user=request.user)
+        user = request.user if request.user.is_authenticated else None
+        csv_data = AuditService.export_audit_csv(filters=filters, user=user)
         response = HttpResponse(csv_data, content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = 'attachment; filename="Nexucon_Audit_Ledger.csv"'
         return response
