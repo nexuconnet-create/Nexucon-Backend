@@ -108,8 +108,8 @@ class StructuralRiskService:
         hotspot_structures = []
         for alert in alerts:
             contributors = [
-                {"type": "Inspection", "severity": "Critical", "description": "LiDAR deflection anomaly detected on Sector 4 slab", "link": "/government/dashboard/inspections"},
-                {"type": "BIM Deviation", "severity": "Major", "description": "Unresolved clash in MEP core conduit vs structural beam", "link": "/government/dashboard/bim/matrix"},
+                {"type": "Inspection", "severity": "Critical", "description": "LiDAR deflection anomaly detected on Sector 4 slab", "link": "/government/dashboard/inspections/findings"},
+                {"type": "BIM Deviation", "severity": "Major", "description": "Unresolved clash in MEP core conduit vs structural beam", "link": "/government/dashboard/bim/clashes"},
                 {"type": "Compliance NCR", "severity": "Major", "description": "Batch rebar tensile test certificates overdue by 14 days", "link": "/government/dashboard/compliance/non-conformances"}
             ]
             hotspot_structures.append({
