@@ -79,6 +79,50 @@ class NotificationViewSet(viewsets.ModelViewSet):
         notif.save()
         return Response(NotificationSerializer(notif).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], url_path='respond')
+    def respond(self, request, pk=None):
+        """
+        Record a statutory directive, decision, or officer comment from the quick sidepop drawer.
+        """
+        notif = self.get_object()
+        comment = request.data.get('comment') or request.data.get('directive') or request.data.get('message', '')
+        action_type = request.data.get('action_type', 'DIRECTIVE')
+
+        # Mark as read
+        notif.is_read = True
+        notif.read_at = timezone.now()
+
+        # Update metadata with responses trail
+        meta = notif.metadata or {}
+        responses = meta.get('responses', [])
+        user_name = request.user.get_full_name() or request.user.username if request.user.is_authenticated else 'Government Official'
+        
+        responses.append({
+            'comment': comment,
+            'action_type': action_type,
+            'officer': user_name,
+            'timestamp': timezone.now().isoformat()
+        })
+        meta['responses'] = responses
+        meta['last_directive'] = comment
+        notif.metadata = meta
+        notif.save()
+
+        # Log audit event
+        try:
+            from apps.audit.models import AuditEvent
+            AuditEvent.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                action="NOTIFICATION_DIRECTIVE_SUBMITTED",
+                resource_type="Notification",
+                resource_id=str(notif.id),
+                new_state={"directive": comment, "reference": notif.notification_reference}
+            )
+        except Exception:
+            pass
+
+        return Response(NotificationSerializer(notif).data, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['get'], url_path='unread-counts')
     def unread_counts(self, request):
         all_notifs = Notification.objects.all()
