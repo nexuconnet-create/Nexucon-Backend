@@ -36,18 +36,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.AllowAny]
 
     def create(self, request, *args, **kwargs):
-        file_obj = request.FILES.get('file')
-        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-        
-        project_val = data.get('project_id') or data.get('project')
-        if isinstance(project_val, list) and project_val:
-            project_val = project_val[0]
-        data['project'] = project_val
-        data['project_id'] = project_val
+        try:
+            file_obj = request.FILES.get('file')
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+            
+            project_val = data.get('project_id') or data.get('project')
+            if isinstance(project_val, list) and project_val:
+                project_val = project_val[0]
+            data['project'] = project_val
+            data['project_id'] = project_val
 
-        doc = DocumentService.upload_document(data, request.user, file_obj=file_obj)
-        serializer = self.get_serializer(doc)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+            doc = DocumentService.upload_document(data, request.user, file_obj=file_obj)
+            serializer = self.get_serializer(doc)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def get_queryset(self):
         qs = super().get_queryset()
