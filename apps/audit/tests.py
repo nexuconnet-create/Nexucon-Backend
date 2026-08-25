@@ -87,3 +87,28 @@ class AuditTestCase(TestCase):
         self.assertIn('total_records', res.data)
         self.assertIn('chain_status', res.data)
         self.assertIn('active_sessions', res.data)
+
+    def test_module_filtering(self):
+        """Test server-side module filtering (approvals, inspections, documents)."""
+        AuditService.log_event("APPROVAL_GRANTED", "ApprovalRequest", "APR-1", user=self.user)
+        AuditService.log_event("INSPECTION_COMPLETED", "Inspection", "INS-1", user=self.user)
+
+        res_app = self.client.get('/api/v1/audit/events/?module=approvals')
+        self.assertEqual(res_app.status_code, 200)
+        for item in res_app.data:
+            self.assertTrue('Approval' in item['resource_type'] or 'APPROV' in item['action'] or 'Decision' in item['resource_type'])
+
+        res_insp = self.client.get('/api/v1/audit/events/?module=inspections')
+        self.assertEqual(res_insp.status_code, 200)
+        for item in res_insp.data:
+            self.assertTrue('Inspection' in item['resource_type'] or 'INSPECT' in item['action'])
+
+    def test_export_endpoint_and_audit_provenance(self):
+        """Test exporting audit ledger produces CSV and records export in the audit ledger."""
+        res = self.client.post('/api/v1/audit/events/export/', {})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res['Content-Type'], 'text/csv; charset=utf-8')
+
+        # Check export activity was logged
+        export_events = AuditEvent.objects.filter(action="AUDIT_LEDGER_EXPORTED")
+        self.assertTrue(export_events.exists())
