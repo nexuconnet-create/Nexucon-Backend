@@ -86,7 +86,12 @@ class DocumentStorageService:
                     endpoint_url=R2_ENDPOINT_URL,
                     aws_access_key_id=access_key,
                     aws_secret_access_key=secret_key,
-                    config=Config(signature_version='s3v4'),
+                    config=Config(
+                        signature_version='s3v4',
+                        connect_timeout=10,
+                        read_timeout=30,
+                        retries={'max_attempts': 2}
+                    ),
                     region_name='auto'
                 )
                 if hasattr(uploaded_file, 'seek'):
