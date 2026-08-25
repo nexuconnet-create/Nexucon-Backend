@@ -250,3 +250,42 @@ class TrainingRecord(models.Model):
 
     def __str__(self):
         return f"{self.course_name}"
+
+
+class MessageTranslation(models.Model):
+    """
+    Multilingual machine translation caching layer for stakeholder communications.
+    Supports English (en), Yorùbá (yo), Igbo (ig), and Hausa (ha).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    message = models.ForeignKey(StakeholderMessage, on_delete=models.CASCADE, related_name='translations')
+    target_language = models.CharField(max_length=10, db_index=True)
+    translated_content = models.TextField()
+    provider = models.CharField(max_length=100, default='Google Cloud Translation')
+    translation_version = models.CharField(max_length=50, default='v3.0')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('message', 'target_language')
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Translation [{self.target_language}]: {self.message_id}"
+
+
+class MeetingActionItem(models.Model):
+    """Actionable items and deliverables assigned during official council sessions."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    meeting = models.ForeignKey(StakeholderMeeting, on_delete=models.CASCADE, related_name='action_items')
+    title = models.CharField(max_length=255)
+    assignee_name = models.CharField(max_length=255, default='Project Lead')
+    due_date = models.CharField(max_length=100, default='Within 5 Business Days')
+    is_completed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.title} ({'Done' if self.is_completed else 'Pending'})"

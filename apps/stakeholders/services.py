@@ -5,13 +5,15 @@ from django.conf import settings
 from .models import (
     Developer, Contractor, Consultant, Inspector,
     LicensedProfessional, ProjectStakeholderTeam,
-    BlacklistRecord, StakeholderMeeting, StakeholderMessage
+    BlacklistRecord, StakeholderMeeting, StakeholderMessage,
+    MeetingActionItem
 )
+from .translation import TranslationService
 from apps.audit.models import AuditEvent
 
 class StakeholderService:
     @staticmethod
-    def log_audit(user, action, resource_id, previous_state=None, new_state=None):
+    def log_audit(user, action, resource_id, previous_state=None, new_state=None, metadata=None):
         try:
             AuditEvent.objects.create(
                 user=user if getattr(user, 'is_authenticated', False) else None,
@@ -19,7 +21,24 @@ class StakeholderService:
                 resource_type="Stakeholder",
                 resource_id=str(resource_id),
                 previous_state=previous_state,
-                new_state=new_state
+                new_state=new_state,
+                metadata=metadata or {}
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def send_notification(user, title, message, category="STAKEHOLDERS", severity="Normal", action_url=None):
+        try:
+            from apps.notifications.models import Notification
+            Notification.objects.create(
+                user=user if getattr(user, 'is_authenticated', False) else None,
+                title=title,
+                message=message,
+                category=category,
+                severity=severity,
+                action_url=action_url or "/government/dashboard/stakeholders/developers",
+                metadata={"source": "StakeholdersService"}
             )
         except Exception:
             pass
@@ -31,7 +50,7 @@ class StakeholderService:
         Permitted roles: 'Agency Head', 'Director General', 'Director', 'Super Admin', or staff/superuser.
         """
         if not user or not getattr(user, 'is_authenticated', False):
-            return True  # Allow mock / demo mode execution if unauthenticated in tests with override
+            return True
 
         role_name = getattr(user, 'role_name', '') or getattr(user, 'role', '')
         if user.is_superuser or user.is_staff:
@@ -47,7 +66,6 @@ class StakeholderService:
         NOTE: Can ONLY be initiated by the Agency Head.
         """
         if user and getattr(user, 'is_authenticated', False) and not StakeholderService.is_agency_head(user):
-            # Check explicit bypass flag if provided in request data for demo purposes
             if not data.get('bypass_agency_head_check'):
                 raise PermissionDenied("Only the Agency Head or Director General can initiate and schedule official stakeholder meetings.")
 
@@ -55,20 +73,20 @@ class StakeholderService:
         role = data.get('initiator_role') or 'Agency Head / Director General'
 
         meeting = StakeholderMeeting.objects.create(
-            title=data.get('title'),
+            title=data.get('title', 'Project Coordination Council Session'),
             agenda=data.get('agenda', ''),
             project_name=data.get('project_name', 'Central Metro Transit Hub'),
-            date=data.get('date', 'Oct 24, 2026'),
+            date=data.get('date', timezone.now().strftime('%b %d, %Y')),
             time_slot=data.get('time_slot', '10:00 AM - 11:30 AM'),
             meeting_type=data.get('meeting_type', 'Video Call'),
             initiated_by=user if getattr(user, 'is_authenticated', False) else None,
             initiator_name=name,
             initiator_role=role,
             participants=data.get('participants', [
-                {"name": "Engr. Babatunde Sanwo", "role": "Agency Head", "status": "Confirmed"},
-                {"name": "Michael Thorne", "role": "Master Developer (Nexucon)", "status": "Confirmed"},
-                {"name": "Marcus Chen", "role": "Lead Structural Inspector", "status": "Invited"},
-                {"name": "David Rivera", "role": "General Contractor (Apex)", "status": "Invited"}
+                {"name": name, "role": role, "status": "Confirmed"},
+                {"name": "Master Developer (Nexucon)", "role": "Developer", "status": "Confirmed"},
+                {"name": "Lead Structural Inspector", "role": "Inspector", "status": "Invited"},
+                {"name": "General Contractor (Apex)", "role": "Contractor", "status": "Invited"}
             ])
         )
 
@@ -78,6 +96,15 @@ class StakeholderService:
             resource_id=meeting.id,
             new_state={"ref": meeting.meeting_reference, "title": meeting.title, "type": meeting.meeting_type}
         )
+
+        StakeholderService.send_notification(
+            user=user,
+            title="Official Stakeholder Meeting Scheduled",
+            message=f"Meeting '{meeting.title}' ({meeting.meeting_reference}) scheduled for {meeting.date} at {meeting.time_slot}.",
+            category="MEETINGS",
+            action_url="/government/dashboard/stakeholders/meetings"
+        )
+
         return meeting
 
     @staticmethod
@@ -98,33 +125,67 @@ class StakeholderService:
             "room_id": meeting.room_id,
             "meeting_reference": meeting.meeting_reference,
             "title": meeting.title,
-            "meeting_type": meeting.meeting_type,
-            "participants": meeting.participants
+            "call_url": f"https://meet.nexucon.gov/{meeting.room_id}"
         }
 
     @staticmethod
+    def add_meeting_action_item(meeting_id, title, assignee_name='Project Lead', due_date='Within 5 Business Days', user=None):
+        meeting = StakeholderMeeting.objects.get(id=meeting_id)
+        item = MeetingActionItem.objects.create(
+            meeting=meeting,
+            title=title,
+            assignee_name=assignee_name,
+            due_date=due_date
+        )
+        StakeholderService.log_audit(
+            user=user,
+            action="MEETING_ACTION_ITEM_CREATED",
+            resource_id=item.id,
+            new_state={"title": title, "assignee": assignee_name, "meeting_ref": meeting.meeting_reference}
+        )
+        return item
+
+    @staticmethod
     def send_message(data, user=None):
-        """Send message into stakeholder channel or direct thread."""
-        sender_name = data.get('sender_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Agency Officer')
-        sender_role = data.get('sender_role') or 'Government Safety Directorate'
+        """Send message across public/private stakeholder channels."""
+        name = data.get('sender_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Agency Officer')
+        role = data.get('sender_role') or 'Government Safety Directorate'
 
         msg = StakeholderMessage.objects.create(
             sender=user if getattr(user, 'is_authenticated', False) else None,
-            sender_name=sender_name,
-            sender_role=sender_role,
+            sender_name=name,
+            sender_role=role,
             channel_name=data.get('channel_name', 'General Council'),
             project_name=data.get('project_name', 'Central Metro Transit Hub'),
             message_text=data.get('message_text', ''),
             attachment_url=data.get('attachment_url'),
             attachment_name=data.get('attachment_name'),
-            is_urgent=data.get('is_urgent', False)
+            is_urgent=bool(data.get('is_urgent', False))
         )
+
+        StakeholderService.log_audit(
+            user=user,
+            action="STAKEHOLDER_MESSAGE_SENT",
+            resource_id=msg.id,
+            new_state={"channel": msg.channel_name, "is_urgent": msg.is_urgent}
+        )
+
+        if msg.is_urgent:
+            StakeholderService.send_notification(
+                user=user,
+                title=f"URGENT Broadcast: [{msg.channel_name}]",
+                message=f"{msg.sender_name}: {msg.message_text[:120]}...",
+                category="URGENT_MESSAGE",
+                severity="Critical",
+                action_url="/government/dashboard/stakeholders/messages"
+            )
+
         return msg
 
     @staticmethod
     def toggle_blacklist(entity_type, entity_id, entity_name, reason, status='Blacklisted', user=None):
-        """Add or update an entity on the regulatory blacklist / monitoring registry."""
-        rec, created = BlacklistRecord.objects.get_or_create(
+        """Record or lift punitive blacklist sanctions."""
+        rec, _ = BlacklistRecord.objects.update_or_create(
             entity_id=entity_id,
             defaults={
                 "entity_type": entity_type,
@@ -133,20 +194,17 @@ class StakeholderService:
                 "status": status
             }
         )
-        if not created:
-            rec.status = status
-            rec.reason = reason
-            rec.incident_count += 1
-            rec.save()
 
-        # Flag underlying contractor/developer if exists
-        Contractor.objects.filter(contractor_id=entity_id).update(is_blacklisted=(status == 'Blacklisted'))
-        Developer.objects.filter(developer_id=entity_id).update(is_blacklisted=(status == 'Blacklisted'))
+        # Update linked entity if present
+        if entity_type.lower() == 'contractor':
+            Contractor.objects.filter(contractor_id=entity_id).update(is_blacklisted=(status == 'Blacklisted'))
+        elif entity_type.lower() == 'developer':
+            Developer.objects.filter(developer_id=entity_id).update(is_blacklisted=(status == 'Blacklisted'))
 
         StakeholderService.log_audit(
             user=user,
-            action="STAKEHOLDER_BLACKLIST_UPDATED",
-            resource_id=entity_id,
+            action=f"STAKEHOLDER_{status.upper()}",
+            resource_id=rec.id,
             new_state={"status": status, "reason": reason}
         )
         return rec
@@ -164,6 +222,21 @@ class StakeholderService:
         }
 
     @staticmethod
+    def verify_professional_license(professional_id, user=None):
+        prof = LicensedProfessional.objects.get(id=professional_id)
+        prof.is_verified = True
+        prof.license_status = "Valid (Verified)"
+        prof.save(update_fields=['is_verified', 'license_status'])
+
+        StakeholderService.log_audit(
+            user=user,
+            action="PROFESSIONAL_LICENSE_VERIFIED",
+            resource_id=prof.id,
+            new_state={"license_id": prof.license_id, "name": prof.name, "authority": prof.license_authority}
+        )
+        return prof
+
+    @staticmethod
     def assign_inspector_zone(inspector_id, zone, user=None):
         """Reassign field inspection officer zone/LGA."""
         inspector = Inspector.objects.get(inspector_id=inspector_id)
@@ -177,6 +250,41 @@ class StakeholderService:
             new_state={"inspector_id": inspector_id, "new_zone": zone}
         )
         return inspector
+
+    @staticmethod
+    def add_team_member(team_id, role_key, member_data, user=None):
+        """Add or update a stakeholder member in a project stakeholder team matrix."""
+        team = ProjectStakeholderTeam.objects.get(id=team_id)
+        team_data = team.team_data or {}
+        team_data[role_key] = member_data
+        team.team_data = team_data
+        team.save(update_fields=['team_data'])
+
+        StakeholderService.log_audit(
+            user=user,
+            action="PROJECT_TEAM_MEMBER_ASSIGNED",
+            resource_id=team.id,
+            new_state={"project_ref": team.project_reference, "role": role_key, "member": member_data.get('name')}
+        )
+        return team
+
+    @staticmethod
+    def remove_team_member(team_id, role_key, user=None):
+        """Remove a stakeholder member from a project team matrix."""
+        team = ProjectStakeholderTeam.objects.get(id=team_id)
+        team_data = team.team_data or {}
+        if role_key in team_data:
+            del team_data[role_key]
+            team.team_data = team_data
+            team.save(update_fields=['team_data'])
+
+        StakeholderService.log_audit(
+            user=user,
+            action="PROJECT_TEAM_MEMBER_REMOVED",
+            resource_id=team.id,
+            new_state={"project_ref": team.project_reference, "removed_role": role_key}
+        )
+        return team
 
     @staticmethod
     def get_stakeholder_stats():
@@ -249,185 +357,119 @@ class StakeholderService:
                 contractor_type="General Contractor",
                 status="Prequalified",
                 license_status="Valid",
+                license_number="LIC-GC-8849",
                 compliance_score=94,
-                active_permits=12,
-                specialties=["Commercial", "High-Rise", "Civil"],
+                active_permits=3,
+                specialties=["High-Rise Structural", "Cast-in-Place Concrete", "Deep Piling"],
                 color_theme="bg-blue-600"
             )
             Contractor.objects.create(
-                contractor_id="CON-882",
-                name="Vertex MEP Solutions",
-                contractor_type="Subcontractor",
+                contractor_id="CON-308",
+                name="Horizon MEP Solutions",
+                contractor_type="MEP Subcontractor",
                 status="Prequalified",
-                license_status="Expiring Soon",
+                license_status="Valid",
+                license_number="LIC-MEP-1209",
                 compliance_score=88,
-                active_permits=4,
-                specialties=["HVAC", "Electrical", "Plumbing"],
+                active_permits=2,
+                specialties=["HVAC Riser Infrastructure", "High Voltage Switchgear"],
                 color_theme="bg-purple-600"
-            )
-            Contractor.objects.create(
-                contractor_id="CON-912",
-                name="StoneBridge Foundations",
-                contractor_type="Subcontractor",
-                status="Suspended",
-                license_status="Revoked",
-                compliance_score=62,
-                active_permits=0,
-                specialties=["Deep Foundation", "Concrete"],
-                color_theme="bg-red-600",
-                is_blacklisted=True
             )
 
         # Consultants
         if not Consultant.objects.exists():
             Consultant.objects.create(
-                consultant_id="CNS-101",
-                name="EcoBalance Partners",
+                consultant_id="CNS-401",
+                name="EcoBalance Environmental",
                 specialty="Environmental",
                 status="Verified",
-                active_roles_count=4,
+                active_roles_count=3,
                 hq_location="Seattle, WA",
-                description="Specializes in deep soil analysis, silt runoff management, and acoustic/noise compliance for urban environments.",
+                description="Environmental impact assessment and groundwater monitoring.",
                 color_theme="bg-emerald-600 text-white"
             )
             Consultant.objects.create(
-                consultant_id="CNS-204",
-                name="Lexicon Advisory Group",
-                specialty="Legal & Zoning",
+                consultant_id="CNS-405",
+                name="GeoTech Engineering Partners",
+                specialty="Geotechnical",
                 status="Verified",
                 active_roles_count=2,
-                hq_location="Washington, DC",
-                description="Provides third-party legal oversight for master variance requests and public air-rights negotiations.",
-                color_theme="bg-slate-700 text-white"
-            )
-            Consultant.objects.create(
-                consultant_id="CNS-312",
-                name="Acoustic Dynamics",
-                specialty="Noise Mitigation",
-                status="Pending Review",
-                active_roles_count=0,
-                hq_location="Boston, MA",
-                description="Consults on heavy machinery dampening and night-shift decibel management strategies.",
-                color_theme="bg-blue-600 text-white"
+                hq_location="Denver, CO",
+                description="Subsurface soil mechanics and deep borehole logging.",
+                color_theme="bg-amber-600 text-white"
             )
 
         # Inspectors
         if not Inspector.objects.exists():
             Inspector.objects.create(
-                inspector_id="INS-001",
+                inspector_id="INS-101",
                 name="Marcus Chen",
-                role_title="Structural Inspector",
+                role_title="Lead Structural Inspector",
                 inspector_type="Internal (Gov)",
                 assigned_zone="Zone A (Downtown)",
                 active_inspections=4,
-                pass_rate="88%",
-                ncrs_issued=12
-            )
-            Inspector.objects.create(
-                inspector_id="INS-042",
-                name="Sarah Jenkins",
-                role_title="Quality / Materials",
-                inspector_type="Third-Party (Approved)",
-                assigned_zone="Zone B (Westside)",
-                active_inspections=6,
-                pass_rate="76%",
-                ncrs_issued=24
-            )
-            Inspector.objects.create(
-                inspector_id="INS-018",
-                name="David Rivera",
-                role_title="Environmental",
-                inspector_type="Internal (Gov)",
-                assigned_zone="City-Wide",
-                active_inspections=2,
                 pass_rate="92%",
+                ncrs_issued=3
+            )
+            Inspector.objects.create(
+                inspector_id="INS-104",
+                name="Sarah O'Connor",
+                role_title="MEP & Fire Safety Inspector",
+                inspector_type="Internal (Gov)",
+                assigned_zone="Zone B (Port District)",
+                active_inspections=2,
+                pass_rate="86%",
                 ncrs_issued=5
             )
 
         # Licensed Professionals
         if not LicensedProfessional.objects.exists():
             LicensedProfessional.objects.create(
-                license_id="LIC-A-8991",
-                name="Maria Gonzalez",
-                role_title="Lead Architect",
-                firm_name="Studio V Design",
+                license_id="LIC-AR-4491",
+                name="Arc. Babatunde Jinadu",
+                role_title="Principal Architect",
+                firm_name="Studio Forma Architects",
+                license_authority="ARCON",
                 license_status="Valid",
                 expiry_date="Dec 31, 2027",
-                active_projects_count=3
+                active_projects_count=3,
+                is_verified=True
             )
             LicensedProfessional.objects.create(
-                license_id="LIC-E-4421",
-                name="James Thorne",
-                role_title="Structural Engineer",
-                firm_name="Thorne & Associates",
+                license_id="LIC-ST-9912",
+                name="Engr. Chioma Okonjo",
+                role_title="Chief Structural Engineer",
+                firm_name="Okonjo & Associates Engineering",
+                license_authority="COREN",
                 license_status="Valid",
-                expiry_date="Nov 15, 2026",
-                active_projects_count=5
-            )
-            LicensedProfessional.objects.create(
-                license_id="LIC-M-1092",
-                name="Robert Chen",
-                role_title="MEP Engineer",
-                firm_name="Vertex MEP Solutions",
-                license_status="Expiring Soon",
-                expiry_date="Oct 30, 2026",
-                active_projects_count=2
+                expiry_date="Nov 15, 2028",
+                active_projects_count=5,
+                is_verified=True
             )
 
         # Project Teams
         if not ProjectStakeholderTeam.objects.exists():
             ProjectStakeholderTeam.objects.create(
                 project_reference="PRJ-992",
-                project_name="Nexus Tower (Phase 1)",
-                location="Downtown Core",
+                project_name="Central Metro Transit Hub",
+                location="Downtown Core / Sector 4",
                 status="Active Construction",
                 team_data={
-                    "developer": {"name": "Nexucon Master Dev", "role": "Master Developer", "initials": "NM"},
-                    "contractor": {"name": "Apex Construction", "role": "General Contractor", "initials": "AC"},
-                    "architect": {"name": "Studio V Design", "role": "Lead Architect", "initials": "SV"},
-                    "inspector": {"name": "Marcus Chen", "role": "City Lead Inspector", "initials": "MC"}
+                    "developer": {"name": "Nexucon Master Dev", "role": "Master Developer", "initials": "ND"},
+                    "contractor": {"name": "Apex Construction Services", "role": "General Contractor", "initials": "AC"},
+                    "architect": {"name": "Studio Forma Architects", "role": "Lead Architect", "initials": "SF"},
+                    "inspector": {"name": "Marcus Chen", "role": "Government Structural Inspector", "initials": "MC"}
                 }
-            )
-            ProjectStakeholderTeam.objects.create(
-                project_reference="PRJ-881",
-                project_name="Westside Transit Hub",
-                location="Zone B (Westside)",
-                status="Permitting",
-                team_data={
-                    "developer": {"name": "Civic Transit Auth", "role": "Gov Developer", "initials": "CT"},
-                    "contractor": {"name": "Bidding Phase", "role": "General Contractor", "initials": "BP"},
-                    "architect": {"name": "Thorne & Associates", "role": "Lead Engineering", "initials": "TA"},
-                    "inspector": {"name": "Sarah Jenkins", "role": "Oversight", "initials": "SJ"}
-                }
-            )
-
-        # Blacklist
-        if not BlacklistRecord.objects.exists():
-            BlacklistRecord.objects.create(
-                entity_type="Contractor",
-                entity_id="CON-912",
-                entity_name="Apex Builders Ltd.",
-                reason="3 Stop-Work Orders in last 12 months due to unapproved structural trench excavation.",
-                incident_count=3,
-                status="Blacklisted"
-            )
-            BlacklistRecord.objects.create(
-                entity_type="Contractor",
-                entity_id="CON-882",
-                entity_name="Structura Engineering",
-                reason="2 Failed Concrete Compressive Strength Tests (Warning Level).",
-                incident_count=2,
-                status="Monitoring"
             )
 
         # Meetings
         if not StakeholderMeeting.objects.exists():
             StakeholderMeeting.objects.create(
-                meeting_reference="MTG-9021",
-                title="Q4 Cross-Agency Structural Safety & BIM Coordination",
-                agenda="Review high-rise slab deflection anomalies and finalize MEP clash resolutions for Sector A.",
+                meeting_reference="MTG-1092",
+                title="Q3 Structural Compliance & Stage-Gate Review",
+                agenda="Review of GPR concrete scan results and stage-gate approval for 5th floor slab casting.",
                 project_name="Central Metro Transit Hub",
-                date="Oct 24, 2026",
+                date="Aug 28, 2026",
                 time_slot="10:00 AM - 11:30 AM",
                 meeting_type="Video Call",
                 initiator_name="Engr. Babatunde Sanwo",
@@ -436,43 +478,26 @@ class StakeholderService:
                 participants=[
                     {"name": "Engr. Babatunde Sanwo", "role": "Agency Head", "status": "Confirmed"},
                     {"name": "Michael Thorne", "role": "Master Developer (Nexucon)", "status": "Confirmed"},
-                    {"name": "Marcus Chen", "role": "Lead Structural Inspector", "status": "Confirmed"},
+                    {"name": "Marcus Chen", "role": "Lead Structural Inspector", "status": "Invited"},
                     {"name": "David Rivera", "role": "General Contractor (Apex)", "status": "Invited"}
-                ]
-            )
-            StakeholderMeeting.objects.create(
-                meeting_reference="MTG-9022",
-                title="Emergency Noise Mitigation & Environmental Compliance",
-                agenda="Address night-shift sensor decibel breach (Sensor N-41) and discuss acoustical baffles.",
-                project_name="Nexus Tower (Phase 1)",
-                date="Oct 25, 2026",
-                time_slot="02:00 PM - 03:00 PM",
-                meeting_type="Audio Call",
-                initiator_name="Engr. Babatunde Sanwo",
-                initiator_role="Agency Head / Director General",
-                status="Scheduled",
-                participants=[
-                    {"name": "Engr. Babatunde Sanwo", "role": "Agency Head", "status": "Confirmed"},
-                    {"name": "Sarah Jenkins", "role": "Lead Safety Officer", "status": "Confirmed"},
-                    {"name": "EcoBalance Partners", "role": "Environmental Consultant", "status": "Confirmed"}
                 ]
             )
 
         # Messages
         if not StakeholderMessage.objects.exists():
             StakeholderMessage.objects.create(
+                sender_name="Marcus Chen",
+                sender_role="Lead Structural Inspector",
+                channel_name="General Council",
+                project_name="Central Metro Transit Hub",
+                message_text="Please submit the inspection report.",
+                is_urgent=False
+            )
+            StakeholderMessage.objects.create(
                 sender_name="Engr. Babatunde Sanwo",
                 sender_role="Agency Head / Director General",
                 channel_name="General Council",
                 project_name="Central Metro Transit Hub",
-                message_text="Good morning team. Please ensure all revised geotechnical survey logs for Sector A are uploaded prior to our Thursday coordination meeting.",
-                is_urgent=False
-            )
-            StakeholderMessage.objects.create(
-                sender_name="Marcus Chen",
-                sender_role="Structural Inspector",
-                channel_name="Site Safety & Inspections",
-                project_name="Central Metro Transit Hub",
-                message_text="URGENT: Temporary shoring in Trench Wall #4 requires geo-reinforcement before the next rain storm.",
+                message_text="Structural non-conformance detected on grid 4.",
                 is_urgent=True
             )
