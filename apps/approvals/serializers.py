@@ -1,11 +1,23 @@
 from rest_framework import serializers
-from .models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria
+from .models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria, ApprovalComment
 
 class TechnicalReviewCriteriaSerializer(serializers.ModelSerializer):
     class Meta:
         model = TechnicalReviewCriteria
         fields = '__all__'
         read_only_fields = ('id',)
+
+
+class ApprovalCommentSerializer(serializers.ModelSerializer):
+    author_avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApprovalComment
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at')
+
+    def get_author_avatar(self, obj):
+        return None
 
 
 class ApprovalDecisionSerializer(serializers.ModelSerializer):
@@ -24,6 +36,7 @@ class ApprovalRequestSerializer(serializers.ModelSerializer):
     project_reference = serializers.CharField(source='project.reference_number', read_only=True)
     decisions = ApprovalDecisionSerializer(many=True, read_only=True)
     criteria = TechnicalReviewCriteriaSerializer(many=True, read_only=True)
+    comments = ApprovalCommentSerializer(many=True, read_only=True)
 
     class Meta:
         model = ApprovalRequest

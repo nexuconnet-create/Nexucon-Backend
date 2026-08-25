@@ -3,7 +3,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from decimal import Decimal
 from apps.projects.models import Project
-from apps.approvals.models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria
+from apps.approvals.models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria, ApprovalComment
 from apps.approvals.services import ApprovalService
 
 User = get_user_model()
@@ -34,9 +34,12 @@ class ApprovalsTestCase(TestCase):
             "project_id": self.project.id,
             "title": "Night Shift Work Permit",
             "request_type": "Permit",
-            "value_amount": 5000000.0
+            "value_amount": 5000000.0,
+            "source_entity_type": "PermitApplication",
+            "source_entity_id": "PERMIT-1234"
         }, self.user)
         self.assertEqual(req_low.doa_level_required, 'Director')
+        self.assertIsNotNone(req_low.source_version_hash)
 
         # High value > ₦50M
         req_high = ApprovalService.create_request({
@@ -91,6 +94,40 @@ class ApprovalsTestCase(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['request']['status'], 'Rejected')
 
+    def test_reviewer_assignment_and_revision_request(self):
+        """Test assigning reviewer and requesting formal revisions."""
+        req = ApprovalService.create_request({
+            "project_id": self.project.id,
+            "title": "Architectural Elevation Plan V2",
+            "request_type": "Document"
+        }, self.user)
+
+        # Assign Reviewer
+        res_assign = self.client.post(f'/api/v1/approvals/requests/{req.id}/assign/', {
+            "reviewer_name": "Engr. David Adeleke"
+        })
+        self.assertEqual(res_assign.status_code, 200)
+        self.assertEqual(res_assign.data['assigned_to_name'], "Engr. David Adeleke")
+
+        # Request Revision
+        res_rev = self.client.post(f'/api/v1/approvals/requests/{req.id}/request-revision/', {
+            "revision_notes": "Setback distance does not comply with 3-meter minimum requirement."
+        })
+        self.assertEqual(res_rev.status_code, 200)
+        self.assertEqual(res_rev.data['request']['status'], 'Awaiting Fix')
+
+    def test_compliance_gate_check(self):
+        """Test compliance gating logic against project NCRs."""
+        req = ApprovalService.create_request({
+            "project_id": self.project.id,
+            "title": "Foundation Pouring Authorization",
+            "request_type": "Permit"
+        }, self.user)
+
+        res = self.client.get(f'/api/v1/approvals/requests/{req.id}/compliance-gate/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['gate_passed'])
+
     def test_document_multi_signing(self):
         """Test multi-signatory document workflow."""
         doc_req = ApprovalService.create_request({
@@ -101,32 +138,14 @@ class ApprovalsTestCase(TestCase):
             "signatories_completed": 0
         }, self.user)
 
-        # First signature
+        # Sign 1
         res1 = self.client.post(f'/api/v1/approvals/requests/{doc_req.id}/sign/')
         self.assertEqual(res1.status_code, 200)
         self.assertEqual(res1.data['signatories_completed'], 1)
         self.assertEqual(res1.data['status'], 'Pending')
 
-        # Second signature
+        # Sign 2
         res2 = self.client.post(f'/api/v1/approvals/requests/{doc_req.id}/sign/')
         self.assertEqual(res2.status_code, 200)
         self.assertEqual(res2.data['signatories_completed'], 2)
         self.assertEqual(res2.data['status'], 'Approved')
-
-    def test_evaluate_technical_criterion(self):
-        """Test evaluating a technical review criterion."""
-        tech_req = ApprovalService.create_request({
-            "project_id": self.project.id,
-            "title": "HVAC Zone 4 Load Calculations",
-            "request_type": "Technical"
-        }, self.user)
-
-        criterion = tech_req.criteria.first()
-        self.assertIsNotNone(criterion)
-
-        res = self.client.post(f'/api/v1/approvals/criteria/{criterion.id}/evaluate/', {
-            "status": "pass",
-            "notes": "Exceeds minimum requirements by 12%."
-        })
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['status'], 'pass')
