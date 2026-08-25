@@ -20,7 +20,7 @@ from .translation import TranslationService
 class DeveloperViewSet(viewsets.ModelViewSet):
     queryset = Developer.objects.all().order_by('-created_at')
     serializer_class = DeveloperSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -43,7 +43,7 @@ class DeveloperViewSet(viewsets.ModelViewSet):
 class ContractorViewSet(viewsets.ModelViewSet):
     queryset = Contractor.objects.all().order_by('-created_at')
     serializer_class = ContractorSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -72,7 +72,7 @@ class ContractorViewSet(viewsets.ModelViewSet):
 class ConsultantViewSet(viewsets.ModelViewSet):
     queryset = Consultant.objects.all().order_by('-created_at')
     serializer_class = ConsultantSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -98,7 +98,7 @@ class ConsultantViewSet(viewsets.ModelViewSet):
 class InspectorViewSet(viewsets.ModelViewSet):
     queryset = Inspector.objects.all().order_by('-created_at')
     serializer_class = InspectorSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -133,7 +133,7 @@ class InspectorViewSet(viewsets.ModelViewSet):
 class LicensedProfessionalViewSet(viewsets.ModelViewSet):
     queryset = LicensedProfessional.objects.all().order_by('-created_at')
     serializer_class = LicensedProfessionalSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -164,7 +164,7 @@ class LicensedProfessionalViewSet(viewsets.ModelViewSet):
 class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
     queryset = ProjectStakeholderTeam.objects.all().order_by('-created_at')
     serializer_class = ProjectStakeholderTeamSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -180,43 +180,41 @@ class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
         member_data = request.data.get('member_data')
         if not role_key or not member_data:
             return Response({"error": "role_key and member_data are required"}, status=status.HTTP_400_BAD_REQUEST)
-        updated_team = StakeholderService.add_team_member(pk, role_key, member_data, request.user)
-        return Response(ProjectStakeholderTeamSerializer(updated_team).data, status=status.HTTP_200_OK)
+        team = StakeholderService.add_team_member(pk, role_key, member_data, request.user)
+        return Response(ProjectStakeholderTeamSerializer(team).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='remove-member')
     def remove_member(self, request, pk=None):
         role_key = request.data.get('role_key')
         if not role_key:
             return Response({"error": "role_key is required"}, status=status.HTTP_400_BAD_REQUEST)
-        updated_team = StakeholderService.remove_team_member(pk, role_key, request.user)
-        return Response(ProjectStakeholderTeamSerializer(updated_team).data, status=status.HTTP_200_OK)
+        team = StakeholderService.remove_team_member(pk, role_key, request.user)
+        return Response(ProjectStakeholderTeamSerializer(team).data, status=status.HTTP_200_OK)
 
 
 class BlacklistRecordViewSet(viewsets.ModelViewSet):
     queryset = BlacklistRecord.objects.all().order_by('-blacklisted_at')
     serializer_class = BlacklistRecordSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
-
-    def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
-        return super().get_queryset()
+    permission_classes = [permissions.AllowAny]
 
     @action(detail=False, methods=['post'], url_path='toggle')
     def toggle(self, request):
-        entity_type = request.data.get('entity_type', 'Contractor')
-        entity_id = request.data.get('entity_id')
-        entity_name = request.data.get('entity_name', 'Unknown Entity')
-        reason = request.data.get('reason', 'Regulatory compliance infraction')
-        status_val = request.data.get('status', 'Blacklisted')
-
-        rec = StakeholderService.toggle_blacklist(entity_type, entity_id, entity_name, reason, status_val, request.user)
+        data = request.data
+        rec = StakeholderService.toggle_blacklist(
+            entity_type=data.get('entity_type', 'Contractor'),
+            entity_id=data.get('entity_id', ''),
+            entity_name=data.get('entity_name', ''),
+            reason=data.get('reason', 'Administrative decision'),
+            status=data.get('status', 'Blacklisted'),
+            user=request.user
+        )
         return Response(BlacklistRecordSerializer(rec).data, status=status.HTTP_200_OK)
 
 
 class StakeholderMeetingViewSet(viewsets.ModelViewSet):
-    queryset = StakeholderMeeting.objects.all().order_by('-created_at')
+    queryset = StakeholderMeeting.objects.all().order_by('-date', '-created_at')
     serializer_class = StakeholderMeetingSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -245,7 +243,7 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
 class StakeholderMessageViewSet(viewsets.ModelViewSet):
     queryset = StakeholderMessage.objects.all().order_by('created_at')
     serializer_class = StakeholderMessageSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
@@ -272,14 +270,16 @@ class StakeholderMessageViewSet(viewsets.ModelViewSet):
 class CertificationViewSet(viewsets.ModelViewSet):
     queryset = Certification.objects.all().order_by('-created_at')
     serializer_class = CertificationSerializer
+    permission_classes = [permissions.AllowAny]
 
 class TrainingRecordViewSet(viewsets.ModelViewSet):
     queryset = TrainingRecord.objects.all().order_by('-created_at')
     serializer_class = TrainingRecordSerializer
+    permission_classes = [permissions.AllowAny]
 
 
 class StakeholderStatsViewSet(viewsets.ViewSet):
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.AllowAny]
 
     def list(self, request):
         stats = StakeholderService.get_stakeholder_stats()

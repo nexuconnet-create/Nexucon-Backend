@@ -485,6 +485,7 @@ class StakeholderService:
 
         # Messages
         if not StakeholderMessage.objects.exists():
+            # General Council
             StakeholderMessage.objects.create(
                 sender_name="Marcus Chen",
                 sender_role="Lead Structural Inspector",
@@ -499,5 +500,48 @@ class StakeholderService:
                 channel_name="General Council",
                 project_name="Central Metro Transit Hub",
                 message_text="Structural non-conformance detected on grid 4.",
+                is_urgent=True
+            )
+            # Project Coordination
+            StakeholderMessage.objects.create(
+                sender_name="David Rivera",
+                sender_role="General Contractor (Apex)",
+                channel_name="Project Coordination",
+                project_name="Central Metro Transit Hub",
+                message_text="Drawing revision approved with conditions for Level 3 MEP Riser.",
+                is_urgent=False
+            )
+            StakeholderMessage.objects.create(
+                sender_name="Michael Thorne",
+                sender_role="Master Developer (Nexucon)",
+                channel_name="Project Coordination",
+                project_name="Central Metro Transit Hub",
+                message_text="Council session will commence shortly for stage-gate signoff.",
+                is_urgent=False
+            )
+            # Site Safety & Inspections
+            StakeholderMessage.objects.create(
+                sender_name="Safety Directorate",
+                sender_role="HSE Compliance Officer",
+                channel_name="Site Safety & Inspections",
+                project_name="Central Metro Transit Hub",
+                message_text="All sub-contractors must ensure 100% PPE compliance.",
+                is_urgent=True
+            )
+            StakeholderMessage.objects.create(
+                sender_name="Marcus Chen",
+                sender_role="Lead Structural Inspector",
+                channel_name="Site Safety & Inspections",
+                project_name="Central Metro Transit Hub",
+                message_text="Site inspection scheduled for tomorrow at 10:00 AM.",
+                is_urgent=False
+            )
+            # Direct Executive Messages
+            StakeholderMessage.objects.create(
+                sender_name="Engr. Babatunde Sanwo",
+                sender_role="Agency Head / Director General",
+                channel_name="Direct Executive Messages",
+                project_name="Central Metro Transit Hub",
+                message_text="Stop-work order issued on Sector 4 pending foundation re-test.",
                 is_urgent=True
             )
