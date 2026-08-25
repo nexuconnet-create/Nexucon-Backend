@@ -1,5 +1,13 @@
 from rest_framework import permissions
 
+def get_user_role(user):
+    if not user or not user.is_authenticated:
+        return None
+    if hasattr(user, 'government_profile') and user.government_profile:
+        if user.government_profile.role:
+            return user.government_profile.role.name
+    return getattr(user, 'role', None)
+
 def check_government_permission(user, permission_name, allowed_role_keywords=None):
     if not user or not user.is_authenticated:
         return False
@@ -7,30 +15,28 @@ def check_government_permission(user, permission_name, allowed_role_keywords=Non
     if user.is_superuser or user.is_staff:
         return True
 
+    # Agency Head & Directors have full access across all government modules
+    role = get_user_role(user)
+    role_str = str(role or '')
+    if any(k.lower() in role_str.lower() for k in ["Agency Head", "Director", "Permanent Secretary", "Executive", "Admin"]):
+        return True
+
+    # Any active government staff member with a profile
+    if hasattr(user, 'government_profile') and user.government_profile:
+        gov_prof = user.government_profile
+        if getattr(gov_prof, 'is_active_staff', True):
+            return True
+
     if user.has_perm(permission_name):
         return True
 
     uname = getattr(user, 'username', '').lower()
     email = getattr(user, 'email', '').lower()
 
-    # Block explicit contractor, applicant, citizen roles
-    role = getattr(user, 'role', '').upper()
-    if role in ['CONTRACTOR', 'APPLICANT', 'CITIZEN', 'EXTERNAL'] or 'contractor' in uname or 'contractor' in email:
+    # Explicitly block external non-government roles
+    user_role_str = role_str.upper()
+    if user_role_str in ['CONTRACTOR', 'APPLICANT', 'CITIZEN', 'EXTERNAL'] or 'contractor' in uname or 'contractor' in email:
         return False
-
-    # Check Government Profile & RBAC Role
-    if hasattr(user, 'government_profile') and user.government_profile:
-        gov_prof = user.government_profile
-        if gov_prof.is_active_staff:
-            if gov_prof.role:
-                role_perms = gov_prof.role.permissions or []
-                if permission_name in role_perms or 'all' in role_perms:
-                    return True
-                if allowed_role_keywords:
-                    role_name = gov_prof.role.name.lower()
-                    if any(kw.lower() in role_name for kw in allowed_role_keywords):
-                        return True
-            return True
 
     # Default for authenticated government dashboard users
     return True
@@ -39,14 +45,14 @@ def check_government_permission(user, permission_name, allowed_role_keywords=Non
 class CanViewIndustryAnalytics(permissions.BasePermission):
     """
     Strict server-side permission check for industry-wide performance and sector benchmarking.
-    Allows authenticated government officials, directors, and users with analytics.view_industry.
-    Blocks unauthenticated users and external roles (Contractor/Applicant).
+    Allows authenticated government officials, agency heads, directors, and inspectors.
+    Blocks unauthenticated users and external roles (Contractors/Applicants).
     """
     def has_permission(self, request, view):
         return check_government_permission(
             request.user,
             'analytics.view_industry',
-            allowed_role_keywords=['Director', 'Agency Head', 'Executive', 'Admin', 'Inspector', 'Government']
+            allowed_role_keywords=['Agency Head', 'Director', 'Executive', 'Admin', 'Inspector', 'Government']
         )
 
 
@@ -58,7 +64,7 @@ class CanViewFinancialAnalytics(permissions.BasePermission):
         return check_government_permission(
             request.user,
             'analytics.view_financial',
-            allowed_role_keywords=['Director', 'Agency Head', 'Finance', 'Executive', 'Admin']
+            allowed_role_keywords=['Agency Head', 'Director', 'Finance', 'Executive', 'Admin']
         )
 
 
