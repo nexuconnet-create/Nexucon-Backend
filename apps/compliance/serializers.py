@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     NonConformanceReport, CorrectiveActionPlan, RegulatoryRequirement,
-    ComplianceReview, ComplianceCertificate
+    ComplianceReview, ComplianceCertificate, EscalationRule
 )
 
 class CorrectiveActionPlanSerializer(serializers.ModelSerializer):
@@ -45,6 +45,8 @@ class NonConformanceReportSerializer(serializers.ModelSerializer):
 
 
 class RegulatoryRequirementSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True)
+
     class Meta:
         model = RegulatoryRequirement
         fields = '__all__'
@@ -58,6 +60,13 @@ class ComplianceReviewSerializer(serializers.ModelSerializer):
         model = ComplianceReview
         fields = '__all__'
         read_only_fields = ('id', 'review_reference', 'created_at')
+
+
+class EscalationRuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EscalationRule
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at')
 
 
 class ComplianceCertificateSerializer(serializers.ModelSerializer):
