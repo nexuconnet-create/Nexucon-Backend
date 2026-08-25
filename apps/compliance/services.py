@@ -350,8 +350,9 @@ class ComplianceService:
         return review
 
     @staticmethod
-    def issue_certificate(data, user):
+    def issue_certificate(data, user, file_obj=None):
         """Issue an official compliance certificate with SHA-256 QR authenticity seal."""
+        from apps.documents.services import DocumentStorageService
         project_id = data.get('project_id') or data.get('project')
         project = Project.objects.filter(pk=project_id).first()
         if not project:
@@ -360,8 +361,18 @@ class ComplianceService:
         category = data.get('category', 'Environmental')
         prefix = category[:3].upper()
         cert_ref = f"CERT-{prefix}-{timezone.now().year}-{uuid.uuid4().hex[:4].upper()}"
-        hash_raw = f"{cert_ref}-{project.id if project else 'PRJ'}-{timezone.now().isoformat()}"
-        qr_hash = f"0x7b2a{hashlib.sha256(hash_raw.encode()).hexdigest()[:12]}e41"
+        
+        file_url = data.get('certificate_file_url')
+        if file_obj:
+            folder_prefix = f"projects/{project.reference_number if (project and project.reference_number) else 'PRJ'}/certificates"
+            file_meta = DocumentStorageService.upload_file_to_r2(file_obj, folder_prefix=folder_prefix)
+            file_url = file_meta['file_url']
+            qr_hash = file_meta['signature_hash']
+        else:
+            hash_raw = f"{cert_ref}-{project.id if project else 'PRJ'}-{timezone.now().isoformat()}"
+            qr_hash = f"0x7b2a{hashlib.sha256(hash_raw.encode()).hexdigest()[:12]}e41"
+            if not file_url:
+                file_url = f"https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/certificates/{cert_ref}.pdf"
 
         cert = ComplianceCertificate.objects.create(
             certificate_reference=cert_ref,
@@ -373,7 +384,7 @@ class ComplianceService:
             expiry_date=data.get('expiry_date') or (timezone.now().date() + datetime.timedelta(days=365 * 2)),
             status='Active',
             qr_verification_hash=qr_hash,
-            certificate_file_url=data.get('certificate_file_url', 'https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/cert.pdf')
+            certificate_file_url=file_url
         )
 
         ComplianceService.log_audit(

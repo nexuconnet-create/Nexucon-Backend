@@ -219,7 +219,8 @@ class ComplianceCertificateViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        cert = ComplianceService.issue_certificate(self.request.data, self.request.user)
+        file_obj = self.request.FILES.get('file')
+        cert = ComplianceService.issue_certificate(self.request.data, self.request.user, file_obj=file_obj)
         serializer.instance = cert
 
     @action(detail=True, methods=['get'], url_path='verify')
