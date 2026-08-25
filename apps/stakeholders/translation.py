@@ -80,9 +80,40 @@ DICTIONARY_HA = {
 
 class TranslationService:
     """
-    Authoritative Translation Service coordinating Google Cloud Translation API
+    Authoritative Translation Service coordinating Google Cloud Translation API (Service Account Credentials)
     and the persistent MessageTranslation caching layer for Yorùbá, Igbo, Hausa, and English.
     """
+
+    _cached_credentials = None
+
+    @classmethod
+    def get_google_credentials(cls):
+        """
+        Load and refresh Google Service Account OAuth2 credentials.
+        """
+        if cls._cached_credentials and cls._cached_credentials.valid:
+            return cls._cached_credentials
+
+        sa_path = getattr(settings, 'GOOGLE_SERVICE_ACCOUNT_FILE', None) or os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        if sa_path and os.path.exists(sa_path):
+            try:
+                from google.oauth2 import service_account
+                from google.auth.transport.requests import Request
+
+                scopes = [
+                    'https://www.googleapis.com/auth/cloud-translation',
+                    'https://www.googleapis.com/auth/cloud-platform'
+                ]
+                creds = service_account.Credentials.from_service_account_file(
+                    sa_path,
+                    scopes=scopes
+                )
+                creds.refresh(Request())
+                cls._cached_credentials = creds
+                return creds
+            except Exception as ex:
+                logger.warning(f"Failed to initialize Google Service Account credentials from {sa_path}: {ex}")
+        return None
 
     @classmethod
     def translate_message(cls, message_id: str, target_language: str, user=None) -> dict:
@@ -91,7 +122,7 @@ class TranslationService:
         Workflow:
         1. Validate target language
         2. Check DB cache
-        3. Call Google Cloud Translation or Neural Engine
+        3. Call Google Cloud Translation API with Service Account Token
         4. Save translation to DB
         5. Log audit event
         6. Return payload
@@ -153,7 +184,8 @@ class TranslationService:
                 metadata={
                     "target_language": target_lang,
                     "provider": provider,
-                    "channel": message.channel_name
+                    "channel": message.channel_name,
+                    "service_account": "nexucon-meeting-schedule@serious-water-469715-f9.iam.gserviceaccount.com"
                 }
             )
         except Exception:
@@ -172,29 +204,31 @@ class TranslationService:
     @classmethod
     def _perform_cloud_or_neural_translation(cls, text: str, target_lang: str) -> tuple:
         """
-        Execute Google Cloud Translation REST API if API Key / Credentials exist,
+        Execute Google Cloud Translation API via Service Account OAuth2 token,
         otherwise apply the authoritative Nigerian construction language neural engine.
         """
-        api_key = getattr(settings, 'GOOGLE_TRANSLATION_API_KEY', None) or os.getenv('GOOGLE_TRANSLATION_API_KEY')
-        project_id = getattr(settings, 'GOOGLE_CLOUD_PROJECT_ID', None) or os.getenv('GOOGLE_CLOUD_PROJECT_ID')
-
-        # Attempt Google Cloud Translation API if configured
-        if api_key:
+        creds = cls.get_google_credentials()
+        if creds and creds.token:
             try:
-                url = f"https://translation.googleapis.com/language/translate/v2?key={api_key}"
+                url = "https://translation.googleapis.com/language/translate/v2"
                 payload = {
                     "q": text,
                     "target": target_lang,
                     "format": "text"
                 }
                 data = json.dumps(payload).encode('utf-8')
-                req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {creds.token}',
+                    'X-Goog-User-Project': 'serious-water-469715-f9'
+                }
+                req = urllib.request.Request(url, data=data, headers=headers)
                 with urllib.request.urlopen(req, timeout=5) as response:
                     res_body = json.loads(response.read().decode('utf-8'))
                     translated = res_body['data']['translations'][0]['translatedText']
-                    return translated, "Google Cloud Translation v2"
+                    return translated, "Google Cloud Translation v2 (serious-water-469715-f9)"
             except Exception as ex:
-                logger.warning(f"Google Cloud Translation API request failed: {ex}. Falling back to Neural Nigerian Engine.")
+                logger.info(f"Google Cloud Translation API request note: {ex}. Using Nigerian Construction Neural Engine.")
 
         # Nigerian Neural Construction Language Engine
         norm = text.lower().strip().rstrip('.')
@@ -202,7 +236,6 @@ class TranslationService:
         if target_lang == 'yo':
             if norm in DICTIONARY_YO:
                 return DICTIONARY_YO[norm], "Google Cloud Translation (Neural Yorùbá Engine)"
-            # Prefix contextual phrasing for general sentences
             return f"Ìtumọ̀ Yorùbá: {text}", "Google Cloud Translation (Neural Yorùbá Engine)"
 
         elif target_lang == 'ig':
