@@ -34,12 +34,42 @@ R2_ENDPOINT_URL = _get_env_val('CLOUDFLARE_R2_ENDPOINT_URL', 'https://ba64cd9c51
 R2_API_URL = _get_env_val('CLOUDFLARE_R2_API_URL', f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}")
 
 
+os.environ.setdefault('AWS_EC2_METADATA_DISABLED', 'true')
+
 class DocumentStorageService:
     """
     Cloudflare R2 Object Storage Service for Project & Regulatory Documents.
     """
-    @staticmethod
-    def upload_file_to_r2(uploaded_file, folder_prefix="documents"):
+    _s3_client = None
+
+    @classmethod
+    def get_s3_client(cls):
+        if cls._s3_client is None:
+            access_key = _get_env_val('CLOUDFLARE_R2_ACCESS_KEY_ID') or _get_env_val('AWS_ACCESS_KEY_ID')
+            secret_key = _get_env_val('CLOUDFLARE_R2_SECRET_ACCESS_KEY') or _get_env_val('AWS_SECRET_ACCESS_KEY')
+            if access_key and secret_key:
+                try:
+                    import boto3
+                    from botocore.config import Config
+                    cls._s3_client = boto3.client(
+                        's3',
+                        endpoint_url=R2_ENDPOINT_URL,
+                        aws_access_key_id=access_key,
+                        aws_secret_access_key=secret_key,
+                        config=Config(
+                            signature_version='s3v4',
+                            connect_timeout=5,
+                            read_timeout=15,
+                            retries={'max_attempts': 2}
+                        ),
+                        region_name='auto'
+                    )
+                except Exception as e:
+                    print(f"[R2 Storage] Warning initializing S3 client: {e}")
+        return cls._s3_client
+
+    @classmethod
+    def upload_file_to_r2(cls, uploaded_file, folder_prefix="documents"):
         """
         Uploads a file into Cloudflare R2 bucket and returns metadata + storage URL.
         """
@@ -88,39 +118,23 @@ class DocumentStorageService:
         file_url = f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}/{unique_key}"
 
         # Try boto3 S3 upload if AWS / R2 credentials exist in environment
-        access_key = _get_env_val('CLOUDFLARE_R2_ACCESS_KEY_ID') or _get_env_val('AWS_ACCESS_KEY_ID')
-        secret_key = _get_env_val('CLOUDFLARE_R2_SECRET_ACCESS_KEY') or _get_env_val('AWS_SECRET_ACCESS_KEY')
-        
-        if access_key and secret_key and file_bytes:
-            try:
-                import boto3
-                from botocore.config import Config
-                s3_client = boto3.client(
-                    's3',
-                    endpoint_url=R2_ENDPOINT_URL,
-                    aws_access_key_id=access_key,
-                    aws_secret_access_key=secret_key,
-                    config=Config(
-                        signature_version='s3v4',
-                        connect_timeout=10,
-                        read_timeout=30,
-                        retries={'max_attempts': 2}
-                    ),
-                    region_name='auto'
-                )
-                content_type, _ = mimetypes.guess_type(clean_name)
-                if not content_type:
-                    content_type = getattr(uploaded_file, 'content_type', 'application/octet-stream')
+        if file_bytes:
+            s3_client = cls.get_s3_client()
+            if s3_client:
+                try:
+                    content_type, _ = mimetypes.guess_type(clean_name)
+                    if not content_type:
+                        content_type = getattr(uploaded_file, 'content_type', 'application/octet-stream')
 
-                s3_client.put_object(
-                    Bucket=R2_BUCKET_NAME,
-                    Key=unique_key,
-                    Body=file_bytes,
-                    ContentType=content_type or 'application/octet-stream'
-                )
-                print(f"[R2 Storage] Successfully streamed {unique_key} ({len(file_bytes)} bytes) to Cloudflare R2 bucket: {R2_BUCKET_NAME}")
-            except Exception as e:
-                print(f"[R2 Storage] Warning during direct S3 stream: {e}")
+                    s3_client.put_object(
+                        Bucket=R2_BUCKET_NAME,
+                        Key=unique_key,
+                        Body=file_bytes,
+                        ContentType=content_type or 'application/octet-stream'
+                    )
+                    print(f"[R2 Storage] Successfully streamed {unique_key} ({len(file_bytes)} bytes) to Cloudflare R2 bucket: {R2_BUCKET_NAME}")
+                except Exception as e:
+                    print(f"[R2 Storage] Warning during direct S3 stream: {e}")
 
         return {
             "file_url": file_url,
