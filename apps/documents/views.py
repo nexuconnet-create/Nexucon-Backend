@@ -124,10 +124,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='create-version')
     def create_version(self, request, pk=None):
-        document = self.get_object()
-        file_obj = request.FILES.get('file')
-        version = DocumentService.create_version(document, request.data, request.user, file_obj=file_obj)
-        return Response(VersionSerializer(version).data, status=status.HTTP_201_CREATED)
+        try:
+            document = self.get_object()
+            file_obj = request.FILES.get('file')
+            version = DocumentService.create_version(document, request.data, request.user, file_obj=file_obj)
+            return Response(VersionSerializer(version).data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['get'], url_path='download')
     def download(self, request, pk=None):
