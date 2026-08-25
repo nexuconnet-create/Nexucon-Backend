@@ -2,14 +2,15 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.db.models import Q
+from django.utils import timezone
 from .models import (
     NonConformanceReport, CorrectiveActionPlan, RegulatoryRequirement,
-    ComplianceReview, ComplianceCertificate
+    ComplianceReview, ComplianceCertificate, EscalationRule
 )
 from .serializers import (
     NonConformanceReportSerializer, CorrectiveActionPlanSerializer,
     RegulatoryRequirementSerializer, ComplianceReviewSerializer,
-    ComplianceCertificateSerializer
+    ComplianceCertificateSerializer, EscalationRuleSerializer
 )
 from .services import ComplianceService
 
@@ -100,11 +101,12 @@ class CorrectiveActionPlanViewSet(viewsets.ModelViewSet):
 
 
 class RegulatoryRequirementViewSet(viewsets.ModelViewSet):
-    queryset = RegulatoryRequirement.objects.all()
+    queryset = RegulatoryRequirement.objects.all().select_related('project')
     serializer_class = RegulatoryRequirementSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
+        ComplianceService.seed_default_requirements()
         qs = super().get_queryset()
         category = self.request.query_params.get('category')
         status_val = self.request.query_params.get('status')
@@ -127,6 +129,7 @@ class RegulatoryRequirementViewSet(viewsets.ModelViewSet):
         req_obj = self.get_object()
         new_status = request.data.get('status', 'Compliant')
         req_obj.status = new_status
+        req_obj.last_checked = timezone.localdate()
         req_obj.save()
         return Response(RegulatoryRequirementSerializer(req_obj).data, status=status.HTTP_200_OK)
 
@@ -156,6 +159,37 @@ class ComplianceReviewViewSet(viewsets.ModelViewSet):
                 Q(auditor_name__icontains=search)
             )
         return qs
+
+    @action(detail=True, methods=['post'], url_path='advance-stage')
+    def advance_stage(self, request, pk=None):
+        review = self.get_object()
+        new_stage = request.data.get('stage')
+        findings_summary = request.data.get('findings_summary')
+        if not new_stage:
+            return Response({'error': 'stage is required'}, status=status.HTTP_400_BAD_REQUEST)
+        updated = ComplianceService.advance_review_stage(review, new_stage, findings_summary, request.user)
+        return Response(ComplianceReviewSerializer(updated).data, status=status.HTTP_200_OK)
+
+
+class EscalationRuleViewSet(viewsets.ModelViewSet):
+    queryset = EscalationRule.objects.all()
+    serializer_class = EscalationRuleSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        ComplianceService.seed_default_escalation_rules()
+        qs = super().get_queryset()
+        category = self.request.query_params.get('category')
+        if category and category.lower() != 'all':
+            qs = qs.filter(trigger_category__iexact=category)
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='toggle-active')
+    def toggle_active(self, request, pk=None):
+        rule = self.get_object()
+        rule.is_active = not rule.is_active
+        rule.save()
+        return Response(EscalationRuleSerializer(rule).data, status=status.HTTP_200_OK)
 
 
 class ComplianceCertificateViewSet(viewsets.ModelViewSet):
@@ -208,3 +242,17 @@ class ComplianceStatsViewSet(viewsets.ViewSet):
     def overview(self, request):
         stats_data = ComplianceService.get_overview_stats()
         return Response(stats_data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='generate-report')
+    def generate_report(self, request):
+        stats_data = ComplianceService.get_overview_stats()
+        open_ncrs = NonConformanceReport.objects.filter(status__in=['Open', 'In Progress']).select_related('project')
+        certs = ComplianceCertificate.objects.filter(status='Active').select_related('project')
+        
+        return Response({
+            "generated_at": timezone.now().isoformat(),
+            "scorecard": stats_data,
+            "active_infractions": NonConformanceReportSerializer(open_ncrs[:10], many=True).data,
+            "awarded_certificates": ComplianceCertificateSerializer(certs[:10], many=True).data,
+            "report_download_url": "https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/compliance_audit_report.pdf"
+        }, status=status.HTTP_200_OK)

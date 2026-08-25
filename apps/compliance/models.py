@@ -158,11 +158,16 @@ class RegulatoryRequirement(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     requirement_reference = models.CharField(max_length=100, db_index=True)
+    project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='regulatory_requirements')
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='Environmental')
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     authority = models.CharField(max_length=255, default='EPA')
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Compliant')
+    mandatory = models.BooleanField(default=True)
+    evidence_required = models.CharField(max_length=255, blank=True, null=True, default='Test Certificate / Inspection Signoff')
+    verification_method = models.CharField(max_length=255, default='Physical Inspection & Documentation')
+    due_date = models.DateField(null=True, blank=True)
     last_checked = models.DateField(default=timezone.localdate)
     created_at = models.DateTimeField(default=timezone.now)
 
@@ -202,6 +207,9 @@ class ComplianceReview(models.Model):
     stage = models.CharField(max_length=50, choices=STAGE_CHOICES, default='Initiation')
     progress = models.IntegerField(default=10)
     
+    findings_count = models.IntegerField(default=0)
+    ncrs_count = models.IntegerField(default=0)
+    
     start_date = models.DateField(default=timezone.localdate)
     due_date = models.DateField(null=True, blank=True)
     findings_summary = models.TextField(blank=True, null=True)
@@ -212,6 +220,35 @@ class ComplianceReview(models.Model):
 
     def __str__(self):
         return f"{self.review_reference}: {self.title} ({self.stage} - {self.progress}%)"
+
+
+class EscalationRule(models.Model):
+    """
+    Automated statutory escalation matrix trigger rules.
+    """
+    CATEGORY_CHOICES = (
+        ('BIM', 'BIM & Model Deviation'),
+        ('Inspection', 'Site & Field Inspection'),
+        ('Quality', 'Material & Quality Assurance'),
+        ('Safety', 'Life Safety & Structural'),
+        ('Worker', 'Workforce & Labor Compliance'),
+        ('General', 'General Statutory Enforcement'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rule_name = models.CharField(max_length=255)
+    trigger_category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='General')
+    action_required = models.CharField(max_length=255)
+    escalation_level = models.IntegerField(default=1)
+    sla_hours = models.IntegerField(default=48)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['escalation_level', 'rule_name']
+
+    def __str__(self):
+        return f"{self.rule_name} (Level {self.escalation_level} - {'Active' if self.is_active else 'Disabled'})"
 
 
 class ComplianceCertificate(models.Model):
@@ -253,3 +290,4 @@ class ComplianceCertificate(models.Model):
 
     def __str__(self):
         return f"{self.certificate_reference}: {self.title} ({self.status})"
+
