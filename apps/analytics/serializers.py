@@ -8,7 +8,7 @@ class GeneratedReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = GeneratedReport
         fields = '__all__'
-        read_only_fields = ('id', 'report_reference', 'created_at')
+        read_only_fields = ('id', 'report_reference', 'status', 'file_url', 'file_size', 'generated_by_name', 'created_at')
 
 
 class DepartmentPerformanceMetricSerializer(serializers.ModelSerializer):
