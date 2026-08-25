@@ -20,6 +20,7 @@ from .translation import TranslationService
 class DeveloperViewSet(viewsets.ModelViewSet):
     queryset = Developer.objects.all().order_by('-created_at')
     serializer_class = DeveloperSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -43,6 +44,7 @@ class DeveloperViewSet(viewsets.ModelViewSet):
 class ContractorViewSet(viewsets.ModelViewSet):
     queryset = Contractor.objects.all().order_by('-created_at')
     serializer_class = ContractorSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -72,6 +74,7 @@ class ContractorViewSet(viewsets.ModelViewSet):
 class ConsultantViewSet(viewsets.ModelViewSet):
     queryset = Consultant.objects.all().order_by('-created_at')
     serializer_class = ConsultantSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -98,6 +101,7 @@ class ConsultantViewSet(viewsets.ModelViewSet):
 class InspectorViewSet(viewsets.ModelViewSet):
     queryset = Inspector.objects.all().order_by('-created_at')
     serializer_class = InspectorSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -133,6 +137,7 @@ class InspectorViewSet(viewsets.ModelViewSet):
 class LicensedProfessionalViewSet(viewsets.ModelViewSet):
     queryset = LicensedProfessional.objects.all().order_by('-created_at')
     serializer_class = LicensedProfessionalSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -164,6 +169,7 @@ class LicensedProfessionalViewSet(viewsets.ModelViewSet):
 class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
     queryset = ProjectStakeholderTeam.objects.all().order_by('-created_at')
     serializer_class = ProjectStakeholderTeamSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -195,6 +201,7 @@ class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
 class BlacklistRecordViewSet(viewsets.ModelViewSet):
     queryset = BlacklistRecord.objects.all().order_by('-blacklisted_at')
     serializer_class = BlacklistRecordSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     @action(detail=False, methods=['post'], url_path='toggle')
@@ -214,6 +221,7 @@ class BlacklistRecordViewSet(viewsets.ModelViewSet):
 class StakeholderMeetingViewSet(viewsets.ModelViewSet):
     queryset = StakeholderMeeting.objects.all().order_by('-date', '-created_at')
     serializer_class = StakeholderMeetingSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -243,6 +251,7 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
 class StakeholderMessageViewSet(viewsets.ModelViewSet):
     queryset = StakeholderMessage.objects.all().order_by('created_at')
     serializer_class = StakeholderMessageSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -270,15 +279,18 @@ class StakeholderMessageViewSet(viewsets.ModelViewSet):
 class CertificationViewSet(viewsets.ModelViewSet):
     queryset = Certification.objects.all().order_by('-created_at')
     serializer_class = CertificationSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
 class TrainingRecordViewSet(viewsets.ModelViewSet):
     queryset = TrainingRecord.objects.all().order_by('-created_at')
     serializer_class = TrainingRecordSerializer
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
 
 class StakeholderStatsViewSet(viewsets.ViewSet):
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def list(self, request):
