@@ -49,8 +49,25 @@ class DocumentStorageService:
         clean_name = getattr(uploaded_file, 'name', 'document.pdf').replace(' ', '_')
         unique_key = f"{folder_prefix}/{datetime.datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}_{clean_name}"
         
-        # Calculate file size formatted
-        size_bytes = getattr(uploaded_file, 'size', 0)
+        # Read file binary data into memory
+        file_bytes = b''
+        try:
+            if hasattr(uploaded_file, 'seek'):
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+            if hasattr(uploaded_file, 'read'):
+                file_bytes = uploaded_file.read()
+            elif hasattr(uploaded_file, 'chunks'):
+                file_bytes = b''.join([c for c in uploaded_file.chunks()])
+            elif isinstance(uploaded_file, (bytes, bytearray)):
+                file_bytes = bytes(uploaded_file)
+        except Exception as e:
+            print(f"[R2 Storage] Warning reading uploaded file bytes: {e}")
+            file_bytes = b''
+
+        size_bytes = len(file_bytes) if file_bytes else getattr(uploaded_file, 'size', 0)
         if size_bytes >= 1024 * 1024:
             file_size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
         elif size_bytes >= 1024:
@@ -62,12 +79,9 @@ class DocumentStorageService:
         ext = os.path.splitext(clean_name)[1].replace('.', '').upper() or 'PDF'
 
         # Compute SHA256 signature hash of file content
-        hasher = hashlib.sha256()
-        try:
-            for chunk in uploaded_file.chunks():
-                hasher.update(chunk)
-            signature_hash = f"0x{hasher.hexdigest()[:24]}"
-        except Exception:
+        if file_bytes:
+            signature_hash = f"0x{hashlib.sha256(file_bytes).hexdigest()[:24]}"
+        else:
             signature_hash = f"0x{hashlib.sha256(unique_key.encode()).hexdigest()[:24]}"
 
         # Public R2 File URL
@@ -77,7 +91,7 @@ class DocumentStorageService:
         access_key = _get_env_val('CLOUDFLARE_R2_ACCESS_KEY_ID') or _get_env_val('AWS_ACCESS_KEY_ID')
         secret_key = _get_env_val('CLOUDFLARE_R2_SECRET_ACCESS_KEY') or _get_env_val('AWS_SECRET_ACCESS_KEY')
         
-        if access_key and secret_key:
+        if access_key and secret_key and file_bytes:
             try:
                 import boto3
                 from botocore.config import Config
@@ -94,12 +108,6 @@ class DocumentStorageService:
                     ),
                     region_name='auto'
                 )
-                if hasattr(uploaded_file, 'seek'):
-                    try:
-                        uploaded_file.seek(0)
-                    except Exception:
-                        pass
-                file_body = uploaded_file.read() if hasattr(uploaded_file, 'read') else uploaded_file
                 content_type, _ = mimetypes.guess_type(clean_name)
                 if not content_type:
                     content_type = getattr(uploaded_file, 'content_type', 'application/octet-stream')
@@ -107,10 +115,10 @@ class DocumentStorageService:
                 s3_client.put_object(
                     Bucket=R2_BUCKET_NAME,
                     Key=unique_key,
-                    Body=file_body,
+                    Body=file_bytes,
                     ContentType=content_type or 'application/octet-stream'
                 )
-                print(f"[R2 Storage] Successfully streamed {unique_key} to Cloudflare R2 bucket: {R2_BUCKET_NAME}")
+                print(f"[R2 Storage] Successfully streamed {unique_key} ({len(file_bytes)} bytes) to Cloudflare R2 bucket: {R2_BUCKET_NAME}")
             except Exception as e:
                 print(f"[R2 Storage] Warning during direct S3 stream: {e}")
 
