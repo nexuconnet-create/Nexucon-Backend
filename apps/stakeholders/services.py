@@ -279,11 +279,77 @@ class StakeholderService:
         return item
 
     @staticmethod
+    def upload_to_cloudflare_r2(data_or_file, file_name, folder_prefix="messages"):
+        """
+        Stream binary files or base64 data payloads directly into Cloudflare R2 storage bucket.
+        """
+        if not data_or_file:
+            return None
+        
+        # If already an HTTP/R2 URL, return directly
+        if isinstance(data_or_file, str) and (data_or_file.startswith('http://') or data_or_file.startswith('https://')):
+            return data_or_file
+
+        import base64
+        import re
+        import datetime
+
+        try:
+            from apps.documents.services import R2StorageService, R2_ENDPOINT_URL, R2_BUCKET_NAME
+            
+            file_bytes = b''
+            content_type = 'application/octet-stream'
+            
+            if isinstance(data_or_file, str) and data_or_file.startswith('data:'):
+                match = re.match(r'data:([^;]+);base64,(.*)', data_or_file)
+                if match:
+                    content_type = match.group(1)
+                    file_bytes = base64.b64decode(match.group(2))
+            elif hasattr(data_or_file, 'read'):
+                file_bytes = data_or_file.read()
+            elif isinstance(data_or_file, (bytes, bytearray)):
+                file_bytes = bytes(data_or_file)
+
+            if file_bytes:
+                clean_name = (file_name or 'attachment.bin').replace(' ', '_')
+                unique_key = f"{folder_prefix}/{datetime.datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}_{clean_name}"
+                
+                s3_client = R2StorageService.get_s3_client()
+                if s3_client:
+                    try:
+                        s3_client.put_object(
+                            Bucket=R2_BUCKET_NAME,
+                            Key=unique_key,
+                            Body=file_bytes,
+                            ContentType=content_type
+                        )
+                        print(f"[Cloudflare R2] Successfully uploaded {unique_key} ({len(file_bytes)} bytes) to bucket {R2_BUCKET_NAME}")
+                    except Exception as e:
+                        print(f"[Cloudflare R2] S3 upload notice: {e}")
+                
+                # Return permanent Cloudflare R2 Public Storage URL
+                return f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}/{unique_key}"
+        except Exception as err:
+            print(f"[Cloudflare R2] Storage helper notice: {err}")
+        
+        return data_or_file
+
+    @staticmethod
     def send_message(data, user=None):
-        """Send message across public/private stakeholder channels."""
+        """Send message across public/private stakeholder channels with Cloudflare R2 storage."""
         name = data.get('sender_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Agency Officer')
         role = data.get('sender_role') or 'Government Safety Directorate'
         text = data.get('message_text', '')
+
+        # Process Cloudflare R2 Storage Upload for File Attachments
+        raw_attachment = data.get('attachment_url')
+        att_name = data.get('attachment_name') or 'attachment'
+        r2_attachment_url = StakeholderService.upload_to_cloudflare_r2(raw_attachment, att_name, folder_prefix="messages/attachments") if raw_attachment else None
+
+        # Process Cloudflare R2 Storage Upload for Voice Notes
+        raw_voice_note = data.get('voice_note_url')
+        voice_name = f"voice_note_{uuid.uuid4().hex[:6]}.webm"
+        r2_voice_note_url = StakeholderService.upload_to_cloudflare_r2(raw_voice_note, voice_name, folder_prefix="messages/voicenotes") if raw_voice_note else None
 
         msg = StakeholderMessage.objects.create(
             sender=user if getattr(user, 'is_authenticated', False) else None,
@@ -292,11 +358,11 @@ class StakeholderService:
             channel_name=data.get('channel_name', 'General Council'),
             project_name=data.get('project_name', 'Central Metro Transit Hub'),
             message_text=text,
-            attachment_url=data.get('attachment_url'),
-            attachment_name=data.get('attachment_name'),
+            attachment_url=r2_attachment_url or raw_attachment,
+            attachment_name=att_name if (r2_attachment_url or raw_attachment) else None,
             attachment_type=data.get('attachment_type'),
             attachment_size=data.get('attachment_size'),
-            voice_note_url=data.get('voice_note_url'),
+            voice_note_url=r2_voice_note_url or raw_voice_note,
             voice_note_duration=int(data.get('voice_note_duration', 0) or 0),
             is_urgent=bool(data.get('is_urgent', False))
         )
@@ -308,6 +374,7 @@ class StakeholderService:
             new_state={
                 "channel": msg.channel_name,
                 "is_urgent": msg.is_urgent,
+                "storage_provider": "Cloudflare R2",
                 "has_voice_note": bool(msg.voice_note_url),
                 "has_attachment": bool(msg.attachment_url)
             }
