@@ -290,9 +290,9 @@ class StakeholderMessageViewSet(viewsets.ModelViewSet):
             qs = qs.filter(channel_name__iexact=channel)
         return qs
 
-    def perform_create(self, serializer):
-        msg = StakeholderService.send_message(self.request.data, self.request.user)
-        serializer.instance = msg
+    def create(self, request, *args, **kwargs):
+        msg = StakeholderService.send_message(request.data, request.user)
+        return Response(StakeholderMessageSerializer(msg).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='translate')
     def translate(self, request, pk=None):
