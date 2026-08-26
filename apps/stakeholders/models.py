@@ -211,18 +211,27 @@ class StakeholderMessage(models.Model):
     
     channel_name = models.CharField(max_length=100, default='General Council', db_index=True)
     project_name = models.CharField(max_length=255, default='Central Metro Transit Hub')
-    message_text = models.TextField()
-    attachment_url = models.CharField(max_length=500, blank=True, null=True)
-    attachment_name = models.CharField(max_length=255, blank=True, null=True)
-    is_urgent = models.BooleanField(default=False)
+    message_text = models.TextField(blank=True, default='')
     
+    # File Attachments
+    attachment_url = models.TextField(blank=True, null=True)
+    attachment_name = models.CharField(max_length=255, blank=True, null=True)
+    attachment_type = models.CharField(max_length=100, blank=True, null=True)
+    attachment_size = models.CharField(max_length=50, blank=True, null=True)
+    
+    # Voice Notes
+    voice_note_url = models.TextField(blank=True, null=True)
+    voice_note_duration = models.IntegerField(default=0, help_text="Duration in seconds")
+    
+    is_urgent = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['created_at']
 
     def __str__(self):
-        return f"[{self.channel_name}] {self.sender_name}: {self.message_text[:40]}"
+        desc = self.message_text[:40] if self.message_text else ('[Voice Note]' if self.voice_note_url else '[Attachment]')
+        return f"[{self.channel_name}] {self.sender_name}: {desc}"
 
 
 class Certification(models.Model):
