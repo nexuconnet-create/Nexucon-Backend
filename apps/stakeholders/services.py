@@ -283,6 +283,7 @@ class StakeholderService:
         """Send message across public/private stakeholder channels."""
         name = data.get('sender_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Agency Officer')
         role = data.get('sender_role') or 'Government Safety Directorate'
+        text = data.get('message_text', '')
 
         msg = StakeholderMessage.objects.create(
             sender=user if getattr(user, 'is_authenticated', False) else None,
@@ -290,9 +291,13 @@ class StakeholderService:
             sender_role=role,
             channel_name=data.get('channel_name', 'General Council'),
             project_name=data.get('project_name', 'Central Metro Transit Hub'),
-            message_text=data.get('message_text', ''),
+            message_text=text,
             attachment_url=data.get('attachment_url'),
             attachment_name=data.get('attachment_name'),
+            attachment_type=data.get('attachment_type'),
+            attachment_size=data.get('attachment_size'),
+            voice_note_url=data.get('voice_note_url'),
+            voice_note_duration=int(data.get('voice_note_duration', 0) or 0),
             is_urgent=bool(data.get('is_urgent', False))
         )
 
@@ -300,14 +305,20 @@ class StakeholderService:
             user=user,
             action="STAKEHOLDER_MESSAGE_SENT",
             resource_id=msg.id,
-            new_state={"channel": msg.channel_name, "is_urgent": msg.is_urgent}
+            new_state={
+                "channel": msg.channel_name,
+                "is_urgent": msg.is_urgent,
+                "has_voice_note": bool(msg.voice_note_url),
+                "has_attachment": bool(msg.attachment_url)
+            }
         )
 
         if msg.is_urgent:
+            preview = msg.message_text[:120] if msg.message_text else ('[Voice Note]' if msg.voice_note_url else '[Attachment]')
             StakeholderService.send_notification(
                 user=user,
                 title=f"URGENT Broadcast: [{msg.channel_name}]",
-                message=f"{msg.sender_name}: {msg.message_text[:120]}...",
+                message=f"{msg.sender_name}: {preview}",
                 category="URGENT_MESSAGE",
                 severity="Critical",
                 action_url="/government/dashboard/stakeholders/messages"
