@@ -188,6 +188,7 @@ class StakeholderMeeting(models.Model):
     initiator_role = models.CharField(max_length=100, default='Agency Head / Director General')
     
     room_id = models.CharField(max_length=100, default=generate_room_id)
+    google_meet_url = models.CharField(max_length=500, blank=True, null=True, default='')
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Scheduled')
     participants = models.JSONField(default=list)
     minutes_notes = models.TextField(blank=True, null=True)

@@ -72,13 +72,17 @@ class StakeholderService:
         name = data.get('initiator_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Engr. Babatunde Sanwo')
         role = data.get('initiator_role') or 'Agency Head / Director General'
 
+        meeting_type = data.get('meeting_type', 'Video Call')
+        google_meet_url = data.get('google_meet_url') or ('https://meet.google.com/new' if meeting_type == 'Video Call' else '')
+
         meeting = StakeholderMeeting.objects.create(
             title=data.get('title', 'Project Coordination Council Session'),
             agenda=data.get('agenda', ''),
             project_name=data.get('project_name', 'Central Metro Transit Hub'),
             date=data.get('date', timezone.now().strftime('%b %d, %Y')),
             time_slot=data.get('time_slot', '10:00 AM - 11:30 AM'),
-            meeting_type=data.get('meeting_type', 'Video Call'),
+            meeting_type=meeting_type,
+            google_meet_url=google_meet_url,
             initiated_by=user if getattr(user, 'is_authenticated', False) else None,
             initiator_name=name,
             initiator_role=role,
@@ -125,6 +129,7 @@ class StakeholderService:
             "room_id": meeting.room_id,
             "meeting_reference": meeting.meeting_reference,
             "title": meeting.title,
+            "google_meet_url": meeting.google_meet_url or "https://meet.google.com/new",
             "call_url": f"https://meet.nexucon.gov/{meeting.room_id}"
         }
 
