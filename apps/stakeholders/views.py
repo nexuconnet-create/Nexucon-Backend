@@ -221,12 +221,20 @@ class BlacklistRecordViewSet(viewsets.ModelViewSet):
 class StakeholderMeetingViewSet(viewsets.ModelViewSet):
     queryset = StakeholderMeeting.objects.all().order_by('-date', '-created_at')
     serializer_class = StakeholderMeetingSerializer
+    lookup_value_regex = r'[^/]+'
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
         StakeholderService.seed_initial_stakeholders()
         return super().get_queryset()
+
+    def get_object(self):
+        pk = self.kwargs.get('pk')
+        meeting = StakeholderService.get_meeting_instance(pk)
+        if meeting:
+            return meeting
+        return super().get_object()
 
     def perform_create(self, serializer):
         meeting = StakeholderService.schedule_meeting(self.request.data, self.request.user)
