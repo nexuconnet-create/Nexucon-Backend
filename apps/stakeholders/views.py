@@ -237,6 +237,26 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
         res = StakeholderService.start_meeting(pk, request.user)
         return Response(res, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], url_path='join')
+    def join_meeting(self, request, pk=None):
+        updated_meeting = StakeholderService.join_meeting(pk, request.data, request.user)
+        return Response(StakeholderMeetingSerializer(updated_meeting).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post', 'patch'], url_path='notes')
+    def update_notes(self, request, pk=None):
+        notes = request.data.get('notes', '')
+        updated_meeting = StakeholderService.update_meeting_notes(pk, notes, request.user)
+        return Response(StakeholderMeetingSerializer(updated_meeting).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='vote')
+    def cast_vote(self, request, pk=None):
+        voter_name = request.data.get('voter_name', 'Council Member')
+        voter_role = request.data.get('voter_role', 'Stakeholder')
+        vote = request.data.get('vote', 'YES')
+        res_title = request.data.get('resolution_title')
+        res = StakeholderService.cast_meeting_vote(pk, voter_name, voter_role, vote, res_title, request.user)
+        return Response(res, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'], url_path='add-action-item')
     def add_action_item(self, request, pk=None):
         title = request.data.get('title')

@@ -134,6 +134,94 @@ class StakeholderService:
         }
 
     @staticmethod
+    def join_meeting(meeting_id, participant_data, user=None):
+        """
+        Record a participant joining the live meeting session in the backend database.
+        """
+        meeting = StakeholderMeeting.objects.get(id=meeting_id)
+        name = participant_data.get('name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Guest Participant')
+        role = participant_data.get('role', 'Stakeholder Representative')
+        email = participant_data.get('email', '')
+
+        # Update meeting status to In Progress if currently scheduled
+        if meeting.status == 'Scheduled':
+            meeting.status = 'In Progress'
+
+        # Update participants JSON list
+        current_participants = list(meeting.participants or [])
+        found = False
+        for p in current_participants:
+            if (email and p.get('email') == email) or p.get('name') == name:
+                p['status'] = 'Live In Room'
+                p['role'] = role
+                p['joined_at'] = timezone.now().strftime('%I:%M %p')
+                found = True
+                break
+
+        if not found:
+            current_participants.append({
+                "name": name,
+                "role": role,
+                "email": email,
+                "status": "Live In Room",
+                "joined_at": timezone.now().strftime('%I:%M %p')
+            })
+
+        meeting.participants = current_participants
+        meeting.save(update_fields=['participants', 'status'])
+
+        StakeholderService.log_audit(
+            user=user,
+            action="PARTICIPANT_JOINED_MEETING",
+            resource_id=meeting.id,
+            new_state={"name": name, "role": role, "email": email, "meeting_ref": meeting.meeting_reference}
+        )
+
+        return meeting
+
+    @staticmethod
+    def update_meeting_notes(meeting_id, notes, user=None):
+        """Update and audit live minutes notes for a council meeting."""
+        meeting = StakeholderMeeting.objects.get(id=meeting_id)
+        meeting.minutes_notes = notes
+        meeting.save(update_fields=['minutes_notes'])
+
+        StakeholderService.log_audit(
+            user=user,
+            action="MEETING_MINUTES_UPDATED",
+            resource_id=meeting.id,
+            new_state={"meeting_ref": meeting.meeting_reference}
+        )
+        return meeting
+
+    @staticmethod
+    def cast_meeting_vote(meeting_id, voter_name, voter_role, vote, resolution_title=None, user=None):
+        """Record official quorum stage-gate vote in audit trail."""
+        meeting = StakeholderMeeting.objects.get(id=meeting_id)
+        StakeholderService.log_audit(
+            user=user,
+            action="MEETING_QUORUM_VOTE_CAST",
+            resource_id=meeting.id,
+            new_state={
+                "voter": voter_name,
+                "role": voter_role,
+                "vote": vote,
+                "resolution": resolution_title or "Stage-Gate Signoff",
+                "meeting_ref": meeting.meeting_reference
+            }
+        )
+        return {
+            "meeting_id": str(meeting.id),
+            "voter": voter_name,
+            "vote": vote,
+            "status": "Recorded"
+        }
+
+    @staticmethod
+    def add_meeting_actionItem(meeting_id, title, assignee_name='Project Lead', due_date='Within 5 Business Days', user=None):
+        return StakeholderService.add_meeting_action_item(meeting_id, title, assignee_name, due_date, user)
+
+    @staticmethod
     def add_meeting_action_item(meeting_id, title, assignee_name='Project Lead', due_date='Within 5 Business Days', user=None):
         meeting = StakeholderMeeting.objects.get(id=meeting_id)
         item = MeetingActionItem.objects.create(
