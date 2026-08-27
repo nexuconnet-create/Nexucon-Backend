@@ -30,6 +30,12 @@ class TersusDevice(models.Model):
     ip_address = models.CharField(max_length=100, blank=True, null=True)
     latitude = models.FloatField(default=6.5244)
     longitude = models.FloatField(default=3.3792)
+    elevation = models.FloatField(default=12.45)
+    horizontal_accuracy = models.CharField(max_length=50, default='0.008 m')
+    vertical_accuracy = models.CharField(max_length=50, default='0.015 m')
+    coordinate_system = models.CharField(max_length=100, default='WGS84 / Minna Datum UTM Zone 31N')
+    satellites_tracked = models.IntegerField(default=28)
+    rtk_fix_status = models.CharField(max_length=50, default='FIXED_RTK')
     firmware_version = models.CharField(max_length=50, default='v2.4.1')
     last_sync = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -42,15 +48,19 @@ class TersusDevice(models.Model):
 
 
 class BIMIntegration(models.Model):
-    """External BIM and design platforms (Autodesk, Procore, Trimble, Bentley)."""
+    """External BIM and design platforms (Autodesk, Procore, Trimble Connect, Bentley)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     provider = models.CharField(max_length=255, unique=True)
     status = models.CharField(max_length=50, default='Connected')
+    environment = models.CharField(max_length=50, default='Production')
     client_id = models.CharField(max_length=255, blank=True, null=True)
     synced_models_count = models.IntegerField(default=0)
+    project_count = models.IntegerField(default=4)
     webhook_url = models.CharField(max_length=500, blank=True, null=True)
     icon_code = models.CharField(max_length=10, default='A')
     last_sync = models.DateTimeField(auto_now=True)
+    last_successful_sync = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -65,13 +75,16 @@ class DocumentSystemIntegration(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, unique=True)
     system_type = models.CharField(max_length=100, default='Cloud Storage')
+    storage_provider = models.CharField(max_length=100, default='Cloudflare R2')
     status = models.CharField(max_length=50, default='Active')
     bucket_or_drive_name = models.CharField(max_length=255, default='nexucondocument')
     endpoint_url = models.CharField(
         max_length=500,
         default='https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument'
     )
+    encrypted_secret_preview = models.CharField(max_length=100, default='••••••••••••8A72')
     synced_files_count = models.IntegerField(default=0)
+    folder_count = models.IntegerField(default=8)
     last_sync = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -87,9 +100,13 @@ class GovernmentAPIIntegration(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     api_key_identifier = models.CharField(max_length=100, unique=True, db_index=True)
     name = models.CharField(max_length=255)
+    provider_code = models.CharField(max_length=50, default='CAC')
     description = models.TextField(blank=True, null=True)
     endpoint_url = models.CharField(max_length=500)
     status = models.CharField(max_length=50, default='connected')
+    auth_method = models.CharField(max_length=100, default='mTLS / Bearer Token')
+    credential_status = models.CharField(max_length=50, default='ACTIVE')
+    documentation_status = models.CharField(max_length=100, default='PENDING CLIENT API DOCUMENTATION/CREDENTIALS')
     data_flow_direction = models.CharField(max_length=50, default='Bidirectional')
     last_sync = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -110,7 +127,11 @@ class APIKeyCredential(models.Model):
     app_type = models.CharField(max_length=100, default='OAuth 2.0 App')
     volume_tier = models.CharField(max_length=100, default='High (450k/day)')
     status = models.CharField(max_length=50, default='Healthy')
+    rate_limit_per_min = models.IntegerField(default=600)
+    allowed_ips = models.CharField(max_length=255, default='*')
     last_used_at = models.DateTimeField(auto_now=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -129,6 +150,10 @@ class IntegrationLog(models.Model):
     status = models.CharField(max_length=50, default='Success')
     payload_size = models.CharField(max_length=50, default='2.4 MB')
     http_status_code = models.IntegerField(default=200)
+    duration_ms = models.IntegerField(default=142)
+    error_code = models.CharField(max_length=100, blank=True, null=True)
+    direction = models.CharField(max_length=50, default='Inbound')
+    request_id = models.CharField(max_length=100, blank=True, null=True)
     details = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

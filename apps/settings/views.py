@@ -44,6 +44,12 @@ class TersusDeviceViewSet(viewsets.ModelViewSet):
         updated = IntegrationService.force_sync_device(device.device_id, request.user)
         return Response(TersusDeviceSerializer(updated).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post', 'get'], url_path='health')
+    def health_check(self, request, pk=None):
+        device = self.get_object()
+        health = IntegrationService.test_tersus_health(device.device_id, request.user)
+        return Response(health, status=status.HTTP_200_OK)
+
 
 class BIMIntegrationViewSet(viewsets.ModelViewSet):
     queryset = BIMIntegration.objects.all().order_by('provider')
@@ -57,6 +63,19 @@ class BIMIntegrationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='sync')
     def sync_platform(self, request, pk=None):
         bim = IntegrationService.sync_bim_platform(pk, request.user)
+        return Response(BIMIntegrationSerializer(bim).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post', 'get'], url_path='health')
+    def health_check(self, request, pk=None):
+        health = IntegrationService.test_bim_health(pk, request.user)
+        return Response(health, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='disconnect')
+    def disconnect(self, request, pk=None):
+        bim = self.get_object()
+        bim.status = 'Disconnected'
+        bim.save()
+        IntegrationService.log_audit(user=request.user, action="INTEGRATION_DISCONNECTED", resource_id=bim.id, new_state={"provider": bim.provider, "status": "Disconnected"})
         return Response(BIMIntegrationSerializer(bim).data, status=status.HTTP_200_OK)
 
 
@@ -74,6 +93,11 @@ class DocumentSystemIntegrationViewSet(viewsets.ModelViewSet):
         dms = IntegrationService.sync_document_system(pk, request.user)
         return Response(DocumentSystemIntegrationSerializer(dms).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post', 'get'], url_path='health')
+    def health_check(self, request, pk=None):
+        health = IntegrationService.test_document_health(pk, request.user)
+        return Response(health, status=status.HTTP_200_OK)
+
 
 class GovernmentAPIIntegrationViewSet(viewsets.ModelViewSet):
     queryset = GovernmentAPIIntegration.objects.all().order_by('name')
@@ -87,8 +111,22 @@ class GovernmentAPIIntegrationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='test-connection')
     def test_connection(self, request, pk=None):
         gov = self.get_object()
-        res = IntegrationService.verify_government_api(gov.api_key_identifier, request.user)
-        return Response(GovernmentAPIIntegrationSerializer(res).data, status=status.HTTP_200_OK)
+        IntegrationService.verify_government_api(gov.api_key_identifier, request.user)
+        gov.refresh_from_db()
+        return Response(GovernmentAPIIntegrationSerializer(gov).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post', 'get'], url_path='health')
+    def health_check(self, request, pk=None):
+        gov = self.get_object()
+        health = IntegrationService.verify_government_api(gov.api_key_identifier, request.user)
+        return Response(health, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='verify-entity')
+    def verify_entity(self, request):
+        provider_code = request.data.get('provider_code', 'CAC')
+        query_identifier = request.data.get('query_identifier', 'RC-1849204')
+        result = IntegrationService.verify_government_entity(provider_code, query_identifier, request.user)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class APIKeyCredentialViewSet(viewsets.ModelViewSet):
@@ -108,6 +146,16 @@ class APIKeyCredentialViewSet(viewsets.ModelViewSet):
         volume_tier = request.data.get('volume_tier', 'High (450k/day)')
         res = IntegrationService.generate_api_key(name, app_type, volume_tier, request.user)
         return Response(res, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='rotate')
+    def rotate(self, request, pk=None):
+        res = IntegrationService.rotate_api_key(pk, request.user)
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='revoke')
+    def revoke(self, request, pk=None):
+        res = IntegrationService.revoke_api_key(pk, request.user)
+        return Response(res, status=status.HTTP_200_OK)
 
 
 class IntegrationLogViewSet(viewsets.ReadOnlyModelViewSet):
