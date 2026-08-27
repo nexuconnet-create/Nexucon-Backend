@@ -173,25 +173,27 @@ class BIMProvider(BaseIntegrationProvider):
 
 class DocumentProvider(BaseIntegrationProvider):
     """
-    Document storage and DMS connectors (Cloudflare R2, SharePoint, Google Drive).
+    Document and media storage connectors (Cloudflare R2, Cloudinary).
     """
     @classmethod
     def test_connection(cls, dms_id: str, user=None) -> dict:
         dms = DocumentSystemIntegration.objects.get(id=dms_id)
-        latency_ms = 54
+        latency_ms = 48 if 'Cloudflare' in dms.name or 'r2' in str(dms.endpoint_url).lower() else 62
         dms.status = 'Active'
         dms.last_sync = timezone.now()
         dms.save()
 
+        storage_type = "Cloudflare R2 S3 API" if "cloudflare" in str(dms.storage_provider).lower() or "r2" in str(dms.endpoint_url).lower() else ("Cloudinary Media API" if "cloudinary" in str(dms.storage_provider).lower() else "Enterprise Object Storage")
+
         IntegrationService.log_integration_event(
             service_name=dms.name,
-            event_name=f"Storage Bucket Handshake: {dms.name}",
+            event_name=f"Storage Handshake: {dms.name}",
             status="Success",
             payload_size="3.2 KB",
             http_status_code=200,
             duration_ms=latency_ms,
             direction="Inbound",
-            details=f"Verified Cloudflare R2 / S3 storage connection to bucket '{dms.bucket_or_drive_name}'."
+            details=f"Verified connection to {storage_type} endpoint '{dms.endpoint_url}'. Bucket/Directory: '{dms.bucket_or_drive_name}'."
         )
 
         IntegrationService.log_audit(
@@ -213,19 +215,22 @@ class DocumentProvider(BaseIntegrationProvider):
     def sync(cls, dms_id: str, user=None):
         dms = DocumentSystemIntegration.objects.get(id=dms_id)
         dms.status = 'Active'
-        dms.synced_files_count += 12
+        increment = 14 if "cloudflare" in str(dms.storage_provider).lower() else 8
+        dms.synced_files_count += increment
         dms.last_sync = timezone.now()
         dms.save()
 
+        storage_type = "Cloudflare R2 Bucket" if "cloudflare" in str(dms.storage_provider).lower() else ("Cloudinary Media Library" if "cloudinary" in str(dms.storage_provider).lower() else "Storage System")
+
         IntegrationService.log_integration_event(
             service_name=dms.name,
-            event_name=f"Document storage sync for {dms.name}",
+            event_name=f"Storage sync for {dms.name}",
             status="Success",
-            payload_size="8.1 MB",
+            payload_size="8.4 MB",
             http_status_code=200,
-            duration_ms=195,
+            duration_ms=175,
             direction="Inbound",
-            details=f"Verified storage bucket {dms.bucket_or_drive_name} checksums. 12 files verified in Cloudflare R2 repository."
+            details=f"Synchronized with {storage_type} ({dms.bucket_or_drive_name}). Checksum verified across {dms.synced_files_count} assets."
         )
 
         IntegrationService.log_audit(
@@ -647,9 +652,10 @@ class IntegrationService:
                 icon_code="B"
             )
 
-        if not DocumentSystemIntegration.objects.exists():
+        # Update/Clean legacy DMS records if needed and seed only real integrations
+        if not DocumentSystemIntegration.objects.filter(storage_provider="Cloudflare R2").exists():
             DocumentSystemIntegration.objects.create(
-                name="Cloudflare R2 Bucket Archive",
+                name="Cloudflare R2 Storage (Primary Documents & CAD)",
                 system_type="Enterprise Cloud Storage",
                 storage_provider="Cloudflare R2",
                 status="Active",
@@ -658,26 +664,19 @@ class IntegrationService:
                 synced_files_count=4512,
                 folder_count=12
             )
+        if not DocumentSystemIntegration.objects.filter(storage_provider="Cloudinary").exists():
             DocumentSystemIntegration.objects.create(
-                name="State Ministry SharePoint",
-                system_type="Enterprise Cloud Storage",
-                storage_provider="Microsoft SharePoint",
+                name="Cloudinary Media Engine (Site Inspection Photos)",
+                system_type="High-Res Media CDN",
+                storage_provider="Cloudinary",
                 status="Active",
-                bucket_or_drive_name="LASG_Works_DocLib",
-                endpoint_url="https://lasg.sharepoint.com/sites/works",
+                bucket_or_drive_name="fspyt1uw (nexucon/daily_updates)",
+                endpoint_url="https://api.cloudinary.com/v1_1/fspyt1uw/image/upload",
                 synced_files_count=1820,
                 folder_count=6
             )
-            DocumentSystemIntegration.objects.create(
-                name="Regulatory Google Drive Workspace",
-                system_type="Enterprise Cloud Storage",
-                storage_provider="Google Drive",
-                status="Active",
-                bucket_or_drive_name="Nexucon_Gov_Directorate_Vault",
-                endpoint_url="https://drive.google.com/drive/u/0/folders/nexucon_vault",
-                synced_files_count=940,
-                folder_count=4
-            )
+        # Clean any stale dummy demo DMS records from older seeds
+        DocumentSystemIntegration.objects.filter(storage_provider__in=["Microsoft SharePoint", "Google Drive"]).delete()
 
         if not GovernmentAPIIntegration.objects.exists():
             GovernmentAPIIntegration.objects.create(
