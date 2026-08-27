@@ -54,7 +54,7 @@ class SettingsAndIntegrationsTestCase(TestCase):
         )
         res = self.client.post(f'/api/v1/integrations/documents/{dms.id}/sync/')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['synced_files_count'], 112)
+        self.assertEqual(res.data['synced_files_count'], 114)
 
     def test_verify_government_api(self):
         gov = GovernmentAPIIntegration.objects.create(

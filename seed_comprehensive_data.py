@@ -1161,15 +1161,32 @@ BIMIntegration.objects.get_or_create(
 )
 
 # Seed DMS Integrations
-DocumentSystemIntegration.objects.get_or_create(
-    name="Microsoft SharePoint Online / M365 DMS",
+DocumentSystemIntegration.objects.update_or_create(
+    name="Cloudflare R2 Storage (Primary Documents & CAD)",
     defaults={
-        "system_type": "Cloud DMS",
+        "system_type": "Enterprise Cloud Storage",
+        "storage_provider": "Cloudflare R2",
         "status": "Active",
-        "bucket_or_drive_name": "lagosstate-docs",
-        "synced_files_count": 1420
+        "bucket_or_drive_name": "nexucondocument",
+        "endpoint_url": "https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument",
+        "synced_files_count": 4512,
+        "folder_count": 12
     }
 )
+DocumentSystemIntegration.objects.update_or_create(
+    name="Cloudinary Media Engine (Site Inspection Photos)",
+    defaults={
+        "system_type": "High-Res Media CDN",
+        "storage_provider": "Cloudinary",
+        "status": "Active",
+        "bucket_or_drive_name": "fspyt1uw (nexucon/daily_updates)",
+        "endpoint_url": "https://api.cloudinary.com/v1_1/fspyt1uw/image/upload",
+        "synced_files_count": 1820,
+        "folder_count": 6
+    }
+)
+# Clean up any legacy dummy demo records
+DocumentSystemIntegration.objects.filter(name="Microsoft SharePoint Online / M365 DMS").delete()
 
 # Seed Government APIs
 GovernmentAPIIntegration.objects.get_or_create(
