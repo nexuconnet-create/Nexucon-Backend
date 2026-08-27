@@ -1214,33 +1214,35 @@ class SettingsService:
             if c.category not in grouped:
                 grouped[c.category] = []
             grouped[c.category].append({
+                "id": str(c.id),
+                "event_label": c.event_label,
                 "label": c.event_label,
                 "in_app": c.in_app,
                 "email": c.email,
                 "sms": c.sms,
+                "is_locked": c.is_locked,
                 "locked": c.is_locked
             })
 
-        return [
-            {
-                "title": "Critical Safety Incidents",
-                "description": "Work stoppages, severe environmental breaches, and major safety hazards.",
-                "color": "text-red-500",
-                "settings": grouped.get("Critical Safety Incidents", [])
-            },
-            {
-                "title": "Permits & Approvals",
-                "description": "New submissions, required reviews, and final sign-offs.",
-                "color": "text-blue-500",
-                "settings": grouped.get("Permits & Approvals", [])
-            },
-            {
-                "title": "Field Inspections",
-                "description": "Inspection requests, NCR generation, and schedule changes.",
-                "color": "text-emerald-500",
-                "settings": grouped.get("Field Inspections", [])
-            }
+        categories_def = [
+            ("Critical Safety Incidents", "Work stoppages, severe environmental breaches, and major safety hazards.", "text-red-500"),
+            ("Permits & Approvals", "New submissions, required reviews, and final sign-offs.", "text-blue-500"),
+            ("Field Inspections", "Inspection requests, NCR generation, and schedule changes.", "text-emerald-500")
         ]
+
+        result = []
+        for cat_name, desc, color in categories_def:
+            items_list = grouped.get(cat_name, [])
+            result.append({
+                "category": cat_name,
+                "title": cat_name,
+                "description": desc,
+                "color": color,
+                "items": items_list,
+                "settings": items_list
+            })
+
+        return result
 
     @classmethod
     def update_notification_preference(cls, category: str, event_label: str, channel: str, enabled: bool, actor=None):
