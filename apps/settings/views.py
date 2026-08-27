@@ -8,7 +8,7 @@ from .models import (
     UserInvitation, CustomRole, RolePermission, ApprovalWorkflow,
     WorkflowStep, InspectionTemplate, ChecklistItem, ComplianceStandard,
     StatutoryDocument, NotificationRoutingRule, NotificationPreferenceCategory,
-    WebhookSubscription
+    WebhookSubscription, AgencyProfile, ReportTemplate
 )
 from .serializers import (
     TersusDeviceSerializer, BIMIntegrationSerializer, DocumentSystemIntegrationSerializer,
@@ -17,7 +17,7 @@ from .serializers import (
     ApprovalWorkflowSerializer, WorkflowStepSerializer, InspectionTemplateSerializer,
     ChecklistItemSerializer, ComplianceStandardSerializer, StatutoryDocumentSerializer,
     NotificationRoutingRuleSerializer, NotificationPreferenceCategorySerializer,
-    WebhookSubscriptionSerializer
+    WebhookSubscriptionSerializer, AgencyProfileSerializer, ReportTemplateSerializer
 )
 from .services import IntegrationService, SettingsService
 
@@ -419,3 +419,38 @@ class WebhookSubscriptionViewSet(viewsets.ViewSet):
     def destroy(self, request, pk=None):
         SettingsService.delete_webhook(pk, request.user)
         return Response({"status": "deleted"}, status=status.HTTP_204_NO_CONTENT)
+
+
+class AgencyProfileViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        profile = SettingsService.get_agency_profile()
+        return Response(AgencyProfileSerializer(profile).data, status=status.HTTP_200_OK)
+
+    def partial_update(self, request, pk=None):
+        updated = SettingsService.update_agency_profile(request.data, request.user)
+        return Response(AgencyProfileSerializer(updated).data, status=status.HTTP_200_OK)
+
+    def create(self, request):
+        updated = SettingsService.update_agency_profile(request.data, request.user)
+        return Response(AgencyProfileSerializer(updated).data, status=status.HTTP_200_OK)
+
+
+class ReportTemplateViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def list(self, request):
+        templates = SettingsService.get_report_templates()
+        return Response(ReportTemplateSerializer(templates, many=True).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='active')
+    def active(self, request):
+        active_tpl = SettingsService.get_active_report_template()
+        return Response(ReportTemplateSerializer(active_tpl).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='set-default')
+    def set_default(self, request, pk=None):
+        tpl = SettingsService.set_active_report_template(pk, request.user)
+        return Response(ReportTemplateSerializer(tpl).data, status=status.HTTP_200_OK)
+

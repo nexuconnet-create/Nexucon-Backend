@@ -261,3 +261,35 @@ class SettingsAndIntegrationsTestCase(TestCase):
 
         del_res = self.client.delete(f'/api/v1/settings/webhooks/{hook_id}/')
         self.assertEqual(del_res.status_code, 204)
+
+    def test_get_and_update_agency_profile(self):
+        # Get profile
+        res = self.client.get('/api/v1/settings/profile/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['agency_code'], 'LASG-MPPUD-01')
+
+        # Update profile
+        update_res = self.client.post('/api/v1/settings/profile/', {
+            "agency_name": "Lagos State Ministry of Physical Planning (Updated)",
+            "official_email": "info@mppud.lagosstate.gov.ng"
+        }, format='json')
+        self.assertEqual(update_res.status_code, 200)
+        self.assertEqual(update_res.data['agency_name'], "Lagos State Ministry of Physical Planning (Updated)")
+        self.assertEqual(update_res.data['official_email'], "info@mppud.lagosstate.gov.ng")
+
+    def test_report_templates_list_and_set_default(self):
+        # List templates
+        res = self.client.get('/api/v1/settings/report-templates/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(len(res.data) >= 4)
+
+        # Set default
+        set_res = self.client.post('/api/v1/settings/report-templates/RPT-STAT-02/set-default/')
+        self.assertEqual(set_res.status_code, 200)
+        self.assertTrue(set_res.data['is_active_default'])
+
+        # Get active
+        active_res = self.client.get('/api/v1/settings/report-templates/active/')
+        self.assertEqual(active_res.status_code, 200)
+        self.assertEqual(active_res.data['id'], 'RPT-STAT-02')
+

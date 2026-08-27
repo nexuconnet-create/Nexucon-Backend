@@ -6,7 +6,8 @@ from .views import (
     IntegrationStatsViewSet, StaffUserViewSet, CustomRoleViewSet,
     ApprovalWorkflowViewSet, InspectionTemplateViewSet, ComplianceStandardViewSet,
     StatutoryDocumentViewSet, NotificationPreferenceViewSet,
-    NotificationRoutingRuleViewSet, WebhookSubscriptionViewSet
+    NotificationRoutingRuleViewSet, WebhookSubscriptionViewSet,
+    AgencyProfileViewSet, ReportTemplateViewSet
 )
 
 router = DefaultRouter()
@@ -21,6 +22,8 @@ router.register(r'logs', IntegrationLogViewSet, basename='integration-log')
 router.register(r'stats', IntegrationStatsViewSet, basename='integration-stats')
 
 # Settings
+router.register(r'profile', AgencyProfileViewSet, basename='agency-profile')
+router.register(r'report-templates', ReportTemplateViewSet, basename='report-template')
 router.register(r'users', StaffUserViewSet, basename='staff-user')
 router.register(r'roles', CustomRoleViewSet, basename='custom-role')
 router.register(r'workflows', ApprovalWorkflowViewSet, basename='approval-workflow')

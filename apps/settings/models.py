@@ -428,3 +428,66 @@ class WebhookSubscription(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.target_url}) - {self.status}"
+
+
+# ==========================================
+# 9. AGENCY PROFILE & JURISDICTION
+# ==========================================
+
+class AgencyProfile(models.Model):
+    """Identity and statutory configuration of the government agency."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agency_name = models.CharField(max_length=255, default='Lagos State Ministry of Physical Planning & Urban Development (MPP&UD)')
+    agency_code = models.CharField(max_length=100, default='LASG-MPPUD-01', unique=True)
+    logo_url = models.CharField(max_length=500, blank=True, null=True)
+    description = models.TextField(default='Central Statutory Enforcement, Development Control, and Building Clearance Authority.')
+    government_level = models.CharField(max_length=50, default='State') # State, Federal, Municipal
+    jurisdiction = models.CharField(max_length=255, default='Lagos State, Federal Republic of Nigeria')
+    official_email = models.EmailField(default='planning@lagosstate.gov.ng')
+    phone = models.CharField(max_length=100, default='+234 1 234 5678')
+    website = models.CharField(max_length=255, default='https://mppud.lagosstate.gov.ng')
+    office_address = models.CharField(max_length=500, default='Block 15, The Secretariat, Alausa, Ikeja, Lagos')
+    country = models.CharField(max_length=100, default='Nigeria')
+    state = models.CharField(max_length=100, default='Lagos State')
+    lga = models.CharField(max_length=100, default='Ikeja')
+    timezone = models.CharField(max_length=100, default='Africa/Lagos (GMT+1)')
+    default_language = models.CharField(max_length=100, default='English (NG)')
+    status = models.CharField(max_length=50, default='Active')
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['agency_name']
+
+    def __str__(self):
+        return f"{self.agency_name} ({self.agency_code})"
+
+
+# ==========================================
+# 10. REPORT PRESENTATION TEMPLATES & VISUALS
+# ==========================================
+
+def generate_rpt_id():
+    return f"RPT-{uuid.uuid4().hex[:4].upper()}"
+
+class ReportTemplate(models.Model):
+    """Report Presentation and Executive Formatting Template."""
+    id = models.CharField(primary_key=True, max_length=50, default=generate_rpt_id)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    theme_style = models.CharField(max_length=100, default='Executive Vibrant') # Executive Vibrant, Modern Architectural, Statutory Technical, Minimalist Slate
+    cover_page_style = models.CharField(max_length=100, default='Detailed Architectural Hero') # Detailed Architectural Hero, State Coat of Arms Gradient, Clean Executive, Split Grid
+    header_color = models.CharField(max_length=50, default='#022C4F')
+    accent_color = models.CharField(max_length=50, default='#2563EB')
+    footer_config = models.JSONField(default=dict) # { show_client_name: True, show_project_name: True, show_lga_zone: True, show_officer_sig: True, disclaimer: "..." }
+    building_code_citations = models.JSONField(default=list) # ["National Building Code of Nigeria (NBC)", "SON CAP Standards", "LASPPPA Urban Planning Laws"]
+    preview_thumbnail_url = models.CharField(max_length=500, blank=True, null=True)
+    is_active_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_active_default', 'name']
+
+    def __str__(self):
+        return f"{self.name} [{self.theme_style}] {'(DEFAULT)' if self.is_active_default else ''}"

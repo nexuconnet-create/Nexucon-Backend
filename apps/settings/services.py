@@ -10,7 +10,7 @@ from .models import (
     UserInvitation, CustomRole, RolePermission, ApprovalWorkflow,
     WorkflowStep, InspectionTemplate, ChecklistItem, ComplianceStandard,
     StatutoryDocument, NotificationRoutingRule, NotificationPreferenceCategory,
-    WebhookSubscription
+    WebhookSubscription, AgencyProfile, ReportTemplate
 )
 from apps.audit.models import AuditEvent
 
@@ -1298,6 +1298,61 @@ class SettingsService:
         )
 
     @classmethod
+    def get_agency_profile(cls):
+        cls.seed_initial_settings()
+        profile = AgencyProfile.objects.first()
+        if not profile:
+            profile = AgencyProfile.objects.create()
+        return profile
+
+    @classmethod
+    def update_agency_profile(cls, data: dict, user=None):
+        profile = cls.get_agency_profile()
+        for key, val in data.items():
+            if hasattr(profile, key) and key not in ['id', 'created_at', 'updated_at']:
+                setattr(profile, key, val)
+        profile.save()
+
+        if getattr(user, 'is_authenticated', False):
+            AuditEvent.objects.create(
+                user=user,
+                user_name=f"{user.first_name} {user.last_name}".strip() or user.username,
+                action="AGENCY_PROFILE_UPDATED",
+                resource_type="AgencyProfile",
+                resource_id=str(profile.id),
+                new_state={"agency_name": profile.agency_name, "agency_code": profile.agency_code, "status": profile.status}
+            )
+        return profile
+
+    @classmethod
+    def get_report_templates(cls):
+        cls.seed_initial_settings()
+        return ReportTemplate.objects.all().order_by('-is_active_default', 'name')
+
+    @classmethod
+    def get_active_report_template(cls):
+        cls.seed_initial_settings()
+        return ReportTemplate.objects.filter(is_active_default=True).first() or ReportTemplate.objects.first()
+
+    @classmethod
+    def set_active_report_template(cls, template_id: str, user=None):
+        ReportTemplate.objects.all().update(is_active_default=False)
+        tpl = ReportTemplate.objects.get(id=template_id)
+        tpl.is_active_default = True
+        tpl.save()
+
+        if getattr(user, 'is_authenticated', False):
+            AuditEvent.objects.create(
+                user=user,
+                user_name=f"{user.first_name} {user.last_name}".strip() or user.username,
+                action="REPORT_TEMPLATE_ACTIVATED",
+                resource_type="ReportTemplate",
+                resource_id=tpl.id,
+                new_state={"name": tpl.name, "theme_style": tpl.theme_style, "is_active_default": True}
+            )
+        return tpl
+
+    @classmethod
     def delete_webhook(cls, webhook_id: str, actor=None):
         wh = WebhookSubscription.objects.get(id=webhook_id)
         wh.delete()
@@ -1305,6 +1360,118 @@ class SettingsService:
 
     @classmethod
     def seed_initial_settings(cls):
+        # 0. Seed Agency Profile
+        if not AgencyProfile.objects.exists():
+            AgencyProfile.objects.create(
+                agency_name="Lagos State Ministry of Physical Planning & Urban Development (MPP&UD)",
+                agency_code="LASG-MPPUD-01",
+                logo_url="/images/agency-logo.png",
+                description="Central Statutory Enforcement, Development Control, and Building Clearance Authority.",
+                government_level="State",
+                jurisdiction="Lagos State, Federal Republic of Nigeria",
+                official_email="planning@lagosstate.gov.ng",
+                phone="+234 1 234 5678",
+                website="https://mppud.lagosstate.gov.ng",
+                office_address="Block 15, The Secretariat, Alausa, Ikeja, Lagos",
+                country="Nigeria",
+                state="Lagos State",
+                lga="Ikeja",
+                timezone="Africa/Lagos (GMT+1)",
+                default_language="English (NG)",
+                status="Active"
+            )
+
+        # 0.1 Seed Report Presentation Templates
+        if not ReportTemplate.objects.exists():
+            ReportTemplate.objects.create(
+                id="RPT-EXEC-01",
+                name="Executive Ministerial Presentation Template",
+                description="Vibrant executive format with detailed cover page, full KPI cards, non-technical project footer, and Nigerian Building Code citations.",
+                theme_style="Executive Vibrant",
+                cover_page_style="Detailed Architectural Hero",
+                header_color="#022C4F",
+                accent_color="#2563EB",
+                is_active_default=True,
+                footer_config={
+                    "show_client_name": True,
+                    "show_project_name": True,
+                    "show_lga_zone": True,
+                    "show_officer_sig": True,
+                    "disclaimer": "Confidential statutory document issued under the National Building Code of Nigeria & SON regulations. Accessible executive layout for non-engineers."
+                },
+                building_code_citations=[
+                    "National Building Code of Nigeria (NBC 2006/2020 Revision)",
+                    "Standards Organization of Nigeria (SON) Structural Steel & Cement Standards",
+                    "Lagos State Urban and Regional Planning and Development Law (2019/2024)",
+                    "LASPPPA Building Setbacks & Density Bylaws"
+                ]
+            )
+            ReportTemplate.objects.create(
+                id="RPT-STAT-02",
+                name="Statutory Compliance & Technical Audit",
+                description="Formal governmental inspection audit with emerald/teal header accents, regulatory clause references, and statutory sign-off block.",
+                theme_style="Statutory Technical",
+                cover_page_style="State Coat of Arms Gradient",
+                header_color="#0F766E",
+                accent_color="#10B981",
+                is_active_default=False,
+                footer_config={
+                    "show_client_name": True,
+                    "show_project_name": True,
+                    "show_lga_zone": True,
+                    "show_officer_sig": True,
+                    "disclaimer": "Statutory audit certified by the Directorate of Building Control and Safety Enforcement."
+                },
+                building_code_citations=[
+                    "National Building Code of Nigeria (NBC Part II Structural Requirements)",
+                    "SON NIS 11:2014 Ordinary Portland Cement Benchmark",
+                    "Federal Ministry of Works (FMW) Highway & Foundation Directives"
+                ]
+            )
+            ReportTemplate.objects.create(
+                id="RPT-BRIEF-03",
+                name="Modern Vibrant Stakeholder Brief",
+                description="Colorful stakeholder report layout designed for public transparency, non-technical readers, and ministerial briefings.",
+                theme_style="Modern Architectural",
+                cover_page_style="Split Grid Presentation",
+                header_color="#4338CA",
+                accent_color="#8B5CF6",
+                is_active_default=False,
+                footer_config={
+                    "show_client_name": True,
+                    "show_project_name": True,
+                    "show_lga_zone": True,
+                    "show_officer_sig": True,
+                    "disclaimer": "Quarterly executive briefing intended for public and non-technical stakeholders."
+                },
+                building_code_citations=[
+                    "National Building Code of Nigeria",
+                    "SON NIS 117 Steel Rebar Specification",
+                    "Lagos State Building Control Agency (LASBCA) Regulations"
+                ]
+            )
+            ReportTemplate.objects.create(
+                id="RPT-ENG-04",
+                name="Standard Engineering Inspection Sheet",
+                description="Clean, high-density engineering sheet focused on test metrics, concrete core sampling, and structural measurements.",
+                theme_style="Minimalist Slate",
+                cover_page_style="Clean Executive Header",
+                header_color="#1E293B",
+                accent_color="#F59E0B",
+                is_active_default=False,
+                footer_config={
+                    "show_client_name": True,
+                    "show_project_name": True,
+                    "show_lga_zone": True,
+                    "show_officer_sig": True,
+                    "disclaimer": "Field inspection sheet certified by the Lead Structural Surveyor and Site Geotechnical Inspector."
+                },
+                building_code_citations=[
+                    "National Building Code of Nigeria (Section 13: Site Safety & Excavations)",
+                    "SON NIS Standards for Aggregates and Concrete Testing"
+                ]
+            )
+
         # 1. Seed Roles
         if not CustomRole.objects.exists():
             admin_r = CustomRole.objects.create(name="System Administrator", role_type="System Default", is_system_default=True, active_users_count=3)
@@ -1390,7 +1557,8 @@ class SettingsService:
         # 5. Seed Statutory Documents
         if not StatutoryDocument.objects.exists():
             StatutoryDocument.objects.create(code="URP-Law 2010", name="Urban & Regional Planning Law", connected_features=["Zoning Controls", "Setbacks"])
-            StatutoryDocument.objects.create(code="NBC-2006", name="National Building Code", connected_features=["Structural Tolerances", "Fire Safety"])
+            StatutoryDocument.objects.create(code="NBC-2006", name="National Building Code of Nigeria", connected_features=["Structural Tolerances", "Fire Safety"])
+            StatutoryDocument.objects.create(code="SON-NIS-117", name="Standards Organization of Nigeria (SON Rebar Standards)", connected_features=["Yield Strength", "Steel Elongation"])
             StatutoryDocument.objects.create(code="LSEPA-2023", name="State Environmental Protection Guidelines", connected_features=["Noise Limits", "Effluent Discharge"])
             StatutoryDocument.objects.create(code="Safety-Comm", name="Safety Commission Regulations", connected_features=["Health & Safety Logs", "Stop-Work Orders"])
 

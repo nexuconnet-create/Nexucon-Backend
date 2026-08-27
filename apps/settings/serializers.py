@@ -1,12 +1,25 @@
 from rest_framework import serializers
+from django.contrib.auth import get_user_model
 from .models import (
     TersusDevice, BIMIntegration, DocumentSystemIntegration,
     GovernmentAPIIntegration, APIKeyCredential, IntegrationLog,
     UserInvitation, CustomRole, RolePermission, ApprovalWorkflow,
     WorkflowStep, InspectionTemplate, ChecklistItem, ComplianceStandard,
     StatutoryDocument, NotificationRoutingRule, NotificationPreferenceCategory,
-    WebhookSubscription
+    WebhookSubscription, AgencyProfile, ReportTemplate
 )
+
+User = get_user_model()
+
+class AgencyProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgencyProfile
+        fields = '__all__'
+
+class ReportTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReportTemplate
+        fields = '__all__'
 
 class TersusDeviceSerializer(serializers.ModelSerializer):
     class Meta:
@@ -43,9 +56,41 @@ class IntegrationLogSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class UserInvitationSerializer(serializers.ModelSerializer):
+    invited_by_email = serializers.ReadOnlyField(source='invited_by.email')
+
     class Meta:
         model = UserInvitation
         fields = '__all__'
+
+class StaffUserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    role_name = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id', 'email', 'first_name', 'last_name', 'full_name',
+            'phone_number', 'is_active', 'is_staff', 'is_superuser',
+            'role_name', 'department', 'status', 'last_login', 'created_at'
+        )
+
+    def get_full_name(self, obj):
+        name = f"{obj.first_name} {obj.last_name}".strip()
+        return name if name else obj.email.split('@')[0].capitalize()
+
+    def get_role_name(self, obj):
+        if obj.is_superuser:
+            return "Government Administrator"
+        group = obj.groups.first()
+        return group.name if group else "Technical Reviewer"
+
+    def get_department(self, obj):
+        return "Physical Planning & Urban Dev"
+
+    def get_status(self, obj):
+        return "ACTIVE" if obj.is_active else "SUSPENDED"
 
 class RolePermissionSerializer(serializers.ModelSerializer):
     class Meta:
