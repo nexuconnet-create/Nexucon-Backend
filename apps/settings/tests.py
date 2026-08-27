@@ -77,21 +77,43 @@ class SettingsAndIntegrationsTestCase(TestCase):
         self.assertIn('raw_key', res.data)
         self.assertTrue(res.data['raw_key'].startswith('nx_live_'))
 
-    def test_integration_logs_filter(self):
-        IntegrationLog.objects.create(
-            service_name="Tersus GNSS",
-            event_name="Telemetry Stream",
-            status="Success"
+    def test_integration_health_checks(self):
+        device = TersusDevice.objects.create(
+            device_id="T-S1-HEALTH",
+            name="Tersus Health Unit",
+            status="Active"
         )
-        res = self.client.get('/api/v1/integrations/logs/?service=Tersus')
+        res = self.client.get(f'/api/v1/integrations/tersus/{device.id}/health/')
         self.assertEqual(res.status_code, 200)
-        results = res.data if isinstance(res.data, list) else res.data.get('results', [])
-        self.assertTrue(any(l['service_name'] == 'Tersus GNSS' for l in results))
+        self.assertEqual(res.data['status'], 'HEALTHY')
+        self.assertEqual(res.data['provider'], 'Tersus GNSS')
 
-    def test_integration_stats(self):
-        res = self.client.get('/api/v1/integrations/stats/')
+    def test_api_key_rotate_and_revoke(self):
+        cred_res = self.client.post('/api/v1/integrations/api-keys/', {
+            "name": "Rotating Key Test",
+            "app_type": "OAuth 2.0 App",
+            "volume_tier": "Standard"
+        })
+        key_id = cred_res.data['id']
+
+        # Rotate
+        rot_res = self.client.post(f'/api/v1/integrations/api-keys/{key_id}/rotate/')
+        self.assertEqual(rot_res.status_code, 200)
+        self.assertIn('raw_key', rot_res.data)
+
+        # Revoke
+        rev_res = self.client.post(f'/api/v1/integrations/api-keys/{key_id}/revoke/')
+        self.assertEqual(rev_res.status_code, 200)
+        self.assertEqual(rev_res.data['status'], 'Revoked')
+
+    def test_verify_government_entity_lookup(self):
+        res = self.client.post('/api/v1/integrations/government/verify-entity/', {
+            "provider_code": "CAC",
+            "query_identifier": "RC-1849204"
+        })
         self.assertEqual(res.status_code, 200)
-        self.assertIn('total_requests_24h', res.data)
+        self.assertTrue(res.data['verified'])
+        self.assertEqual(res.data['registration_status'], 'ACTIVE & COMPLIANT')
 
     # ---------------- SETTINGS TESTS ----------------
 

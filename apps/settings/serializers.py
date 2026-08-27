@@ -31,7 +31,11 @@ class GovernmentAPIIntegrationSerializer(serializers.ModelSerializer):
 class APIKeyCredentialSerializer(serializers.ModelSerializer):
     class Meta:
         model = APIKeyCredential
-        fields = ('id', 'name', 'key_prefix', 'app_type', 'volume_tier', 'status', 'last_used_at', 'created_at')
+        fields = (
+            'id', 'name', 'key_prefix', 'app_type', 'volume_tier', 'status',
+            'rate_limit_per_min', 'allowed_ips', 'last_used_at', 'revoked_at',
+            'expires_at', 'created_at'
+        )
 
 class IntegrationLogSerializer(serializers.ModelSerializer):
     class Meta:
