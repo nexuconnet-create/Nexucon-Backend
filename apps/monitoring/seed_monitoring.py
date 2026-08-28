@@ -10,7 +10,7 @@ django.setup()
 
 from apps.projects.models import Project
 from apps.monitoring.models import (
-    DailySiteUpdate, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
+    DailySiteUpdate, MissedSiteVisitRecord, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
 )
 
 def run():
@@ -548,6 +548,53 @@ def run():
     )
 
     print("Seeded comprehensive Site Verifications across projects.")
+
+    # 5. Missed Site Visit Records (Internal Control & Field Worker Attendance Audit Roster)
+    if MissedSiteVisitRecord.objects.count() == 0:
+        MissedSiteVisitRecord.objects.create(
+            project=p1,
+            inspector_name='Engr. Abdulwahab Onike',
+            inspector_badge='LASG-INSP-STR-042',
+            scheduled_date=datetime.date.today() - datetime.timedelta(days=1),
+            reason_category='ADVERSE_WEATHER',
+            justification_notes='Torrential rain and severe localized flooding across the coastal corridor prevented structural rebar inspection on the exterior podium. Site operations suspended by developer safety team.',
+            evidence_photos=[
+                'https://res.cloudinary.com/fspyt1uw/image/upload/v1787390545/nexucon/daily_updates/lulnlngu73euc9c5byvx.jpg'
+            ],
+            status='JUSTIFIED',
+            supervisor_acknowledgment='Approved by Directorate Supervisor. Re-inspection scheduled for morning shift.',
+            acknowledged_at=timezone.now()
+        )
+
+        MissedSiteVisitRecord.objects.create(
+            project=p3,
+            inspector_name='Insp. Sunkanmi Olowonishaye',
+            inspector_badge='LASG-INSP-CIV-108',
+            scheduled_date=datetime.date.today() - datetime.timedelta(days=2),
+            reason_category='ACCESS_DENIED',
+            justification_notes='Developer site security refused entry stating concrete curing protocol in progress and project manager absent. Formal notice issued to main contractor.',
+            evidence_photos=[
+                'https://res.cloudinary.com/fspyt1uw/image/upload/v1787390550/nexucon/daily_updates/ikalmpfdz59w8hbaxstv.jpg'
+            ],
+            status='FLAGGED_UNJUSTIFIED',
+            supervisor_acknowledgment='Flagged for compliance investigation. Warning letter dispatched to site developer.',
+            acknowledged_at=timezone.now()
+        )
+
+        MissedSiteVisitRecord.objects.create(
+            project=p2,
+            inspector_name='Engr. Tunde Balogun',
+            inspector_badge='LASG-INSP-MEP-019',
+            scheduled_date=datetime.date.today() - datetime.timedelta(days=3),
+            reason_category='EMERGENCY_REASSIGNMENT',
+            justification_notes='Inspector urgently reassigned by Agency Head to conduct structural integrity assessment on a reported cracked column in high-density commercial zone.',
+            evidence_photos=[],
+            status='JUSTIFIED',
+            supervisor_acknowledgment='Authorized emergency reassignment by Directorate Head.',
+            acknowledged_at=timezone.now()
+        )
+
+        print("Seeded Missed Site Visit internal control records.")
 
 if __name__ == '__main__':
     run()

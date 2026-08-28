@@ -8,6 +8,9 @@ import datetime
 def generate_upd_ref():
     return f"UPD-{datetime.datetime.now().year}-{uuid.uuid4().hex[:6].upper()}"
 
+def generate_msv_ref():
+    return f"MSV-{datetime.datetime.now().year}-{uuid.uuid4().hex[:6].upper()}"
+
 def generate_obs_ref():
     return f"OBS-{datetime.datetime.now().year}-{uuid.uuid4().hex[:6].upper()}"
 
@@ -24,6 +27,7 @@ def generate_ms_code():
 class DailySiteUpdate(models.Model):
     """
     Frequent asynchronous updates, daily photos, drone surveys, and progress reports.
+    Originates directly from assigned field inspectors on active sites.
     """
     TYPE_CHOICES = (
         ('DAILY_PHOTO', 'Daily Photo Update'),
@@ -39,11 +43,25 @@ class DailySiteUpdate(models.Model):
         ('Flagged', 'Flagged'),
     )
 
+    ORIGIN_CHOICES = (
+        ('FIELD_INSPECTOR', 'Field Inspector (Direct On-Site)'),
+        ('PROXY_OFFICE_SUPERVISOR', 'Office Staff Proxy (Documented)'),
+        ('OFFLINE_FIELD_SYNC', 'Offline Field Device Sync'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     update_reference = models.CharField(max_length=100, db_index=True, null=True, blank=True, default=generate_upd_ref)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='site_updates')
     update_type = models.CharField(max_length=50, choices=TYPE_CHOICES, default='DAILY_PHOTO')
     
+    # Direct Field Inspector Attribution
+    inspector = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='inspected_daily_updates')
+    inspector_name = models.CharField(max_length=255, default='Engr. Abdulwahab Onike')
+    inspector_badge = models.CharField(max_length=100, default='LASG-INSP-STR-042')
+    inspection_date = models.DateField(default=datetime.date.today)
+    origin_type = models.CharField(max_length=50, choices=ORIGIN_CHOICES, default='FIELD_INSPECTOR')
+    field_verification_stamp = models.JSONField(default=dict, blank=True, help_text="GPS Lock, timestamp, and field seal")
+
     reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reported_site_updates')
     reported_by_name = models.CharField(max_length=255, default='Site Supervisor')
     
@@ -64,10 +82,64 @@ class DailySiteUpdate(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['-created_at']
+        ordering = ['-inspection_date', '-created_at']
 
     def __str__(self):
-        return f"{self.update_reference} - {self.update_type} ({self.project.name})"
+        return f"{self.update_reference} - {self.update_type} by {self.inspector_name} ({self.project.name})"
+
+
+class MissedSiteVisitRecord(models.Model):
+    """
+    Formal internal control record when an assigned field inspector cannot visit
+    or provide an update for a scheduled construction project/date.
+    Monitors government field worker performance, compliance, and site access blockers.
+    """
+    REASON_CHOICES = (
+        ('ADVERSE_WEATHER', 'Adverse Weather / Heavy Downpour'),
+        ('ACCESS_DENIED', 'Site Access Denied by Developer / Contractor'),
+        ('SITE_INACCESSIBLE', 'Flooded Road / Inaccessible Approach Road'),
+        ('SECURITY_CONCERN', 'Safety Hazard / Site Unrest / Security Incident'),
+        ('EQUIPMENT_BREAKDOWN', 'Transport / Rover / Device Hardware Failure'),
+        ('EMERGENCY_REASSIGNMENT', 'Reassigned to Emergency Structural Audit'),
+        ('DEVELOPER_UNAVAILABLE', 'Site Key Personnel / Site Engineer Unavailable'),
+        ('ILLNESS_LEAVE', 'Inspector Official / Medical Leave'),
+        ('OTHER', 'Other Documented Justification'),
+    )
+
+    STATUS_CHOICES = (
+        ('SUBMITTED', 'Submitted / Pending Review'),
+        ('ACKNOWLEDGED', 'Supervisor Acknowledged'),
+        ('JUSTIFIED', 'Justified Non-Attendance'),
+        ('FLAGGED_UNJUSTIFIED', 'Flagged as Unjustified'),
+        ('ESCALATED', 'Escalated to Directorate'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    record_reference = models.CharField(max_length=100, db_index=True, null=True, blank=True, default=generate_msv_ref)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='missed_visits')
+    
+    inspector = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='missed_site_visits')
+    inspector_name = models.CharField(max_length=255, default='Engr. Abdulwahab Onike')
+    inspector_badge = models.CharField(max_length=100, default='LASG-INSP-STR-042')
+    
+    scheduled_date = models.DateField(default=datetime.date.today)
+    reason_category = models.CharField(max_length=60, choices=REASON_CHOICES, default='ADVERSE_WEATHER')
+    justification_notes = models.TextField(help_text="Detailed explanation of why the site visit could not proceed")
+    evidence_photos = models.JSONField(default=list, blank=True, help_text="Supporting photos e.g. locked gate, flooded road")
+    
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='SUBMITTED')
+    supervisor_acknowledgment = models.TextField(blank=True, null=True)
+    supervisor_acknowledged_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='acknowledged_missed_visits')
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-scheduled_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.record_reference} - {self.inspector_name} on {self.project.name} ({self.scheduled_date})"
 
 
 class FieldObservation(models.Model):

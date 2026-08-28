@@ -86,12 +86,7 @@ class StakeholderService:
             initiated_by=user if getattr(user, 'is_authenticated', False) else None,
             initiator_name=name,
             initiator_role=role,
-            participants=data.get('participants', [
-                {"name": name, "role": role, "status": "Confirmed"},
-                {"name": "Master Developer (Nexucon)", "role": "Developer", "status": "Confirmed"},
-                {"name": "Lead Structural Inspector", "role": "Inspector", "status": "Invited"},
-                {"name": "General Contractor (Apex)", "role": "Contractor", "status": "Invited"}
-            ])
+            participants=data.get('participants') or ([{"name": name, "role": role, "status": "Confirmed"}] if name else [])
         )
 
         StakeholderService.log_audit(

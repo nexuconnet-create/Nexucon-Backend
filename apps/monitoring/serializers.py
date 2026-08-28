@@ -1,15 +1,32 @@
 from rest_framework import serializers
-from .models import DailySiteUpdate, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
+from .models import (
+    DailySiteUpdate, MissedSiteVisitRecord, FieldObservation, 
+    SiteIssue, ConstructionMilestone, SiteVerification
+)
 
 class DailySiteUpdateSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
     project_reference = serializers.CharField(source='project.reference_number', read_only=True)
     project_location = serializers.CharField(source='project.lga', read_only=True)
+    developer_name = serializers.CharField(source='project.developer_name', read_only=True)
 
     class Meta:
         model = DailySiteUpdate
         fields = '__all__'
         read_only_fields = ('id', 'update_reference', 'created_at', 'updated_at')
+
+
+class MissedSiteVisitRecordSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    project_reference = serializers.CharField(source='project.reference_number', read_only=True)
+    project_location = serializers.CharField(source='project.lga', read_only=True)
+    developer_name = serializers.CharField(source='project.developer_name', read_only=True)
+    reason_display = serializers.CharField(source='get_reason_category_display', read_only=True)
+
+    class Meta:
+        model = MissedSiteVisitRecord
+        fields = '__all__'
+        read_only_fields = ('id', 'record_reference', 'created_at', 'updated_at')
 
 
 class FieldObservationSerializer(serializers.ModelSerializer):

@@ -6,16 +6,19 @@ from django.db.models import Q
 from django.utils import timezone
 import datetime
 
-from .models import DailySiteUpdate, FieldObservation, SiteIssue, ConstructionMilestone, SiteVerification
+from .models import (
+    DailySiteUpdate, MissedSiteVisitRecord, FieldObservation, 
+    SiteIssue, ConstructionMilestone, SiteVerification
+)
 from .serializers import (
-    DailySiteUpdateSerializer, FieldObservationSerializer,
-    SiteIssueSerializer, ConstructionMilestoneSerializer,
-    SiteVerificationSerializer
+    DailySiteUpdateSerializer, MissedSiteVisitRecordSerializer,
+    FieldObservationSerializer, SiteIssueSerializer, 
+    ConstructionMilestoneSerializer, SiteVerificationSerializer
 )
 from .services import MonitoringService
 
 class DailySiteUpdateViewSet(viewsets.ModelViewSet):
-    queryset = DailySiteUpdate.objects.all().select_related('project', 'reported_by')
+    queryset = DailySiteUpdate.objects.all().select_related('project', 'reported_by', 'inspector')
     serializer_class = DailySiteUpdateSerializer
     permission_classes = [AllowAny]
 
@@ -25,6 +28,8 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
         type_param = self.request.query_params.get('type')
         status_param = self.request.query_params.get('status')
         search_param = self.request.query_params.get('search')
+        date_param = self.request.query_params.get('date') or self.request.query_params.get('inspection_date')
+        inspector_param = self.request.query_params.get('inspector')
 
         if project_param:
             queryset = queryset.filter(project_id=project_param)
@@ -35,10 +40,20 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
         if status_param:
             queryset = queryset.filter(status__iexact=status_param)
 
+        if date_param:
+            queryset = queryset.filter(inspection_date=date_param)
+
+        if inspector_param:
+            queryset = queryset.filter(
+                Q(inspector_name__icontains=inspector_param) |
+                Q(inspector_badge__icontains=inspector_param)
+            )
+
         if search_param:
             queryset = queryset.filter(
                 Q(update_reference__icontains=search_param) |
                 Q(project__name__icontains=search_param) |
+                Q(inspector_name__icontains=search_param) |
                 Q(reported_by_name__icontains=search_param) |
                 Q(work_summary__icontains=search_param)
             )
@@ -55,9 +70,105 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
         update = self.perform_create(None)
         return Response({
             'success': True,
-            'message': 'Daily site update logged successfully',
+            'message': 'Daily site update logged successfully with direct field inspector attribution',
             'data': DailySiteUpdateSerializer(update).data
         }, status=status.HTTP_201_CREATED)
+
+
+class MissedSiteVisitViewSet(viewsets.ModelViewSet):
+    queryset = MissedSiteVisitRecord.objects.all().select_related('project', 'inspector', 'supervisor_acknowledged_by')
+    serializer_class = MissedSiteVisitRecordSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        project_param = self.request.query_params.get('project')
+        reason_param = self.request.query_params.get('reason')
+        status_param = self.request.query_params.get('status')
+        search_param = self.request.query_params.get('search')
+        date_param = self.request.query_params.get('date') or self.request.query_params.get('scheduled_date')
+
+        if project_param:
+            queryset = queryset.filter(project_id=project_param)
+
+        if reason_param:
+            queryset = queryset.filter(reason_category__iexact=reason_param)
+
+        if status_param:
+            queryset = queryset.filter(status__iexact=status_param)
+
+        if date_param:
+            queryset = queryset.filter(scheduled_date=date_param)
+
+        if search_param:
+            queryset = queryset.filter(
+                Q(record_reference__icontains=search_param) |
+                Q(project__name__icontains=search_param) |
+                Q(inspector_name__icontains=search_param) |
+                Q(justification_notes__icontains=search_param)
+            )
+
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        record = MonitoringService.log_missed_site_visit(
+            data=request.data,
+            user=request.user
+        )
+        return Response({
+            'success': True,
+            'message': 'Non-visitation justification logged successfully in internal control audit roster',
+            'data': MissedSiteVisitRecordSerializer(record).data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='acknowledge')
+    def acknowledge(self, request, pk=None):
+        record = MonitoringService.acknowledge_missed_site_visit(
+            visit_id=pk,
+            data=request.data,
+            user=request.user
+        )
+        if not record:
+            return Response({'error': 'Record not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'success': True,
+            'message': 'Missed site visit justification reviewed and acknowledged by Directorate Supervisor',
+            'data': MissedSiteVisitRecordSerializer(record).data
+        })
+
+    @action(detail=True, methods=['get', 'post'], url_path='telemetry')
+    def telemetry(self, request, pk=None):
+        update = self.get_object()
+        if request.method == 'POST':
+            updated = MonitoringService.update_daily_update_telemetry(
+                update=update,
+                telemetry_data=request.data,
+                user=request.user
+            )
+            return Response({
+                'success': True,
+                'message': 'Live telemetry & Google Maps coordinates synchronized successfully',
+                'data': MonitoringService.get_daily_update_telemetry(updated.id)
+            })
+        else:
+            telemetry_info = MonitoringService.get_daily_update_telemetry(update.id)
+            return Response({
+                'success': True,
+                'data': telemetry_info
+            })
+
+    @action(detail=False, methods=['post'], url_path='calculate-location')
+    def calculate_location(self, request):
+        lat = request.data.get('latitude') or request.data.get('lat')
+        lng = request.data.get('longitude') or request.data.get('lng')
+        project_id = request.data.get('project_id') or request.data.get('project')
+        
+        telemetry = MonitoringService.calculate_location_telemetry(lat, lng, project_id)
+        return Response({
+            'success': True,
+            'data': telemetry
+        })
+
 
 
 class FieldObservationViewSet(viewsets.ModelViewSet):
