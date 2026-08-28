@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    DailySiteUpdateViewSet, FieldObservationViewSet,
+    DailySiteUpdateViewSet, MissedSiteVisitViewSet, FieldObservationViewSet,
     SiteIssueViewSet, ConstructionMilestoneViewSet,
     SiteVerificationViewSet, MonitoringStatsViewSet,
     SiteProgressViewSet
@@ -9,6 +9,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register(r'updates', DailySiteUpdateViewSet, basename='site-update')
+router.register(r'missed-visits', MissedSiteVisitViewSet, basename='missed-site-visit')
 router.register(r'observations', FieldObservationViewSet, basename='field-observation')
 router.register(r'issues', SiteIssueViewSet, basename='site-issue')
 router.register(r'milestones', ConstructionMilestoneViewSet, basename='construction-milestone')
