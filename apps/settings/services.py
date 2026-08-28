@@ -1388,7 +1388,7 @@ class SettingsService:
             ReportTemplate.objects.create(
                 id="RPT-EXEC-01",
                 name="Executive Ministerial Presentation Template",
-                description="Vibrant executive format with detailed cover page, full KPI cards, non-technical project footer, and Nigerian Building Code citations.",
+                description="Vibrant executive format with detailed cover page, full KPI cards, non-technical project footer, and comprehensive Nigerian Industrial Standards (NIS blocks, cement, steel, concrete) citations.",
                 theme_style="Executive Vibrant",
                 cover_page_style="Detailed Architectural Hero",
                 header_color="#022C4F",
@@ -1399,19 +1399,24 @@ class SettingsService:
                     "show_project_name": True,
                     "show_lga_zone": True,
                     "show_officer_sig": True,
-                    "disclaimer": "Confidential statutory document issued under the National Building Code of Nigeria & SON regulations. Accessible executive layout for non-engineers."
+                    "disclaimer": "Confidential statutory document issued under the National Building Code of Nigeria & comprehensive Nigerian Industrial Standards (NIS 87 Blocks, NIS 11 Cement, NIS 117 Steel Rebar, NIS 156 Concrete). Accessible executive layout."
                 },
                 building_code_citations=[
                     "National Building Code of Nigeria (NBC 2006/2020 Revision)",
-                    "Standards Organization of Nigeria (SON) Structural Steel & Cement Standards",
+                    "SON NIS 87:2007 - Standard for Sandcrete Blocks & Precast Masonry Units",
+                    "SON NIS 11:2014 / NIS 444 - Portland Cement Specifications (CEM I / II)",
+                    "SON NIS 117:2004 - High-Yield Deformed Steel Rebar Standards",
+                    "SON NIS 156 / NIS 820 - Structural Concrete Aggregates & Ready-Mix Criteria",
+                    "SON NIS 74 / NIS 378 - Building Electrical Installation & Cable Standards",
+                    "SON NIS 384 - Building Plumbing & Sanitary Installation Systems",
                     "Lagos State Urban and Regional Planning and Development Law (2019/2024)",
-                    "LASPPPA Building Setbacks & Density Bylaws"
+                    "Lagos State Building Control Agency (LASBCA) Regulations"
                 ]
             )
             ReportTemplate.objects.create(
                 id="RPT-STAT-02",
                 name="Statutory Compliance & Technical Audit",
-                description="Formal governmental inspection audit with emerald/teal header accents, regulatory clause references, and statutory sign-off block.",
+                description="Formal governmental inspection audit with emerald/teal header accents, multi-material NIS regulatory clause references, and statutory sign-off block.",
                 theme_style="Statutory Technical",
                 cover_page_style="State Coat of Arms Gradient",
                 header_color="#0F766E",
@@ -1422,18 +1427,21 @@ class SettingsService:
                     "show_project_name": True,
                     "show_lga_zone": True,
                     "show_officer_sig": True,
-                    "disclaimer": "Statutory audit certified by the Directorate of Building Control and Safety Enforcement."
+                    "disclaimer": "Statutory audit certified by the Directorate of Building Control and Safety Enforcement in compliance with SON NIS 87, NIS 11, NIS 117, NIS 156 & NBC."
                 },
                 building_code_citations=[
-                    "National Building Code of Nigeria (NBC Part II Structural Requirements)",
-                    "SON NIS 11:2014 Ordinary Portland Cement Benchmark",
-                    "Federal Ministry of Works (FMW) Highway & Foundation Directives"
+                    "National Building Code of Nigeria (NBC Part II Structural & Materials Requirements)",
+                    "SON NIS 87:2007 - Sandcrete Blocks (Compressive Strength >= 3.45 N/mm2 / 7.0 N/mm2)",
+                    "SON NIS 11:2014 - Ordinary Portland Cement Benchmark",
+                    "SON NIS 117:2004 - Steel Rebar Minimum Yield Strength (460/500 N/mm2)",
+                    "SON NIS 156 - Concrete Quality & Silt Content Thresholds (<3%)",
+                    "Lagos State Urban and Regional Planning and Development Law"
                 ]
             )
             ReportTemplate.objects.create(
                 id="RPT-BRIEF-03",
                 name="Modern Vibrant Stakeholder Brief",
-                description="Colorful stakeholder report layout designed for public transparency, non-technical readers, and ministerial briefings.",
+                description="Colorful stakeholder report layout designed for public transparency, non-technical readers, and ministerial briefings with full NIS citations.",
                 theme_style="Modern Architectural",
                 cover_page_style="Split Grid Presentation",
                 header_color="#4338CA",
@@ -1444,18 +1452,18 @@ class SettingsService:
                     "show_project_name": True,
                     "show_lga_zone": True,
                     "show_officer_sig": True,
-                    "disclaimer": "Quarterly executive briefing intended for public and non-technical stakeholders."
+                    "disclaimer": "Quarterly executive briefing intended for public and non-technical stakeholders under Nigerian Industrial Standards."
                 },
                 building_code_citations=[
                     "National Building Code of Nigeria",
-                    "SON NIS 117 Steel Rebar Specification",
+                    "SON NIS 87 Blocks, NIS 11 Cement & NIS 117 Steel Rebar Specifications",
                     "Lagos State Building Control Agency (LASBCA) Regulations"
                 ]
             )
             ReportTemplate.objects.create(
                 id="RPT-ENG-04",
                 name="Standard Engineering Inspection Sheet",
-                description="Clean, high-density engineering sheet focused on test metrics, concrete core sampling, and structural measurements.",
+                description="Clean, high-density engineering sheet focused on test metrics, sandcrete block crushing tests, concrete core sampling, and structural measurements.",
                 theme_style="Minimalist Slate",
                 cover_page_style="Clean Executive Header",
                 header_color="#1E293B",
@@ -1466,11 +1474,13 @@ class SettingsService:
                     "show_project_name": True,
                     "show_lga_zone": True,
                     "show_officer_sig": True,
-                    "disclaimer": "Field inspection sheet certified by the Lead Structural Surveyor and Site Geotechnical Inspector."
+                    "disclaimer": "Field inspection sheet certified by the Lead Structural Surveyor, Materials Quality Engineer, and Site Geotechnical Inspector."
                 },
                 building_code_citations=[
-                    "National Building Code of Nigeria (Section 13: Site Safety & Excavations)",
-                    "SON NIS Standards for Aggregates and Concrete Testing"
+                    "National Building Code of Nigeria (Section 13: Site Safety, Excavations & Concrete)",
+                    "SON NIS 87 - Compressive Strength Crushing Tests for Blocks",
+                    "SON NIS 117 - Tensile and Bending Steel Rebar Tests",
+                    "SON NIS 156 / NIS 820 - Slump, Curing and Concrete Cube Crushing Tests"
                 ]
             )
 
@@ -1558,11 +1568,16 @@ class SettingsService:
 
         # 5. Seed Statutory Documents
         if not StatutoryDocument.objects.exists():
-            StatutoryDocument.objects.create(code="URP-Law 2010", name="Urban & Regional Planning Law", connected_features=["Zoning Controls", "Setbacks"])
-            StatutoryDocument.objects.create(code="NBC-2006", name="National Building Code of Nigeria", connected_features=["Structural Tolerances", "Fire Safety"])
-            StatutoryDocument.objects.create(code="SON-NIS-117", name="Standards Organization of Nigeria (SON Rebar Standards)", connected_features=["Yield Strength", "Steel Elongation"])
-            StatutoryDocument.objects.create(code="LSEPA-2023", name="State Environmental Protection Guidelines", connected_features=["Noise Limits", "Effluent Discharge"])
-            StatutoryDocument.objects.create(code="Safety-Comm", name="Safety Commission Regulations", connected_features=["Health & Safety Logs", "Stop-Work Orders"])
+            StatutoryDocument.objects.create(code="NBC-2006/2020", name="National Building Code of Nigeria", connected_features=["Structural Tolerances", "Fire Safety", "Enforcement & Administration"])
+            StatutoryDocument.objects.create(code="SON-NIS-87", name="SON NIS 87:2007 - Standard for Sandcrete & Masonry Blocks", connected_features=["Compressive Crushing Strength", "Block Dimension Tolerances", "Mix Ratios"])
+            StatutoryDocument.objects.create(code="SON-NIS-11", name="SON NIS 11:2014 / NIS 444 - Portland Cement Quality", connected_features=["Cement Grade CEM I / II", "Setting Time", "Compressive Strength"])
+            StatutoryDocument.objects.create(code="SON-NIS-117", name="SON NIS 117:2004 - Steel Bars for Concrete Reinforcement", connected_features=["Yield Strength (460/500 N/mm2)", "Steel Elongation", "Tensile Ratio"])
+            StatutoryDocument.objects.create(code="SON-NIS-156", name="SON NIS 156 / NIS 820 - Structural Concrete Aggregates", connected_features=["Aggregate Grading", "Silt Content (<3%)", "Slump Tolerances"])
+            StatutoryDocument.objects.create(code="SON-NIS-74", name="SON NIS 74 / NIS 378 - Building Electrical Installations", connected_features=["Copper Cable Rating", "Insulation Resistance", "Earthing Protection"])
+            StatutoryDocument.objects.create(code="SON-NIS-384", name="SON NIS 384 - Building Plumbing & Sanitary Systems", connected_features=["Pipe Pressure Ratings", "Backflow Prevention", "Drainage Gradients"])
+            StatutoryDocument.objects.create(code="URP-Law 2019/2024", name="Lagos State Urban & Regional Planning Law", connected_features=["Zoning Controls", "Setbacks", "Building Density"])
+            StatutoryDocument.objects.create(code="LASBCA-Regs", name="Lagos State Building Control Agency Regulations", connected_features=["Building Stage Certification", "Material Testing Logs", "Stop-Work Orders"])
+            StatutoryDocument.objects.create(code="LSEPA-2023", name="State Environmental Protection Guidelines", connected_features=["Noise Limits", "Effluent Discharge", "Air Quality"])
 
         # 6. Seed Notification Routing & Preferences
         if not NotificationRoutingRule.objects.exists():
