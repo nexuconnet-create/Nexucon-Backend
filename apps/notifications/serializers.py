@@ -23,3 +23,17 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
         model = NotificationPreference
         fields = '__all__'
         read_only_fields = ('id', 'user')
+
+
+from .models import WebhookEndpoint
+class WebhookEndpointSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WebhookEndpoint
+        fields = '__all__'
+
+
+from .models import WebhookDelivery
+class WebhookDeliverySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WebhookDelivery
+        fields = '__all__'

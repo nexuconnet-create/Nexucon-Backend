@@ -188,3 +188,25 @@ class EmailDeliveryViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = EmailDelivery.objects.all()
     serializer_class = EmailDeliverySerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+class NotificationPreferenceViewSet(viewsets.ModelViewSet):
+    serializer_class = NotificationPreferenceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return NotificationPreference.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+from .models import WebhookEndpoint
+from .serializers import WebhookEndpointSerializer
+
+class WebhookEndpointViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for Webhook Endpoints.
+    """
+    queryset = WebhookEndpoint.objects.all().order_by('-created_at')
+    serializer_class = WebhookEndpointSerializer
+>>>>>>> Stashed changes

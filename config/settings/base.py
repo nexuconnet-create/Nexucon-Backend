@@ -81,6 +81,11 @@ INSTALLED_APPS += [
     'apps.audit',
     'apps.emergency',
     'apps.public_portal',
+    'apps.common',
+    'apps.processing',
+    'apps.reports',
+    'apps.scans',
+    'apps.storage',
 ]
 
 MIDDLEWARE = [

@@ -197,3 +197,116 @@ class StopWorkOrder(models.Model):
 
     def __str__(self):
         return f"{self.order_number} - {self.project.name} ({self.status})"
+
+
+from apps.scans.models import ScanSession
+
+from django.contrib.auth import get_user_model
+User = get_user_model()
+
+class Issue(models.Model):
+    """
+    Represents a QC issue or defect tracking ticket.
+    """
+    STATUS_CHOICES = [
+        ('open', 'Open'),
+        ('in_progress', 'In Progress'),
+        ('resolved', 'Resolved'),
+        ('closed', 'Closed'),
+    ]
+
+    PRIORITY_CHOICES = [
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('critical', 'Critical'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='open')
+    priority = models.CharField(max_length=50, choices=PRIORITY_CHOICES, default='medium')
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='issues', null=True, blank=True)
+    session = models.ForeignKey(ScanSession, on_delete=models.CASCADE, related_name='issues', null=True, blank=True)
+    assignee = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_issues')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_issues')
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"[{self.status.upper()}] {self.title}"
+
+
+class IssueComment(models.Model):
+    """
+    Allows team members to comment on issues.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name='comments')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='issue_comments')
+    text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Comment by {self.user.username} on {self.issue.title}"
+
+class NonConformanceReport(models.Model):
+    """
+    Level 4 Governance: Automatically generated NCR for tracking critical deviations and defects.
+    """
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('issued', 'Issued'),
+        ('under_review', 'Under Review'),
+        ('closed', 'Closed'),
+    ]
+
+    SEVERITY_CHOICES = [
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('critical', 'Critical'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ncr_number = models.CharField(max_length=50, unique=True)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='legacy_ncrs', null=True, blank=True)
+    session = models.ForeignKey(ScanSession, on_delete=models.CASCADE, related_name='legacy_ncrs', null=True, blank=True)
+    defect_id = models.UUIDField(null=True, blank=True, help_text="Linked to the specific Defect in ScanSession")
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='draft')
+    severity = models.CharField(max_length=50, choices=SEVERITY_CHOICES, default='medium')
+    description = models.TextField(help_text="Detailed description of the non-conformance")
+    root_cause_analysis = models.TextField(blank=True, default='')
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"NCR {self.ncr_number} - {self.status.upper()}"
+
+
+class CorrectiveAction(models.Model):
+    """
+    Action items generated to address a Non-Conformance Report (NCR).
+    """
+    STATUS_CHOICES = [
+        ('open', 'Open'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('verified', 'Verified Closed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ncr = models.ForeignKey(NonConformanceReport, on_delete=models.CASCADE, related_name='corrective_actions')
+    action_description = models.TextField()
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='open')
+    assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_actions')
+    due_date = models.DateField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Action for NCR {self.ncr.ncr_number} - {self.status}"

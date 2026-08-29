@@ -169,3 +169,19 @@ class ProjectMilestone(models.Model):
 
     def __str__(self):
         return f"{self.project.name} - {self.title}"
+
+
+class BIMModel(models.Model):
+    """Stores uploaded BIM reference files linked to projects, with version tracking."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='legacy_bim_models', null=True, blank=True)
+    name = models.CharField(max_length=255)
+    version = models.CharField(max_length=50, default='v1.0')
+    file = models.FileField(upload_to='bim_models/', null=True, blank=True)
+    file_url = models.URLField(max_length=500, blank=True)
+    file_format = models.CharField(max_length=50, choices=[('ifc', 'IFC'), ('rvt', 'Revit'), ('nwd', 'Navisworks'), ('other', 'Other')])
+    uploaded_by = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} v{self.version} ({self.project.name})"

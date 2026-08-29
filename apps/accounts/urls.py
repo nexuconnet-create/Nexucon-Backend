@@ -4,6 +4,7 @@ from .views import CustomLoginView, UserRegistrationView, UserMeView, UserOnboar
 
 urlpatterns = [
     path('login/', CustomLoginView.as_view(), name='login'),
+    path('token/', CustomLoginView.as_view(), name='token_obtain_pair'),
     path('register/', UserRegistrationView.as_view(), name='register'),
     path('refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('me/', UserMeView.as_view(), name='me'),

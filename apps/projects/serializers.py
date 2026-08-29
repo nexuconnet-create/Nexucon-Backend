@@ -47,3 +47,11 @@ class ProjectSerializer(serializers.ModelSerializer):
                 ProjectProfessional.objects.create(project=instance, **prof_data)
                 
         return instance
+
+
+from .models import BIMModel
+class BIMModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BIMModel
+        fields = ['id', 'project', 'name', 'version', 'file', 'file_url', 'file_format', 'uploaded_by', 'created_at']
+        read_only_fields = ['id', 'created_at', 'file_url', 'name', 'file_format', 'project']
