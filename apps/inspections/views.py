@@ -446,3 +446,64 @@ class ChecklistViewSet(viewsets.ModelViewSet):
     queryset = Checklist.objects.all()
     serializer_class = ChecklistSerializer
     permission_classes = [AllowAny]
+
+
+from drf_spectacular.utils import extend_schema
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+from .models import Issue, IssueComment, NonConformanceReport, CorrectiveAction
+from .serializers import IssueSerializer, IssueCommentSerializer, NonConformanceReportSerializer, CorrectiveActionSerializer
+
+
+@method_decorator(cache_page(60 * 15), name='list')
+@method_decorator(cache_page(60 * 15), name='retrieve')
+class IssueViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for QC Issues/Defects.
+    """
+    queryset = Issue.objects.select_related('project', 'session', 'created_by', 'assignee').prefetch_related('comments', 'comments__user').all().order_by('-created_at')
+    serializer_class = IssueSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+
+    @extend_schema(request=IssueCommentSerializer, responses={201: IssueCommentSerializer})
+    @action(detail=True, methods=['post'])
+    def add_comment(self, request, pk=None):
+        issue = self.get_object()
+        serializer = IssueCommentSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(
+                issue=issue, 
+                user=request.user if request.user.is_authenticated else None
+            )
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+@method_decorator(cache_page(60 * 15), name='list')
+@method_decorator(cache_page(60 * 15), name='retrieve')
+class NonConformanceReportViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for Non-Conformance Reports.
+    """
+    queryset = NonConformanceReport.objects.select_related('project', 'session').prefetch_related('corrective_actions').all().order_by('-created_at')
+    serializer_class = NonConformanceReportSerializer
+
+    @extend_schema(request=CorrectiveActionSerializer, responses={201: CorrectiveActionSerializer})
+    @action(detail=True, methods=['post'])
+    def add_corrective_action(self, request, pk=None):
+        ncr = self.get_object()
+        serializer = CorrectiveActionSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(ncr=ncr)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+@method_decorator(cache_page(60 * 15), name='list')
+@method_decorator(cache_page(60 * 15), name='retrieve')
+class CorrectiveActionViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for Corrective Actions.
+    """
+    queryset = CorrectiveAction.objects.select_related('ncr', 'assigned_to').all().order_by('-created_at')
+    serializer_class = CorrectiveActionSerializer

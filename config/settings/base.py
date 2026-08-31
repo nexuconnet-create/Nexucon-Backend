@@ -28,6 +28,10 @@ CORS_ALLOW_ALL_HEADERS = True
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "http://192.168.0.196:3000",
@@ -35,6 +39,10 @@ CORS_ALLOWED_ORIGINS = [
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "https://*.vercel.app",
@@ -81,7 +89,19 @@ INSTALLED_APPS += [
     'apps.audit',
     'apps.emergency',
     'apps.public_portal',
+    'apps.common',
+    'apps.processing',
+    'apps.reports',
+    'apps.scans',
+    'apps.storage',
 ]
+
+import cloudinary
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME", ""),
+    api_key=os.getenv("CLOUDINARY_API_KEY", ""),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET", "")
+)
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -176,12 +196,14 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Cloudflare R2 / S3 Document Storage
-CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID', 'ba64cd9c51c2da4db93a1886397fd7b3')
+STORAGE_PROVIDER = os.getenv('STORAGE_PROVIDER', '').lower()  # 'cloudflare_r2' enables R2 as default Django storage
+CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID') or os.getenv('CLOUDFLARE_R2_ACCOUNT_ID', 'ba64cd9c51c2da4db93a1886397fd7b3')
 CLOUDFLARE_R2_BUCKET_NAME = os.getenv('CLOUDFLARE_R2_BUCKET_NAME', 'nexucondocument')
+CLOUDFLARE_R2_ENDPOINT_URL = os.getenv('CLOUDFLARE_R2_ENDPOINT_URL', f"https://{CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com")
 CLOUDFLARE_R2_ACCESS_KEY_ID = os.getenv('CLOUDFLARE_R2_ACCESS_KEY_ID')
 CLOUDFLARE_R2_SECRET_ACCESS_KEY = os.getenv('CLOUDFLARE_R2_SECRET_ACCESS_KEY')
 
-if CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUDFLARE_R2_SECRET_ACCESS_KEY:
+if STORAGE_PROVIDER == 'cloudflare_r2' and CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUDFLARE_R2_SECRET_ACCESS_KEY:
     STORAGES = {
         "default": {
             "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
@@ -189,7 +211,7 @@ if CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUDFLARE_R2_SECRET_ACCESS_KEY:
                 "access_key": CLOUDFLARE_R2_ACCESS_KEY_ID,
                 "secret_key": CLOUDFLARE_R2_SECRET_ACCESS_KEY,
                 "bucket_name": CLOUDFLARE_R2_BUCKET_NAME,
-                "endpoint_url": f"https://{CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com",
+                "endpoint_url": CLOUDFLARE_R2_ENDPOINT_URL,
                 "signature_version": "s3v4",
                 "region_name": "auto",
                 "file_overwrite": False,
@@ -207,6 +229,14 @@ else:
     MEDIA_ROOT = BASE_DIR / 'media'
 
 # Google Cloud Service Account & Translation / Calendar APIs
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', str(BASE_DIR / 'config' / 'google_service_account.json'))
+_google_sa_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', str(BASE_DIR / 'config' / 'google_service_account.json'))
+if not os.path.isabs(_google_sa_path):
+    _google_sa_path = str(BASE_DIR / _google_sa_path)
+GOOGLE_SERVICE_ACCOUNT_FILE = _google_sa_path
 GOOGLE_CLOUD_PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT_ID', 'serious-water-469715-f9')
+
+# Google Meet & Calendar service account (nexucon-meeting@serious-water-469715-f9)
+GOOGLE_MEETING_PROJECT_ID = os.getenv('GOOGLE_MEETING_PROJECT_ID', GOOGLE_CLOUD_PROJECT_ID)
+GOOGLE_MEETING_CLIENT_EMAIL = os.getenv('GOOGLE_MEETING_CLIENT_EMAIL', '')
+GOOGLE_MEETING_PRIVATE_KEY = os.getenv('GOOGLE_MEETING_PRIVATE_KEY', '').replace('\\n', '\n')
 

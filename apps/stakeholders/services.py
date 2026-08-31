@@ -2,6 +2,7 @@ import uuid
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied
 from django.conf import settings
+from django.db.models import Q
 from .models import (
     Developer, Contractor, Consultant, Inspector,
     LicensedProfessional, ProjectStakeholderTeam,
@@ -9,6 +10,10 @@ from .models import (
     MeetingActionItem
 )
 from .translation import TranslationService
+from .google_calendar import (
+    GoogleMeetCalendarService, GoogleMeetCalendarError,
+    parse_display_datetime, extract_attendee_emails
+)
 from apps.audit.models import AuditEvent
 
 class StakeholderService:
@@ -64,6 +69,10 @@ class StakeholderService:
         """
         Schedule an official stakeholder meeting or call session.
         NOTE: Can ONLY be initiated by the Agency Head.
+
+        For Video/Audio calls a REAL Google Calendar event is created through the
+        configured service account and a real Google Meet link is attached when
+        the credentials/project allow it. No fabricated meet links are stored.
         """
         if user and getattr(user, 'is_authenticated', False) and not StakeholderService.is_agency_head(user):
             if not data.get('bypass_agency_head_check'):
@@ -73,7 +82,46 @@ class StakeholderService:
         role = data.get('initiator_role') or 'Agency Head / Director General'
 
         meeting_type = data.get('meeting_type', 'Video Call')
-        google_meet_url = data.get('google_meet_url') or ('https://meet.google.com/new' if meeting_type == 'Video Call' else '')
+        participants = data.get('participants') or ([{"name": name, "role": role, "status": "Confirmed"}] if name else [])
+
+        # ---- Real Google Calendar / Meet integration ----
+        google_meet_url = ''
+        calendar_event_id = ''
+        calendar_link = ''
+        meet_link_status = ''
+        meet_note = ''
+
+        if meeting_type in ('Video Call', 'Audio Call'):
+            try:
+                start_dt, end_dt = parse_display_datetime(data.get('date'), data.get('time_slot'))
+                cal_result = GoogleMeetCalendarService.create_meeting_event(
+                    title=data.get('title', 'Project Coordination Council Session'),
+                    agenda=data.get('agenda', ''),
+                    start=start_dt,
+                    end=end_dt,
+                    attendees=extract_attendee_emails(participants),
+                    meeting_reference='',
+                    project_name=data.get('project_name', 'Central Metro Transit Hub'),
+                    add_meet_conference=True,
+                )
+                calendar_event_id = cal_result.get('event_id') or ''
+                calendar_link = cal_result.get('html_link') or ''
+                google_meet_url = cal_result.get('hangout_link') or ''
+                if google_meet_url:
+                    meet_link_status = 'meet_available'
+                elif calendar_event_id:
+                    meet_link_status = 'calendar_only'
+                    meet_note = ('Calendar event created; a Google Meet link could not be attached with the '
+                                 'current service account (no Workspace/Meet capability or Meet API disabled).')
+                else:
+                    meet_link_status = 'unavailable'
+                    meet_note = cal_result.get('calendar_error') or 'Google Calendar event could not be created.'
+                if calendar_event_id and not cal_result.get('attendees_invited'):
+                    meet_note = (meet_note + ' ' if meet_note else '') + \
+                        'Attendees were not invited by Google (service accounts need Domain-Wide Delegation); use /send-invites to email them via Resend.'
+            except GoogleMeetCalendarError as ex:
+                meet_link_status = 'unavailable'
+                meet_note = str(ex)
 
         meeting = StakeholderMeeting.objects.create(
             title=data.get('title', 'Project Coordination Council Session'),
@@ -83,17 +131,26 @@ class StakeholderService:
             time_slot=data.get('time_slot', '10:00 AM - 11:30 AM'),
             meeting_type=meeting_type,
             google_meet_url=google_meet_url,
+            google_calendar_event_id=calendar_event_id,
+            google_calendar_link=calendar_link,
+            meet_link_status=meet_link_status,
             initiated_by=user if getattr(user, 'is_authenticated', False) else None,
             initiator_name=name,
             initiator_role=role,
-            participants=data.get('participants') or ([{"name": name, "role": role, "status": "Confirmed"}] if name else [])
+            participants=participants
         )
 
         StakeholderService.log_audit(
             user=user,
             action="STAKEHOLDER_MEETING_SCHEDULED",
             resource_id=meeting.id,
-            new_state={"ref": meeting.meeting_reference, "title": meeting.title, "type": meeting.meeting_type}
+            new_state={
+                "ref": meeting.meeting_reference, "title": meeting.title, "type": meeting.meeting_type,
+                "google_calendar_event_id": calendar_event_id,
+                "google_meet_url": google_meet_url,
+                "meet_link_status": meet_link_status,
+                "meet_note": meet_note,
+            }
         )
 
         StakeholderService.send_notification(
@@ -104,14 +161,23 @@ class StakeholderService:
             action_url="/government/dashboard/stakeholders/meetings"
         )
 
+        # Optional backend email invitations via Resend (opt-in to avoid
+        # duplicating the emails the frontend already sends itself).
+        if data.get('send_invite_emails'):
+            StakeholderService.send_meeting_invitations(meeting, user)
+
         return meeting
 
     @staticmethod
     def start_meeting(meeting_id, user=None):
         """Launch live audio/video conference room."""
-        meeting = StakeholderMeeting.objects.get(id=meeting_id)
+        meeting = StakeholderService.get_meeting_instance(meeting_id)
+        if not meeting:
+            raise ValueError(f"Meeting not found: {meeting_id}")
         meeting.status = 'In Progress'
         meeting.save(update_fields=['status'])
+
+        frontend_url = (getattr(settings, 'FRONTEND_URL', '') or 'http://localhost:3000').rstrip('/')
 
         StakeholderService.log_audit(
             user=user,
@@ -124,9 +190,100 @@ class StakeholderService:
             "room_id": meeting.room_id,
             "meeting_reference": meeting.meeting_reference,
             "title": meeting.title,
-            "google_meet_url": meeting.google_meet_url or "https://meet.google.com/new",
-            "call_url": f"https://meet.nexucon.gov/{meeting.room_id}"
+            "google_meet_url": meeting.google_meet_url or '',
+            "google_calendar_link": meeting.google_calendar_link or '',
+            "meet_link_status": meeting.meet_link_status or '',
+            "call_url": f"{frontend_url}/government/dashboard/stakeholders/meetings/{meeting.id}/room"
         }
+
+    @staticmethod
+    def send_meeting_invitations(meeting, user=None):
+        """
+        Email meeting invitations to participants via the Resend integration.
+        Only participants with valid email addresses are contacted.
+        """
+        recipients = extract_attendee_emails(meeting.participants or [])
+        if not recipients:
+            return {"sent": 0, "results": [], "error": "No participants with valid email addresses."}
+
+        from apps.notifications.email_service import EmailService
+        from django.conf import settings as django_settings
+
+        frontend_url = (getattr(django_settings, 'FRONTEND_URL', '') or 'http://localhost:3000').rstrip('/')
+        room_url = f"{frontend_url}/government/dashboard/stakeholders/meetings/{meeting.id}/room"
+
+        meet_line = ''
+        if meeting.google_meet_url:
+            meet_line = (
+                f'<tr><td style="padding:8px 0;color:#555;">Google Meet</td>'
+                f'<td style="padding:8px 0;"><a href="{meeting.google_meet_url}" style="color:#1a73e8;">{meeting.google_meet_url}</a></td></tr>'
+            )
+        calendar_line = ''
+        if meeting.google_calendar_link:
+            calendar_line = (
+                f'<tr><td style="padding:8px 0;color:#555;">Calendar Event</td>'
+                f'<td style="padding:8px 0;"><a href="{meeting.google_calendar_link}" style="color:#1a73e8;">Open in Google Calendar</a></td></tr>'
+            )
+
+        html = f"""
+        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+          <div style="background:#0f2a4a;color:#fff;padding:18px 24px;">
+            <h2 style="margin:0;font-size:18px;">🏛️ Nexucon Stakeholder Meeting</h2>
+          </div>
+          <div style="padding:24px;">
+            <p style="font-size:16px;margin:0 0 16px;">You are invited to an official stakeholder meeting.</p>
+            <table style="width:100%;font-size:14px;border-collapse:collapse;">
+              <tr><td style="padding:8px 0;color:#555;">Meeting</td><td style="padding:8px 0;"><b>{meeting.title}</b></td></tr>
+              <tr><td style="padding:8px 0;color:#555;">Reference</td><td style="padding:8px 0;">{meeting.meeting_reference}</td></tr>
+              <tr><td style="padding:8px 0;color:#555;">Project</td><td style="padding:8px 0;">{meeting.project_name}</td></tr>
+              <tr><td style="padding:8px 0;color:#555;">Date</td><td style="padding:8px 0;">{meeting.date}</td></tr>
+              <tr><td style="padding:8px 0;color:#555;">Time</td><td style="padding:8px 0;">{meeting.time_slot}</td></tr>
+              <tr><td style="padding:8px 0;color:#555;">Type</td><td style="padding:8px 0;">{meeting.meeting_type}</td></tr>
+              <tr><td style="padding:8px 0;color:#555;">Initiated by</td><td style="padding:8px 0;">{meeting.initiator_name} ({meeting.initiator_role})</td></tr>
+              {meet_line}
+              {calendar_line}
+            </table>
+            {'<p style="margin:16px 0 0;"><b>Agenda:</b><br>' + (meeting.agenda or '—') + '</p>' if meeting.agenda else ''}
+            <p style="margin:24px 0;">
+              <a href="{room_url}" style="background:#1a73e8;color:#fff;text-decoration:none;padding:12px 24px;border-radius:6px;display:inline-block;">Join the Nexucon Meeting Room</a>
+            </p>
+          </div>
+          <div style="background:#f7f7f7;padding:12px 24px;color:#888;font-size:12px;">
+            This is an official notification from the Nexucon Government Regulatory Platform.
+          </div>
+        </div>
+        """
+
+        text = (
+            f"Nexucon Stakeholder Meeting\n"
+            f"{meeting.title} ({meeting.meeting_reference})\n"
+            f"Project: {meeting.project_name}\n"
+            f"Date: {meeting.date} | Time: {meeting.time_slot}\n"
+            f"Type: {meeting.meeting_type}\n"
+            f"Initiated by: {meeting.initiator_name} ({meeting.initiator_role})\n"
+            + (f"Google Meet: {meeting.google_meet_url}\n" if meeting.google_meet_url else "")
+            + (f"Calendar: {meeting.google_calendar_link}\n" if meeting.google_calendar_link else "")
+            + f"Meeting room: {room_url}\n"
+        )
+
+        results = []
+        for email in recipients:
+            res = EmailService.send_email(
+                to_email=email,
+                subject=f"📅 Official Stakeholder Meeting: {meeting.title} - {meeting.date}",
+                html_content=html,
+                text_content=text,
+            )
+            results.append({"email": email, "success": bool(res.get("success")), "id": res.get("id"), "error": res.get("error")})
+
+        sent = sum(1 for r in results if r["success"])
+        StakeholderService.log_audit(
+            user=user,
+            action="MEETING_INVITATIONS_SENT",
+            resource_id=meeting.id,
+            new_state={"recipients": recipients, "sent": sent}
+        )
+        return {"sent": sent, "total": len(recipients), "results": results}
 
     @staticmethod
     def get_meeting_instance(meeting_id_or_ref):

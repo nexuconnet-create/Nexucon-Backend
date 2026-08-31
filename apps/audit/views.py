@@ -106,3 +106,31 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         response = HttpResponse(csv_data, content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = 'attachment; filename="Nexucon_Audit_Ledger.csv"'
         return response
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from apps.scans.models import ScanSession
+from .models import AuditEvent
+from drf_spectacular.utils import extend_schema
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+
+class SessionTimelineView(APIView):
+    """
+    Returns the full audit event timeline for a scan session.
+    This provides complete traceability of every lifecycle event.
+    """
+
+    @extend_schema(
+        responses={200: AuditEventSerializer(many=True)},
+        summary="Retrieve the full timeline of events for a scan session.",
+        tags=["Audit & Timeline"],
+    )
+    @method_decorator(cache_page(60 * 15))
+    def get(self, request, session_id):
+        events = AuditEvent.objects.filter(
+            Q(session_id=session_id) | Q(resource_id=str(session_id))
+        ).order_by('timestamp')
+        serializer = AuditEventSerializer(events, many=True)
+        return Response(serializer.data)

@@ -95,3 +95,20 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # Add extra responses here
         data.update({'user': UserMeSerializer(self.user).data})
         return data
+
+
+class ApiKeySerializer(serializers.ModelSerializer):
+    """
+    Read serializer. Never exposes the full secret — only the masked preview.
+    The plaintext key is returned once, by the create endpoint.
+    """
+    masked_key = serializers.CharField(read_only=True)
+
+    class Meta:
+        from .models import ApiKey
+        model = ApiKey
+        fields = [
+            'id', 'name', 'masked_key', 'is_active',
+            'last_used_at', 'revoked_at', 'created_at',
+        ]
+        read_only_fields = ['id', 'masked_key', 'last_used_at', 'revoked_at', 'created_at']
