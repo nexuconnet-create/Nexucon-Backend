@@ -129,6 +129,8 @@ class SessionTimelineView(APIView):
     )
     @method_decorator(cache_page(60 * 15))
     def get(self, request, session_id):
-        events = AuditEvent.objects.filter(session_id=session_id).order_by('timestamp')
+        events = AuditEvent.objects.filter(
+            Q(session_id=session_id) | Q(resource_id=str(session_id))
+        ).order_by('timestamp')
         serializer = AuditEventSerializer(events, many=True)
         return Response(serializer.data)

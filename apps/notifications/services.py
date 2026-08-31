@@ -311,7 +311,6 @@ class NotificationService:
             entity_id=entity_id,
             action_url=action_url or "/government/dashboard/notifications/critical"
         )
-=======
         for item in defaults:
             Notification.objects.create(**item)
 
@@ -359,7 +358,6 @@ class WebhookService:
         return delivery
 
 
-
 class _LegacyNotificationServiceHelper:
     @classmethod
     def trigger_stop_work(cls, defect):
@@ -402,5 +400,3 @@ class _LegacyNotificationServiceHelper:
             "message": message
         }
         logger.info(f"Webhook Payload Dispatched: {json.dumps(payload)}")
-
->>>>>>> Stashed changes

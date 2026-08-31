@@ -111,6 +111,13 @@ class Project(models.Model):
     monitoring_category = models.CharField(max_length=255, blank=True, null=True)
     inspection_frequency = models.CharField(max_length=100, blank=True, null=True)
     internal_notes = models.TextField(blank=True, null=True)
+    
+    # Client / cover-page information (from Tarsus)
+    client_name = models.CharField(max_length=200, blank=True, default='', help_text="Name of the client / commissioning body")
+    project_number = models.CharField(max_length=100, blank=True, default='', help_text="Internal or contract project reference number")
+    client_contact = models.CharField(max_length=200, blank=True, default='', help_text="Primary client contact name or email")
+    latitude = models.FloatField(null=True, blank=True, help_text="Project site latitude")
+    longitude = models.FloatField(null=True, blank=True, help_text="Project site longitude")
 
     # 9. Monitoring Configuration
     enable_site_monitoring = models.BooleanField(default=False)

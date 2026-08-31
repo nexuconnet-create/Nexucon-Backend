@@ -242,8 +242,22 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='start')
     def start_meeting(self, request, pk=None):
-        res = StakeholderService.start_meeting(pk, request.user)
+        try:
+            res = StakeholderService.start_meeting(pk, request.user)
+        except ValueError as ex:
+            return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='send-invites')
+    def send_invites(self, request, pk=None):
+        """Email meeting invitations to participants via the Resend integration."""
+        meeting = StakeholderService.get_meeting_instance(pk)
+        if not meeting:
+            return Response({"error": f"Meeting not found: {pk}"}, status=status.HTTP_404_NOT_FOUND)
+        result = StakeholderService.send_meeting_invitations(meeting, request.user)
+        if result.get("error") and not result.get("results"):
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='join')
     def join_meeting(self, request, pk=None):
