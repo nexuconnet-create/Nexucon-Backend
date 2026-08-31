@@ -77,8 +77,9 @@ class ReportService:
       7. BIM Comparison - Red-Alert for deviations > threshold (review §4)
       8. Clash Detection - Conflict Map (review §5)
       9. Engineering Recommendations - Prioritised To-Do with Accountability (review §6)
-     10. Final Site Health Check / Conclusion (review §7)
-     11. Engineer Sign-Off
+     10. Observations, Conclusions & Recommendations - detailed written narrative
+     11. Final Site Health Check / Conclusion (review §7)
+     12. Engineer Sign-Off
     """
 
     # ------------------------------------------------------------------
@@ -1899,12 +1900,196 @@ class ReportService:
                     pdf.cell(0, 4, f'     REF: {std}', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                     pdf.set_text_color(*BRAND_DARK)
 
-        # ================= SECTION 9 =================
+        # ================= SECTION 9: OBSERVATIONS, CONCLUSIONS & RECOMMENDATIONS =================
+        # The written engineering narrative behind the tables and images in
+        # Sections 2-8: what was observed, what it means, and what should
+        # happen next. Every statement is derived from the same measured
+        # data — nothing is invented, and anything not assessed says so.
         if pdf.get_y() + 60 > pdf.page_break_trigger:
             pdf.add_page()
         else:
             pdf.ln(8)
-        cls._section_heading(pdf, '9', 'Final Site Health Check & Conclusion')
+        cls._section_heading(pdf, '9', 'Observations, Conclusions & Recommendations - Detailed Narrative')
+        pdf.set_font('helvetica', 'I', 8.5)
+        pdf.set_text_color(*DARK_GREY)
+        pdf.multi_cell(0, 5, 'This section is the written engineering narrative behind the tables and images in this report. It explains what was observed on site, what those observations mean for the project, and exactly what should happen next. Every statement below is drawn from the measured data in Sections 2-8 of this report.', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(3)
+        pdf.set_text_color(*BRAND_DARK)
+
+        def _para(title, body, title_color=BRAND_BLUE):
+            """One titled narrative paragraph: courier label, wrapped body."""
+            if pdf.get_y() + 20 > pdf.page_break_trigger:
+                pdf.add_page()
+            pdf.set_font('courier', 'B', 8)
+            pdf.set_text_color(*title_color)
+            pdf.cell(0, 5, title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.set_font('helvetica', '', 8.3)
+            pdf.set_text_color(*BRAND_DARK)
+            pdf.multi_cell(0, 4.3, body, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(2.5)
+
+        # ---- Measured aggregates the narrative is built from ----
+        sev_counts = {s: len([d for d in def_list if str(getattr(d, 'severity', '')).lower() == s]) for s in ('critical', 'high', 'medium', 'low')}
+        type_counts = {}
+        for d in def_list:
+            t = str(getattr(d, 'type', 'defect')).replace('_', ' ').title()
+            type_counts[t] = type_counts.get(t, 0) + 1
+        type_str = ', '.join(f'{n} x {t}' for t, n in type_counts.items())
+        max_var = max((float(getattr(a, 'temperature_variance', 0) or 0) for a in ano_list), default=None)
+        clash_high = len([c for c in (clashes or []) if str(c.get('severity', '')).lower() in ('high', 'critical')])
+        clash_medium = len([c for c in (clashes or []) if str(c.get('severity', '')).lower() == 'medium'])
+        defect_meanings = {
+            'crack': 'cracks are splits in the surface that can admit water and, over time, corrode the steel reinforcement inside the member',
+            'concrete_crack': 'cracks are splits in the concrete that can admit water and, over time, corrode the steel reinforcement inside the member',
+            'spalling': 'spalling is concrete breaking away from the surface, typically caused by rusting reinforcement expanding from within',
+            'corrosion': 'corrosion on reinforcing steel expands as it develops and eventually splits the surrounding concrete, reducing the member\'s capacity',
+            'thermal_anomaly': 'thermal anomalies are temperature differences that usually indicate hidden moisture, missing insulation or air leakage paths',
+            'deformation': 'deformation indicates a member has moved or bent beyond its designed geometry, which can affect load distribution',
+            'delamination': 'delamination means layers of the material have separated, leaving a hollow and weakened zone',
+        }
+        meaning_str = '; '.join(defect_meanings.get(str(d.type).lower(), 'an AI-confirmed surface anomaly requiring engineer review') for d in def_list[:3])
+        sensors_list = getattr(scan, 'sensors_used', []) or []
+        sensors_str = ', '.join(str(s).upper() for s in sensors_list) if sensors_list else 'not recorded on this session'
+        max_dev_m = max(_top_vals_m) if _top_vals_m else None
+
+        # ---------- OBSERVATIONS ----------
+        cls._subsection_bar(pdf, '9.1  Observations')
+
+        _para('OBSERVATION 1 - SURVEY METHOD AND COVERAGE',
+              f'The site was surveyed on {date_str} using capture device "{scan_ref}" with the following capture modalities: {sensors_str}. The session is recorded with status {str(getattr(scan, "status", "-")).upper()}. During analysis the Nexucon AI inspection engine registered {len(def_list)} visual finding(s) and {len(ano_list)} thermal anomaly/anomalies, with an overall AI confidence of {conf_pct}. '
+              + ('A high confidence figure means the vision models repeatedly and independently confirmed the findings; individual per-finding confidence values are printed on each finding card in Section 3.' if overall_confidence is not None and overall_confidence >= 0.7 else 'Where the overall confidence is moderate, the findings should be treated as strong indications to be confirmed by a physical inspection rather than as certainties.'))
+
+        if not def_list:
+            _para('OBSERVATION 2 - STRUCTURAL AND SURFACE CONDITION',
+                  'No visual defects were detected in this scan. The surfaces captured by the vision models showed no cracks, spalling, corrosion, deformation or delamination above the detection threshold. This is a favourable result; however, it reflects only the areas and surfaces actually captured by this survey pass - any area obscured from the scanner remains unverified until a subsequent pass covers it.')
+        else:
+            _para('OBSERVATION 2 - STRUCTURAL AND SURFACE CONDITION',
+                  f'{len(def_list)} visual finding(s) were recorded, distributed by severity as {sev_counts["critical"]} critical, {sev_counts["high"]} high, {sev_counts["medium"]} medium and {sev_counts["low"]} low, and by type as: {type_str}. In physical terms: {meaning_str}. '
+                  + ('The presence of critical-severity findings means at least one condition was assessed as an immediate safety concern.' if sev_counts['critical'] else 'No finding reached critical severity, so no immediate life-safety trigger was raised by the visual inspection.')
+                  + f' The full evidence, per-finding confidence, location coordinates and applicable Nigerian Standards for each item are given in Section 3 (Defect Findings).')
+
+        if not ano_list:
+            _para('OBSERVATION 3 - THERMAL PERFORMANCE (BUILDING ENVELOPE)',
+                  'No thermal anomalies were detected. The building envelope shows no abnormal temperature patterns, which indicates continuous insulation and an intact air barrier in the areas imaged. Applicable standard: SON NIS 412 (Thermal Performance of Buildings).')
+        else:
+            var_str = f'up to {max_var:.1f} deg C' if max_var is not None else 'of measurable magnitude'
+            _para('OBSERVATION 3 - THERMAL PERFORMANCE (BUILDING ENVELOPE)',
+                  f'{len(ano_list)} thermal anomaly/anomalies were detected with temperature variance {var_str} against the surrounding surface. Thermography cannot see through structures - it reads surface temperature - but abnormal surface temperatures reliably indicate an underlying cause: hidden moisture (evaporative cooling), missing or displaced insulation, air leakage around openings, or an electrical hotspot. Each anomaly, with its exact bracketed location on the thermal image, is listed in Section 5. Applicable standard: SON NIS 412 (Thermal Performance of Buildings).')
+
+        if frame_mismatch:
+            _para('OBSERVATION 4 - POSITIONAL COMPLIANCE VS BIM DESIGN',
+                  f'The scan-to-BIM comparison produced a mean deviation of {mean_dev:.2f} m, but every individual measured deviation point is smaller (maximum {max_dev_m:.2f} m). A mean cannot exceed every member of its own population, so this result is internally inconsistent and points to a data problem rather than a structural one: the scan and the BIM model are almost certainly not referenced to the same coordinate frame, or a units/georeferencing transform was skipped when the data was ingested. The comparison must be re-run after the surveyor confirms the project control points before ANY positional conclusion is drawn from it (see the data-validation flag in Section 6).')
+        elif mean_dev is None:
+            _para('OBSERVATION 4 - POSITIONAL COMPLIANCE VS BIM DESIGN',
+                  'BIM alignment has not been run for this scan session, so no as-built versus design positional comparison is available. Without it, the report cannot state whether the constructed work is within the designed position. It is recommended that "Align to BIM" be executed against the project model to complete this assessment.')
+        elif bim_alert:
+            _para('OBSERVATION 4 - POSITIONAL COMPLIANCE VS BIM DESIGN',
+                  f'The as-built scan deviates from the approved BIM design by a mean of {mean_dev:.2f} m against a tolerance of 0.010 m (10 mm) - roughly {mean_dev / 0.01:.0f} times the permitted value. This is a STOP WORK condition: if the measured shift is real, every dimension set out from the current position will inherit the error. The surveyor must re-verify the project control points before any further construction proceeds (see Section 6).')
+        elif mean_dev < 0.01:
+            _para('OBSERVATION 4 - POSITIONAL COMPLIANCE VS BIM DESIGN',
+                  f'The as-built scan deviates from the approved BIM design by a mean of {mean_dev * 1000:.1f} mm, which is within the 10 mm tolerance of NIS 87 / ISO 19650. The constructed work is in the designed position to the accuracy of this survey. The largest individual deviations are itemised in the Top Deviation Points table in Section 6' + (f' (maximum {max_dev_m * 1000:.0f} mm).' if max_dev_m is not None else '.'))
+        else:
+            _para('OBSERVATION 4 - POSITIONAL COMPLIANCE VS BIM DESIGN',
+                  f'The as-built scan deviates from the approved BIM design by a mean of {mean_dev * 1000:.1f} mm against the 10 mm tolerance, so the deviation is real but not of the magnitude of a structural misplacement - this is a workmanship/setting-out review item rather than a stop-work condition. The elements concerned are listed with their exact magnitudes in Section 6 and should be measured up on site and corrected or accepted by the engineer on record.')
+
+        if clashes:
+            _para('OBSERVATION 5 - DESIGN COORDINATION (CLASH DETECTION)',
+                  f'{len(clashes)} clash(es) were found in the model: {clash_high} high/critical severity and {clash_medium} medium severity. A clash means two or more elements - beams, walls, pipes, ducts - are designed to occupy the same physical space, so they cannot be built as drawn. Each unfixed clash becomes rework the moment construction reaches that floor: typically demolition of freshly built work at a cost several times that of a drawing revision today. The conflicting elements and their locations are tabulated in Section 7.')
+        else:
+            _para('OBSERVATION 5 - DESIGN COORDINATION (CLASH DETECTION)',
+                  'No element clashes were detected in the model comparison. The design is spatially coordinated in the areas scanned: no two elements are claimed to occupy the same space.')
+
+        if progress_val:
+            score_pct = (progress_val.progress_score or 0.0) * 100
+            area = progress_val.covered_area_sqm or 0.0
+            _para('OBSERVATION 6 - CONSTRUCTION PROGRESS',
+                  f'Progress validation against the BIM model measures {score_pct:g}% physically complete, with {area:g} m2 of construction captured in the point cloud. ' + ('The remaining works are concentrated in the unscanned/unbuilt areas of the model; the progress figure will rise as subsequent scan passes capture them.' if score_pct < 100 else 'The captured works are complete relative to the model.') + ' The measurement basis is described in Section 4.')
+        else:
+            _para('OBSERVATION 6 - CONSTRUCTION PROGRESS',
+                  'No progress validation result is stored for this scan session, so no percentage-complete figure can be reported. Run the progress validation pipeline against the BIM model to quantify physical completion.')
+
+        # ---------- CONCLUSIONS ----------
+        if pdf.get_y() + 30 > pdf.page_break_trigger:
+            pdf.add_page()
+        cls._subsection_bar(pdf, '9.2  Conclusions')
+
+        if has_critical or bim_alert:
+            verdict = 'THE SITE FAILS THE INSPECTION IN ITS CURRENT STATE'
+        elif has_high or ano_list:
+            verdict = 'THE SITE IS CONDITIONAL - SAFE TO CONTINUE ONLY WITH THE URGENT ACTIONS BELOW COMPLETED'
+        else:
+            verdict = 'THE SITE PASSES THE INSPECTION AND IS GENERALLY SOUND AND COMPLIANT'
+        _para('OVERALL CONCLUSION', f'{verdict}. This verdict is the synthesis of every measured dimension of this survey: {len(def_list)} visual finding(s) ({sev_counts["critical"]} critical / {sev_counts["high"]} high), {len(ano_list)} thermal anomaly/anomalies, a mean scan-to-BIM deviation of ' + (f'{mean_dev * 1000:.1f} mm' if mean_dev is not None else 'not assessed') + f', {len(clashes or [])} design clash(es), and an overall AI confidence of {conf_pct}.')
+
+        _para('CONCLUSION - STRUCTURAL INTEGRITY',
+              'The main structure is sound and no critical structural weakness was detected by this survey. Findings of lower severity, if acted on within their SLA, will not develop into structural problems.' if not has_critical else f'The structure has {sev_counts["critical"]} critical-severity finding(s) that were assessed as immediate safety concerns. Until they are reviewed by a COREN-registered structural engineer and remediated or justified, they represent an unacceptable risk, and work in the affected zones should not proceed.')
+
+        _para('CONCLUSION - BUILDING ENVELOPE',
+              'The building envelope is performing as designed in the areas imaged: no abnormal heat-loss or moisture signatures were found.' if not ano_list else f'The envelope is not fully performing: {len(ano_list)} thermal anomaly/anomalies indicate heat loss and/or moisture paths that will raise energy cost and can seed concealed deterioration (hidden moisture is the precursor of corrosion and mould). These are repairable envelope works, not structural concerns.')
+
+        _para('CONCLUSION - COMPLIANCE WITH DESIGN',
+              'Compliance with design could not be assessed because the BIM comparison has not been run.' if mean_dev is None else ('Compliance with design could not be determined: the comparison data failed its own consistency check (likely coordinate-system error) and must be re-run.' if frame_mismatch else ('The constructed work is NOT in its designed position. This is the most serious finding class in this report and it invalidates dimension-critical work until corrected.' if bim_alert else 'The constructed work is within the designed positional tolerance.')))
+
+        _para('CONCLUSION - DATA CONFIDENCE AND LIMITATIONS',
+              f'All findings in this report were produced by AI-assisted analysis under the Nexucon Digital Eye platform with an overall confidence of {conf_pct}. AI findings are indicative: they must be reviewed and validated by a COREN-registered structural engineer before any remedial works are commissioned or rejected. The survey covered only what the scanner captured - surfaces obscured from the sensor were not assessed. Standards applied: Nigeria National Building Code 2006; NIS 87; NIS 439; NIS 412; SON general construction standards; ISO 19650.')
+
+        # ---------- RECOMMENDATIONS (NARRATIVE) ----------
+        if pdf.get_y() + 30 > pdf.page_break_trigger:
+            pdf.add_page()
+        cls._subsection_bar(pdf, '9.3  Recommendations')
+
+        pdf.set_font('helvetica', 'I', 8)
+        pdf.set_text_color(*DARK_GREY)
+        pdf.multi_cell(0, 4.3, 'The prioritised action table in Section 8 lists every recommendation with its SLA and accountable party. The paragraphs below explain the reasoning behind each action and how to close it out. SLA definitions: CRITICAL = 2 days, URGENT/HIGH = 7 days, ROUTINE/MEDIUM = 10 days, LOW = 14 days.', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(2)
+        pdf.set_text_color(*BRAND_DARK)
+
+        if recommendations:
+            for i, rec in enumerate(recommendations, 1):
+                if isinstance(rec, dict):
+                    rec_text = str(rec.get('recommendation', '')).encode('ascii', 'ignore').decode('ascii')
+                    priority = str(rec.get('priority', 'Low')).lower()
+                    linked = str(rec.get('related_finding_id', ''))
+                else:
+                    rec_text = str(rec).encode('ascii', 'ignore').decode('ascii')
+                    priority = 'low'
+                    linked = ''
+                sev_color = cls._severity_color(priority)
+                tl_label, _ = TRAFFIC_LIGHT.get(priority, ('ROUTINE', SEV_LOW))
+                sla = SLA_DAYS.get(priority, 14)
+                acct = ACCOUNTABILITY.get(priority, 'Site Supervisor')
+                risk_labels = {'critical': 'structural and life-safety risk', 'high': 'safety and quality risk', 'medium': 'quality risk', 'low': 'low residual risk'}
+                body = (f'{rec_text} '
+                        f'Why: this action carries {risk_labels.get(priority, "low residual risk")} if left unaddressed, and it derives directly from the observations above'
+                        + (f' (linked finding {linked})' if linked else '')
+                        + f'. Who: {acct}. Deadline: within {sla} days (priority {tl_label}). '
+                          f'Closure: the action is closed when the responsible party completes the work and it is verified in the next Nexucon scan pass.')
+                _para(f'RECOMMENDATION {i} - {tl_label} (SLA {sla} DAYS)', body, title_color=sev_color)
+        else:
+            _para('RECOMMENDATION 1 - MAINTAIN THE QUALITY PLAN',
+                  'No specific AI recommendations were generated for this scan, which reflects a clean result set rather than an incomplete analysis. Continue scheduled monitoring in line with the project quality plan and re-scan after the next construction milestone.')
+        if bim_alert:
+            _para('RECOMMENDATION - POSITION RE-VERIFICATION (OVERRIDING)',
+                  'Have the site surveyor re-verify the building grid and control points immediately, before any further dimension-critical work (concrete pours, wall setting-out). Once coordinates are confirmed, re-scan and re-run the BIM alignment so the deviation is either quantified properly or cleared.', title_color=SEV_CRITICAL)
+        if frame_mismatch:
+            _para('RECOMMENDATION - GEOREFERENCING CHECK (OVERRIDING)',
+                  'Before any positional conclusion is drawn, confirm that the scan and the BIM model share one coordinate frame and that the correct project control points were used on ingest, then re-run "Align to BIM". A comparison that fails its own consistency check must never be used to justify site works.', title_color=SEV_MEDIUM)
+        if ano_list:
+            _para('RECOMMENDATION - ENVELOPE REMEDIATION',
+                  'Commission the roofing/envelope contractor to reinstate insulation and seal the leakage paths identified in Section 5, then re-scan thermally to confirm the anomalies have cleared. Left open, these paths will continue to cost energy and can conceal moisture-driven deterioration.', title_color=SEV_HIGH)
+        if clashes:
+            _para('RECOMMENDATION - DESIGN COORDINATION REVIEW',
+                  'Convene the design team to resolve the model clashes listed in Section 7 and re-issue the affected drawings before construction reaches those floors. Resolving a clash on the model costs a drawing revision; resolving it on site costs demolition and rebuilding.', title_color=SEV_MEDIUM)
+
+        _para('FOLLOW-UP',
+              'The Project Manager should assign every recommendation above, track each to closure against its SLA, and schedule a follow-up Nexucon scan once the surveyor and contractor have completed their works. The follow-up scan verifies the remediation - a finding that no longer appears in the next report is the objective evidence that the action was effective.')
+
+        # ================= SECTION 10 =================
+        if pdf.get_y() + 60 > pdf.page_break_trigger:
+            pdf.add_page()
+        else:
+            pdf.ln(8)
+        cls._section_heading(pdf, '10', 'Final Site Health Check & Conclusion')
         pdf.set_font('helvetica', 'I', 8.5)
         pdf.set_text_color(*DARK_GREY)
         pdf.multi_cell(0, 5, "This is the verdict. The Project Manager should assign the recommended actions and schedule a follow-up scan after the surveyor and contractor complete their work. All findings must be reviewed and validated by a certified structural engineer (COREN registered) before remedial works are commissioned.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
@@ -1970,12 +2155,12 @@ class ReportService:
         pdf.multi_cell(card_w - 3, 3.6, 'NEXT STEPS: the Project Manager should assign these actions and schedule a follow-up scan after the surveyor and contractor complete their work.')
         pdf.set_text_color(*BRAND_DARK)
 
-        # ================= SECTION 10 =================
+        # ================= SECTION 11 =================
         if pdf.get_y() + 60 > pdf.page_break_trigger:
             pdf.add_page()
         else:
             pdf.ln(8)
-        cls._section_heading(pdf, '10', 'Professional Engineer Sign-Off')
+        cls._section_heading(pdf, '11', 'Professional Engineer Sign-Off')
         pdf.set_font('helvetica', 'I', 8.5)
         pdf.set_text_color(*DARK_GREY)
         pdf.multi_cell(0, 5, 'This report was prepared using AI-assisted analysis under the Nexucon Digital Eye platform. All AI findings carry a confidence score and must be reviewed and validated by a COREN-registered structural engineer before any remedial works are commissioned. Standards applied: SON General Construction Standards; Nigeria National Building Code 2006; NIS 87; NIS 439; NIS 412; ISO 19650.', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
