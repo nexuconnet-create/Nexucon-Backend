@@ -164,6 +164,7 @@ class NotificationService:
             except Exception:
                 continue
 
+
         text_content = ""
         try:
             text_content = render_to_string("emails/base_notification.txt", context)
@@ -310,3 +311,92 @@ class NotificationService:
             entity_id=entity_id,
             action_url=action_url or "/government/dashboard/notifications/critical"
         )
+        for item in defaults:
+            Notification.objects.create(**item)
+
+import requests
+import json
+import logging
+logger = logging.getLogger(__name__)
+
+from .models import WebhookEndpoint, WebhookDelivery
+class WebhookService:
+    """Service to handle webhook deliveries."""
+    
+    @staticmethod
+    def send_webhook(endpoint: WebhookEndpoint, event_type: str, payload: dict) -> WebhookDelivery:
+        """Sends a payload to a specific webhook endpoint and logs the delivery attempt."""
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'SiteSupervise-Webhook/1.0',
+        }
+        
+        # In a production app, we would add HMAC signatures to headers using endpoint.secret_key
+        
+        delivery = WebhookDelivery(
+            endpoint=endpoint,
+            event_type=event_type,
+            payload=payload,
+        )
+        
+        try:
+            response = requests.post(
+                endpoint.url, 
+                json=payload, 
+                headers=headers, 
+                timeout=10
+            )
+            delivery.status_code = response.status_code
+            delivery.response_body = response.text[:2000] # Cap length
+            delivery.success = 200 <= response.status_code < 300
+        except Exception as e:
+            logger.error(f"Failed to send webhook to {endpoint.url}: {e}")
+            delivery.response_body = str(e)[:2000]
+            delivery.success = False
+            
+        delivery.save()
+        return delivery
+
+
+class _LegacyNotificationServiceHelper:
+    @classmethod
+    def trigger_stop_work(cls, defect):
+        """
+        Real-Time QA: Grand Rapids Model.
+        Triggers an immediate 'Stop Work' or 'Inspect Now' notification to the site manager
+        before the next pour/step.
+        """
+        from apps.notifications.models import InAppNotification
+        logger.info(f"Triggering STOP WORK notification for Defect {defect.id}")
+        
+        # 1. Create In-App Notification
+        project = defect.session.project
+        title = f"URGENT: Stop Work - Critical {defect.type.capitalize()} Detected"
+        
+        message = (
+            f"A critical {defect.type} has been detected in ScanSession {defect.session.scanner_id}.\n"
+            f"Location: ({defect.location_x}, {defect.location_y}, {defect.location_z})\n"
+        )
+        if defect.grid_zone or defect.room_level:
+            message += f"Zone/Room: {defect.grid_zone} {defect.room_level}\n"
+            
+        message += f"\nImmediate engineering review is required before work can continue."
+        
+        InAppNotification.objects.create(
+            project=project,
+            title=title,
+            message=message,
+            type='stop_work',
+            related_entity_id=defect.id
+        )
+        
+        # 2. Fire webhook payload (Simulated)
+        # In a real app, this would iterate over WebhookEndpoints and create WebhookDeliveries.
+        payload = {
+            "event": "defect.critical_stop_work",
+            "defect_id": str(defect.id),
+            "project_id": str(project.id) if project else None,
+            "severity": defect.severity,
+            "message": message
+        }
+        logger.info(f"Webhook Payload Dispatched: {json.dumps(payload)}")

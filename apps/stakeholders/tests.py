@@ -1,6 +1,7 @@
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
+from unittest.mock import patch
 from rest_framework.test import APIClient
 from apps.stakeholders.models import (
     Developer, Contractor, Consultant, Inspector,
@@ -11,6 +12,19 @@ from apps.stakeholders.services import StakeholderService
 from apps.stakeholders.translation import TranslationService
 
 User = get_user_model()
+
+# Standard stub for the external Google Calendar/Meet call so the test suite
+# never hits the real API (real integration is verified in live smoke tests).
+GOOGLE_EVENT_STUB = {
+    'event_id': 'stub-event-id',
+    'html_link': 'https://www.google.com/calendar/event?eid=stub',
+    'hangout_link': 'https://meet.google.com/stub-abc-mno',
+    'meet_link_source': 'google_calendar_conference',
+    'status': 'created_with_meet',
+    'meet_error': '',
+    'calendar_error': '',
+    'attendees_invited': False,
+}
 
 class StakeholderTestCase(TestCase):
     def setUp(self):
@@ -35,17 +49,22 @@ class StakeholderTestCase(TestCase):
     def test_schedule_meeting_agency_head_authorized(self):
         """Test that Agency Head can successfully schedule an official meeting."""
         self.client.force_authenticate(user=self.agency_head)
-        res = self.client.post('/api/v1/stakeholders/meetings/', {
-            "title": "High-Rise Safety & BIM Review",
-            "agenda": "Review slab deflection and MEP coordination.",
-            "project_name": "Nexus Tower (Phase 1)",
-            "date": "Oct 28, 2026",
-            "time_slot": "10:00 AM - 11:30 AM",
-            "meeting_type": "Video Call"
-        })
+        with patch('apps.stakeholders.services.GoogleMeetCalendarService.create_meeting_event',
+                   return_value=dict(GOOGLE_EVENT_STUB)):
+            res = self.client.post('/api/v1/stakeholders/meetings/', {
+                "title": "High-Rise Safety & BIM Review",
+                "agenda": "Review slab deflection and MEP coordination.",
+                "project_name": "Nexus Tower (Phase 1)",
+                "date": "Oct 28, 2026",
+                "time_slot": "10:00 AM - 11:30 AM",
+                "meeting_type": "Video Call"
+            })
         self.assertEqual(res.status_code, 201)
         self.assertIn('MTG-', res.data['meeting_reference'])
         self.assertEqual(res.data['status'], 'Scheduled')
+        self.assertEqual(res.data['google_meet_url'], 'https://meet.google.com/stub-abc-mno')
+        self.assertEqual(res.data['meet_link_status'], 'meet_available')
+        self.assertEqual(res.data['google_calendar_event_id'], 'stub-event-id')
 
     def test_schedule_meeting_non_agency_head_forbidden(self):
         """Test that non-agency-head users receive PermissionDenied when attempting to schedule."""

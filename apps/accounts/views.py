@@ -304,3 +304,39 @@ class UserOnboardingView(APIView):
             'data': serializer.data,
             'errors': None
         })
+
+
+from rest_framework import viewsets
+from rest_framework.decorators import action
+from .models import ApiKey
+from .serializers import ApiKeySerializer
+
+class ApiKeyViewSet(viewsets.ModelViewSet):
+    """
+    Manage API keys belonging to the signed-in user.
+
+    The plaintext key is shown exactly once, in the create response; afterwards
+    only a masked preview is available, so it cannot be re-read from the UI.
+    """
+    serializer_class = ApiKeySerializer
+    permission_classes = (IsAuthenticated,)
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        return ApiKey.objects.filter(user=self.request.user)
+
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        name = (request.data.get('name') or 'Default key')[:150]
+        api_key = ApiKey.objects.create(user=request.user, name=name)
+        data = ApiKeySerializer(api_key).data
+        data['key'] = api_key.key  # shown once, never again
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='revoke')
+    def revoke(self, request, pk=None):
+        api_key = self.get_object()
+        api_key.revoke()
+        return Response(ApiKeySerializer(api_key).data)

@@ -67,3 +67,63 @@ class CreateInspectionSerializer(serializers.ModelSerializer):
         if not value or value == '':
             return None
         return value
+
+
+from .models import Issue, IssueComment, NonConformanceReport, CorrectiveAction
+from django.contrib.auth import get_user_model
+User = get_user_model()
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name']
+
+
+class IssueCommentSerializer(serializers.ModelSerializer):
+    user = UserSerializer(read_only=True)
+
+    class Meta:
+        model = IssueComment
+        fields = ['id', 'issue', 'user', 'text', 'created_at']
+        read_only_fields = ['id', 'created_at', 'issue']
+
+
+class IssueSerializer(serializers.ModelSerializer):
+    assignee = UserSerializer(read_only=True)
+    assignee_id = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(), source='assignee', write_only=True, required=False, allow_null=True
+    )
+    created_by = UserSerializer(read_only=True)
+    comments = IssueCommentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Issue
+        fields = [
+            'id', 'title', 'description', 'status', 'priority', 
+            'project', 'session', 'assignee', 'assignee_id', 'created_by', 
+            'created_at', 'updated_at', 'comments'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by']
+
+
+class CorrectiveActionSerializer(serializers.ModelSerializer):
+    assignee = UserSerializer(read_only=True)
+    assignee_id = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(), source='assignee', write_only=True, required=False, allow_null=True
+    )
+
+    class Meta:
+        from .models import CorrectiveAction
+        model = CorrectiveAction
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'ncr']
+
+
+class NonConformanceReportSerializer(serializers.ModelSerializer):
+    corrective_actions = CorrectiveActionSerializer(many=True, read_only=True)
+
+    class Meta:
+        from .models import NonConformanceReport
+        model = NonConformanceReport
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'ncr_number']

@@ -1,4 +1,5 @@
 import datetime
+import logging
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from django.db.models import Q
@@ -6,6 +7,8 @@ from .models import Inspection, Finding, StopWorkOrder, Checklist
 from apps.projects.models import Project
 from apps.permits.models import Permit
 from apps.audit.models import AuditEvent
+
+logger = logging.getLogger(__name__)
 
 class InspectionService:
     @staticmethod
@@ -336,3 +339,74 @@ class InspectionService:
             new_state={"reference": reinspection.inspection_reference, "parent": original_inspection.inspection_reference}
         )
         return reinspection
+
+    @classmethod
+    def auto_generate_ncrs_for_scan(cls, session):
+        import uuid
+        from datetime import timedelta
+        from apps.scans.models import Defect
+        from .models import NonConformanceReport, CorrectiveAction
+        """
+        Level 4 Governance: Automatically generates Non-Conformance Reports (NCRs)
+        for any 'high' or 'critical' defects found in a ScanSession.
+        """
+        logger.info(f"Auto-generating NCRs for ScanSession {session.id}")
+        
+        # Fetch critical/high defects
+        defects = Defect.objects.filter(
+            session=session,
+            severity__in=['high', 'critical']
+        )
+        
+        generated_ncrs = []
+        
+        for defect in defects:
+            # Check if an NCR already exists for this defect to prevent duplicates
+            if NonConformanceReport.objects.filter(defect_id=defect.id).exists():
+                continue
+                
+            ncr_number = f"NCR-{timezone.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+            
+            # Use AI Service for root cause and corrective action recommendations if possible
+            # Here we provide a baseline automated generation
+            description = defect.description or f"AI-detected {defect.type} with {defect.severity} severity at location ({defect.location_x}, {defect.location_y}, {defect.location_z})."
+            
+            if defect.evidence_link:
+                description += f"\nEvidence: {defect.evidence_link}"
+                
+            root_cause = "Automated root cause analysis pending engineering review. Potential structural or material non-conformance detected."
+            
+            ncr = NonConformanceReport.objects.create(
+                ncr_number=ncr_number,
+                project=session.project,
+                session=session,
+                defect_id=defect.id,
+                status='issued',
+                severity=defect.severity,
+                description=description,
+                root_cause_analysis=root_cause
+            )
+            
+            # Generate default Corrective Actions based on defect type
+            action_desc = f"Inspect and verify the {defect.type} identified in {ncr_number}."
+            dtype = (defect.type or '').lower()
+            if 'crack' in dtype:
+                action_desc = "Perform structural integrity check and apply appropriate epoxy injection or patching."
+            elif 'spall' in dtype:
+                action_desc = "Remove loose material, treat exposed rebar (if any), and apply repair mortar."
+            elif 'corros' in dtype:
+                action_desc = "Assess corrosion extent, prepare the surface and apply protective coating after remediation."
+            elif 'deform' in dtype:
+                action_desc = "Survey the deformed element against design geometry and engineer a corrective alignment plan."
+            
+            CorrectiveAction.objects.create(
+                ncr=ncr,
+                action_description=action_desc,
+                status='open',
+                due_date=timezone.now().date() + timedelta(days=7) # Default 1 week deadline
+            )
+            
+            generated_ncrs.append(ncr)
+            
+        logger.info(f"Generated {len(generated_ncrs)} NCRs for ScanSession {session.id}")
+        return generated_ncrs

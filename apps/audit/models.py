@@ -37,6 +37,7 @@ class AuditEvent(models.Model):
     event_type = models.CharField(max_length=100, blank=True, null=True, db_index=True)
     resource_type = models.CharField(max_length=100, db_index=True)
     resource_id = models.CharField(max_length=255, db_index=True)
+    session_id = models.UUIDField(null=True, blank=True, help_text="UUID of the parent ScanSession, for easy timeline queries.")
     project_name = models.CharField(max_length=255, default='Central Metro Transit Hub')
     
     ip_address = models.GenericIPAddressField(null=True, blank=True)
