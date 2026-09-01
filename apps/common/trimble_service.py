@@ -36,7 +36,7 @@ class TrimbleConnectService:
             "client_secret": getattr(settings, 'TRIMBLE_CLIENT_SECRET', os.environ.get('TRIMBLE_CLIENT_SECRET', '')),
             "project_id": getattr(settings, 'TRIMBLE_PROJECT_ID', os.environ.get('TRIMBLE_PROJECT_ID', '')),
             "folder_id": getattr(settings, 'TRIMBLE_FOLDER_ID', os.environ.get('TRIMBLE_FOLDER_ID', 'YxeHTR0XTrA')),
-            "redirect_uri": getattr(settings, 'TRIMBLE_REDIRECT_URI', 'http://localhost:8000/api/v1/scans/trimble-callback/'),
+            "redirect_uri": getattr(settings, 'TRIMBLE_REDIRECT_URI', 'https://nexucon-backend.onrender.com/api/v1/scans/trimble-callback/'),
         }
 
     @classmethod

@@ -35,6 +35,8 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "http://192.168.0.196:3000",
+    "https://nexucon-backend.onrender.com",
+    "https://nexucon-frontend-8x3a.vercel.app",
 ]
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
