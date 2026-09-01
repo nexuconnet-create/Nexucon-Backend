@@ -142,9 +142,11 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Nexucon Email notifications <notifications@nexucon.net>")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://nexucon-frontend-8x3a.vercel.app")
 
+_default_postgres_engine = 'django.contrib.gis.db.backends.postgis' if os.getenv("ENABLE_GIS", "False").lower() in ("true", "1") else 'django.db.backends.postgresql'
+
 DATABASES = {
     'default': {
-        'ENGINE': os.getenv('DATABASE_ENGINE', 'django.contrib.gis.db.backends.postgis' if (os.getenv('DATABASE_URL') or os.getenv('POSTGRES_DB')) else 'django.db.backends.sqlite3'),
+        'ENGINE': os.getenv('DATABASE_ENGINE', _default_postgres_engine if (os.getenv('DATABASE_URL') or os.getenv('POSTGRES_DB')) else 'django.db.backends.sqlite3'),
         'NAME': os.getenv('DATABASE_NAME', str(BASE_DIR / 'db.sqlite3')),
         'USER': os.getenv('DATABASE_USER', 'postgres'),
         'PASSWORD': os.getenv('DATABASE_PASSWORD', ''),

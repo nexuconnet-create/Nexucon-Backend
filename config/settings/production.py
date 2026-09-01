@@ -16,8 +16,11 @@ if os.getenv("DATABASE_URL"):
         conn_max_age=600,
         conn_health_checks=True,
     )
-    # Ensure postgis engine is used
-    DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
+    # Set engine to postgis only if ENABLE_GIS is enabled or requested
+    if os.getenv("ENABLE_GIS", "False").lower() in ("true", "1") or os.getenv("DATABASE_ENGINE") == "django.contrib.gis.db.backends.postgis":
+        DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
+    else:
+        DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
 
 # Static files (WhiteNoise)
 MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
