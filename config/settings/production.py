@@ -43,11 +43,43 @@ try:
 except NameError:
     CSRF_TRUSTED_ORIGINS = []
 
+try:
+    CORS_ALLOWED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
+except NameError:
+    CORS_ALLOWED_ORIGINS = []
+
 if os.getenv("FRONTEND_URL"):
-    frontend_url = os.getenv("FRONTEND_URL")
-    CORS_ALLOWED_ORIGINS.append(frontend_url)
-    if frontend_url not in CSRF_TRUSTED_ORIGINS:
-        CSRF_TRUSTED_ORIGINS.append(frontend_url)
+    frontend_raw = os.getenv("FRONTEND_URL", "").strip()
+    for item in frontend_raw.split(","):
+        cleaned = item.strip().rstrip("/")
+        if cleaned:
+            if cleaned not in CORS_ALLOWED_ORIGINS:
+                CORS_ALLOWED_ORIGINS.append(cleaned)
+            if cleaned not in CSRF_TRUSTED_ORIGINS:
+                CSRF_TRUSTED_ORIGINS.append(cleaned)
+
+def _sanitize_origin(origin):
+    origin = origin.strip().rstrip("/")
+    if "://" in origin:
+        parts = origin.split("://", 1)
+        scheme = parts[0]
+        rest = parts[1].split("/", 1)[0]
+        return f"{scheme}://{rest}"
+    return origin
+
+def _sanitize_csrf_origin(origin):
+    origin = origin.strip().rstrip("/")
+    if origin.startswith("https://*.") or origin.startswith("http://*."):
+        return origin
+    if "://" in origin:
+        parts = origin.split("://", 1)
+        scheme = parts[0]
+        rest = parts[1].split("/", 1)[0]
+        return f"{scheme}://{rest}"
+    return origin
+
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys([_sanitize_origin(o) for o in CORS_ALLOWED_ORIGINS if o]))
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys([_sanitize_csrf_origin(o) for o in CSRF_TRUSTED_ORIGINS if o]))
 
 # Allow any Vercel domain dynamically to support preview deployments
 CORS_ALLOWED_ORIGIN_REGEXES = [
