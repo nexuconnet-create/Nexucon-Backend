@@ -205,25 +205,29 @@ CLOUDFLARE_R2_ENDPOINT_URL = os.getenv('CLOUDFLARE_R2_ENDPOINT_URL', f"https://{
 CLOUDFLARE_R2_ACCESS_KEY_ID = os.getenv('CLOUDFLARE_R2_ACCESS_KEY_ID')
 CLOUDFLARE_R2_SECRET_ACCESS_KEY = os.getenv('CLOUDFLARE_R2_SECRET_ACCESS_KEY')
 
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
+
 if STORAGE_PROVIDER == 'cloudflare_r2' and CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUDFLARE_R2_SECRET_ACCESS_KEY:
-    STORAGES = {
-        "default": {
-            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-            "OPTIONS": {
-                "access_key": CLOUDFLARE_R2_ACCESS_KEY_ID,
-                "secret_key": CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-                "bucket_name": CLOUDFLARE_R2_BUCKET_NAME,
-                "endpoint_url": CLOUDFLARE_R2_ENDPOINT_URL,
-                "signature_version": "s3v4",
-                "region_name": "auto",
-                "file_overwrite": False,
-                "default_acl": None,
-                "querystring_auth": True,
-                "querystring_expire": 3600,
-            },
-        },
-        "staticfiles": {
-            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "access_key": CLOUDFLARE_R2_ACCESS_KEY_ID,
+            "secret_key": CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+            "bucket_name": CLOUDFLARE_R2_BUCKET_NAME,
+            "endpoint_url": CLOUDFLARE_R2_ENDPOINT_URL,
+            "signature_version": "s3v4",
+            "region_name": "auto",
+            "file_overwrite": False,
+            "default_acl": None,
+            "querystring_auth": True,
+            "querystring_expire": 3600,
         },
     }
 else:
