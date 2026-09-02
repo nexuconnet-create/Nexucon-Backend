@@ -177,7 +177,7 @@ def _seed_defaults_if_empty():
 class BIMStructuralElementViewSet(viewsets.ModelViewSet):
     queryset = BIMStructuralElement.objects.all().order_by('-created_at')
     serializer_class = BIMStructuralElementSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         _seed_defaults_if_empty()
@@ -206,7 +206,7 @@ class BIMStructuralElementViewSet(viewsets.ModelViewSet):
 class GPRScanViewSet(viewsets.ModelViewSet):
     queryset = GPRScan.objects.all().order_by('-created_at')
     serializer_class = GPRScanSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         _seed_defaults_if_empty()
@@ -231,7 +231,7 @@ class GPRScanViewSet(viewsets.ModelViewSet):
 class PunditTestViewSet(viewsets.ModelViewSet):
     queryset = PunditTest.objects.all().order_by('-created_at')
     serializer_class = PunditTestSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         _seed_defaults_if_empty()
@@ -256,7 +256,7 @@ class PunditTestViewSet(viewsets.ModelViewSet):
 class DigitalEyeFindingViewSet(viewsets.ModelViewSet):
     queryset = DigitalEyeFinding.objects.all().order_by('-created_at')
     serializer_class = DigitalEyeFindingSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -292,7 +292,7 @@ class DigitalEyeFindingViewSet(viewsets.ModelViewSet):
 class AIAnalysisViewSet(viewsets.ModelViewSet):
     queryset = AIAnalysisRecord.objects.all().order_by('-created_at')
     serializer_class = AIAnalysisRecordSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -313,7 +313,7 @@ class AIAnalysisViewSet(viewsets.ModelViewSet):
 class ProcessingQueueJobViewSet(viewsets.ModelViewSet):
     queryset = ProcessingQueueJob.objects.all().order_by('-created_at')
     serializer_class = ProcessingQueueJobSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -334,7 +334,7 @@ class ProcessingQueueJobViewSet(viewsets.ModelViewSet):
 class EvidenceSpatialPointViewSet(viewsets.ModelViewSet):
     queryset = EvidenceSpatialPoint.objects.all().order_by('-timestamp')
     serializer_class = EvidenceSpatialPointSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -358,7 +358,7 @@ class EvidenceSpatialPointViewSet(viewsets.ModelViewSet):
 class DeviceReportViewSet(viewsets.ModelViewSet):
     queryset = DeviceReportRecord.objects.all().order_by('-created_at')
     serializer_class = DeviceReportRecordSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         _seed_defaults_if_empty()
@@ -381,6 +381,25 @@ class DeviceReportViewSet(viewsets.ModelViewSet):
         return StandardResponse.success(
             message="Device reports retrieved successfully",
             data=serializer.data
+        )
+
+    def create(self, request, *args, **kwargs):
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'id' not in data or not data['id']:
+            data['id'] = f"rep-{int(timezone.now().timestamp() * 1000)}"
+        if 'report_reference' not in data or not data['report_reference']:
+            device = data.get('device_type', 'NDT')
+            data['report_reference'] = f"RPT-{device}-{timezone.now().year}-{str(uuid.uuid4())[:4].upper()}"
+        if 'title' not in data or not data['title']:
+            data['title'] = f"{data.get('device_type', 'NDT')} Statutory Inspection Dossier"
+        
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return StandardResponse.success(
+            message="Device report created successfully",
+            data=serializer.data,
+            status_code=status.HTTP_201_CREATED
         )
 
 
