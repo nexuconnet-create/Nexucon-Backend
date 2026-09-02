@@ -10,9 +10,19 @@ import requests
 from django.conf import settings
 from PIL import Image
 
-import openai
-from openai import OpenAI, RateLimitError, APIError
-import google.generativeai as genai
+try:
+    import openai
+    from openai import OpenAI, RateLimitError, APIError
+except ImportError:
+    openai = None
+    OpenAI = None
+    RateLimitError = Exception
+    APIError = Exception
+
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
 from .ml_pipeline import MultimodalPipeline
 
