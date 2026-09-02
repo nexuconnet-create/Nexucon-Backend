@@ -35,6 +35,7 @@ urlpatterns = [
     
     # Migrated Apps
     path('api/v1/scans/', include('apps.scans.urls')),
+    path('api/v1/digital-eye/', include('apps.digital_eye.urls')),
     path('api/v1/', include('apps.reports.urls')),
     path('api/v1/processing/', include('apps.processing.urls')),
 ]
