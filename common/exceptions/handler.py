@@ -1,6 +1,10 @@
+import traceback
+import logging
+from django.conf import settings
 from rest_framework.views import exception_handler
-from rest_framework.response import Response
 from common.responses.standard import StandardResponse
+
+logger = logging.getLogger(__name__)
 
 def custom_exception_handler(exc, context):
     """
@@ -22,6 +26,14 @@ def custom_exception_handler(exc, context):
             status_code=response.status_code
         )
 
-    # For unhandled exceptions, let Django handle it (typically 500)
-    # In production, we might want to catch these here too.
-    return None
+    # For unhandled exceptions, log the full traceback and return clean JSON response
+    view_name = context.get('view', 'UnknownView') if context else 'UnknownView'
+    logger.error(f"Unhandled 500 in {view_name}: {str(exc)}\n{traceback.format_exc()}")
+    print(f"[ERROR 500] in {view_name}: {str(exc)}\n{traceback.format_exc()}")
+
+    error_msg = f"Internal Server Error: {str(exc)}" if getattr(settings, 'DEBUG', False) else "An internal server error occurred."
+    return StandardResponse.error(
+        message=error_msg,
+        errors={'exception': str(exc)} if getattr(settings, 'DEBUG', False) else None,
+        status_code=500
+    )

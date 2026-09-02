@@ -29,7 +29,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     """CRUD API for Project model"""
     queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
     serializer_class = ProjectSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     @extend_schema(responses={200: ProjectSerializer(many=True)})
     def list(self, request, *args, **kwargs):
@@ -60,12 +60,16 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         project = serializer.save(status='PLANNING')
         # Automatically create an Application for this new project to appear in the review queue
-        Application.objects.create(
-            project=project,
-            applicant=self.request.user,
-            application_type='General Construction Permit',
-            status='SUBMITTED'
-        )
+        from django.contrib.auth import get_user_model
+        UserModel = get_user_model()
+        applicant_user = self.request.user if (self.request.user and self.request.user.is_authenticated) else UserModel.objects.first()
+        if applicant_user:
+            Application.objects.create(
+                project=project,
+                applicant=applicant_user,
+                application_type='General Construction Permit',
+                status='SUBMITTED'
+            )
         from django.core.cache import cache
         cache.clear()
 

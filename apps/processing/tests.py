@@ -3,12 +3,14 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from apps.scans.models import ScanSession
-from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
 
 class ProcessingE2ETestCase(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.user = User.objects.create_user(username='testuser', password='password')
+        self.user = User.objects.create_user(username='testuser', email='testuser@test.com', password='password')
         self.client.force_authenticate(user=self.user)
         # Create a mock session
         self.session = ScanSession.objects.create(

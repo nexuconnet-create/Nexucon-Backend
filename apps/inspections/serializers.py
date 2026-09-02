@@ -9,9 +9,9 @@ class ChecklistSerializer(serializers.ModelSerializer):
 
 
 class FindingSerializer(serializers.ModelSerializer):
-    project_name = serializers.CharField(source='project.name', read_only=True)
-    project_reference = serializers.CharField(source='project.reference_number', read_only=True)
-    inspection_reference = serializers.CharField(source='inspection.inspection_reference', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True, default=None)
+    project_reference = serializers.CharField(source='project.reference_number', read_only=True, default=None)
+    inspection_reference = serializers.CharField(source='inspection.inspection_reference', read_only=True, default=None)
 
     class Meta:
         model = Finding
@@ -20,9 +20,9 @@ class FindingSerializer(serializers.ModelSerializer):
 
 
 class StopWorkOrderSerializer(serializers.ModelSerializer):
-    project_name = serializers.CharField(source='project.name', read_only=True)
-    project_reference = serializers.CharField(source='project.reference_number', read_only=True)
-    project_location = serializers.CharField(source='project.lga', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True, default=None)
+    project_reference = serializers.CharField(source='project.reference_number', read_only=True, default=None)
+    project_location = serializers.CharField(source='project.lga', read_only=True, default=None)
     inspection_reference = serializers.CharField(source='inspection.inspection_reference', read_only=True, default=None)
 
     class Meta:
@@ -32,9 +32,9 @@ class StopWorkOrderSerializer(serializers.ModelSerializer):
 
 
 class InspectionSerializer(serializers.ModelSerializer):
-    project_name = serializers.CharField(source='project.name', read_only=True)
-    project_reference = serializers.CharField(source='project.reference_number', read_only=True)
-    project_location = serializers.CharField(source='project.lga', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True, default=None)
+    project_reference = serializers.CharField(source='project.reference_number', read_only=True, default=None)
+    project_location = serializers.CharField(source='project.lga', read_only=True, default=None)
     permit_number = serializers.CharField(source='permit.permit_number', read_only=True, default=None)
     findings = FindingSerializer(many=True, read_only=True)
     findings_count = serializers.SerializerMethodField()

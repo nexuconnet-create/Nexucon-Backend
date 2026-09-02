@@ -2,17 +2,18 @@ from unittest.mock import patch
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
-from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 from apps.scans.models import ScanSession, Defect, ThermalAnomaly
 from apps.reports.models import QualityReport
 import uuid
 
+User = get_user_model()
 
 class ReportIntegrationTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(
-            username="testreportuser", password="testpassword"
+            username="testreportuser", email="testreportuser@test.com", password="testpassword"
         )
         refresh = RefreshToken.for_user(self.user)
         self.token = str(refresh.access_token)
