@@ -149,6 +149,24 @@ def _seed_defaults_if_empty():
             concrete_quality_rating="EXCELLENT",
             status="VERIFIED",
         )
+        PunditTest.objects.create(
+            id="pundit-02",
+            test_reference="UPV-2026-054",
+            project_id_str="e5d43c44-2a33-4ee0-9bff-2b0a05fc9126",
+            project_name="Eko Atlantic Signature Tower",
+            structural_element_id_str="elem-003",
+            structural_element_name="Foundation Bored Pile P-42",
+            test_location="Pile Cap P-42 Core Depth 1.2m",
+            device_model="Proceq Pundit PL-200 UPV",
+            transducer_type="DIRECT",
+            transducer_frequency_khz=25,
+            path_length_mm=600.0,
+            transit_time_us=172.4,
+            pulse_velocity_ms=3480.0,
+            estimated_compressive_strength_mpa=27.8,
+            concrete_quality_rating="DOUBTFUL",
+            status="ANOMALY",
+        )
 
     if not DeviceReportRecord.objects.exists():
         DeviceReportRecord.objects.create(
