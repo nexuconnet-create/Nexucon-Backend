@@ -31,7 +31,6 @@ class TersusDeviceViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        IntegrationService.seed_initial_integrations()
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         if search:
@@ -57,7 +56,6 @@ class BIMIntegrationViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        IntegrationService.seed_initial_integrations()
         return super().get_queryset()
 
     @action(detail=True, methods=['post'], url_path='sync')
@@ -85,7 +83,6 @@ class DocumentSystemIntegrationViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        IntegrationService.seed_initial_integrations()
         return super().get_queryset()
 
     @action(detail=True, methods=['post'], url_path='sync')
@@ -105,7 +102,6 @@ class GovernmentAPIIntegrationViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        IntegrationService.seed_initial_integrations()
         return super().get_queryset()
 
     @action(detail=True, methods=['post'], url_path='test-connection')
@@ -123,8 +119,12 @@ class GovernmentAPIIntegrationViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='verify-entity')
     def verify_entity(self, request):
-        provider_code = request.data.get('provider_code', 'CAC')
-        query_identifier = request.data.get('query_identifier', 'RC-1849204')
+        provider_code = request.data.get('provider_code')
+        query_identifier = request.data.get('query_identifier')
+        if not provider_code or not query_identifier:
+            return Response(
+                {"error": "provider_code and query_identifier are required."},
+                status=status.HTTP_400_BAD_REQUEST)
         result = IntegrationService.verify_government_entity(provider_code, query_identifier, request.user)
         return Response(result, status=status.HTTP_200_OK)
 
@@ -135,7 +135,6 @@ class APIKeyCredentialViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        IntegrationService.seed_initial_integrations()
         return super().get_queryset()
 
     def create(self, request, *args, **kwargs):
@@ -164,7 +163,6 @@ class IntegrationLogViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        IntegrationService.seed_initial_integrations()
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         service = self.request.query_params.get('service')

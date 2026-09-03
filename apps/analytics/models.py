@@ -46,11 +46,11 @@ class GeneratedReport(models.Model):
     period_start = models.DateField(null=True, blank=True)
     period_end = models.DateField(null=True, blank=True)
     
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Ready')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
     file_url = models.CharField(max_length=500, blank=True, null=True)
-    file_size = models.CharField(max_length=50, default='1.4 MB')
+    file_size = models.CharField(max_length=50, blank=True, null=True)
     
-    generated_by_name = models.CharField(max_length=255, default='Director General')
+    generated_by_name = models.CharField(max_length=255, blank=True, null=True)
     generated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='generated_reports')
     
     created_at = models.DateTimeField(default=timezone.now)
@@ -68,11 +68,11 @@ class DepartmentPerformanceMetric(models.Model):
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     department_name = models.CharField(max_length=255, unique=True)
-    turnaround_days = models.DecimalField(max_digits=5, decimal_places=1, default=10.0)
+    turnaround_days = models.DecimalField(max_digits=5, decimal_places=1, null=True, blank=True)
     target_days = models.DecimalField(max_digits=5, decimal_places=1, default=14.0)
-    efficiency_percentage = models.IntegerField(default=90)
-    workload_level = models.CharField(max_length=50, default='High')
-    pending_reviews_count = models.IntegerField(default=12)
+    efficiency_percentage = models.IntegerField(null=True, blank=True)
+    workload_level = models.CharField(max_length=50, blank=True, null=True)
+    pending_reviews_count = models.IntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -88,10 +88,10 @@ class OfficerPerformanceRecord(models.Model):
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     officer_name = models.CharField(max_length=255)
-    role = models.CharField(max_length=255, default='Senior Inspector')
-    inspections_completed = models.IntegerField(default=45)
-    sla_adherence_rate = models.IntegerField(default=95)
-    average_review_days = models.DecimalField(max_digits=4, decimal_places=1, default=3.2)
+    role = models.CharField(max_length=255, blank=True, null=True)
+    inspections_completed = models.IntegerField(default=0)
+    sla_adherence_rate = models.IntegerField(null=True, blank=True)
+    average_review_days = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True)
     rank = models.IntegerField(default=1)
 
     class Meta:
@@ -115,9 +115,9 @@ class RiskAssessmentAlert(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='risk_alerts', null=True, blank=True)
     structure_name = models.CharField(max_length=255)
-    risk_score = models.IntegerField(default=75)
+    risk_score = models.IntegerField(null=True, blank=True)
     risk_level = models.CharField(max_length=50, choices=RISK_LEVELS, default='High')
-    primary_vulnerability = models.CharField(max_length=255, default='Foundation Settlement Anomaly')
+    primary_vulnerability = models.CharField(max_length=255, blank=True, null=True)
     status = models.CharField(max_length=50, default='Active Alert')
     created_at = models.DateTimeField(default=timezone.now)
 

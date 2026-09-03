@@ -138,7 +138,7 @@ class Finding(models.Model):
     inspection = models.ForeignKey(Inspection, on_delete=models.CASCADE, related_name='findings')
     project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, blank=True, related_name='findings')
     
-    title = models.CharField(max_length=255, default='Site Finding')
+    title = models.CharField(max_length=255)
     description = models.TextField()
     severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='LOW')
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='STRUCTURAL')
@@ -310,3 +310,77 @@ class CorrectiveAction(models.Model):
 
     def __str__(self):
         return f"Action for NCR {self.ncr.ncr_number} - {self.status}"
+
+
+# ==========================================================================
+# Inspection Execution (implementation plan §5 Week 7)
+# ==========================================================================
+
+class InspectionSubmission(models.Model):
+    """
+    The tamper-evident execution record of an inspection: dynamic checklist
+    results, mandatory GPS + timestamp, and a SHA-256 submission hash over
+    the full content. Any later alteration is detectable through
+    `verify_integrity()`.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    inspection = models.OneToOneField(Inspection, on_delete=models.CASCADE,
+                                      related_name='submission')
+    checklist_template = models.ForeignKey(
+        'settings.InspectionTemplate', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='submissions',
+    )
+    checklist_results = models.JSONField(
+        default=list, blank=True,
+        help_text="Item-by-item results [{item_id, title, result, notes, evidence_hashes}]",
+    )
+    evidence_files = models.JSONField(
+        default=list, blank=True,
+        help_text="[{file_name, sha256, url}] — every attached artifact with its checksum",
+    )
+    gps_latitude = models.FloatField(null=True, blank=True)
+    gps_longitude = models.FloatField(null=True, blank=True)
+    gps_recorded_at = models.DateTimeField(null=True, blank=True,
+                                           help_text="Device timestamp of the GPS fix")
+    submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                     null=True, blank=True, related_name='inspection_submissions')
+    submitted_at = models.DateTimeField(default=timezone.now)
+    submission_hash = models.CharField(
+        max_length=64, db_index=True,
+        help_text="SHA-256 over checklist results + evidence checksums + GPS + timestamp",
+    )
+    device_info = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-submitted_at']
+
+    def __str__(self):
+        return f"Submission for {self.inspection.inspection_reference} ({self.submitted_at:%Y-%m-%d %H:%M})"
+
+
+class InspectionSignoff(models.Model):
+    """
+    Cryptographic digital sign-off of an inspection submission by the
+    inspector: binds the submission hash, inspector identity and signing time
+    into a single SHA-256 signature that can be independently verified.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    submission = models.OneToOneField(InspectionSubmission, on_delete=models.CASCADE,
+                                      related_name='signoff')
+    signed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                  null=True, blank=True, related_name='inspection_signoffs')
+    signed_by_name = models.CharField(max_length=255, blank=True, default='')
+    signature_text = models.TextField(
+        blank=True, default='',
+        help_text="Inspector's typed declaration, e.g. 'I confirm this inspection was executed at the recorded location and time.'",
+    )
+    signed_at = models.DateTimeField(default=timezone.now)
+    signoff_hash = models.CharField(max_length=64, db_index=True)
+
+    class Meta:
+        ordering = ['-signed_at']
+
+    def __str__(self):
+        return f"Sign-off for {self.submission.inspection.inspection_reference}"

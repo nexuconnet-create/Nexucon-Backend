@@ -637,6 +637,47 @@ class AIService:
                 return []
 
     # ========================================================
+    # GENERIC STRUCTURED JSON SYNTHESIS
+    # ========================================================
+
+    @classmethod
+    def generate_structured_json(cls, prompt: str, max_tokens: int = None):
+        """
+        Generic contextual-synthesis entry point for the AI Evidence
+        Intelligence Layer (correlation narratives, executive briefings,
+        recommendations). Returns a parsed JSON object.
+
+        Raises AIServiceError / AIProviderUnavailable when no provider is
+        configured or all fail — callers MUST fall back to deterministic
+        output built from the real data and NEVER fabricate content.
+        """
+        def run_openai():
+            client = cls._get_openai_client()
+            messages = [{"role": "user", "content": prompt}]
+            content = cls._generate_with_openai_retry(client, messages, response_format="json_object")
+            return cls._parse_json_response(content)
+
+        def run_gemini():
+            model = cls._get_gemini_model_instance()
+            content = cls._generate_with_gemini_retry(
+                model, prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            return cls._parse_json_response(content)
+
+        provider = cls._get_provider()
+        primary, secondary = (run_gemini, run_openai) if provider == "gemini" else (run_openai, run_gemini)
+
+        try:
+            return primary()
+        except Exception as e:
+            logger.warning(
+                "Primary AI provider (%s) structured synthesis failed (%s). Trying secondary...",
+                provider, e,
+            )
+            return secondary()
+
+    # ========================================================
     # ENGINEERING RECOMMENDATIONS
     # ========================================================
 

@@ -37,12 +37,15 @@ def process_scan_pipeline(session_id: str):
 
     from apps.audit.services import AuditService
     AuditService.log_event(
-        event_type='processing_started',
-        entity_type='processing_task',
-        entity_id=task.id,
-        session_id=session.id,
-        new_value='in_progress',
-        description='AI analysis processing pipeline started.',
+        action='PROCESSING_STARTED',
+        resource_type='processing_task',
+        resource_id=task.id,
+        previous_state='pending',
+        new_state='in_progress',
+        metadata={
+            'session_id': str(session.id),
+            'description': 'AI analysis processing pipeline started.',
+        },
     )
 
     # Initialize channels layer for WebSocket streaming
@@ -167,26 +170,33 @@ def process_scan_pipeline(session_id: str):
             summary_json = TrimbleConnectService.generate_inspection_summary(session)
             ai_overlay_json = TrimbleConnectService.generate_ai_overlay_json(session)
             from apps.scans.utils import refresh_storage_url
-            TrimbleConnectService.upload_files_to_trimble(
+            synced = TrimbleConnectService.upload_files_to_trimble(
                 session,
                 defect_csv,
                 summary_json,
                 ai_overlay_json=ai_overlay_json,
                 thermal_orthomosaic_url=refresh_storage_url(session.thermal_url)
             )
-            broadcast_ws_status("processing", "Trimble Connect synchronization completed.")
+            if synced:
+                broadcast_ws_status("processing", "Trimble Connect synchronization completed.")
+            else:
+                broadcast_ws_status(
+                    "processing",
+                    "Trimble Connect sync skipped — OAuth credentials not configured.")
         except Exception as trimble_e:
             logger.error(f"Failed to sync data to Trimble Connect: {trimble_e}")
             broadcast_ws_status("processing", f"Trimble Connect sync warning: {trimble_e}")
 
         AuditService.log_event(
-            event_type='processing_completed',
-            entity_type='scan_session',
-            entity_id=session.id,
-            session_id=session.id,
-            old_value='processing',
-            new_value='completed',
-            description='Full processing pipeline completed successfully.',
+            action='PROCESSING_COMPLETED',
+            resource_type='scan_session',
+            resource_id=session.id,
+            previous_state='processing',
+            new_state='completed',
+            metadata={
+                'session_id': str(session.id),
+                'description': 'Full processing pipeline completed successfully.',
+            },
         )
 
         # Dispatch webhooks
@@ -212,13 +222,16 @@ def process_scan_pipeline(session_id: str):
         task.result_data = {"error": str(e)}
         task.save()
         AuditService.log_event(
-            event_type='processing_failed',
-            entity_type='scan_session',
-            entity_id=session.id,
-            session_id=session.id,
-            old_value='processing',
-            new_value='failed',
-            description=f'Processing pipeline failed: {e}',
+            action='PROCESSING_FAILED',
+            resource_type='scan_session',
+            resource_id=session.id,
+            previous_state='processing',
+            new_state='failed',
+            severity='High',
+            metadata={
+                'session_id': str(session.id),
+                'description': f'Processing pipeline failed: {e}',
+            },
         )
 
         # Dispatch webhooks

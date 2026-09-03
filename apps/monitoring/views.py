@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from django.db.models import Q
 from django.utils import timezone
 import datetime
@@ -16,14 +16,39 @@ from .serializers import (
     ConstructionMilestoneSerializer, SiteVerificationSerializer
 )
 from .services import MonitoringService
+from common.permissions import scoped_projects
+
+
+def _resolve_scoped_project(request):
+    """
+    Resolve the project a monitoring write targets and enforce tenant scoping:
+    the project must be inside the requesting user's scoped_projects().
+
+    Raises ValidationError when the project cannot be resolved; returns None
+    when the project exists but is outside the caller's scope (callers answer
+    404 so out-of-scope resources are never revealed).
+    """
+    project = MonitoringService.get_project_instance(
+        request.data.get('project_id') or request.data.get('project'))
+    if not scoped_projects(request.user).filter(pk=project.pk).exists():
+        return None
+    return project
+
+
+def _out_of_scope_response():
+    return Response(
+        {'success': False, 'error': 'Project not found.'},
+        status=status.HTTP_404_NOT_FOUND)
+
 
 class DailySiteUpdateViewSet(viewsets.ModelViewSet):
     queryset = DailySiteUpdate.objects.all().select_related('project', 'reported_by', 'inspector')
     serializer_class = DailySiteUpdateSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(
+            project__in=scoped_projects(self.request.user))
         project_param = self.request.query_params.get('project')
         type_param = self.request.query_params.get('type')
         status_param = self.request.query_params.get('status')
@@ -67,6 +92,8 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         update = self.perform_create(None)
         return Response({
             'success': True,
@@ -74,14 +101,57 @@ class DailySiteUpdateViewSet(viewsets.ModelViewSet):
             'data': DailySiteUpdateSerializer(update).data
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get', 'post'], url_path='telemetry')
+    def telemetry(self, request, pk=None):
+        update = self.get_object()
+        if request.method == 'POST':
+            updated = MonitoringService.update_daily_update_telemetry(
+                update=update,
+                telemetry_data=request.data,
+                user=request.user
+            )
+            return Response({
+                'success': True,
+                'message': 'Live telemetry & Google Maps coordinates synchronized successfully',
+                'data': MonitoringService.get_daily_update_telemetry(updated.id)
+            })
+        else:
+            telemetry_info = MonitoringService.get_daily_update_telemetry(update.id)
+            return Response({
+                'success': True,
+                'data': telemetry_info
+            })
+
+    @action(detail=False, methods=['post'], url_path='calculate-location')
+    def calculate_location(self, request):
+        lat = request.data.get('latitude') or request.data.get('lat')
+        lng = request.data.get('longitude') or request.data.get('lng')
+        project_id = request.data.get('project_id') or request.data.get('project')
+
+        if lat is None or lng is None:
+            return Response(
+                {'success': False, 'error': 'latitude and longitude are required.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        # Device telemetry (accuracy, satellites, RTK status, laser distance…)
+        # rides along in the payload; anything absent is reported as null.
+        telemetry = MonitoringService.calculate_location_telemetry(
+            lat, lng, project_id, telemetry_source=request.data)
+        return Response({
+            'success': True,
+            'data': telemetry
+        })
+
+
 
 class MissedSiteVisitViewSet(viewsets.ModelViewSet):
     queryset = MissedSiteVisitRecord.objects.all().select_related('project', 'inspector', 'supervisor_acknowledged_by')
     serializer_class = MissedSiteVisitRecordSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(
+            project__in=scoped_projects(self.request.user))
         project_param = self.request.query_params.get('project')
         reason_param = self.request.query_params.get('reason')
         status_param = self.request.query_params.get('status')
@@ -111,6 +181,8 @@ class MissedSiteVisitViewSet(viewsets.ModelViewSet):
         return queryset
 
     def create(self, request, *args, **kwargs):
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         record = MonitoringService.log_missed_site_visit(
             data=request.data,
             user=request.user
@@ -123,61 +195,31 @@ class MissedSiteVisitViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='acknowledge')
     def acknowledge(self, request, pk=None):
-        record = MonitoringService.acknowledge_missed_site_visit(
-            visit_id=pk,
+        # get_object() resolves through the scoped queryset, so a record on
+        # another tenant's project is a 404 rather than a writable resource.
+        record = self.get_object()
+        acknowledged = MonitoringService.acknowledge_missed_site_visit(
+            visit_id=record.id,
             data=request.data,
             user=request.user
         )
-        if not record:
+        if not acknowledged:
             return Response({'error': 'Record not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response({
             'success': True,
             'message': 'Missed site visit justification reviewed and acknowledged by Directorate Supervisor',
-            'data': MissedSiteVisitRecordSerializer(record).data
+            'data': MissedSiteVisitRecordSerializer(acknowledged).data
         })
-
-    @action(detail=True, methods=['get', 'post'], url_path='telemetry')
-    def telemetry(self, request, pk=None):
-        update = self.get_object()
-        if request.method == 'POST':
-            updated = MonitoringService.update_daily_update_telemetry(
-                update=update,
-                telemetry_data=request.data,
-                user=request.user
-            )
-            return Response({
-                'success': True,
-                'message': 'Live telemetry & Google Maps coordinates synchronized successfully',
-                'data': MonitoringService.get_daily_update_telemetry(updated.id)
-            })
-        else:
-            telemetry_info = MonitoringService.get_daily_update_telemetry(update.id)
-            return Response({
-                'success': True,
-                'data': telemetry_info
-            })
-
-    @action(detail=False, methods=['post'], url_path='calculate-location')
-    def calculate_location(self, request):
-        lat = request.data.get('latitude') or request.data.get('lat')
-        lng = request.data.get('longitude') or request.data.get('lng')
-        project_id = request.data.get('project_id') or request.data.get('project')
-        
-        telemetry = MonitoringService.calculate_location_telemetry(lat, lng, project_id)
-        return Response({
-            'success': True,
-            'data': telemetry
-        })
-
 
 
 class FieldObservationViewSet(viewsets.ModelViewSet):
     queryset = FieldObservation.objects.all().select_related('project', 'assigned_officer')
     serializer_class = FieldObservationSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(
+            project__in=scoped_projects(self.request.user))
         project_param = self.request.query_params.get('project')
         category_param = self.request.query_params.get('category')
         severity_param = self.request.query_params.get('severity')
@@ -213,6 +255,8 @@ class FieldObservationViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         obs = self.perform_create(None)
         return Response({
             'success': True,
@@ -239,10 +283,11 @@ class FieldObservationViewSet(viewsets.ModelViewSet):
 class SiteIssueViewSet(viewsets.ModelViewSet):
     queryset = SiteIssue.objects.all().select_related('project')
     serializer_class = SiteIssueSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(
+            project__in=scoped_projects(self.request.user))
         project_param = self.request.query_params.get('project')
         severity_param = self.request.query_params.get('severity')
         status_param = self.request.query_params.get('status')
@@ -274,6 +319,8 @@ class SiteIssueViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         issue = self.perform_create(None)
         return Response({
             'success': True,
@@ -307,10 +354,11 @@ class SiteIssueViewSet(viewsets.ModelViewSet):
 class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
     queryset = ConstructionMilestone.objects.all().select_related('project')
     serializer_class = ConstructionMilestoneSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(
+            project__in=scoped_projects(self.request.user))
         project_param = self.request.query_params.get('project')
         phase_param = self.request.query_params.get('phase')
         status_param = self.request.query_params.get('status')
@@ -352,6 +400,8 @@ class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         milestone = self.perform_create(None)
         return Response({
             'success': True,
@@ -438,10 +488,11 @@ class ConstructionMilestoneViewSet(viewsets.ModelViewSet):
 class SiteVerificationViewSet(viewsets.ModelViewSet):
     queryset = SiteVerification.objects.all().select_related('project')
     serializer_class = SiteVerificationSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(
+            project__in=scoped_projects(self.request.user))
         project_param = self.request.query_params.get('project')
         method_param = self.request.query_params.get('method')
         status_param = self.request.query_params.get('status')
@@ -484,6 +535,8 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         vrf = self.perform_create(None)
         return Response({
             'success': True,
@@ -551,7 +604,7 @@ class SiteVerificationViewSet(viewsets.ModelViewSet):
 from apps.projects.models import Project
 
 class MonitoringStatsViewSet(viewsets.ViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def list(self, request):
         return self.overview(request)
@@ -562,48 +615,52 @@ class MonitoringStatsViewSet(viewsets.ViewSet):
         today = timezone.now().date()
         week_ahead = today + datetime.timedelta(days=7)
 
-        # Tab 1: Live Site View
-        active_sites_count = Project.objects.filter(status__in=['ACTIVE', 'IN_PROGRESS', 'UNDER_CONSTRUCTION']).count()
-        if active_sites_count == 0:
-            active_sites_count = Project.objects.exclude(status__in=['SUSPENDED', 'CANCELLED', 'ARCHIVED']).count()
+        # Tenant scoping: every aggregate is computed over the requesting
+        # user's scoped projects only.
+        allowed = scoped_projects(request.user)
 
-        daily_updates = list(DailySiteUpdate.objects.all())
+        # Tab 1: Live Site View
+        active_sites_count = allowed.filter(status__in=['ACTIVE', 'IN_PROGRESS', 'UNDER_CONSTRUCTION']).count()
+        if active_sites_count == 0:
+            active_sites_count = allowed.exclude(status__in=['SUSPENDED', 'CANCELLED', 'ARCHIVED']).count()
+
+        daily_updates = list(DailySiteUpdate.objects.filter(project__in=allowed))
         daily_photos_count = sum(len(u.photos or []) for u in daily_updates if u.update_type == 'DAILY_PHOTO')
         if daily_photos_count == 0:
-            daily_photos_count = DailySiteUpdate.objects.filter(update_type='DAILY_PHOTO').count()
-        
-        drone_surveys_count = DailySiteUpdate.objects.filter(update_type='DRONE_SURVEY').count()
-        active_observations_count = FieldObservation.objects.filter(status__in=['OPEN', 'UNDER_REVIEW', 'ACTION_REQUIRED']).count()
+            daily_photos_count = DailySiteUpdate.objects.filter(project__in=allowed, update_type='DAILY_PHOTO').count()
+
+        drone_surveys_count = DailySiteUpdate.objects.filter(project__in=allowed, update_type='DRONE_SURVEY').count()
+        active_observations_count = FieldObservation.objects.filter(project__in=allowed, status__in=['OPEN', 'UNDER_REVIEW', 'ACTION_REQUIRED']).count()
 
         # Tab 2: Site Progress
-        delayed_milestones = ConstructionMilestone.objects.filter(Q(status='DELAYED') | Q(is_delayed=True)).count()
+        delayed_milestones = ConstructionMilestone.objects.filter(project__in=allowed).filter(Q(status='DELAYED') | Q(is_delayed=True)).count()
         on_schedule_sites = max(0, active_sites_count - delayed_milestones) if active_sites_count > 0 else 0
-        verified_milestones = ConstructionMilestone.objects.filter(status='VERIFIED').count()
-        progress_reports_count = DailySiteUpdate.objects.count()
+        verified_milestones = ConstructionMilestone.objects.filter(project__in=allowed, status='VERIFIED').count()
+        progress_reports_count = DailySiteUpdate.objects.filter(project__in=allowed).count()
 
         # Tab 3: Field Observations
-        quality_obs_count = FieldObservation.objects.filter(category='QUALITY').count()
-        safety_obs_count = FieldObservation.objects.filter(category='SAFETY').count()
-        resolved_obs_count = FieldObservation.objects.filter(status__in=['RESOLVED', 'CLOSED']).count()
+        quality_obs_count = FieldObservation.objects.filter(project__in=allowed, category='QUALITY').count()
+        safety_obs_count = FieldObservation.objects.filter(project__in=allowed, category='SAFETY').count()
+        resolved_obs_count = FieldObservation.objects.filter(project__in=allowed, status__in=['RESOLVED', 'CLOSED']).count()
 
         # Tab 4: Site Issues
-        open_issues_count = SiteIssue.objects.filter(status__in=['OPEN', 'IN_PROGRESS', 'UNDER_REVIEW']).count()
-        critical_issues_count = SiteIssue.objects.filter(severity='CRITICAL').count()
-        under_review_issues_count = SiteIssue.objects.filter(status='UNDER_REVIEW').count()
-        resolved_issues_count = SiteIssue.objects.filter(status__in=['RESOLVED', 'CLOSED']).count()
+        open_issues_count = SiteIssue.objects.filter(project__in=allowed, status__in=['OPEN', 'IN_PROGRESS', 'UNDER_REVIEW']).count()
+        critical_issues_count = SiteIssue.objects.filter(project__in=allowed, severity='CRITICAL').count()
+        under_review_issues_count = SiteIssue.objects.filter(project__in=allowed, status='UNDER_REVIEW').count()
+        resolved_issues_count = SiteIssue.objects.filter(project__in=allowed, status__in=['RESOLVED', 'CLOSED']).count()
 
         # Tab 5: Construction Milestones
-        total_milestones = ConstructionMilestone.objects.count()
-        milestones_due_this_week = ConstructionMilestone.objects.filter(target_date__gte=today, target_date__lte=week_ahead).count()
-        milestones_upcoming = ConstructionMilestone.objects.filter(status__in=['UPCOMING', 'PLANNED', 'IN_PROGRESS']).count()
-        milestones_pending_verification = ConstructionMilestone.objects.filter(status='PENDING_VERIFICATION').count()
-        milestones_blocked = ConstructionMilestone.objects.filter(status='BLOCKED').count()
+        total_milestones = ConstructionMilestone.objects.filter(project__in=allowed).count()
+        milestones_due_this_week = ConstructionMilestone.objects.filter(project__in=allowed, target_date__gte=today, target_date__lte=week_ahead).count()
+        milestones_upcoming = ConstructionMilestone.objects.filter(project__in=allowed, status__in=['UPCOMING', 'PLANNED', 'IN_PROGRESS']).count()
+        milestones_pending_verification = ConstructionMilestone.objects.filter(project__in=allowed, status='PENDING_VERIFICATION').count()
+        milestones_blocked = ConstructionMilestone.objects.filter(project__in=allowed, status='BLOCKED').count()
 
         # Tab 6: Site Verification
-        pending_verifications = SiteVerification.objects.filter(status='PENDING_VERIFICATION').count()
-        verified_verifications = SiteVerification.objects.filter(status='VERIFIED').count()
-        variance_detected = SiteVerification.objects.filter(Q(status='VARIANCE_DETECTED') | Q(variance_detected=True)).count()
-        active_devices = SiteVerification.objects.values('device_identifier').distinct().count()
+        pending_verifications = SiteVerification.objects.filter(project__in=allowed, status='PENDING_VERIFICATION').count()
+        verified_verifications = SiteVerification.objects.filter(project__in=allowed, status='VERIFIED').count()
+        variance_detected = SiteVerification.objects.filter(project__in=allowed).filter(Q(status='VARIANCE_DETECTED') | Q(variance_detected=True)).count()
+        active_devices = SiteVerification.objects.filter(project__in=allowed).values('device_identifier').distinct().count()
 
         return Response({
             'success': True,
@@ -656,12 +713,26 @@ class SiteProgressViewSet(viewsets.ViewSet):
     Endpoints for physical construction progress, programme breakdowns, 
     and schedule tracking across active projects.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+
+    def _resolve_scoped_project_or_none(self, project_id):
+        """Resolve a project id/ref/name but only within the caller's scope."""
+        project = MonitoringService.get_project_instance(project_id)
+        if not scoped_projects(self.request.user).filter(pk=project.pk).exists():
+            return None
+        return project
 
     def list(self, request):
         """Get physical construction progress details across all active projects."""
         project_param = request.query_params.get('project')
-        data = MonitoringService.get_project_progress_details(project_param)
+        if project_param and project_param.upper() != 'ALL':
+            project = self._resolve_scoped_project_or_none(project_param)
+            if project is None:
+                return _out_of_scope_response()
+            data = MonitoringService.get_project_progress_details(project.id)
+        else:
+            data = MonitoringService.get_project_progress_details(
+                projects=scoped_projects(request.user))
         return Response({
             'success': True,
             'data': data
@@ -669,7 +740,10 @@ class SiteProgressViewSet(viewsets.ViewSet):
 
     def retrieve(self, request, pk=None):
         """Get deep progress details for a specific project."""
-        data = MonitoringService.get_project_progress_details(pk)
+        project = self._resolve_scoped_project_or_none(pk)
+        if project is None:
+            return _out_of_scope_response()
+        data = MonitoringService.get_project_progress_details(project.id)
         return Response({
             'success': True,
             'data': data
@@ -678,6 +752,8 @@ class SiteProgressViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='update')
     def update_progress(self, request):
         """Update progress percentage and create a progress log in database."""
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         data = MonitoringService.update_project_progress(request.data, request.user)
         return Response({
             'success': True,
@@ -688,6 +764,8 @@ class SiteProgressViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='flag-delay')
     def flag_delay(self, request):
         """Flag construction delay and record a non-conformance notice."""
+        if _resolve_scoped_project(request) is None:
+            return _out_of_scope_response()
         issue = MonitoringService.flag_project_schedule_delay(request.data, request.user)
         return Response({
             'success': True,

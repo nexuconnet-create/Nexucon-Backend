@@ -16,6 +16,13 @@ class StartSessionSerializer(serializers.ModelSerializer):
         model = ScanSession
         fields = ["project_id", "scanner_id", "timestamp", "sensors_used", "expected_size_mb"]
 
+    def validate_project_id(self, value):
+        """Reject unknown projects with a 400 instead of an IntegrityError/500."""
+        from apps.projects.models import Project
+        if value is not None and not Project.objects.filter(id=value).exists():
+            raise serializers.ValidationError("Project not found.")
+        return value
+
 class LocationSerializer(serializers.Serializer):
     latitude = serializers.FloatField(required=False, allow_null=True)
     longitude = serializers.FloatField(required=False, allow_null=True)

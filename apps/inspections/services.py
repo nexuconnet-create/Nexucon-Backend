@@ -2,6 +2,7 @@ import datetime
 import logging
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError as APIValidationError
 from django.db.models import Q
 from .models import Inspection, Finding, StopWorkOrder, Checklist
 from apps.projects.models import Project
@@ -92,11 +93,13 @@ class InspectionService:
         previous_inspector = inspection.inspector_name
         if inspector_user and hasattr(inspector_user, 'get_full_name'):
             inspection.inspector = inspector_user if getattr(inspector_user, 'is_authenticated', False) else None
-            inspection.inspector_name = inspector_user.get_full_name() or getattr(inspector_user, 'email', 'Assigned Inspector')
+            inspection.inspector_name = inspector_user.get_full_name() or getattr(inspector_user, 'email', None)
         elif inspector_name:
             inspection.inspector_name = inspector_name
         else:
-            inspection.inspector_name = 'Engr. Babatunde Adeleke'
+            raise APIValidationError(
+                "A real inspector (inspector_user or inspector_name) is required — "
+                "an inspection cannot be assigned to a fabricated officer.")
 
         if scheduled_date:
             inspection.scheduled_date = scheduled_date

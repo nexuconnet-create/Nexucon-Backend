@@ -1,5 +1,6 @@
 import uuid
 import hashlib
+import datetime
 from django.utils import timezone
 from django.db.models import Q
 from .models import AuditEvent
@@ -14,7 +15,7 @@ class AuditService:
         user_name=None, 
         user_role=None,
         user_email=None,
-        project_name="Central Metro Transit Hub", 
+        project_name=None,
         previous_state=None, 
         new_state=None,
         ip_address=None, 
@@ -30,7 +31,7 @@ class AuditService:
         if not name and user and getattr(user, 'is_authenticated', False):
             name = user.get_full_name() or user.username
         if not name:
-            name = "System Officer"
+            name = "System"
 
         role = user_role
         if not role and user and getattr(user, 'is_authenticated', False):
@@ -38,7 +39,7 @@ class AuditService:
             if hasattr(user, 'government_profile') and user.government_profile and user.government_profile.role:
                 role = user.government_profile.role.name
         if not role:
-            role = "Safety & Regulatory Lead"
+            role = "System"
 
         email = user_email or (getattr(user, 'email', None) if user and getattr(user, 'is_authenticated', False) else None)
 
@@ -75,32 +76,60 @@ class AuditService:
         events = AuditEvent.objects.all().order_by('timestamp')
         total_count = events.count()
         verified_count = events.filter(is_verified=True).count()
+        tampered_count = max(total_count - verified_count, 0)
+
+        # Real aggregate digest computed over the stored per-event signature
+        # hashes — nothing here is invented.
+        digest = hashlib.sha256()
+        for event in events:
+            digest.update(str(event.signature_hash).encode('utf-8'))
+
+        if total_count == 0:
+            status_value, integrity = "EMPTY", "No audit events recorded."
+        elif tampered_count == 0:
+            status_value, integrity = "VALID", f"{round(verified_count / total_count * 100, 1)}% VERIFIED"
+        else:
+            status_value, integrity = "TAMPER_DETECTED", f"{round(verified_count / total_count * 100, 1)}% VERIFIED"
 
         return {
-            "status": "VALID",
-            "chain_integrity": "100.0% VERIFIED",
+            "status": status_value,
+            "chain_integrity": integrity,
             "total_blocks_checked": total_count,
-            "tampered_blocks_detected": 0,
-            "root_hash": "0x8f4e2c9b1a7d3e5f",
-            "latest_block_hash": events.last().signature_hash if events.exists() else "0x3a9c1d5e7f124a9b",
+            "tampered_blocks_detected": tampered_count,
+            "root_hash": f"0x{digest.hexdigest()[:16]}",
+            "latest_block_hash": events.last().signature_hash if events.exists() else None,
             "verified_at": timezone.now().isoformat()
         }
 
     @staticmethod
     def get_audit_summary():
-        """Retrieve aggregated audit metrics and security counters."""
+        """Retrieve aggregated audit metrics computed from real audit records only."""
         total_records = AuditEvent.objects.count()
         today_events = AuditEvent.objects.filter(timestamp__date=timezone.now().date()).count()
         critical_alerts = AuditEvent.objects.filter(severity__in=['Critical', 'High']).count()
+        unverified = AuditEvent.objects.filter(is_verified=False).count()
 
+        if total_records == 0:
+            chain_status = "No audit events recorded."
+        elif unverified == 0:
+            chain_status = "Verified & Tamper-Proof"
+        else:
+            chain_status = f"{unverified} unverified event(s) — integrity review required."
+
+        # Session / 2FA / failed-login telemetry need a real data source
+        # (session store, 2FA enrolment records, login-failure audit events).
+        # Until they are tracked they are reported as None, never invented.
         return {
-            "total_records": max(total_records, 48),
-            "today_events": max(today_events, 14),
-            "critical_alerts": max(critical_alerts, 4),
-            "chain_status": "Verified & Tamper-Proof",
-            "active_sessions": 38,
-            "two_factor_coverage": "100%",
-            "failed_logins_24h": 0
+            "total_records": total_records,
+            "today_events": today_events,
+            "critical_alerts": critical_alerts,
+            "chain_status": chain_status,
+            "active_sessions": None,
+            "two_factor_coverage": None,
+            "failed_logins_24h": AuditEvent.objects.filter(
+                action__icontains='LOGIN', severity='Critical',
+                timestamp__gte=timezone.now() - datetime.timedelta(days=1),
+            ).count() if AuditEvent.objects.filter(action__icontains='LOGIN').exists() else None
         }
 
     @staticmethod
@@ -166,121 +195,3 @@ class AuditService:
         )
 
         return csv_data
-
-    @staticmethod
-    def seed_initial_audit_records():
-        if AuditEvent.objects.count() >= 10:
-            return
-
-        seed_data = [
-            {
-                "audit_reference": "AUD-991A",
-                "user_name": "Engr. Folake Balogun",
-                "user_role": "Director of Technical Review",
-                "action": "APPROVAL_DECISION_APPROVED",
-                "resource_type": "ApprovalRequest",
-                "resource_id": "APR-2026-0042",
-                "project_name": "Eko Atlantic Marina Tower",
-                "severity": "Normal",
-                "previous_state": {"status": "PENDING_DIRECTOR_REVIEW", "delegation_level": "L3"},
-                "new_state": {"status": "APPROVED", "delegation_level": "L3", "signoff_hash": "0x4a9b1c"},
-                "signature_hash": "0x7f2e1a9c4d5b"
-            },
-            {
-                "audit_reference": "AUD-991B",
-                "user_name": "Inspector Babatunde Adeleke",
-                "user_role": "Senior Field Inspector",
-                "action": "INSPECTION_COMPLETED_PASS",
-                "resource_type": "Inspection",
-                "resource_id": "INS-2026-0814",
-                "project_name": "Lekki Port Logistics Hub",
-                "severity": "Normal",
-                "previous_state": {"status": "IN_PROGRESS", "pass_rate": None},
-                "new_state": {"status": "COMPLETED", "result": "PASS", "items_passed": 18, "items_failed": 0},
-                "signature_hash": "0x3a8f1b2c9d4e"
-            },
-            {
-                "audit_reference": "AUD-991C",
-                "user_name": "Arch. Olumide Johnson",
-                "user_role": "Government Reviewer",
-                "action": "DOCUMENT_VERSION_STAMPED",
-                "resource_type": "Document",
-                "resource_id": "DOC-STR-009",
-                "project_name": "Victoria Island Commercial Complex",
-                "severity": "Normal",
-                "previous_state": {"version": "v1.2", "stamped": False},
-                "new_state": {"version": "v1.3", "stamped": True, "stamp_id": "LASBCA-REV-981"},
-                "signature_hash": "0x9c2d4e7f1a3b"
-            },
-            {
-                "audit_reference": "AUD-991D",
-                "user_name": "System Security Controller",
-                "user_role": "Platform Administrator",
-                "action": "USER_ROLE_UPDATED",
-                "resource_type": "User",
-                "resource_id": "USR-8821",
-                "project_name": "Government Security Administration",
-                "severity": "High",
-                "previous_state": {"role": "Inspector", "permissions": ["inspections.view"]},
-                "new_state": {"role": "Lead Inspector", "permissions": ["inspections.view", "inspections.approve_stage"]},
-                "signature_hash": "0x1d4e7f9a2c3b"
-            },
-            {
-                "audit_reference": "AUD-991E",
-                "user_name": "Engr. Chidi Nnamdi",
-                "user_role": "HSE Compliance Lead",
-                "action": "NCR_FLAGGED_CRITICAL",
-                "resource_type": "NonConformanceReport",
-                "resource_id": "NCR-2026-013F",
-                "project_name": "Marina Coastal Bridge",
-                "severity": "Critical",
-                "previous_state": {"compliance_status": "COMPLIANT"},
-                "new_state": {"compliance_status": "NON_COMPLIANT", "ncr_code": "NCR-13F", "severity": "Critical"},
-                "signature_hash": "0x5e8f2a1b9c3d"
-            },
-            {
-                "audit_reference": "AUD-991F",
-                "user_name": "GPR Geotechnical Analyst",
-                "user_role": "Subsurface Specialist",
-                "action": "GPR_ANOMALY_RECORDED",
-                "resource_type": "GPRSurvey",
-                "resource_id": "GPR-SURV-044",
-                "project_name": "Badagry Expressway Expansion",
-                "severity": "Warning",
-                "previous_state": {"scan_status": "RAW_UPLOAD"},
-                "new_state": {"scan_status": "PROCESSED", "anomalies_detected": 2, "max_depth_m": 4.8},
-                "signature_hash": "0x8a1b3c4d7e9f"
-            },
-            {
-                "audit_reference": "AUD-991G",
-                "user_name": "BIM Coordination Officer",
-                "user_role": "BIM Manager",
-                "action": "BIM_CLASH_MATRIX_RESOLVED",
-                "resource_type": "BIMModel",
-                "resource_id": "BIM-MOD-012",
-                "project_name": "Eko Atlantic Marina Tower",
-                "severity": "Normal",
-                "previous_state": {"open_clashes": 14, "coordination_status": "PENDING"},
-                "new_state": {"open_clashes": 0, "coordination_status": "COORDINATED"},
-                "signature_hash": "0x2c4e6a8f1b3d"
-            },
-            {
-                "audit_reference": "AUD-991H",
-                "user_name": "Director General / Agency Head",
-                "user_role": "Agency Head",
-                "action": "PERMIT_FINAL_DECISION_GRANTED",
-                "resource_type": "PermitDecision",
-                "resource_id": "DEC-2026-0031",
-                "project_name": "Marina Coastal Bridge",
-                "severity": "High",
-                "previous_state": {"decision": "PENDING_FINAL_SIGNATURE"},
-                "new_state": {"decision": "GRANTED", "permit_number": "PERM-2026-9812", "statutory_fees_paid": True},
-                "signature_hash": "0x6f8a1c3e5b7d"
-            }
-        ]
-
-        for s in seed_data:
-            try:
-                AuditEvent.objects.get_or_create(audit_reference=s["audit_reference"], defaults=s)
-            except Exception:
-                pass

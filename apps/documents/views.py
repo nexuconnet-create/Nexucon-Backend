@@ -1,6 +1,9 @@
 from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, NotAuthenticated
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import Http404
 from django.db.models import Q
 from django.utils import timezone
 import datetime
@@ -15,6 +18,8 @@ from .serializers import (
     DocumentTemplateSerializer, DocumentFolderSerializer
 )
 from .services import DocumentService
+from apps.projects.models import Project
+from common.permissions import scoped_projects
 
 
 def is_valid_uuid(val):
@@ -33,18 +38,33 @@ class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all().select_related('project', 'linked_bim_model', 'linked_inspection', 'linked_compliance_case')
     serializer_class = DocumentSerializer
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
         try:
             file_obj = request.FILES.get('file')
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-            
+
             project_val = data.get('project_id') or data.get('project')
             if isinstance(project_val, list) and project_val:
                 project_val = project_val[0]
             data['project'] = project_val
             data['project_id'] = project_val
+
+            # Multi-tenant scoping: a document must be registered against a
+            # real project within the uploader's own scope — never silently
+            # attached to an arbitrary project.
+            if not project_val or str(project_val).lower() in ('undefined', 'null', 'none', ''):
+                return Response({"error": "A valid project is required to register a document."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            try:
+                project = Project.objects.get(pk=project_val)
+            except (Project.DoesNotExist, DjangoValidationError, ValueError, TypeError):
+                return Response({"error": "A valid project is required to register a document."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not request.user.is_superuser and project not in scoped_projects(request.user):
+                return Response({"error": "Target project is outside your assigned scope."},
+                                status=status.HTTP_403_FORBIDDEN)
 
             doc = DocumentService.upload_document(data, request.user, file_obj=file_obj)
             serializer = self.get_serializer(doc)
@@ -56,6 +76,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Multi-tenant scoping (plan §8) — a user only reaches documents on
+        # projects within their scope. Without this every authenticated user
+        # could read and download every tenant's documents.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            qs = qs.filter(project__in=scoped_projects(self.request.user))
         project_id = self.request.query_params.get('project')
         folder = self.request.query_params.get('folder')
         discipline = self.request.query_params.get('discipline')
@@ -129,6 +154,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
             file_obj = request.FILES.get('file')
             version = DocumentService.create_version(document, request.data, request.user, file_obj=file_obj)
             return Response(VersionSerializer(version).data, status=status.HTTP_201_CREATED)
+        except (Http404, PermissionDenied, NotAuthenticated):
+            # Out-of-scope documents must surface as 404, not be converted
+            # into a misleading 400 by the catch-all below.
+            raise
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -187,10 +216,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
 class VersionViewSet(viewsets.ModelViewSet):
     queryset = Version.objects.all().select_related('document')
     serializer_class = VersionSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Multi-tenant scoping — versions inherit their document's project scope.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            qs = qs.filter(document__project__in=scoped_projects(self.request.user))
         document_id = self.request.query_params.get('document')
         if is_valid_uuid(document_id):
             qs = qs.filter(document_id=document_id)
@@ -202,7 +234,13 @@ class VersionViewSet(viewsets.ModelViewSet):
         v_b = request.data.get('version_b')
         if not v_a or not v_b:
             return Response({"error": "version_a and version_b are required."}, status=status.HTTP_400_BAD_REQUEST)
-        diff = DocumentService.compare_versions(v_a, v_b)
+        try:
+            diff = DocumentService.compare_versions(v_a, v_b)
+        except Version.DoesNotExist:
+            return Response({"error": "One or both versions were not found."}, status=status.HTTP_404_NOT_FOUND)
+        except (DjangoValidationError, ValueError, TypeError):
+            # A non-UUID id makes the pk lookup raise ValidationError.
+            return Response({"error": "version_a and version_b must be valid version ids."}, status=status.HTTP_400_BAD_REQUEST)
         return Response(diff, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'], url_path='download')
@@ -219,10 +257,13 @@ class VersionViewSet(viewsets.ModelViewSet):
 class ApprovalViewSet(viewsets.ModelViewSet):
     queryset = Approval.objects.all().select_related('document', 'version')
     serializer_class = ApprovalSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Multi-tenant scoping — approvals inherit their document's project scope.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            qs = qs.filter(document__project__in=scoped_projects(self.request.user))
         status_val = self.request.query_params.get('status')
         project_id = self.request.query_params.get('project')
         if status_val and str(status_val).lower() not in ('undefined', 'null', 'none', '', 'all'):
@@ -248,10 +289,13 @@ class ApprovalViewSet(viewsets.ModelViewSet):
 class DocumentReviewViewSet(viewsets.ModelViewSet):
     queryset = DocumentReview.objects.all().select_related('document', 'version', 'reviewer')
     serializer_class = DocumentReviewSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Multi-tenant scoping — reviews inherit their document's project scope.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            qs = qs.filter(document__project__in=scoped_projects(self.request.user))
         doc_id = self.request.query_params.get('document')
         if is_valid_uuid(doc_id):
             qs = qs.filter(document_id=doc_id)
@@ -261,10 +305,13 @@ class DocumentReviewViewSet(viewsets.ModelViewSet):
 class DocumentFolderViewSet(viewsets.ModelViewSet):
     queryset = DocumentFolder.objects.all().select_related('project')
     serializer_class = DocumentFolderSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Multi-tenant scoping — folders follow the same project scope.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            qs = qs.filter(project__in=scoped_projects(self.request.user))
         project_id = self.request.query_params.get('project')
         if is_valid_uuid(project_id):
             qs = qs.filter(project_id=project_id)
@@ -274,7 +321,7 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
 class DocumentTemplateViewSet(viewsets.ModelViewSet):
     queryset = DocumentTemplate.objects.all()
     serializer_class = DocumentTemplateSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -289,7 +336,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
 
 
 class DocumentStatsViewSet(viewsets.ViewSet):
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def list(self, request):
         return self._compute_stats(request)
@@ -305,6 +352,11 @@ class DocumentStatsViewSet(viewsets.ViewSet):
         if is_valid_uuid(project_id):
             qs = qs.filter(project_id=project_id)
             folder_qs = folder_qs.filter(project_id=project_id)
+        # Multi-tenant scoping — stats disclose only the user's scoped projects.
+        if request.user.is_authenticated and not request.user.is_superuser:
+            scope = scoped_projects(request.user)
+            qs = qs.filter(project__in=scope)
+            folder_qs = folder_qs.filter(project__in=scope)
 
         total_docs = qs.count()
         drawings_count = qs.filter(document_type__in=['DRAWING', 'SUBMITTED_DRAWING']).count()

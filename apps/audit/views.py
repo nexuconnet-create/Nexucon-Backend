@@ -16,7 +16,6 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        AuditService.seed_initial_audit_records()
         qs = super().get_queryset()
         
         resource_type = self.request.query_params.get('resource_type')
@@ -84,17 +83,17 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         diff_data = AuditService.compute_diff(event)
         return Response(diff_data, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get', 'post'], url_path='verify-chain', permission_classes=[permissions.AllowAny])
+    @action(detail=False, methods=['get', 'post'], url_path='verify-chain', permission_classes=[permissions.IsAuthenticated])
     def verify_chain(self, request):
         res = AuditService.verify_hash_chain()
         return Response(res, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get'], url_path='summary', permission_classes=[permissions.AllowAny])
+    @action(detail=False, methods=['get'], url_path='summary', permission_classes=[permissions.IsAuthenticated])
     def summary(self, request):
         summary_data = AuditService.get_audit_summary()
         return Response(summary_data, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get', 'post'], url_path='export', permission_classes=[permissions.AllowAny])
+    @action(detail=False, methods=['get', 'post'], url_path='export', permission_classes=[permissions.IsAuthenticated])
     def export_ledger(self, request):
         filters = {
             'resource_type': request.data.get('resource_type') if request.method == 'POST' else request.query_params.get('resource_type'),

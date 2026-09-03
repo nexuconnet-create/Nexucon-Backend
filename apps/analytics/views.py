@@ -135,7 +135,7 @@ class GeneratedReportViewSet(viewsets.ModelViewSet):
             "report_reference": report.report_reference,
             "title": report.title,
             "format": report.format,
-            "download_url": report.file_url or f"https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/reports/{report.report_reference}.pdf"
+            "download_url": report.file_url
         }, status=status.HTTP_200_OK)
 
 

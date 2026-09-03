@@ -33,12 +33,15 @@ class ResendEmailProvider(BaseEmailProvider):
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         if not self.api_key:
-            logger.warning("Resend API key is missing. Simulating sandbox email delivery.")
+            logger.warning(
+                "Resend API key is missing — email NOT sent. "
+                "Configure RESEND_API_KEY to enable delivery.")
             return {
-                "success": True, 
-                "id": f"sim_resend_{os.urandom(4).hex()}", 
-                "simulated": True,
-                "provider": "resend_sandbox"
+                "success": False,
+                "error": ("RESEND_API_KEY is not configured — email delivery is "
+                          "unavailable. No email was sent and none is claimed as sent."),
+                "provider": "resend",
+                "missing_credential": "RESEND_API_KEY"
             }
 
         payload = {

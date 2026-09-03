@@ -1,6 +1,7 @@
 import hashlib
 import uuid
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 import datetime
 from .models import (
     NonConformanceReport, CorrectiveActionPlan, RegulatoryRequirement,
@@ -100,7 +101,7 @@ class ComplianceService:
                     "title": "Environmental Impact Assessment (EIA) Clearance",
                     "description": "Baseline soil, noise, and environmental effluent containment audit.",
                     "authority": "Federal Ministry of Environment & LASEPA",
-                    "status": "Compliant",
+                    "status": "Pending Assessment",
                     "mandatory": True,
                     "evidence_required": "Approved EIA Certification & Periodic Air/Water Sampling",
                     "verification_method": "Laboratory Report Verification"
@@ -111,7 +112,7 @@ class ComplianceService:
                     "title": "Structural Conformance & Core Stability (NBC Sec. 4)",
                     "description": "Validation of reinforced concrete compressive strength and foundation load calculations.",
                     "authority": "Lagos State Building Control Agency (LASBCA)",
-                    "status": "Compliant",
+                    "status": "Pending Assessment",
                     "mandatory": True,
                     "evidence_required": "Core Cylinder Cube Test Results (28-day cure)",
                     "verification_method": "Laboratory Crushing Test & Physical Field Inspection"
@@ -122,7 +123,7 @@ class ComplianceService:
                     "title": "Occupational Fire Safety & Means of Egress",
                     "description": "Adequacy of pressurized stairwells, dry risers, hydrants, and flame-retardant barriers.",
                     "authority": "Lagos State Fire and Rescue Service",
-                    "status": "At Risk",
+                    "status": "Pending Assessment",
                     "mandatory": True,
                     "evidence_required": "Fire Safety Certificate & Hydraulic Pressure Test",
                     "verification_method": "Field Smoke & Pressure Audit"
@@ -133,7 +134,7 @@ class ComplianceService:
                     "title": "Physical Planning Setback & Height Approval",
                     "description": "Compliance with approved density, building setbacks from road alignment, and zoning height limits.",
                     "authority": "Ministry of Physical Planning and Urban Development",
-                    "status": "Compliant",
+                    "status": "Pending Assessment",
                     "mandatory": True,
                     "evidence_required": "Survey Plan & Stamped Development Permit",
                     "verification_method": "Topographic Drone & Spatial Cadastral Review"
@@ -148,11 +149,11 @@ class ComplianceService:
         project_id = data.get('project_id') or data.get('project')
         project = Project.objects.filter(pk=project_id).first()
         if not project:
-            project = Project.objects.first()
-            if not project:
-                project = Project.objects.create(name='Metropolitan Infrastructure Project', reference_number='PRJ-2026-METRO')
+            raise ValidationError(
+                "A valid project_id is required — an NCR cannot be logged against "
+                "an arbitrary or non-existent project.")
 
-        reported_by = data.get('reported_by_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else 'J. Doe (Safety)')
+        reported_by = data.get('reported_by_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else None)
 
         ncr = NonConformanceReport.objects.create(
             project=project,
@@ -163,7 +164,7 @@ class ComplianceService:
             status=data.get('status', 'Open'),
             reported_by_name=reported_by,
             reporter=user if getattr(user, 'is_authenticated', False) else None,
-            assignee_name=data.get('assignee_name', 'Lead Contractor'),
+            assignee_name=data.get('assignee_name'),
             source=data.get('source', 'MANUAL'),
             source_reference=data.get('source_reference'),
             escalation_level=1,
@@ -279,7 +280,7 @@ class ComplianceService:
         project_id = data.get('project_id') or data.get('project')
         project = Project.objects.filter(pk=project_id).first()
         if not project:
-            project = Project.objects.first()
+            raise ValidationError("A valid project_id is required to create a CAPA.")
 
         ncr_id = data.get('ncr_id') or data.get('ncr')
         ncr = NonConformanceReport.objects.filter(pk=ncr_id).first() if ncr_id else None
@@ -291,7 +292,7 @@ class ComplianceService:
             action_plan=data.get('action_plan', ''),
             priority=data.get('priority', 'High'),
             status=data.get('status', 'todo'),
-            assignee_name=data.get('assignee_name', 'HSE Officer'),
+            assignee_name=data.get('assignee_name'),
             due_date=data.get('due_date'),
             comments_count=int(data.get('comments_count', 0)),
             attachments_count=int(data.get('attachments_count', 0))
@@ -356,7 +357,7 @@ class ComplianceService:
         project_id = data.get('project_id') or data.get('project')
         project = Project.objects.filter(pk=project_id).first()
         if not project:
-            project = Project.objects.first()
+            raise ValidationError("A valid project_id is required to issue a certificate.")
 
         category = data.get('category', 'Environmental')
         prefix = category[:3].upper()
@@ -371,8 +372,6 @@ class ComplianceService:
         else:
             hash_raw = f"{cert_ref}-{project.id if project else 'PRJ'}-{timezone.now().isoformat()}"
             qr_hash = f"0x7b2a{hashlib.sha256(hash_raw.encode()).hexdigest()[:12]}e41"
-            if not file_url:
-                file_url = f"https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/certificates/{cert_ref}.pdf"
 
         cert = ComplianceCertificate.objects.create(
             certificate_reference=cert_ref,
@@ -421,10 +420,11 @@ class ComplianceService:
 
         total_reqs = RegulatoryRequirement.objects.count()
         compliant_reqs = RegulatoryRequirement.objects.filter(status='Compliant').count()
-        score = round((compliant_reqs / total_reqs * 100)) if total_reqs > 0 else 94
+        # No fabricated fallback — with no assessed requirements there is no score.
+        score = round((compliant_reqs / total_reqs * 100)) if total_reqs > 0 else None
 
         return {
-            "overall_score": f"{score}%",
+            "overall_score": f"{score}%" if score is not None else None,
             "open_ncrs_count": open_ncrs,
             "critical_ncrs_count": critical_ncrs,
             "pending_capas_count": pending_capas,

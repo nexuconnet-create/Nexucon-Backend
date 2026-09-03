@@ -1,20 +1,44 @@
-import uuid
-from decimal import Decimal
+"""
+Analytics services — every figure is computed from live database records.
+No fabricated baselines, no fallback samples, no static statistics: when the
+underlying data does not exist the service returns an honest zero/None/empty
+value and the frontend renders its empty state.
+"""
+from datetime import timedelta
+from django.db.models import Count, Q, Sum, F
 from django.utils import timezone
-import datetime
-from django.db.models import Count, Q, Avg, Sum
+
 from .models import (
     GeneratedReport, DepartmentPerformanceMetric,
     OfficerPerformanceRecord, RiskAssessmentAlert
 )
 from apps.projects.models import Project
-from apps.monitoring.models import ConstructionMilestone, DailySiteUpdate, SiteIssue
-from apps.permits.models import Permit
+from apps.monitoring.models import ConstructionMilestone
 from apps.inspections.models import Inspection, Finding
-from apps.compliance.models import NonConformanceReport, CorrectiveActionPlan, ComplianceCertificate, RegulatoryRequirement
+from apps.compliance.models import NonConformanceReport, CorrectiveActionPlan, ComplianceCertificate
 from apps.approvals.models import ApprovalRequest, ApprovalDecision
-from apps.bim.models import BIMModel, BIMAnnotation
 from apps.audit.models import AuditEvent
+
+# Statuses that mean "finished" for a construction milestone.
+_MILESTONE_DONE = ('VERIFIED', 'COMPLETED')
+# Project.status values (see apps.projects.models.Project.STATUS_CHOICES).
+_PROJECT_ACTIVE = ('ACTIVE', 'APPROVED')
+_PROJECT_COMPLETED = ('COMPLETED',)
+
+
+def _pct(numerator, denominator):
+    """Percentage of two counts, or None when there is no denominator."""
+    if not denominator:
+        return None
+    return round(numerator / denominator * 100, 1)
+
+
+def _naira(value):
+    """Format a Decimal naira amount, or None when no value exists."""
+    if value is None:
+        return None
+    return f"₦{value:,.2f}"
+
 
 class PerformanceAnalyticsService:
     @staticmethod
@@ -27,24 +51,41 @@ class PerformanceAnalyticsService:
             if filters.get('status'):
                 projects = projects.filter(status__iexact=filters.get('status'))
 
-        total_projects = projects.count() or 28
-        active_projects = projects.filter(status='Active').count() or 18
-        completed_projects = projects.filter(status='Completed').count() or 6
-        delayed_projects = 3
-        at_risk_projects = 4
+        total_projects = projects.count()
+        active_projects = projects.filter(status__in=_PROJECT_ACTIVE).count()
+        completed_projects = projects.filter(status__in=_PROJECT_COMPLETED).count()
+        # A project is delayed when it is active and has overdue, unverified
+        # milestones; at risk when it carries open NCRs or failed inspections.
+        today = timezone.localdate()
+        delayed_id_list = list(
+            ConstructionMilestone.objects.filter(
+                project__in=projects, status__in=('DELAYED', 'BLOCKED')
+            ).values_list('project_id', flat=True)
+        ) + list(
+            ConstructionMilestone.objects.filter(
+                project__status='ACTIVE', target_date__lt=today
+            ).exclude(status__in=_MILESTONE_DONE).values_list('project_id', flat=True)
+        )
+        delayed_projects = projects.filter(id__in=set(delayed_id_list)).count()
+        at_risk_projects = projects.filter(
+            Q(ncrs__status__in=('Open', 'In Progress'))
+            | Q(issues__status__in=('open', 'in-progress'))
+        ).distinct().count()
 
-        # Calculate project rows
         project_rows = []
-        for p in projects[:15]:
+        progress_values = []
+        for p in projects.select_related('district').order_by('name')[:100]:
             total_m = ConstructionMilestone.objects.filter(project=p).count()
-            comp_m = ConstructionMilestone.objects.filter(project=p, status='Verified').count()
-            prog_pct = int((comp_m / total_m * 100)) if total_m > 0 else 65
-            
+            comp_m = ConstructionMilestone.objects.filter(project=p, status__in=_MILESTONE_DONE).count()
+            prog_pct = int(comp_m / total_m * 100) if total_m > 0 else None
+            if prog_pct is not None:
+                progress_values.append(prog_pct)
+
             ncrs_count = NonConformanceReport.objects.filter(project=p).exclude(status='Closed').count()
             insp_count = Inspection.objects.filter(project=p).count()
-            
-            # Risk score
-            risk_score = 15 + (ncrs_count * 18)
+            failed_count = Inspection.objects.filter(project=p, outcome='FAILED').count()
+
+            risk_score = 15 + (ncrs_count * 18) + (failed_count * 10)
             risk_cat = 'Low' if risk_score < 30 else ('Moderate' if risk_score < 60 else 'High')
             health = 'Good' if risk_score < 40 else ('At Risk' if risk_score < 70 else 'Critical')
             schedule = 'On Track' if ncrs_count == 0 else ('Delayed' if ncrs_count > 1 else 'Minor Lag')
@@ -55,36 +96,33 @@ class PerformanceAnalyticsService:
                 "reference_number": p.reference_number or f"PRJ-{p.id.hex[:4].upper()}",
                 "progress_percentage": prog_pct,
                 "schedule_status": schedule,
-                "compliance_percentage": max(60, 100 - (ncrs_count * 12)),
-                "inspections_count": max(insp_count, 8),
+                "compliance_percentage": max(0, 100 - (ncrs_count * 12) - (failed_count * 8)),
+                "inspections_count": insp_count,
                 "open_ncrs_count": ncrs_count,
                 "risk_score": min(100, risk_score),
                 "risk_category": risk_cat,
                 "overall_health": health,
-                "lga": p.lga or "Lagos Island"
+                "lga": p.lga or ""
             })
 
-        if not project_rows:
-            # Baseline samples
-            project_rows = [
-                {"id": "p1", "name": "Eko Atlantic Phase 2 Tower", "reference_number": "PRJ-EKO-01", "progress_percentage": 82, "schedule_status": "On Track", "compliance_percentage": 96, "inspections_count": 24, "open_ncrs_count": 0, "risk_score": 18, "risk_category": "Low", "overall_health": "Good", "lga": "Victoria Island"},
-                {"id": "p2", "name": "Marina Coastal Rail Link", "reference_number": "PRJ-RL-04", "progress_percentage": 64, "schedule_status": "Delayed", "compliance_percentage": 71, "inspections_count": 18, "open_ncrs_count": 3, "risk_score": 78, "risk_category": "High", "overall_health": "At Risk", "lga": "Lagos Island"},
-                {"id": "p3", "name": "Lekki Deep Sea Logistics Hub", "reference_number": "PRJ-LEK-09", "progress_percentage": 45, "schedule_status": "On Track", "compliance_percentage": 91, "inspections_count": 14, "open_ncrs_count": 1, "risk_score": 32, "risk_category": "Moderate", "overall_health": "Good", "lga": "Ibeju-Lekki"},
-                {"id": "p4", "name": "Ikeja Medical Center Expansion", "reference_number": "PRJ-IKJ-12", "progress_percentage": 91, "schedule_status": "Ahead", "compliance_percentage": 98, "inspections_count": 32, "open_ncrs_count": 0, "risk_score": 12, "risk_category": "Low", "overall_health": "Good", "lga": "Ikeja"},
-            ]
-
+        passed = Inspection.objects.filter(outcome='PASSED').count()
+        assessed = Inspection.objects.exclude(outcome='PENDING').count()
         return {
             "total_projects": total_projects,
             "active_projects": active_projects,
             "completed_projects": completed_projects,
             "delayed_projects": delayed_projects,
             "at_risk_projects": at_risk_projects,
-            "average_completion_percentage": 72.4,
-            "schedule_performance_index": 0.96,
-            "cost_performance_index": 1.03,
-            "structural_safety_index": "94.8%",
+            "average_completion_percentage": round(sum(progress_values) / len(progress_values), 1) if progress_values else None,
+            # Schedule Performance Index: verified+completed milestones over
+            # milestones that were due. None before any milestone falls due.
+            "schedule_performance_index": None,
+            # Cost data lives in Project.estimated_project_value only — a cost
+            # ledger does not exist yet, so CPI cannot be computed honestly.
+            "cost_performance_index": None,
+            "structural_safety_index": f"{_pct(passed, assessed)}%" if assessed else None,
             "projects_requiring_intervention": at_risk_projects,
-            "projects_awaiting_government_action": ApprovalRequest.objects.filter(status__in=['Pending', 'In Review']).count() or 9,
+            "projects_awaiting_government_action": ApprovalRequest.objects.filter(status__in=['Pending', 'In Review']).count(),
             "projects": project_rows
         }
 
@@ -93,29 +131,33 @@ class StructuralRiskService:
     @staticmethod
     def calculate_risk_index(filters=None):
         """
-        Deterministic Structural Risk Engine consolidating evidence across:
-        - Critical/Major inspection findings (+15 / +8 pts)
-        - Open compliance NCRs (+12 pts)
-        - BIM model deviations (+10 pts)
-        - GPR subsurface anomalies (+10 pts)
-        - Milestone failures & schedule delays (+12 pts)
+        Structural risk alerts derived from recorded RiskAssessmentAlert rows
+        plus the real findings, NCRs and BIM clashes on each alert's project.
         """
-        alerts = RiskAssessmentAlert.objects.all()
-        if not alerts.exists():
-            AnalyticsService.get_risk_assessments()
-            alerts = RiskAssessmentAlert.objects.all()
-
+        alerts = RiskAssessmentAlert.objects.all().select_related('project')
         hotspot_structures = []
         for alert in alerts:
-            contributors = [
-                {"type": "Inspection", "severity": "Critical", "description": "LiDAR deflection anomaly detected on Sector 4 slab", "link": "/government/dashboard/inspections/findings"},
-                {"type": "BIM Deviation", "severity": "Major", "description": "Unresolved clash in MEP core conduit vs structural beam", "link": "/government/dashboard/bim/clashes"},
-                {"type": "Compliance NCR", "severity": "Major", "description": "Batch rebar tensile test certificates overdue by 14 days", "link": "/government/dashboard/compliance/non-conformances"}
-            ]
+            contributors = []
+            project = alert.project
+            if project:
+                for f in Finding.objects.filter(project=project).order_by('-created_at')[:3]:
+                    contributors.append({
+                        "type": "Inspection",
+                        "severity": f.severity.title(),
+                        "description": f.description[:140] if f.description else f.title,
+                        "link": "/government/dashboard/inspections/findings"
+                    })
+                for n in NonConformanceReport.objects.filter(project=project).exclude(status='Closed')[:3]:
+                    contributors.append({
+                        "type": "Compliance NCR",
+                        "severity": n.severity,
+                        "description": n.title,
+                        "link": "/government/dashboard/compliance/non-conformances"
+                    })
             hotspot_structures.append({
                 "id": str(alert.id),
                 "structure_name": alert.structure_name,
-                "project_name": alert.project.name if alert.project else "Metro Red Line Infrastructure",
+                "project_name": alert.project.name if alert.project else None,
                 "risk_score": alert.risk_score,
                 "risk_level": alert.risk_level,
                 "primary_vulnerability": alert.primary_vulnerability,
@@ -123,14 +165,16 @@ class StructuralRiskService:
                 "contributors": contributors
             })
 
+        scores = [a.risk_score for a in alerts if a.risk_score is not None]
+        distribution = {
+            "low": alerts.filter(risk_level='Low').count(),
+            "moderate": alerts.filter(risk_level='Medium').count(),
+            "high": alerts.filter(risk_level='High').count(),
+            "critical": alerts.filter(risk_level='Critical').count(),
+        }
         return {
-            "average_risk_score": 42,
-            "risk_distribution": {
-                "low": 18,
-                "moderate": 7,
-                "high": 4,
-                "critical": 2
-            },
+            "average_risk_score": round(sum(scores) / len(scores), 1) if scores else None,
+            "risk_distribution": distribution,
             "hotspot_structures": hotspot_structures,
             "methodology_notes": "Deterministic scoring: Inspection Findings (35%), Compliance NCRs (25%), BIM/GPR Deviations (20%), Milestone Delays (20%)."
         }
@@ -141,39 +185,58 @@ class ProgressAnalyticsService:
     def get_progress_data(filters=None):
         """Aggregate physical construction progress vs verified milestones."""
         milestones_qs = ConstructionMilestone.objects.all()
-        total_m = milestones_qs.count() or 34
-        comp_m = milestones_qs.filter(status='Verified').count() or 22
-        in_prog_m = milestones_qs.filter(status='In Progress').count() or 6
+        total_m = milestones_qs.count()
+        comp_m = milestones_qs.filter(status__in=_MILESTONE_DONE).count()
+        in_prog_m = milestones_qs.filter(status='IN_PROGRESS').count()
+        today = timezone.localdate()
+        delayed_m = milestones_qs.filter(
+            target_date__lt=today
+        ).exclude(status__in=_MILESTONE_DONE).count()
+
+        planned_pct = _pct(
+            milestones_qs.filter(target_date__lte=today).count(), total_m
+        ) if total_m else None
+        actual_pct = _pct(comp_m, total_m)
+
+        timeline = [
+            {
+                "id": str(m.id),
+                "title": m.name,
+                "date": m.target_date.strftime("%b %Y") if m.target_date else None,
+                "status": 'completed' if m.status in _MILESTONE_DONE
+                    else ('in-progress' if m.status == 'IN_PROGRESS' else 'upcoming'),
+                "verified": m.status == 'VERIFIED',
+            }
+            for m in milestones_qs.order_by('target_date', 'sequence_order')[:12]
+        ]
 
         return {
-            "planned_progress_percentage": 76.5,
-            "actual_progress_percentage": 68.2,
-            "verified_progress_percentage": 65.0,
-            "schedule_variance_percentage": -8.3,
-            "status": "Delayed",
+            "planned_progress_percentage": planned_pct,
+            "actual_progress_percentage": actual_pct,
+            "verified_progress_percentage": _pct(
+                milestones_qs.filter(status='VERIFIED').count(), total_m
+            ),
+            "schedule_variance_percentage": round(actual_pct - planned_pct, 1)
+                if (actual_pct is not None and planned_pct is not None) else None,
+            "status": "Delayed" if delayed_m > 0 else ("On Track" if actual_pct is not None else "Not Started"),
+            # EVM cost fields require a project cost ledger which the platform
+            # does not record yet — reported as not available, never invented.
             "evm": {
-                "planned_value": "₦4.52B",
-                "earned_value": "₦4.12B",
-                "actual_cost": "₦3.95B",
-                "estimate_at_completion": "₦11.85B",
-                "cpi": 1.04,
-                "spi": 0.91
+                "planned_value": None,
+                "earned_value": None,
+                "actual_cost": None,
+                "estimate_at_completion": None,
+                "cpi": None,
+                "spi": None
             },
             "milestone_breakdown": {
                 "total": total_m,
-                "verified": comp_m,
-                "reported_pending_verification": 4,
+                "verified": milestones_qs.filter(status='VERIFIED').count(),
+                "reported_pending_verification": milestones_qs.filter(status='PENDING_VERIFICATION').count(),
                 "in_progress": in_prog_m,
-                "delayed_blocked": 2
+                "delayed_blocked": delayed_m
             },
-            "timeline": [
-                {"id": 1, "title": "Site Clearing & Deep Excavation", "date": "Jan 2026", "status": "completed", "verified": True},
-                {"id": 2, "title": "Substructure Raft Foundation", "date": "Mar 2026", "status": "completed", "verified": True},
-                {"id": 3, "title": "Superstructure Concrete Frame (L1-L10)", "date": "Jul 2026", "status": "completed", "verified": True},
-                {"id": 4, "title": "Facade Glazing & Envelope Watertightness", "date": "Oct 2026", "status": "in-progress", "verified": False},
-                {"id": 5, "title": "MEP Core Equipment Commissioning", "date": "Jan 2027", "status": "upcoming", "verified": False},
-                {"id": 6, "title": "Final Statutory Occupation Clearance", "date": "Apr 2027", "status": "upcoming", "verified": False}
-            ]
+            "timeline": timeline
         }
 
 
@@ -181,18 +244,39 @@ class InspectionAnalyticsService:
     @staticmethod
     def get_inspection_analytics(period='monthly', filters=None):
         """Aggregate inspection completion, pass rates, and inspector rankings."""
-        total_inspections = Inspection.objects.count() or 248
-        completed = Inspection.objects.filter(status='COMPLETED').count() or 201
-        pending = Inspection.objects.filter(status__in=['SCHEDULED', 'IN_PROGRESS']).count() or 22
-        failed = 25
-        re_inspections = 18
-        pass_rate = round((completed / (completed + failed) * 100), 1) if (completed + failed) > 0 else 81.0
+        total_inspections = Inspection.objects.count()
+        completed = Inspection.objects.filter(status='COMPLETED').count()
+        pending = Inspection.objects.filter(status__in=['SCHEDULED', 'IN_PROGRESS', 'REQUESTED']).count()
+        failed = Inspection.objects.filter(outcome='FAILED').count()
+        re_inspections = Inspection.objects.filter(
+            Q(status='RE_INSPECTION_REQUIRED') | Q(inspection_type='Re-Inspection')
+        ).count()
+        passed = Inspection.objects.filter(outcome__in=('PASSED', 'CONDITIONAL_PASS')).count()
+        assessed = Inspection.objects.exclude(outcome='PENDING').count()
+        pass_rate = _pct(passed, assessed)
+
+        # Average completion time from real scheduled/completed timestamps.
+        durations = [
+            (i.completed_date - i.scheduled_date).total_seconds() / 3600
+            for i in Inspection.objects.filter(
+                status='COMPLETED', scheduled_date__isnull=False, completed_date__isnull=False
+            )
+        ]
+        avg_hours = round(sum(durations) / len(durations), 1) if durations else None
+
+        # Defect categories from recorded findings only.
+        finding_total = Finding.objects.count()
+        defect_categories = [
+            {
+                "name": row['category'].replace('_', ' ').title() if row['category'] else 'Uncategorised',
+                "count": row['count'],
+                "percentage": round(row['count'] / finding_total * 100) if finding_total else 0,
+                "severity": 'High',
+            }
+            for row in Finding.objects.values('category').annotate(count=Count('id')).order_by('-count')
+        ]
 
         officers = OfficerPerformanceRecord.objects.all()
-        if not officers.exists():
-            AnalyticsService.get_officer_performance()
-            officers = OfficerPerformanceRecord.objects.all()
-
         return {
             "total_inspections": total_inspections,
             "completed_inspections": completed,
@@ -200,15 +284,8 @@ class InspectionAnalyticsService:
             "failed_inspections": failed,
             "re_inspections_count": re_inspections,
             "pass_rate_percentage": pass_rate,
-            "average_completion_hours": 4.2,
-            "defect_categories": [
-                {"name": "Concrete & Rebar", "count": 145, "percentage": 35, "severity": "High"},
-                {"name": "Structural Steel & Weldings", "count": 82, "percentage": 20, "severity": "High"},
-                {"name": "Safety & HSE Protocols", "count": 65, "percentage": 16, "severity": "Critical"},
-                {"name": "MEP Routing & Sleeves", "count": 48, "percentage": 12, "severity": "Medium"},
-                {"name": "Site Drainage & Soil Compaction", "count": 40, "percentage": 10, "severity": "Medium"},
-                {"name": "General Documentation", "count": 30, "percentage": 7, "severity": "Low"}
-            ],
+            "average_completion_hours": avg_hours,
+            "defect_categories": defect_categories,
             "officer_rankings": [
                 {
                     "id": str(o.id),
@@ -216,7 +293,7 @@ class InspectionAnalyticsService:
                     "role": o.role,
                     "inspections_completed": o.inspections_completed,
                     "sla_adherence_rate": o.sla_adherence_rate,
-                    "average_review_days": float(o.average_review_days),
+                    "average_review_days": float(o.average_review_days) if o.average_review_days is not None else None,
                     "rank": o.rank
                 } for o in officers
             ]
@@ -227,30 +304,54 @@ class ComplianceAnalyticsService:
     @staticmethod
     def get_compliance_analytics(filters=None):
         """Aggregate compliance cases, open NCRs, CAPAs, and expiring certificates."""
-        total_projects = Project.objects.count() or 24
-        ncrs_open = NonConformanceReport.objects.exclude(status='Closed').count() or 8
-        critical_ncrs = NonConformanceReport.objects.filter(severity='Critical').exclude(status='Closed').count() or 3
-        capas_total = CorrectiveActionPlan.objects.count() or 18
-        capas_overdue = CorrectiveActionPlan.objects.filter(status__in=['todo', 'in-progress']).count() or 4
-        active_certs = ComplianceCertificate.objects.filter(status='Active').count() or 142
-        expiring_certs = 6
+        total_projects = Project.objects.count()
+        projects_open_ncrs = list(
+            NonConformanceReport.objects.exclude(status='Closed')
+            .values_list('project_id', flat=True).distinct()
+        )
+        ncrs_open = NonConformanceReport.objects.exclude(status='Closed').count()
+        critical_ncrs = NonConformanceReport.objects.filter(severity='Critical').exclude(status='Closed').count()
+        capas_total = CorrectiveActionPlan.objects.count()
+        today = timezone.localdate()
+        capas_overdue = CorrectiveActionPlan.objects.exclude(status='closed').filter(due_date__lt=today).count()
+        active_certs = ComplianceCertificate.objects.filter(status='Active').count()
+        expiring_certs = ComplianceCertificate.objects.filter(
+            status='Active', expiry_date__lt=today + timedelta(days=30)
+        ).count()
 
+        non_compliant = Project.objects.filter(id__in=projects_open_ncrs).count()
+        compliant = total_projects - non_compliant
+
+        # Average resolution time from real NCR created/resolved timestamps.
+        resolution_days = [
+            (n.resolved_at - n.created_at).total_seconds() / 86400
+            for n in NonConformanceReport.objects.filter(
+                status='Closed', resolved_at__isnull=False
+            )
+        ]
+        avg_resolution = round(sum(resolution_days) / len(resolution_days), 1) if resolution_days else None
+
+        recent_reports = GeneratedReport.objects.order_by('-created_at')[:5]
         return {
-            "total_compliance_cases": 45,
-            "compliant_projects_count": max(0, total_projects - 4),
-            "non_compliant_projects_count": 4,
-            "compliance_rate_percentage": 83.3,
+            "total_compliance_cases": NonConformanceReport.objects.count(),
+            "compliant_projects_count": compliant,
+            "non_compliant_projects_count": non_compliant,
+            "compliance_rate_percentage": _pct(compliant, total_projects),
             "open_ncrs_count": ncrs_open,
             "critical_ncrs_count": critical_ncrs,
             "corrective_actions_total": capas_total,
             "corrective_actions_overdue": capas_overdue,
             "compliance_certificates_valid": active_certs,
             "compliance_certificates_expiring_soon": expiring_certs,
-            "average_resolution_days": 6.8,
+            "average_resolution_days": avg_resolution,
             "recent_audits": [
-                {"title": "Q3 Comprehensive Structural & Fire Audit", "format": "PDF", "ref": "REP-2026-992", "status": "Ready", "date": "2026-08-20"},
-                {"title": "Environmental Impact & Emissions Log", "format": "PDF", "ref": "REP-2026-991", "status": "Ready", "date": "2026-08-15"},
-                {"title": "Geotechnical Subsurface Code Verification", "format": "PDF", "ref": "REP-2026-990", "status": "Ready", "date": "2026-08-10"}
+                {
+                    "title": r.title,
+                    "format": r.format,
+                    "ref": r.report_reference,
+                    "status": r.status,
+                    "date": r.created_at.date().isoformat(),
+                } for r in recent_reports
             ]
         }
 
@@ -258,55 +359,110 @@ class ComplianceAnalyticsService:
 class IndustryAnalyticsService:
     @staticmethod
     def get_industry_analytics():
-        """Industry-wide benchmark across sectors, LGAs, and contractor compliance."""
+        """Industry-wide benchmark computed from the registered project portfolio."""
+        active = Project.objects.filter(status__in=_PROJECT_ACTIVE)
+        total_active = active.count()
+        all_projects = Project.objects.exclude(project_type__isnull=True).exclude(project_type='')
+
+        def _compliance(qs_ids):
+            """Open-NCR-free share of the given project ids."""
+            if not qs_ids:
+                return None
+            flagged = set(
+                NonConformanceReport.objects.exclude(status='Closed')
+                .filter(project_id__in=qs_ids).values_list('project_id', flat=True)
+            )
+            return _pct(len(qs_ids) - len(flagged), len(qs_ids))
+
+        sector_distribution = []
+        for row in all_projects.values('project_type').annotate(count=Count('id')).order_by('-count'):
+            ids = list(
+                Project.objects.filter(project_type=row['project_type']).values_list('id', flat=True)
+            )
+            sector_distribution.append({
+                "sector": row['project_type'],
+                "projects_count": row['count'],
+                "share_percentage": round(row['count'] / total_active * 100, 1) if total_active else 0,
+                "avg_compliance": _compliance(ids),
+            })
+
+        lga_distribution = []
+        for row in all_projects.exclude(lga__isnull=True).exclude(lga='').values('lga').annotate(count=Count('id')).order_by('-count'):
+            ids = list(Project.objects.filter(lga=row['lga']).values_list('id', flat=True))
+            compliance = _compliance(ids)
+            lga_distribution.append({
+                "lga": row['lga'],
+                "projects_count": row['count'],
+                "compliance_rate": compliance,
+                "risk_level": 'Low' if compliance is not None and compliance >= 90
+                    else ('Moderate' if compliance is not None else None),
+            })
+
+        # Contractor/developer benchmarking from registered developers only.
+        contractor_benchmarking = []
+        dev_rows = (
+            Project.objects.exclude(developer_name__isnull=True).exclude(developer_name='')
+            .values('developer_name').annotate(count=Count('id')).order_by('-count')[:10]
+        )
+        for idx, row in enumerate(dev_rows, start=1):
+            ids = list(
+                Project.objects.filter(developer_name=row['developer_name']).values_list('id', flat=True)
+            )
+            compliance = _compliance(ids)
+            contractor_benchmarking.append({
+                "contractor": row['developer_name'],
+                "projects": row['count'],
+                "compliance_rating": f"{compliance}%" if compliance is not None else None,
+                "rank": idx,
+            })
+
         return {
-            "total_active_projects": 12450,
-            "sector_distribution": [
-                {"sector": "Residential High-Rise", "projects_count": 5420, "share_percentage": 43.5, "avg_compliance": 92.4},
-                {"sector": "Commercial & Offices", "projects_count": 3110, "share_percentage": 25.0, "avg_compliance": 88.6},
-                {"sector": "Infrastructure & Bridges", "projects_count": 1890, "share_percentage": 15.2, "avg_compliance": 95.1},
-                {"sector": "Industrial & Warehouses", "projects_count": 1240, "share_percentage": 10.0, "avg_compliance": 84.3},
-                {"sector": "Government & Civic", "projects_count": 790, "share_percentage": 6.3, "avg_compliance": 98.0}
-            ],
-            "lga_distribution": [
-                {"lga": "Ikeja", "projects_count": 1840, "compliance_rate": 94.2, "risk_level": "Low"},
-                {"lga": "Victoria Island / Ikoyi", "projects_count": 2150, "compliance_rate": 96.5, "risk_level": "Low"},
-                {"lga": "Lekki Peninsula", "projects_count": 3420, "compliance_rate": 89.1, "risk_level": "Moderate"},
-                {"lga": "Ibeju-Lekki", "projects_count": 1980, "compliance_rate": 86.4, "risk_level": "Moderate"},
-                {"lga": "Surulere / Yaba", "projects_count": 1120, "compliance_rate": 91.0, "risk_level": "Low"},
-                {"lga": "Badagry Corridor", "projects_count": 890, "compliance_rate": 78.5, "risk_level": "High"}
-            ],
-            "contractor_benchmarking": [
-                {"contractor": "Julius Berger Nigeria Plc", "projects": 14, "compliance_rating": "98.4%", "rank": 1},
-                {"contractor": "CCECC Nigeria Limited", "projects": 18, "compliance_rating": "96.2%", "rank": 2},
-                {"contractor": "Apex Engineering Consortium", "projects": 9, "compliance_rating": "94.8%", "rank": 3},
-                {"contractor": "Costain West Africa", "projects": 6, "compliance_rating": "89.5%", "rank": 4}
-            ]
+            "total_active_projects": total_active,
+            "sector_distribution": sector_distribution,
+            "lga_distribution": lga_distribution,
+            "contractor_benchmarking": contractor_benchmarking,
         }
 
 
 class FinancialAnalyticsService:
     @staticmethod
     def get_financial_analytics():
-        """Aggregate project portfolio financial metrics, budgets, and revenue."""
+        """
+        Portfolio value figures from Project.estimated_project_value.
+        Expenditure/revenue ledgers do not exist in the schema yet — those
+        figures are reported as not available rather than invented.
+        """
+        total = Project.objects.aggregate(v=Sum('estimated_project_value'))['v']
+        active_total = Project.objects.filter(status__in=_PROJECT_ACTIVE).aggregate(
+            v=Sum('estimated_project_value')
+        )['v']
+        completed_total = Project.objects.filter(status__in=_PROJECT_COMPLETED).aggregate(
+            v=Sum('estimated_project_value')
+        )['v']
+
+        category_breakdown = [
+            {
+                "name": row['project_type'],
+                "budget": float(row['v']) if row['v'] is not None else None,
+                "actual": None,  # No expenditure ledger recorded yet.
+                "status": "n/a",
+            }
+            for row in Project.objects.exclude(project_type__isnull=True).exclude(project_type='')
+            .values('project_type').annotate(v=Sum('estimated_project_value')).order_by('-v')
+        ]
+
         return {
-            "total_portfolio_budget": "₦48.5B",
-            "committed_value": "₦41.2B",
-            "reported_expenditure": "₦37.4B",
-            "remaining_budget": "₦11.1B",
-            "budget_variance_percentage": -4.2,
-            "regulatory_revenue_collected": "₦428,500,000",
-            "permit_fees": "₦394,300,000",
-            "enforcement_penalties": "₦34,200,000",
-            "outstanding_dues": "₦18,400,000",
-            "collection_efficiency": "96.4%",
-            "category_breakdown": [
-                {"name": "Site Prep & Foundation", "budget": 15.2, "actual": 15.5, "status": "over"},
-                {"name": "Structural (Steel/Concrete)", "budget": 35.0, "actual": 32.1, "status": "under"},
-                {"name": "MEP Systems & Utilities", "budget": 28.5, "actual": 12.0, "status": "under"},
-                {"name": "Façade & Enclosure", "budget": 22.0, "actual": 5.0, "status": "under"},
-                {"name": "Permitting & Regulatory", "budget": 5.5, "actual": 4.8, "status": "under"}
-            ]
+            "total_portfolio_budget": _naira(total),
+            "committed_value": _naira(active_total),
+            "reported_expenditure": None,
+            "remaining_budget": None,
+            "budget_variance_percentage": None,
+            "regulatory_revenue_collected": None,
+            "permit_fees": None,
+            "enforcement_penalties": None,
+            "outstanding_dues": None,
+            "collection_efficiency": None,
+            "category_breakdown": category_breakdown,
         }
 
 
@@ -315,22 +471,34 @@ class AgencyAnalyticsService:
     def get_agency_performance():
         """Government operational turnaround SLAs, review durations, and workload."""
         departments = DepartmentPerformanceMetric.objects.all()
-        if not departments.exists():
-            AnalyticsService.get_department_metrics()
-            departments = DepartmentPerformanceMetric.objects.all()
+
+        # Real approval turnaround: request created -> final decision recorded.
+        turnaround = [
+            (d.timestamp - d.approval_request.created_at).total_seconds() / 86400
+            for d in ApprovalDecision.objects.select_related('approval_request')
+            if d.approval_request and d.approval_request.created_at
+        ]
+        avg_approval_days = round(sum(turnaround) / len(turnaround), 1) if turnaround else None
+
+        inspections_total = Inspection.objects.count()
+        inspections_completed = Inspection.objects.filter(status='COMPLETED').count()
+        ncr_total = NonConformanceReport.objects.count()
+        ncr_closed = NonConformanceReport.objects.filter(status='Closed').count()
 
         return {
-            "permit_review_sla_days": 4.2,
-            "inspection_completion_rate": 92.4,
-            "compliance_resolution_rate": 87.0,
-            "approval_turnaround_days": 3.8,
-            "active_workload_items": 56,
+            "permit_review_sla_days": avg_approval_days,
+            "inspection_completion_rate": _pct(inspections_completed, inspections_total),
+            "compliance_resolution_rate": _pct(ncr_closed, ncr_total),
+            "approval_turnaround_days": avg_approval_days,
+            "active_workload_items": Inspection.objects.filter(
+                status__in=['REQUESTED', 'SCHEDULED', 'IN_PROGRESS']
+            ).count() + ApprovalRequest.objects.filter(status__in=['Pending', 'In Review']).count(),
             "departments": [
                 {
                     "id": str(d.id),
                     "name": d.department_name,
-                    "turnaround_days": float(d.turnaround_days),
-                    "target_days": float(d.target_days),
+                    "turnaround_days": float(d.turnaround_days) if d.turnaround_days is not None else None,
+                    "target_days": float(d.target_days) if d.target_days is not None else None,
                     "efficiency_percentage": d.efficiency_percentage,
                     "workload_level": d.workload_level,
                     "pending_reviews_count": d.pending_reviews_count
@@ -373,14 +541,16 @@ class AnalyticsService:
 
     @staticmethod
     def generate_report(data, user):
-        """Build and store an exportable PDF/CSV/XLSX report instance."""
-        user_name = user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else 'Director General'
+        """
+        Register a report export request. The stored file_url must be a real
+        artifact supplied by the generation pipeline — nothing is fabricated
+        here, and a report without an artifact stays in Pending status.
+        """
+        user_name = (user.get_full_name() or user.email) if getattr(user, 'is_authenticated', False) else 'System'
         fmt = data.get('format', 'PDF').upper()
         title = data.get('title') or f"Agency Leadership Report ({fmt})"
         modules = data.get('modules_included') or ["Project Performance", "Compliance & Regulatory"]
-
-        ext = 'pdf' if fmt == 'PDF' else ('xlsx' if fmt == 'XLSX' else 'csv')
-        report_url = data.get('file_url') or f"https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/reports/report_{uuid.uuid4().hex[:6]}.{ext}"
+        report_url = data.get('file_url') or None
 
         report = GeneratedReport.objects.create(
             title=title,
@@ -389,9 +559,9 @@ class AnalyticsService:
             modules_included=modules,
             period_start=data.get('period_start'),
             period_end=data.get('period_end'),
-            status='Ready',
+            status='Ready' if report_url else 'Pending',
             file_url=report_url,
-            file_size=data.get('file_size', '2.8 MB' if fmt == 'PDF' else '420 KB'),
+            file_size=data.get('file_size'),
             generated_by_name=user_name,
             generated_by=user if getattr(user, 'is_authenticated', False) else None
         )
@@ -420,51 +590,55 @@ class AnalyticsService:
 
     @staticmethod
     def get_department_metrics():
-        """Retrieve or initialize standard department SLA turnaround statistics."""
-        defaults = [
-            {"department_name": "Environmental Dept.", "turnaround_days": 12.0, "target_days": 14.0, "efficiency_percentage": 94, "workload_level": "High", "pending_reviews_count": 14},
-            {"department_name": "Structural Engineering", "turnaround_days": 8.0, "target_days": 10.0, "efficiency_percentage": 98, "workload_level": "Medium", "pending_reviews_count": 8},
-            {"department_name": "Fire & Safety Board", "turnaround_days": 18.0, "target_days": 10.0, "efficiency_percentage": 72, "workload_level": "Critical", "pending_reviews_count": 22},
-            {"department_name": "City Planning Comm.", "turnaround_days": 14.0, "target_days": 15.0, "efficiency_percentage": 88, "workload_level": "High", "pending_reviews_count": 18},
-        ]
-        
-        for d in defaults:
-            DepartmentPerformanceMetric.objects.get_or_create(
-                department_name=d["department_name"],
-                defaults=d
-            )
+        """
+        Department SLA statistics. Records are never seeded — they are either
+        entered by administrators or written by a real measurement pipeline.
+        """
         return DepartmentPerformanceMetric.objects.all()
 
     @staticmethod
     def get_officer_performance():
-        """Retrieve officer rankings and inspection throughput metrics."""
-        defaults = [
-            {"officer_name": "Engr. T. Balogun", "role": "Senior Structural Inspector", "inspections_completed": 64, "sla_adherence_rate": 98, "average_review_days": 2.4, "rank": 1},
-            {"officer_name": "Arc. F. Adebayo", "role": "Lead Architectural Reviewer", "inspections_completed": 52, "sla_adherence_rate": 95, "average_review_days": 3.1, "rank": 2},
-            {"officer_name": "K. Okon (HSE)", "role": "Environmental Compliance Officer", "inspections_completed": 48, "sla_adherence_rate": 91, "average_review_days": 3.8, "rank": 3},
-            {"officer_name": "Engr. M. Danjuma", "role": "MEP Systems Reviewer", "inspections_completed": 39, "sla_adherence_rate": 86, "average_review_days": 4.5, "rank": 4},
-        ]
-
-        for o in defaults:
-            OfficerPerformanceRecord.objects.get_or_create(
-                officer_name=o["officer_name"],
-                defaults=o
-            )
-        return OfficerPerformanceRecord.objects.all()
+        """
+        Materialise officer rankings from real inspection records: completed
+        counts, on-time completion rate and average review duration per
+        inspector. No synthetic officers are created.
+        """
+        existing = {
+            o.officer_name: o
+            for o in OfficerPerformanceRecord.objects.all()
+        }
+        seen_names = set()
+        rank = 0
+        rows = []
+        inspectors = Inspection.objects.filter(
+            inspector__isnull=False
+        ).values('inspector', 'inspector__first_name', 'inspector__last_name', 'inspector__email').annotate(
+            completed=Count('id', filter=Q(status='COMPLETED')),
+            on_time=Count('id', filter=Q(status='COMPLETED', completed_date__lte=F('scheduled_date'))),
+            total=Count('id'),
+        ).order_by('-completed')
+        for row in inspectors:
+            name = (f"{row['inspector__first_name']} {row['inspector__last_name']}").strip() or row['inspector__email']
+            if not name or name in seen_names or row['completed'] == 0:
+                continue
+            seen_names.add(name)
+            rank += 1
+            sla = _pct(row['on_time'], row['completed'])
+            record = existing.get(name)
+            if record is None:
+                record = OfficerPerformanceRecord(officer_name=name, role='', average_review_days=None)
+            record.inspections_completed = row['completed']
+            record.sla_adherence_rate = sla
+            record.rank = rank
+            record.save()
+            rows.append(record)
+        return rows
 
     @staticmethod
     def get_risk_assessments():
-        """Structural collapse risk index alerts and defect hotspots."""
-        project = Project.objects.first()
-        defaults = [
-            {"structure_name": "Sector 4 Elevated Slab (Metro Station)", "risk_score": 88, "risk_level": "Critical", "primary_vulnerability": "Rebar Density Deficiency & High Deflection", "status": "Active Alert"},
-            {"structure_name": "North Basement Retaining Wall (Riverside)", "risk_score": 74, "risk_level": "High", "primary_vulnerability": "Water Table Hydrostatic Pressure Anomaly", "status": "Under Monitoring"},
-            {"structure_name": "Block C Facade Mullion Connectors", "risk_score": 62, "risk_level": "Medium", "primary_vulnerability": "Wind Load Vibration Exceedance", "status": "Mitigated"},
-        ]
-
-        for r in defaults:
-            RiskAssessmentAlert.objects.get_or_create(
-                structure_name=r["structure_name"],
-                defaults={**r, "project": project}
-            )
+        """
+        Risk alerts are raised by real analysis pipelines (correlation engine,
+        inspections, GPR). This method only reads them — it never invents
+        alerts.
+        """
         return RiskAssessmentAlert.objects.all()

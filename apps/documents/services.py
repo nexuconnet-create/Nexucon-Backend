@@ -6,6 +6,7 @@ import mimetypes
 from pathlib import Path
 from django.utils import timezone
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from .models import (
     Document, Version, Approval, DocumentReview, 
     DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder
@@ -30,7 +31,7 @@ def _get_env_val(key, default=''):
     return val or default
 
 R2_BUCKET_NAME = _get_env_val('CLOUDFLARE_R2_BUCKET_NAME', 'nexucondocument')
-R2_ENDPOINT_URL = _get_env_val('CLOUDFLARE_R2_ENDPOINT_URL', 'https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com')
+R2_ENDPOINT_URL = _get_env_val('CLOUDFLARE_R2_ENDPOINT_URL', '')
 R2_API_URL = _get_env_val('CLOUDFLARE_R2_API_URL', f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}")
 
 
@@ -191,7 +192,9 @@ class DocumentService:
             except Exception:
                 project = None
         if not project:
-            project = Project.objects.first()
+            # A document must be registered against a real project — never
+            # silently attached to an arbitrary one.
+            raise ValidationError("A valid project is required to register a document.")
 
         folder_name = data.get('folder', '01_Architectural')
         if isinstance(folder_name, list) and folder_name:

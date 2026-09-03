@@ -39,7 +39,13 @@ class Project(models.Model):
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    
+
+    # Zonal / District jurisdiction assignment (HQ -> District -> Project drill-down).
+    district = models.ForeignKey(
+        'government.District', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='projects', help_text="District office with jurisdiction over this project",
+    )
+
     # 1. Project Information
     name = models.CharField(max_length=255)
     reference_number = models.CharField(max_length=50, unique=True, default=generate_project_ref)

@@ -29,18 +29,22 @@ class ApplicationService:
         from django.contrib.auth import get_user_model
         User = get_user_model()
 
-        # Safely resolve applicant
-        applicant = user if (user and getattr(user, 'is_authenticated', False)) else User.objects.first()
+        # Safely resolve applicant — an application must be attributed to a
+        # real, authenticated submitter; never to an arbitrary user row.
+        if user and getattr(user, 'is_authenticated', False):
+            applicant = user
+        else:
+            raise ValidationError("An authenticated applicant is required to file an application.")
 
-        # Safely resolve project
+        # Safely resolve project — never fall back to an arbitrary project.
         project_val = data.get('project') or data.get('project_id')
         if isinstance(project_val, Project):
             project = project_val
         else:
             try:
                 project = Project.objects.get(id=project_val)
-            except Exception:
-                project = Project.objects.first()
+            except (Project.DoesNotExist, ValueError, TypeError):
+                raise ValidationError("A valid construction project is required to file an application.")
 
         created_by_name = data.get('created_by_name')
         if not created_by_name:

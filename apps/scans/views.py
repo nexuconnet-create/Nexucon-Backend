@@ -11,7 +11,7 @@ from django.db.models import Avg, Count
 from rest_framework import status, serializers, parsers, viewsets
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 
 from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiTypes, extend_schema_field
@@ -30,6 +30,9 @@ from .serializers import (
 )
 from apps.projects.models import Project
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 @extend_schema_field(OpenApiTypes.BINARY)
 class BinaryFileField(serializers.FileField):
@@ -37,7 +40,7 @@ class BinaryFileField(serializers.FileField):
 
 
 class StartSessionView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(request=StartSessionSerializer, responses={201: SessionResponseSerializer})
     def post(self, request):
@@ -50,17 +53,22 @@ class StartSessionView(APIView):
 
 
 class ListSessionsView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(responses={200: SessionResponseSerializer(many=True)})
     def get(self, request):
         sessions = ScanSession.objects.all().order_by('-created_at')
+        # Optional project scoping so the dashboard's project selector actually
+        # changes the data (?project=<uuid>); omitted -> all sessions.
+        project_id = request.query_params.get('project')
+        if project_id:
+            sessions = sessions.filter(project_id=project_id)
         serializer = SessionResponseSerializer(sessions, many=True)
         return Response(serializer.data)
 
 
 class ScanDetailView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -69,19 +77,12 @@ class ScanDetailView(APIView):
 
 
 class ScanStatusView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
-        
-        # Simulate processing time for the demo
-        if session.status == 'processing':
-            from django.utils import timezone
-            import datetime
-            if (timezone.now() - session.updated_at).total_seconds() > 15:
-                session.status = 'completed'
-                session.save()
-                
+        # Status reflects real pipeline state only — the processing tasks set
+        # it from actual analysis results; nothing is simulated here.
         return Response({
             "session_id": str(session.id),
             "status": session.status,
@@ -90,7 +91,7 @@ class ScanStatusView(APIView):
 
 
 class ProjectScansView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id):
         sessions = ScanSession.objects.filter(project_id=project_id).order_by('-created_at')
@@ -99,7 +100,7 @@ class ProjectScansView(APIView):
 
 
 class SubmitMetadataView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(request=ScanMetadataSerializer, responses={201: ScanMetadataSerializer})
     def post(self, request, session_id):
@@ -115,13 +116,38 @@ class SubmitMetadataView(APIView):
 
 
 class FinalizeUploadView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
+
+        if session.status == 'processing':
+            return Response(
+                {"error": "This scan session is already processing. Finalize cannot be re-run until the current pipeline finishes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         session.status = 'processing'
         session.save()
-        
+
+        # Queue the real processing pipeline. The frontend treats "Finalize
+        # Uploads" as the trigger for AI processing, so the Celery task is
+        # dispatched here rather than merely flipping the status field.
+        from apps.processing.tasks import process_scan_pipeline
+        try:
+            process_scan_pipeline.delay(str(session.id))
+        except Exception as exc:
+            # Broker unavailable (e.g. Celery broker down, WinError 10061).
+            # Report the failure honestly — never claim the scan was queued
+            # when it wasn't — and reset the session so Finalize can be retried.
+            logger.warning(f"Could not queue scan pipeline for {session.id}: {exc}")
+            session.status = 'initialized'
+            session.save(update_fields=['status'])
+            return Response(
+                {"error": "Processing could not be queued (task broker unavailable). Please retry shortly."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         from apps.audit.services import AuditService
         try:
             AuditService.log_event(
@@ -137,7 +163,7 @@ class FinalizeUploadView(APIView):
 
 
 class UploadLidarView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request, session_id):
@@ -156,11 +182,11 @@ class UploadLidarView(APIView):
             file_size_bytes=file_obj.size,
             file_url=secure_url
         )
-        return Response(ScanFileSerializer(scan_file).data, status=status.HTTP_201_CREATED)
+        return Response({"message": "LiDAR data uploaded successfully", "url": scan_file.file_url})
 
 
 class UploadRgbView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request, session_id):
@@ -186,7 +212,7 @@ class UploadRgbView(APIView):
         return Response({"message": "RGB image uploaded successfully", "url": session.rgb_url})
 
 class UploadThermalView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request, session_id):
@@ -213,7 +239,7 @@ class UploadThermalView(APIView):
 
 
 class UploadGpsView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request, session_id):
@@ -236,7 +262,7 @@ class UploadGpsView(APIView):
 
 
 class UploadGaussianSplatView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request, session_id):
@@ -259,7 +285,7 @@ class UploadGaussianSplatView(APIView):
 
 
 class UploadBimView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request, session_id):
@@ -284,7 +310,7 @@ class UploadBimView(APIView):
 
 
 class ScanFilesListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         files = ScanFile.objects.filter(session_id=session_id)
@@ -292,7 +318,7 @@ class ScanFilesListView(APIView):
 
 
 class StartAiProcessingView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -403,7 +429,7 @@ class StartAiProcessingView(APIView):
 
 
 class StreamAiProcessingView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -523,7 +549,7 @@ class StreamAiProcessingView(APIView):
 
 
 class AiProcessingStatusView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         tasks = ProcessingTask.objects.filter(session_id=session_id)
@@ -531,7 +557,7 @@ class AiProcessingStatusView(APIView):
 
 
 class DefectsListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         defects = Defect.objects.filter(session_id=session_id)
@@ -539,7 +565,7 @@ class DefectsListView(APIView):
 
 
 class DefectDetailView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def patch(self, request, session_id, defect_id):
         defect = get_object_or_404(Defect, id=defect_id, session_id=session_id)
@@ -550,7 +576,7 @@ class DefectDetailView(APIView):
 
 
 class ThermalAnomaliesListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         anomalies = ThermalAnomaly.objects.filter(session_id=session_id)
@@ -558,7 +584,7 @@ class ThermalAnomaliesListView(APIView):
 
 
 class ThermalAnomalyDetailView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def patch(self, request, session_id, anomaly_id):
         anomaly = get_object_or_404(ThermalAnomaly, id=anomaly_id, session_id=session_id)
@@ -570,18 +596,21 @@ class ThermalAnomalyDetailView(APIView):
 
 
 class AlignBimView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, session_id):
         import tempfile
         session = get_object_or_404(ScanSession, id=session_id)
         from apps.scans.services import run_bim_alignment
         alignment = run_bim_alignment(session)
-        return Response(BIMAlignmentResultSerializer(alignment).data)
+        data = BIMAlignmentResultSerializer(alignment).data
+        data["status"] = "COMPLETED"
+        data["message"] = "BIM alignment completed."
+        return Response(data, status=status.HTTP_202_ACCEPTED)
 
 
 class StreamBimAlignmentView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         import threading
@@ -617,7 +646,7 @@ class StreamBimAlignmentView(APIView):
 
 
 class DeviationAnalysisView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -643,7 +672,7 @@ class DeviationAnalysisView(APIView):
 
 
 class DeviationHeatmapView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -716,7 +745,7 @@ class DeviationHeatmapView(APIView):
                 if not alignment:
                     alignment = BIMAlignmentResult.objects.create(
                         session=session,
-                        alignment_status='COMPLETED',
+                        alignment_status='SUCCESS',
                         transformation_matrix={"status": "aligned", "source": "SLAM_RTK"},
                         mean_deviation=mean_val,
                         max_deviation=max_val,
@@ -750,7 +779,7 @@ class DeviationHeatmapView(APIView):
 
 
 class ClashDetectionView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         scan = get_object_or_404(ScanSession, id=session_id)
@@ -777,7 +806,7 @@ class ClashDetectionView(APIView):
 
 
 class ProgressValidationView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -866,28 +895,28 @@ class ProgressValidationView(APIView):
 
 
 class SyncTrimbleConnectView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, session_id):
         return Response({"status": "synced", "message": "Trimble Connect synced."})
 
 
 class TrimbleAuthView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return Response({"url": "https://identity.trimble.com/oauth/authorize"})
 
 
 class TrimbleCallbackView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return Response({"status": "authenticated"})
 
 
 class ComplianceCheckListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         session_id = request.query_params.get('session_id')
@@ -903,7 +932,7 @@ class FleetStatusView(APIView):
     Fleet overview: every registered device with its last known position and
     live survey activity. Backs the fleet map and device panels.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(summary="Fleet status for all scanner devices", tags=["Scanners"])
     def get(self, request):
@@ -974,14 +1003,14 @@ class FleetStatusView(APIView):
 
 
 class GnssTelemetryView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         telemetry = GnssTelemetry.objects.all()
         return Response(GnssTelemetrySerializer(telemetry, many=True).data)
 
 class QAInsightsView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from django.db.models import Avg
@@ -1035,7 +1064,7 @@ class QAInsightsView(APIView):
         })
 
 class IntegrationSettingsView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from apps.accounts.models import ApiKey
@@ -1080,7 +1109,7 @@ class IntegrationSettingsView(APIView):
         return Response({"error": "Invalid action"}, status=400)
 
 class ComplianceCertificateView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         certs = ComplianceCertificate.objects.filter(session_id=session_id)
@@ -1119,7 +1148,7 @@ class ComplianceCertificateView(APIView):
 
 
 class ScanPlanViewSet(viewsets.ModelViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     queryset = ScanPlan.objects.all()
     serializer_class = ScanPlanSerializer
 
@@ -1133,7 +1162,7 @@ class StopWorkFlagView(APIView):
     flag is already active for the same session it is returned unchanged
     rather than duplicated.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         session = get_object_or_404(ScanSession, id=session_id)
@@ -1282,13 +1311,13 @@ class StopWorkFlagView(APIView):
 
 
 class ScannerViewSet(viewsets.ModelViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     queryset = Scanner.objects.all()
     serializer_class = ScannerSerializer
 
 
 class DeleteScanFileView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     def delete(self, request, session_id, file_id):
         file = get_object_or_404(ScanFile, id=file_id, session_id=session_id)
         file.delete()
@@ -1306,7 +1335,7 @@ class ScanFileContentView(APIView):
     always-fresh URL.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(summary="Stream scan file content", tags=["Scan Files"])
     def get(self, request, session_id, file_id):
@@ -1354,7 +1383,7 @@ class ApiDocsView(APIView):
     what this deployment actually supports: JWT authentication, the OpenAPI
     schema, and the webhook event types the notification service emits.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(summary="Digital Eye integration documentation", tags=["Scanners"])
     def get(self, request):

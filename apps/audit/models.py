@@ -29,8 +29,8 @@ class AuditEvent(models.Model):
         blank=True,
         related_name='audit_events'
     )
-    user_name = models.CharField(max_length=255, default='System Officer')
-    user_role = models.CharField(max_length=100, default='Government Officer')
+    user_name = models.CharField(max_length=255, default='System')
+    user_role = models.CharField(max_length=100, default='System')
     user_email = models.EmailField(null=True, blank=True)
     
     action = models.CharField(max_length=100, db_index=True)
@@ -38,7 +38,7 @@ class AuditEvent(models.Model):
     resource_type = models.CharField(max_length=100, db_index=True)
     resource_id = models.CharField(max_length=255, db_index=True)
     session_id = models.UUIDField(null=True, blank=True, help_text="UUID of the parent ScanSession, for easy timeline queries.")
-    project_name = models.CharField(max_length=255, default='Central Metro Transit Hub')
+    project_name = models.CharField(max_length=255, blank=True, null=True)
     
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.TextField(blank=True, null=True)
@@ -49,7 +49,7 @@ class AuditEvent(models.Model):
     metadata = models.JSONField(default=dict, blank=True)
     
     severity = models.CharField(max_length=50, choices=SEVERITY_CHOICES, default='Normal', db_index=True)
-    signature_hash = models.CharField(max_length=255, default='0x8f4e2c9b1a7d3e5f')
+    signature_hash = models.CharField(max_length=255, blank=True, null=True)
     is_verified = models.BooleanField(default=True)
     
     class Meta:
@@ -67,7 +67,7 @@ class AuditEvent(models.Model):
         # Strict immutability: existing records can NEVER be updated
         if self.pk and AuditEvent.objects.filter(pk=self.pk).exists():
             raise PermissionDenied("Audit records are immutable append-only. Modification is strictly forbidden.")
-        if not self.signature_hash or self.signature_hash == '0x8f4e2c9b1a7d3e5f':
+        if not self.signature_hash:
             salt = uuid.uuid4().hex[:8]
             raw = hashlib.sha256(f"{self.action}:{self.resource_type}:{self.resource_id}:{salt}".encode('utf-8')).hexdigest()[:14]
             self.signature_hash = f"0x{raw}"

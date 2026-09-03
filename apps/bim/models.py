@@ -55,11 +55,11 @@ class BIMModel(models.Model):
     hash_signature = models.CharField(max_length=255, blank=True, null=True)
     
     lod = models.CharField(max_length=50, default='LOD 300')
-    element_count = models.IntegerField(default=12450)
+    element_count = models.IntegerField(default=0)
     coordinate_system = models.JSONField(default=dict, blank=True, help_text="Georeferencing CRS and origin coordinates")
     
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='uploaded_bim_models')
-    uploaded_by_name = models.CharField(max_length=255, default='BIM Coordinator')
+    uploaded_by_name = models.CharField(max_length=255, blank=True, null=True)
     
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -179,7 +179,7 @@ class BIMAnnotation(models.Model):
     model = models.ForeignKey(BIMModel, on_delete=models.CASCADE, related_name='annotations')
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='bim_annotations')
     
-    author_name = models.CharField(max_length=255, default='Sarah Jenkins')
+    author_name = models.CharField(max_length=255, blank=True, null=True)
     author_role = models.CharField(max_length=255, default='Lead Architect')
     text = models.TextField()
     
@@ -310,8 +310,8 @@ class BIMProgressValidation(models.Model):
     schedule_status = models.CharField(max_length=50, choices=SCHEDULE_STATUS, default='ON_TRACK')
     days_variance = models.IntegerField(default=0, help_text="Negative for days behind, positive for days ahead")
     
-    completed_elements_count = models.IntegerField(default=4205)
-    total_elements_count = models.IntegerField(default=9500)
+    completed_elements_count = models.IntegerField(default=0)
+    total_elements_count = models.IntegerField(default=0)
     earned_value_usd = models.CharField(max_length=50, default='$2.4M')
     
     planned_vs_actual = models.JSONField(default=list, blank=True)

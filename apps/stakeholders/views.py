@@ -20,11 +20,9 @@ from .translation import TranslationService
 class DeveloperViewSet(viewsets.ModelViewSet):
     queryset = Developer.objects.all().order_by('-created_at')
     serializer_class = DeveloperSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         if search:
@@ -44,11 +42,9 @@ class DeveloperViewSet(viewsets.ModelViewSet):
 class ContractorViewSet(viewsets.ModelViewSet):
     queryset = Contractor.objects.all().order_by('-created_at')
     serializer_class = ContractorSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         if search:
@@ -74,11 +70,9 @@ class ContractorViewSet(viewsets.ModelViewSet):
 class ConsultantViewSet(viewsets.ModelViewSet):
     queryset = Consultant.objects.all().order_by('-created_at')
     serializer_class = ConsultantSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         specialty = self.request.query_params.get('specialty')
@@ -101,11 +95,9 @@ class ConsultantViewSet(viewsets.ModelViewSet):
 class InspectorViewSet(viewsets.ModelViewSet):
     queryset = Inspector.objects.all().order_by('-created_at')
     serializer_class = InspectorSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         zone = self.request.query_params.get('zone')
         search = self.request.query_params.get('search')
@@ -137,11 +129,9 @@ class InspectorViewSet(viewsets.ModelViewSet):
 class LicensedProfessionalViewSet(viewsets.ModelViewSet):
     queryset = LicensedProfessional.objects.all().order_by('-created_at')
     serializer_class = LicensedProfessionalSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         authority = self.request.query_params.get('authority')
         search = self.request.query_params.get('search')
@@ -162,18 +152,19 @@ class LicensedProfessionalViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='verify-license')
     def verify_license(self, request, pk=None):
-        prof = StakeholderService.verify_professional_license(pk, request.user)
+        try:
+            prof = StakeholderService.verify_professional_license(pk, request.user)
+        except (LicensedProfessional.DoesNotExist, ValueError):
+            return Response({"error": f"Licensed professional not found: {pk}"}, status=status.HTTP_404_NOT_FOUND)
         return Response(LicensedProfessionalSerializer(prof).data, status=status.HTTP_200_OK)
 
 
 class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
     queryset = ProjectStakeholderTeam.objects.all().order_by('-created_at')
     serializer_class = ProjectStakeholderTeamSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         if search:
@@ -186,7 +177,10 @@ class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
         member_data = request.data.get('member_data')
         if not role_key or not member_data:
             return Response({"error": "role_key and member_data are required"}, status=status.HTTP_400_BAD_REQUEST)
-        team = StakeholderService.add_team_member(pk, role_key, member_data, request.user)
+        try:
+            team = StakeholderService.add_team_member(pk, role_key, member_data, request.user)
+        except (ProjectStakeholderTeam.DoesNotExist, ValueError):
+            return Response({"error": f"Team not found: {pk}"}, status=status.HTTP_404_NOT_FOUND)
         return Response(ProjectStakeholderTeamSerializer(team).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='remove-member')
@@ -194,15 +188,17 @@ class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
         role_key = request.data.get('role_key')
         if not role_key:
             return Response({"error": "role_key is required"}, status=status.HTTP_400_BAD_REQUEST)
-        team = StakeholderService.remove_team_member(pk, role_key, request.user)
+        try:
+            team = StakeholderService.remove_team_member(pk, role_key, request.user)
+        except (ProjectStakeholderTeam.DoesNotExist, ValueError):
+            return Response({"error": f"Team not found: {pk}"}, status=status.HTTP_404_NOT_FOUND)
         return Response(ProjectStakeholderTeamSerializer(team).data, status=status.HTTP_200_OK)
 
 
 class BlacklistRecordViewSet(viewsets.ModelViewSet):
     queryset = BlacklistRecord.objects.all().order_by('-blacklisted_at')
     serializer_class = BlacklistRecordSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     @action(detail=False, methods=['post'], url_path='toggle')
     def toggle(self, request):
@@ -222,11 +218,9 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
     queryset = StakeholderMeeting.objects.all().order_by('-date', '-created_at')
     serializer_class = StakeholderMeetingSerializer
     lookup_value_regex = r'[^/]+'
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         return super().get_queryset()
 
     def get_object(self):
@@ -261,13 +255,19 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='join')
     def join_meeting(self, request, pk=None):
-        updated_meeting = StakeholderService.join_meeting(pk, request.data, request.user)
+        try:
+            updated_meeting = StakeholderService.join_meeting(pk, request.data, request.user)
+        except ValueError as ex:
+            return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(StakeholderMeetingSerializer(updated_meeting).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post', 'patch'], url_path='notes')
     def update_notes(self, request, pk=None):
         notes = request.data.get('notes', '')
-        updated_meeting = StakeholderService.update_meeting_notes(pk, notes, request.user)
+        try:
+            updated_meeting = StakeholderService.update_meeting_notes(pk, notes, request.user)
+        except ValueError as ex:
+            return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(StakeholderMeetingSerializer(updated_meeting).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='vote')
@@ -276,7 +276,10 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
         voter_role = request.data.get('voter_role', 'Stakeholder')
         vote = request.data.get('vote', 'YES')
         res_title = request.data.get('resolution_title')
-        res = StakeholderService.cast_meeting_vote(pk, voter_name, voter_role, vote, res_title, request.user)
+        try:
+            res = StakeholderService.cast_meeting_vote(pk, voter_name, voter_role, vote, res_title, request.user)
+        except ValueError as ex:
+            return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(res, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='add-action-item')
@@ -286,18 +289,19 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
         due_date = request.data.get('due_date', 'Within 5 Business Days')
         if not title:
             return Response({"error": "title is required"}, status=status.HTTP_400_BAD_REQUEST)
-        item = StakeholderService.add_meeting_action_item(pk, title, assignee, due_date, request.user)
+        try:
+            item = StakeholderService.add_meeting_action_item(pk, title, assignee, due_date, request.user)
+        except ValueError as ex:
+            return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(MeetingActionItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
 
 class StakeholderMessageViewSet(viewsets.ModelViewSet):
     queryset = StakeholderMessage.objects.all().order_by('created_at')
     serializer_class = StakeholderMessageSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        StakeholderService.seed_initial_stakeholders()
         qs = super().get_queryset()
         channel = self.request.query_params.get('channel')
         if channel and channel.upper() != 'ALL':
@@ -321,19 +325,16 @@ class StakeholderMessageViewSet(viewsets.ModelViewSet):
 class CertificationViewSet(viewsets.ModelViewSet):
     queryset = Certification.objects.all().order_by('-created_at')
     serializer_class = CertificationSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
 class TrainingRecordViewSet(viewsets.ModelViewSet):
     queryset = TrainingRecord.objects.all().order_by('-created_at')
     serializer_class = TrainingRecordSerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
 
 class StakeholderStatsViewSet(viewsets.ViewSet):
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def list(self, request):
         stats = StakeholderService.get_stakeholder_stats()
