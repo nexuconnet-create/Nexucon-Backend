@@ -12,10 +12,13 @@ from .serializers import (
     UserMeSerializer,
 )
 from .models import UserSession, EmailVerificationToken
+from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.utils import timezone
 from rest_framework_simplejwt.exceptions import TokenError
 from apps.notifications.email_service import EmailService
+
+User = get_user_model()
 
 
 class CustomLoginView(TokenObtainPairView):
@@ -119,6 +122,71 @@ class UserRegistrationView(generics.CreateAPIView):
     serializer_class = UserRegistrationSerializer
 
     def create(self, request, *args, **kwargs):
+        email = (request.data.get('email') or '').strip().lower()
+        password = request.data.get('password')
+
+        # Check if user already exists
+        if email:
+            existing_user = User.objects.filter(email__iexact=email).first()
+            if existing_user:
+                if existing_user.is_verified:
+                    return Response({
+                        'success': False,
+                        'message': 'An account with this email address already exists. Please log in instead.',
+                        'data': None,
+                        'errors': {
+                            'email': ['An account with this email address already exists. Please log in instead.']
+                        }
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    # User exists but is NOT verified yet. Update credentials & issue fresh OTP
+                    if password:
+                        if len(password) < 8:
+                            return Response({
+                                'success': False,
+                                'message': 'Password must be at least 8 characters long.',
+                                'data': None,
+                                'errors': {'password': ['Password must be at least 8 characters long.']}
+                            }, status=status.HTTP_400_BAD_REQUEST)
+                        existing_user.set_password(password)
+
+                    if request.data.get('first_name'):
+                        existing_user.first_name = request.data.get('first_name')
+                    if request.data.get('last_name'):
+                        existing_user.last_name = request.data.get('last_name')
+                    if request.data.get('phone_number'):
+                        existing_user.phone_number = request.data.get('phone_number')
+                    existing_user.save()
+                    user = existing_user
+
+                    # Generate 6-digit email verification token
+                    otp_token = EmailVerificationToken.generate_token(email=user.email, user=user)
+
+                    # Dispatch verification email via Resend
+                    full_name = f"{user.first_name} {user.last_name}".strip() or user.username
+                    try:
+                        EmailService.send_verification_otp_email(
+                            email=user.email,
+                            name=full_name,
+                            otp_code=otp_token.code,
+                            expires_minutes=15
+                        )
+                    except Exception as e:
+                        import logging
+                        logging.getLogger(__name__).error(f"Failed to send verification email to {user.email}: {e}")
+
+                    return Response({
+                        'success': True,
+                        'message': 'We have sent a 6-digit verification code to your email address.',
+                        'data': {
+                            'user': UserMeSerializer(user).data,
+                            'email': user.email,
+                            'requires_verification': True,
+                            'is_verified': False,
+                        },
+                        'errors': None
+                    }, status=status.HTTP_200_OK)
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
