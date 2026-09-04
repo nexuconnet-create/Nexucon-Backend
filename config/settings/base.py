@@ -27,33 +27,51 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dummy-secret-key-for-dev-only" if D
 if not SECRET_KEY and not DEBUG:
     raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=False.")
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
-CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_HEADERS = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://localhost:3002",
-    "http://127.0.0.1:3002",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    "http://192.168.0.196:3000",
+    "https://api.nexucon.net",
+    "http://api.nexucon.net",
+    "https://nexucon.net",
+    "http://nexucon.net",
+    "http://187.7.20.123",
+    "http://187.7.20.123:8000",
     "https://nexucon-backend.onrender.com",
     "https://nexucon-frontend-8x3a.vercel.app",
 ]
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://localhost:3002",
-    "http://127.0.0.1:3002",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "https://api.nexucon.net",
+    "http://api.nexucon.net",
+    "https://nexucon.net",
+    "http://nexucon.net",
+    "http://187.7.20.123",
+    "http://187.7.20.123:8000",
     "https://*.vercel.app",
     "https://nexucon-backend.onrender.com",
 ]
+
+# Dynamically add any env-defined origins
+for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS", "DJANGO_ALLOWED_HOSTS"):
+    _val = os.getenv(_env_key, "").strip()
+    if _val:
+        for _item in _val.split(","):
+            _cleaned = _item.strip().rstrip("/")
+            if _cleaned and _cleaned != "*":
+                if _cleaned not in CORS_ALLOWED_ORIGINS:
+                    CORS_ALLOWED_ORIGINS.append(_cleaned)
+                if _cleaned not in CSRF_TRUSTED_ORIGINS:
+                    CSRF_TRUSTED_ORIGINS.append(_cleaned)
+                if not _cleaned.startswith("http://") and not _cleaned.startswith("https://"):
+                    CSRF_TRUSTED_ORIGINS.append(f"https://{_cleaned}")
+                    CSRF_TRUSTED_ORIGINS.append(f"http://{_cleaned}")
 
 INSTALLED_APPS = [
     'django.contrib.admin',
