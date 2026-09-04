@@ -1,13 +1,15 @@
 """
-Digital Eye API serializers (implementation plan §5A, Weeks 1–3).
+Digital Eye API serializers.
 """
 from rest_framework import serializers
 
 from common.permissions import scoped_projects
 from .models import (
-    BIMElementMapping, FieldDevice, GPRAnomaly, GPRSurvey, GnssBenchmark,
-    GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITTest, SensorDataFile,
-    TrimbleConnection, TrimbleProject,
+    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, DeviceReportRecord,
+    DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan,
+    GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream,
+    PUNDITTest, ProcessingQueueJob, SensorDataFile, TrimbleConnection,
+    TrimbleProject,
 )
 
 
@@ -79,11 +81,8 @@ class GPRAnomalySerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
     def validate(self, attrs):
-        # Rebar detections should carry a cover measurement when possible.
         anomaly_type = attrs.get('anomaly_type')
         if anomaly_type == 'rebar' and attrs.get('rebar_cover_mm') is None:
-            # Allowed (cover may genuinely be unmeasured) but flagged in the
-            # description if not mentioned.
             if not attrs.get('description'):
                 attrs['description'] = 'Rebar detected; cover not measured.'
         return attrs
@@ -117,25 +116,25 @@ class GPRSurveySerializer(serializers.ModelSerializer):
 
 
 class PUNDITTestSerializer(serializers.ModelSerializer):
-    project = ScopedProjectField()
+    project = ScopedProjectField(required=False, allow_null=True)
+    test_type_display = serializers.CharField(source='get_test_type_display', read_only=True)
+    quality_grade_display = serializers.CharField(source='get_quality_grade_display', read_only=True)
+    transducer_type_display = serializers.CharField(source='get_transducer_type_display', read_only=True)
     file_ids = serializers.PrimaryKeyRelatedField(
         many=True, queryset=SensorDataFile.objects.all(), source='files',
         required=False, write_only=True,
     )
     files = SensorDataFileSerializer(many=True, read_only=True)
-    test_type_display = serializers.CharField(source='get_test_type_display', read_only=True)
-    quality_grade_display = serializers.CharField(source='get_quality_grade_display', read_only=True)
-    transducer_type_display = serializers.CharField(source='get_transducer_type_display', read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True)
 
     def get_estimated_compressive_strength_mpa(self, obj):
         """
         Estimated compressive strength (E.C.S) from pulse velocity, using the
         documented calibration curve that the official NDT report renders
-        (apps.reports.ndt_reports) — single source of truth. Returns None when
-        the velocity is missing or outside the curve's valid 2.0–5.0 km/s
-        range (never extrapolated).
+        (apps.reports.ndt_reports) — single source of truth.
         """
+        if obj.estimated_compressive_strength_mpa is not None:
+            return obj.estimated_compressive_strength_mpa
         from apps.reports.ndt_reports import estimated_compressive_strength
         return estimated_compressive_strength(obj.velocity_km_s)
 
@@ -145,15 +144,18 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         model = PUNDITTest
         fields = [
             'id', 'test_reference', 'project', 'project_name', 'device', 'scan_session',
+            'project_id_str', 'structural_element_id_str', 'structural_element_name',
+            'structural_element_guid', 'device_model',
             'test_type', 'test_type_display', 'structural_element',
             'transducer_frequency_khz', 'transducer_type', 'transducer_type_display',
             'test_location',
-            'path_length_mm', 'pulse_time_us',
+            'path_length_mm', 'pulse_time_us', 'transit_time_us',
             'crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us',
             'surface_temperature_c', 'surface_condition', 'latitude', 'longitude',
-            'velocity_km_s', 'quality_grade', 'quality_grade_display',
-            'estimated_compressive_strength_mpa',
-            'crack_depth_mm', 'operator', 'operator_name', 'tested_at', 'notes',
+            'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
+            'concrete_quality_rating', 'estimated_compressive_strength_mpa',
+            'crack_depth_mm', 'estimated_crack_depth_mm', 'waveform_samples',
+            'operator', 'operator_name', 'tested_at', 'test_date', 'status', 'notes',
             'file_ids', 'files', 'created_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'test_reference', 'velocity_km_s', 'quality_grade',
@@ -165,6 +167,8 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         if test_type == 'pulse_velocity':
             for field in ('path_length_mm', 'pulse_time_us'):
                 value = attrs.get(field, getattr(self.instance, field, None) if self.instance else None)
+                if value is None and field == 'pulse_time_us':
+                    value = attrs.get('transit_time_us', getattr(self.instance, 'transit_time_us', None) if self.instance else None)
                 if value is None:
                     raise serializers.ValidationError(
                         {field: 'Required for pulse-velocity testing (BS 1881-203).'})
@@ -177,6 +181,12 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         {field: 'Required for crack-depth (time-difference) testing.'})
         return attrs
+
+
+class PunditTestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PUNDITTest
+        fields = '__all__'
 
 
 class GnssBenchmarkSerializer(serializers.ModelSerializer):
@@ -261,8 +271,11 @@ class TrimbleConnectionSerializer(serializers.ModelSerializer):
             'id', 'name', 'status', 'status_display', 'scope',
             'trimble_user_id', 'trimble_user_name', 'last_health_check_at',
             'last_health_status', 'last_error', 'created_by', 'created_at', 'updated_at',
+            'project', 'project_id_str', 'project_name', 'trimble_project_id',
+            'trimble_project_name', 'region', 'last_sync_at', 'synced_models_count',
+            'synced_elements_count', 'bcf_topics_count', 'webhook_active',
         ]
-        # authorization_code / pkce_verifier / tokens are never serialized out.
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class LiveStreamSerializer(serializers.ModelSerializer):
@@ -291,10 +304,51 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         return None
 
     def validate(self, attrs):
-        # When a stream is anchored to a BIM element, adopt its coordinates.
         element = attrs.get('mapped_element') or (
             self.instance.mapped_element if self.instance else None)
         if element and not (attrs.get('mapped_coordinates') or
                             (self.instance and self.instance.mapped_coordinates)):
             attrs['mapped_coordinates'] = element.coordinates
         return attrs
+
+
+class BIMStructuralElementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BIMStructuralElement
+        fields = '__all__'
+
+
+class GPRScanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GPRScan
+        fields = '__all__'
+
+
+class DigitalEyeFindingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DigitalEyeFinding
+        fields = '__all__'
+
+
+class AIAnalysisRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIAnalysisRecord
+        fields = '__all__'
+
+
+class ProcessingQueueJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProcessingQueueJob
+        fields = '__all__'
+
+
+class EvidenceSpatialPointSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EvidenceSpatialPoint
+        fields = '__all__'
+
+
+class DeviceReportRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DeviceReportRecord
+        fields = '__all__'

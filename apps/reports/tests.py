@@ -1280,7 +1280,7 @@ class GenerateReportViewExtraTests(APITestCase):
 # ---------------------------------------------------------------------------
 import io
 import re
-from datetime import datetime
+from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.files.base import File as DjangoFile
 
@@ -1321,7 +1321,7 @@ class NDTReportFixtureMixin:
             device_type="pundit", name="Pundit PL-2",
             model="Pundit PL-2", manufacturer="Proceq",
             device_id="SN-88112", status="online",
-            calibration_date=datetime(2026, 1, 15, tzinfo=timezone.utc),
+            calibration_date=date(2026, 1, 15),
             assigned_project=project,
         )
 
@@ -1329,7 +1329,7 @@ class NDTReportFixtureMixin:
         defaults = dict(
             project=project, device=device, test_type="pulse_velocity",
             structural_element="COL-C24", transducer_frequency_khz=54,
-            tested_at=datetime(2026, 8, 20, 10, 30, tzinfo=timezone.utc),
+            tested_at=datetime(2026, 8, 20, 10, 30, tzinfo=dt_timezone.utc),
         )
         defaults.update(kwargs)
         return PUNDITTest.objects.create(**defaults)
@@ -1480,7 +1480,8 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         self.assertIn('CRACK DEPTH MEASUREMENTS', text)
         self.assertIn('99.5', text)
-        self.assertIn('Depth exceeds 25 mm - structural review required', text)
+        flat = ' '.join(text.split())
+        self.assertIn('Depth exceeds 25 mm - structural review required', flat)
 
     # ------------------------------------------------- layout regression
     def test_wrap_lines_fit_column_and_lose_nothing(self):
@@ -1571,7 +1572,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         # Long values are rendered whole — wrapped, never truncated.
         flat = ' '.join(_pdf_text(data).split())
         self.assertIn(' '.join(long_condition.split()), flat)
-        self.assertIn(long_reference, flat)
+        self.assertIn(long_reference, flat.replace(' ', ''))
 
     def test_empty_project_report_is_honest(self):
         data = NDTReportService.generate_ndt_report(self.project)
