@@ -15,12 +15,15 @@ class ScanService:
         session = ScanSession.objects.create(status='initialized', **validated_data)
         from apps.audit.services import AuditService
         AuditService.log_event(
+            action='SESSION_CREATED',
+            resource_type='ScanSession',
+            resource_id=str(session.id),
             event_type='session_created',
-            entity_type='scan_session',
-            entity_id=session.id,
-            session_id=session.id,
-            new_value='initialized',
-            description=f'Scan session created with scanner {session.scanner_id}.',
+            new_state='initialized',
+            metadata={
+                'description': f'Scan session created with scanner {session.scanner_id}.',
+                'scanner_id': session.scanner_id,
+            },
         )
         return session
 
@@ -34,13 +37,13 @@ class ScanService:
         session.save()
         from apps.audit.services import AuditService
         AuditService.log_event(
+            action='SCAN_STATUS_CHANGED',
+            resource_type='ScanSession',
+            resource_id=str(session.id),
             event_type='status_changed',
-            entity_type='scan_session',
-            entity_id=session.id,
-            session_id=session.id,
-            old_value=old_status,
-            new_value='processing',
-            description='Upload finalized; scan queued for processing.',
+            previous_state=old_status,
+            new_state='processing',
+            metadata={'description': 'Upload finalized; scan queued for processing.'},
         )
         
         # Dispatch background processing task via Celery
@@ -136,7 +139,7 @@ def run_bim_alignment(session):
 
     alignment = BIMAlignmentResult.objects.create(
         session=session,
-        alignment_status='completed',
+        alignment_status='SUCCESS',
         transformation_matrix=result.get("alignment") or {"status": "unaligned", "reason": "no_point_cloud"},
         mean_deviation=deviations.get("mean_mm"),
         max_deviation=deviations.get("max_mm"),
@@ -312,12 +315,6 @@ class DataFusionService:
             except Exception as e:
                 logger.warning(f"Error creating thermal anomaly: {e}")
 
-    @staticmethod
-    def generate_3dgs_model(session: ScanSession) -> None:
-        """
-        Fuses RGB images and sparse LiDAR parameters to generate a 3D Gaussian Splatting model.
-        """
-        # Simulates 3DGS pipeline saving the splat file metadata link
     @staticmethod
     def calculate_progress(session: ScanSession):
         """

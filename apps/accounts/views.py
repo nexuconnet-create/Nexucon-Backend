@@ -20,6 +20,39 @@ class CustomLoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
+        # --- Two-factor enforcement (plan §5 Week 6: mobile JWT + 2FA) -----
+        from django.contrib.auth import get_user_model
+        from .models import TwoFactorSecret
+        from .two_factor import verify_code
+
+        email = (request.data.get('email') or '').strip().lower()
+        if email:
+            User = get_user_model()
+            user = User.objects.filter(email__iexact=email).first()
+            if user and user.is_active:
+                two_factor = getattr(user, 'two_factor', None)
+                if two_factor and two_factor.is_enabled:
+                    code = request.data.get('totp_code')
+                    if not code:
+                        return Response({
+                            'success': False,
+                            'message': 'Two-factor authentication code required.',
+                            'data': {'mfa_required': True, 'mfa_method': 'totp'},
+                            'errors': [{'field': 'totp_code', 'message': 'Provide the 6-digit code from your authenticator app.'}],
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    if not verify_code(two_factor.secret, str(code),
+                                       last_used_counter=two_factor.last_used_counter):
+                        return Response({
+                            'success': False,
+                            'message': 'Invalid or expired two-factor code.',
+                            'data': {'mfa_required': True, 'mfa_method': 'totp'},
+                            'errors': [{'field': 'totp_code', 'message': 'Invalid or expired code.'}],
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    # Mark the step used so the code cannot be replayed.
+                    import time as _time
+                    two_factor.last_used_counter = int(_time.time()) // 30
+                    two_factor.save(update_fields=['last_used_counter', 'updated_at'])
+
         response = super().post(request, *args, **kwargs)
         if response.status_code == 200:
             access_token = response.data.get('access')
@@ -340,3 +373,84 @@ class ApiKeyViewSet(viewsets.ModelViewSet):
         api_key = self.get_object()
         api_key.revoke()
         return Response(ApiKeySerializer(api_key).data)
+
+
+# ---------------------------------------------------------------------------
+# Two-factor authentication (TOTP) — plan §5 Week 6: mobile JWT + 2FA
+# ---------------------------------------------------------------------------
+from django.utils import timezone as django_timezone
+
+from .models import TwoFactorSecret
+from . import two_factor as tf
+
+
+class TwoFactorStatusView(APIView):
+    """GET /api/v1/auth/2fa/ — current 2FA status for the signed-in user."""
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        config = getattr(request.user, 'two_factor', None)
+        return Response({
+            'enabled': bool(config and config.is_enabled),
+            'pending_setup': bool(config and not config.is_enabled),
+        })
+
+
+class TwoFactorSetupView(APIView):
+    """
+    POST /api/v1/auth/2fa/setup/ — start 2FA enrollment. Returns the base32
+    secret and an otpauth:// provisioning URI. 2FA stays disabled until the
+    user verifies a live code (TwoFactorVerifyView).
+    """
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        secret = tf.generate_secret()
+        config, _ = TwoFactorSecret.objects.update_or_create(
+            user=request.user,
+            defaults={'secret': secret, 'is_enabled': False, 'confirmed_at': None},
+        )
+        return Response({
+            'secret': secret,
+            'provisioning_uri': tf.provisioning_uri(
+                secret, request.user.email, issuer='Nexucon'),
+            'detail': 'Add the secret to your authenticator app, then verify a '
+                      'code at /api/v1/auth/2fa/verify/ to enable 2FA.',
+        }, status=status.HTTP_201_CREATED)
+
+
+class TwoFactorVerifyView(APIView):
+    """POST /api/v1/auth/2fa/verify/ {code} — confirm enrollment and enable 2FA."""
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        config = getattr(request.user, 'two_factor', None)
+        if not config:
+            return Response({'detail': 'No 2FA setup in progress — call /api/v1/auth/2fa/setup/ first.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        code = str(request.data.get('code') or '')
+        if not tf.verify_code(config.secret, code):
+            return Response({'detail': 'Invalid or expired code.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        config.is_enabled = True
+        config.confirmed_at = django_timezone.now()
+        config.save(update_fields=['is_enabled', 'confirmed_at', 'updated_at'])
+        return Response({'enabled': True})
+
+
+class TwoFactorDisableView(APIView):
+    """POST /api/v1/auth/2fa/disable/ {code} — disable 2FA (code required)."""
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        config = getattr(request.user, 'two_factor', None)
+        if not config or not config.is_enabled:
+            return Response({'detail': 'Two-factor authentication is not enabled.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        code = str(request.data.get('code') or '')
+        if not tf.verify_code(config.secret, code,
+                              last_used_counter=config.last_used_counter):
+            return Response({'detail': 'Invalid or expired code.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        config.delete()
+        return Response({'enabled': False})

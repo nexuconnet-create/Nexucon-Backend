@@ -61,9 +61,9 @@ class NonConformanceReport(models.Model):
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='Safety')
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Open')
     
-    reported_by_name = models.CharField(max_length=255, default='J. Doe (Safety)')
+    reported_by_name = models.CharField(max_length=255, blank=True, null=True)
     reporter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reported_ncrs')
-    assignee_name = models.CharField(max_length=255, default='Lead Contractor')
+    assignee_name = models.CharField(max_length=255, blank=True, null=True)
     
     source = models.CharField(max_length=50, choices=SOURCE_CHOICES, default='MANUAL')
     source_reference = models.CharField(max_length=100, blank=True, null=True)
@@ -122,7 +122,7 @@ class CorrectiveActionPlan(models.Model):
     priority = models.CharField(max_length=50, choices=PRIORITY_CHOICES, default='High')
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='todo')
     
-    assignee_name = models.CharField(max_length=255, default='HSE Officer')
+    assignee_name = models.CharField(max_length=255, blank=True, null=True)
     due_date = models.DateField(null=True, blank=True)
     
     comments_count = models.IntegerField(default=0)
@@ -151,6 +151,7 @@ class RegulatoryRequirement(models.Model):
     )
 
     STATUS_CHOICES = (
+        ('Pending Assessment', 'Pending Assessment'),
         ('Compliant', 'Compliant'),
         ('At Risk', 'At Risk'),
         ('Non-Compliant', 'Non-Compliant'),
@@ -163,7 +164,7 @@ class RegulatoryRequirement(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     authority = models.CharField(max_length=255, default='EPA')
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Compliant')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending Assessment')
     mandatory = models.BooleanField(default=True)
     evidence_required = models.CharField(max_length=255, blank=True, null=True, default='Test Certificate / Inspection Signoff')
     verification_method = models.CharField(max_length=255, default='Physical Inspection & Documentation')
@@ -203,9 +204,9 @@ class ComplianceReview(models.Model):
     
     title = models.CharField(max_length=255)
     review_type = models.CharField(max_length=50, choices=REVIEW_TYPES, default='Safety')
-    auditor_name = models.CharField(max_length=255, default='J. Doe (Lead)')
+    auditor_name = models.CharField(max_length=255, blank=True, null=True)
     stage = models.CharField(max_length=50, choices=STAGE_CHOICES, default='Initiation')
-    progress = models.IntegerField(default=10)
+    progress = models.IntegerField(default=0)
     
     findings_count = models.IntegerField(default=0)
     ncrs_count = models.IntegerField(default=0)

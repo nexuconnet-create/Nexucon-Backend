@@ -29,7 +29,8 @@ class BIMService:
     def upload_model(data, user):
         """Upload and register a new BIM model with v1.0 version."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        # The DRF serializer hands us a Project instance; raw callers pass a pk.
+        project = project_id if isinstance(project_id, Project) else Project.objects.get(pk=project_id)
 
         model = BIMModel.objects.create(
             project=project,
@@ -205,12 +206,14 @@ class BIMService:
             secondary_model=secondary_model,
             clash_type='HARD_CLASH',
             title=f"{prim_disc} vs {sec_disc} Spatial Interference",
-            description=f"Hard physical clearance breach (-160mm) detected between {prim_disc} elements and {sec_disc} distribution at Grid 4-C on {site_name}.",
+            description=(
+                f"Clash matrix run between the {prim_disc} model and the {sec_disc} model "
+                f"on {site_name}. No geometric interference data could be measured from the "
+                "stored model files — review the federated models to confirm clearances."
+            ),
             severity='HIGH',
             status='OPEN',
-            assigned_to_name='Michael Chen (MEP Coordinator)',
             assigned_discipline='MEP',
-            coordinates_3d={"x": 14.2, "y": 8.5, "z": 12.0}
         )
 
         BIMService.log_audit(
@@ -311,8 +314,7 @@ class BIMService:
         if model:
             models_list = list(project.bim_models.all()) if hasattr(project, 'bim_models') else [model]
             total_elements = sum(m.element_count for m in models_list if m.element_count > 0)
-        if total_elements == 0:
-            total_elements = 18500
+        # Unknown element counts stay 0 — no invented element totals.
 
         # Query real construction milestones for this project
         from apps.monitoring.models import ConstructionMilestone
@@ -376,32 +378,15 @@ class BIMService:
                 total_progress_sum += actual
                 item_count += 1
         else:
-            num_floors = getattr(project, 'number_of_floors', 12) or 12
-            p_type = getattr(project, 'project_type', 'Commercial')
-            if p_type == 'Industrial':
-                planned_vs_actual = [
-                    {"phase": "Substructure Laser Grading & Deep Bored Piling", "planned": 100, "actual": 100, "status": "Completed"},
-                    {"phase": "High-Tolerance Industrial Laser Screed Floor Slab", "planned": 100, "actual": 90, "status": "In Progress"},
-                    {"phase": "Structural Steel Portal Frame & Cladding", "planned": 70, "actual": 55, "status": "Delayed - 4 Days"},
-                    {"phase": "Automated High-Bay Logistics & Loading Docks", "planned": 30, "actual": 15, "status": "Pending"}
-                ]
-                has_delay = True
-                delayed_days = 4
-                total_progress_sum = 260
-                item_count = 4
-            else:
-                planned_vs_actual = [
-                    {"phase": "Substructure & Deep Foundation Piling", "planned": 100, "actual": 100, "status": "Completed"},
-                    {"phase": f"Podium Transfer Slab & Shear Core (Levels 1-{min(4, num_floors)})", "planned": 100, "actual": 92, "status": "Delayed - 3 Days"},
-                    {"phase": f"Superstructure Post-Tensioned Slabs (Levels {min(5, num_floors)}-{num_floors})", "planned": 55, "actual": 48, "status": "In Progress"},
-                    {"phase": "Unitized Curtain Wall & Building Envelope Glazing", "planned": 25, "actual": 15, "status": "Pending"}
-                ]
-                has_delay = True
-                delayed_days = 3
-                total_progress_sum = 255
-                item_count = 4
+            # No milestone data exists for this project — report an empty
+            # schedule rather than fabricated demo phases.
+            planned_vs_actual = []
+            has_delay = False
+            delayed_days = 0
+            total_progress_sum = 0
+            item_count = 0
 
-        avg_progress = (total_progress_sum / item_count) if item_count > 0 else 50
+        avg_progress = (total_progress_sum / item_count) if item_count > 0 else 0.0
         completed_elements = int((avg_progress / 100.0) * total_elements)
 
         # Compute Earned Value from real project budget / value
@@ -413,7 +398,9 @@ class BIMService:
             else:
                 earned_value_str = f"₦{ev_amount / 1_000_000:.1f}M"
         else:
-            earned_value_str = f"${(avg_progress * total_elements * 65) / 1_000_000:.1f}M"
+            # No budgeted project value on record — report unknown rather
+            # than inventing a valuation.
+            earned_value_str = "N/A"
 
         schedule_status = 'DELAYED' if has_delay else ('ON_TRACK' if delayed_days == 0 else 'AHEAD')
         days_variance = -delayed_days if has_delay else (0 if schedule_status == 'ON_TRACK' else 4)
@@ -455,20 +442,24 @@ class BIMService:
     def create_bim_milestone(data, user):
         """Create a new BIM Construction Milestone linked to approved model and version."""
         project_id = data.get('project_id') or data.get('project')
-        project = Project.objects.get(pk=project_id)
+        # The DRF serializer hands us a Project instance; raw callers pass a pk.
+        project = project_id if isinstance(project_id, Project) else Project.objects.get(pk=project_id)
 
         bim_model_id = data.get('bim_model_id') or data.get('bim_model')
-        bim_model = BIMModel.objects.get(pk=bim_model_id)
+        # Serializer payloads carry model instances; raw callers pass pks.
+        bim_model = bim_model_id if isinstance(bim_model_id, BIMModel) else BIMModel.objects.get(pk=bim_model_id)
 
         model_version_id = data.get('model_version_id') or data.get('model_version')
         model_version = None
         if model_version_id:
-            model_version = BIMModelVersion.objects.filter(pk=model_version_id).first()
+            model_version = model_version_id if isinstance(model_version_id, BIMModelVersion) else BIMModelVersion.objects.filter(pk=model_version_id).first()
         if not model_version:
             model_version = bim_model.versions.filter(is_current=True).first()
 
         linked_cm_id = data.get('linked_construction_milestone_id') or data.get('linked_construction_milestone')
-        linked_cm = ConstructionMilestone.objects.filter(pk=linked_cm_id).first() if linked_cm_id else None
+        linked_cm = None
+        if linked_cm_id:
+            linked_cm = linked_cm_id if isinstance(linked_cm_id, ConstructionMilestone) else ConstructionMilestone.objects.filter(pk=linked_cm_id).first()
 
         milestone = BIMConstructionMilestone.objects.create(
             project=project,

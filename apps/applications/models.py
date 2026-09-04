@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django.utils import timezone as dj_timezone
 from apps.projects.models import Project
 import uuid
 import datetime
@@ -68,7 +69,7 @@ class Application(models.Model):
     assigned_reviewer_name = models.CharField(max_length=255, null=True, blank=True)
     
     # Dates
-    submission_date = models.DateTimeField(null=True, blank=True, default=datetime.datetime.now)
+    submission_date = models.DateTimeField(null=True, blank=True, default=dj_timezone.now)
     review_deadline = models.DateField(null=True, blank=True)
     decision_date = models.DateTimeField(null=True, blank=True)
     

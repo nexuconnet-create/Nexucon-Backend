@@ -2,11 +2,26 @@ from .base import *
 import dj_database_url
 import os
 
-DEBUG = os.getenv("DEBUG", "False") == "True"
+# DEBUG uses the same env var as base.py (DJANGO_DEBUG); never defaults on.
+DEBUG = os.getenv("DJANGO_DEBUG", "False") == "True"
 
 # Security
+if not SECRET_KEY or SECRET_KEY.startswith("dummy-secret-key"):
+    raise RuntimeError("Production requires a real DJANGO_SECRET_KEY environment variable.")
+if os.getenv("DJANGO_ALLOWED_HOSTS"):
+    ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS").split(",") if h.strip()]
+elif "*" in ALLOWED_HOSTS:
+    raise RuntimeError("Production requires an explicit DJANGO_ALLOWED_HOSTS list (wildcards are not allowed).")
 SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
+SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "True") == "True"
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "False") == "True"
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
 
 # Database
 # If DATABASE_URL is set, use dj_database_url to parse it

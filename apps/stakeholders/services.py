@@ -36,8 +36,11 @@ class StakeholderService:
     def send_notification(user, title, message, category="STAKEHOLDERS", severity="Normal", action_url=None):
         try:
             from apps.notifications.models import Notification
+            # NOTE: the Notification model's FK is `recipient` — passing `user=`
+            # raised TypeError, which the bare except silently swallowed, so no
+            # stakeholder notification was ever persisted.
             Notification.objects.create(
-                user=user if getattr(user, 'is_authenticated', False) else None,
+                recipient=user if getattr(user, 'is_authenticated', False) else None,
                 title=title,
                 message=message,
                 category=category,
@@ -78,8 +81,8 @@ class StakeholderService:
             if not data.get('bypass_agency_head_check'):
                 raise PermissionDenied("Only the Agency Head or Director General can initiate and schedule official stakeholder meetings.")
 
-        name = data.get('initiator_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Engr. Babatunde Sanwo')
-        role = data.get('initiator_role') or 'Agency Head / Director General'
+        name = data.get('initiator_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else None)
+        role = data.get('initiator_role') or ('Agency Head / Director General' if user and getattr(user, 'is_authenticated', False) and StakeholderService.is_agency_head(user) else None)
 
         meeting_type = data.get('meeting_type', 'Video Call')
         participants = data.get('participants') or ([{"name": name, "role": role, "status": "Confirmed"}] if name else [])
@@ -101,7 +104,7 @@ class StakeholderService:
                     end=end_dt,
                     attendees=extract_attendee_emails(participants),
                     meeting_reference='',
-                    project_name=data.get('project_name', 'Central Metro Transit Hub'),
+                    project_name=data.get('project_name') or '',
                     add_meet_conference=True,
                 )
                 calendar_event_id = cal_result.get('event_id') or ''
@@ -126,7 +129,7 @@ class StakeholderService:
         meeting = StakeholderMeeting.objects.create(
             title=data.get('title', 'Project Coordination Council Session'),
             agenda=data.get('agenda', ''),
-            project_name=data.get('project_name', 'Central Metro Transit Hub'),
+            project_name=data.get('project_name'),
             date=data.get('date', timezone.now().strftime('%b %d, %Y')),
             time_slot=data.get('time_slot', '10:00 AM - 11:30 AM'),
             meeting_type=meeting_type,
@@ -289,7 +292,6 @@ class StakeholderService:
     def get_meeting_instance(meeting_id_or_ref):
         """Flexible meeting resolver supporting UUIDs, references (MTG-XXXX), room IDs, or fallback."""
         if not meeting_id_or_ref:
-            StakeholderService.seed_initial_stakeholders()
             return StakeholderMeeting.objects.first()
         
         # 1. Try UUID lookup
@@ -311,8 +313,7 @@ class StakeholderService:
         if m:
             return m
 
-        # 3. If "room" or "default" requested, get latest or seed
-        StakeholderService.seed_initial_stakeholders()
+        # 3. If "room" or "default" requested, return the latest meeting
         return StakeholderMeeting.objects.first()
 
     @staticmethod
@@ -447,7 +448,11 @@ class StakeholderService:
         import datetime
 
         try:
-            from apps.documents.services import R2StorageService, R2_ENDPOINT_URL, R2_BUCKET_NAME
+            # NOTE: R2StorageService does not exist in apps.documents.services —
+            # the shared S3 client lives on DocumentStorageService. Importing the
+            # old name raised ImportError, which silently disabled every R2
+            # upload (raw base64 payloads were persisted instead of stored files).
+            from apps.documents.services import DocumentStorageService, R2_ENDPOINT_URL, R2_BUCKET_NAME
             
             file_bytes = b''
             content_type = 'application/octet-stream'
@@ -466,7 +471,7 @@ class StakeholderService:
                 clean_name = (file_name or 'attachment.bin').replace(' ', '_')
                 unique_key = f"{folder_prefix}/{datetime.datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}_{clean_name}"
                 
-                s3_client = R2StorageService.get_s3_client()
+                s3_client = DocumentStorageService.get_s3_client()
                 if s3_client:
                     try:
                         s3_client.put_object(
@@ -489,8 +494,8 @@ class StakeholderService:
     @staticmethod
     def send_message(data, user=None):
         """Send message across public/private stakeholder channels with Cloudflare R2 storage."""
-        name = data.get('sender_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else 'Agency Officer')
-        role = data.get('sender_role') or 'Government Safety Directorate'
+        name = data.get('sender_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else (user.email if getattr(user, 'is_authenticated', False) else None))
+        role = data.get('sender_role') or (getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None)
         text = data.get('message_text', '')
 
         # Process Cloudflare R2 Storage Upload for File Attachments
@@ -508,7 +513,7 @@ class StakeholderService:
             sender_name=name,
             sender_role=role,
             channel_name=data.get('channel_name', 'General Council'),
-            project_name=data.get('project_name', 'Central Metro Transit Hub'),
+            project_name=data.get('project_name'),
             message_text=text,
             attachment_url=r2_attachment_url or raw_attachment,
             attachment_name=att_name if (r2_attachment_url or raw_attachment) else None,
@@ -652,259 +657,19 @@ class StakeholderService:
     @staticmethod
     def get_stakeholder_stats():
         """Retrieve aggregated counts and pass rates."""
-        active_inspectors = Inspector.objects.filter(is_active=True).count() or 42
-        total_contractors = Contractor.objects.count() or 18
-        active_developers = Developer.objects.count() or 6
-        scheduled_meetings = StakeholderMeeting.objects.filter(status='Scheduled').count() or 3
-
+        from apps.inspections.models import Inspection
+        from apps.compliance.models import NonConformanceReport
+        assessed = Inspection.objects.exclude(outcome='PENDING').count()
+        passed = Inspection.objects.filter(outcome__in=('PASSED', 'CONDITIONAL_PASS')).count()
+        pass_rate = round(passed / assessed * 100, 1) if assessed else None
         return {
-            "active_inspectors": active_inspectors,
-            "total_contractors": total_contractors,
-            "active_developers": active_developers,
-            "scheduled_meetings": scheduled_meetings,
-            "pending_inspections": 128,
-            "global_pass_rate": "84.2%",
-            "total_ncrs_issued": 1492
+            "active_inspectors": Inspector.objects.filter(is_active=True).count(),
+            "total_contractors": Contractor.objects.count(),
+            "active_developers": Developer.objects.count(),
+            "scheduled_meetings": StakeholderMeeting.objects.filter(status='Scheduled').count(),
+            "pending_inspections": Inspection.objects.filter(
+                status__in=['REQUESTED', 'SCHEDULED', 'IN_PROGRESS']).count(),
+            "global_pass_rate": f"{pass_rate}%" if pass_rate is not None else None,
+            "total_ncrs_issued": NonConformanceReport.objects.count()
         }
 
-    @staticmethod
-    def seed_initial_stakeholders():
-        """Ensure baseline stakeholders, meetings, and channel messages exist."""
-        if Developer.objects.exists() and StakeholderMeeting.objects.exists():
-            return
-
-        # Developers
-        if not Developer.objects.exists():
-            Developer.objects.create(
-                developer_id="DEV-101",
-                name="Nexucon Master Dev",
-                status="Verified",
-                active_projects_count=4,
-                portfolio_value="$1.2B",
-                hq_location="New York, NY",
-                primary_contact_name="Michael Thorne",
-                primary_contact_email="m.thorne@nexucon.dev",
-                primary_contact_phone="+1 (555) 019-2034",
-                color_theme="bg-blue-600"
-            )
-            Developer.objects.create(
-                developer_id="DEV-102",
-                name="Apex Properties Group",
-                status="Verified",
-                active_projects_count=2,
-                portfolio_value="$450M",
-                hq_location="Chicago, IL",
-                primary_contact_name="Sarah Jenkins",
-                primary_contact_email="s.jenkins@apexprop.com",
-                primary_contact_phone="+1 (555) 018-9921",
-                color_theme="bg-emerald-600"
-            )
-            Developer.objects.create(
-                developer_id="DEV-105",
-                name="Urban Core Holdings",
-                status="Pending Review",
-                active_projects_count=0,
-                portfolio_value="N/A",
-                hq_location="Miami, FL",
-                primary_contact_name="David Rivera",
-                primary_contact_email="drivera@urbancore.net",
-                primary_contact_phone="+1 (555) 012-3341",
-                color_theme="bg-slate-600"
-            )
-
-        # Contractors
-        if not Contractor.objects.exists():
-            Contractor.objects.create(
-                contractor_id="CON-304",
-                name="Apex Construction Services",
-                contractor_type="General Contractor",
-                status="Prequalified",
-                license_status="Valid",
-                license_number="LIC-GC-8849",
-                compliance_score=94,
-                active_permits=3,
-                specialties=["High-Rise Structural", "Cast-in-Place Concrete", "Deep Piling"],
-                color_theme="bg-blue-600"
-            )
-            Contractor.objects.create(
-                contractor_id="CON-308",
-                name="Horizon MEP Solutions",
-                contractor_type="MEP Subcontractor",
-                status="Prequalified",
-                license_status="Valid",
-                license_number="LIC-MEP-1209",
-                compliance_score=88,
-                active_permits=2,
-                specialties=["HVAC Riser Infrastructure", "High Voltage Switchgear"],
-                color_theme="bg-purple-600"
-            )
-
-        # Consultants
-        if not Consultant.objects.exists():
-            Consultant.objects.create(
-                consultant_id="CNS-401",
-                name="EcoBalance Environmental",
-                specialty="Environmental",
-                status="Verified",
-                active_roles_count=3,
-                hq_location="Seattle, WA",
-                description="Environmental impact assessment and groundwater monitoring.",
-                color_theme="bg-emerald-600 text-white"
-            )
-            Consultant.objects.create(
-                consultant_id="CNS-405",
-                name="GeoTech Engineering Partners",
-                specialty="Geotechnical",
-                status="Verified",
-                active_roles_count=2,
-                hq_location="Denver, CO",
-                description="Subsurface soil mechanics and deep borehole logging.",
-                color_theme="bg-amber-600 text-white"
-            )
-
-        # Inspectors
-        if not Inspector.objects.exists():
-            Inspector.objects.create(
-                inspector_id="INS-101",
-                name="Marcus Chen",
-                role_title="Lead Structural Inspector",
-                inspector_type="Internal (Gov)",
-                assigned_zone="Zone A (Downtown)",
-                active_inspections=4,
-                pass_rate="92%",
-                ncrs_issued=3
-            )
-            Inspector.objects.create(
-                inspector_id="INS-104",
-                name="Sarah O'Connor",
-                role_title="MEP & Fire Safety Inspector",
-                inspector_type="Internal (Gov)",
-                assigned_zone="Zone B (Port District)",
-                active_inspections=2,
-                pass_rate="86%",
-                ncrs_issued=5
-            )
-
-        # Licensed Professionals
-        if not LicensedProfessional.objects.exists():
-            LicensedProfessional.objects.create(
-                license_id="LIC-AR-4491",
-                name="Arc. Babatunde Jinadu",
-                role_title="Principal Architect",
-                firm_name="Studio Forma Architects",
-                license_authority="ARCON",
-                license_status="Valid",
-                expiry_date="Dec 31, 2027",
-                active_projects_count=3,
-                is_verified=True
-            )
-            LicensedProfessional.objects.create(
-                license_id="LIC-ST-9912",
-                name="Engr. Chioma Okonjo",
-                role_title="Chief Structural Engineer",
-                firm_name="Okonjo & Associates Engineering",
-                license_authority="COREN",
-                license_status="Valid",
-                expiry_date="Nov 15, 2028",
-                active_projects_count=5,
-                is_verified=True
-            )
-
-        # Project Teams
-        if not ProjectStakeholderTeam.objects.exists():
-            ProjectStakeholderTeam.objects.create(
-                project_reference="PRJ-992",
-                project_name="Central Metro Transit Hub",
-                location="Downtown Core / Sector 4",
-                status="Active Construction",
-                team_data={
-                    "developer": {"name": "Nexucon Master Dev", "role": "Master Developer", "initials": "ND"},
-                    "contractor": {"name": "Apex Construction Services", "role": "General Contractor", "initials": "AC"},
-                    "architect": {"name": "Studio Forma Architects", "role": "Lead Architect", "initials": "SF"},
-                    "inspector": {"name": "Marcus Chen", "role": "Government Structural Inspector", "initials": "MC"}
-                }
-            )
-
-        # Meetings
-        if not StakeholderMeeting.objects.exists():
-            StakeholderMeeting.objects.create(
-                meeting_reference="MTG-1092",
-                title="Q3 Structural Compliance & Stage-Gate Review",
-                agenda="Review of GPR concrete scan results and stage-gate approval for 5th floor slab casting.",
-                project_name="Central Metro Transit Hub",
-                date="Aug 28, 2026",
-                time_slot="10:00 AM - 11:30 AM",
-                meeting_type="Video Call",
-                initiator_name="Engr. Babatunde Sanwo",
-                initiator_role="Agency Head / Director General",
-                status="Scheduled",
-                participants=[
-                    {"name": "Engr. Babatunde Sanwo", "role": "Agency Head", "status": "Confirmed"},
-                    {"name": "Michael Thorne", "role": "Master Developer (Nexucon)", "status": "Confirmed"},
-                    {"name": "Marcus Chen", "role": "Lead Structural Inspector", "status": "Invited"},
-                    {"name": "David Rivera", "role": "General Contractor (Apex)", "status": "Invited"}
-                ]
-            )
-
-        # Messages
-        if not StakeholderMessage.objects.exists():
-            # General Council
-            StakeholderMessage.objects.create(
-                sender_name="Marcus Chen",
-                sender_role="Lead Structural Inspector",
-                channel_name="General Council",
-                project_name="Central Metro Transit Hub",
-                message_text="Please submit the inspection report.",
-                is_urgent=False
-            )
-            StakeholderMessage.objects.create(
-                sender_name="Engr. Babatunde Sanwo",
-                sender_role="Agency Head / Director General",
-                channel_name="General Council",
-                project_name="Central Metro Transit Hub",
-                message_text="Structural non-conformance detected on grid 4.",
-                is_urgent=True
-            )
-            # Project Coordination
-            StakeholderMessage.objects.create(
-                sender_name="David Rivera",
-                sender_role="General Contractor (Apex)",
-                channel_name="Project Coordination",
-                project_name="Central Metro Transit Hub",
-                message_text="Drawing revision approved with conditions for Level 3 MEP Riser.",
-                is_urgent=False
-            )
-            StakeholderMessage.objects.create(
-                sender_name="Michael Thorne",
-                sender_role="Master Developer (Nexucon)",
-                channel_name="Project Coordination",
-                project_name="Central Metro Transit Hub",
-                message_text="Council session will commence shortly for stage-gate signoff.",
-                is_urgent=False
-            )
-            # Site Safety & Inspections
-            StakeholderMessage.objects.create(
-                sender_name="Safety Directorate",
-                sender_role="HSE Compliance Officer",
-                channel_name="Site Safety & Inspections",
-                project_name="Central Metro Transit Hub",
-                message_text="All sub-contractors must ensure 100% PPE compliance.",
-                is_urgent=True
-            )
-            StakeholderMessage.objects.create(
-                sender_name="Marcus Chen",
-                sender_role="Lead Structural Inspector",
-                channel_name="Site Safety & Inspections",
-                project_name="Central Metro Transit Hub",
-                message_text="Site inspection scheduled for tomorrow at 10:00 AM.",
-                is_urgent=False
-            )
-            # Direct Executive Messages
-            StakeholderMessage.objects.create(
-                sender_name="Engr. Babatunde Sanwo",
-                sender_role="Agency Head / Director General",
-                channel_name="Direct Executive Messages",
-                project_name="Central Metro Transit Hub",
-                message_text="Stop-work order issued on Sector 4 pending foundation re-test.",
-                is_urgent=True
-            )

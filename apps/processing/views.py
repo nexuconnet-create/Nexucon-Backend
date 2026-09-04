@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.db.models import Avg, Count, Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status, viewsets
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
 
 class EdgeSyncView(APIView):
     """Bulk-ingest defects that were pre-processed on the edge device."""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(
         summary="Sync defects detected on the edge scanner",
@@ -92,7 +92,7 @@ class NodeStatusView(APIView):
     GPU utilisation can only come from a worker calling the heartbeat endpoint;
     until one does it is reported with fallback benchmark figures.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(summary="Processing node status and live host metrics", tags=["Processing"])
     def get(self, request):
@@ -220,7 +220,7 @@ class AIModelViewSet(viewsets.ModelViewSet):
     """Registry of the AI models the processing pipeline runs."""
     queryset = AIModelVersion.objects.all()
     serializer_class = AIModelVersionSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(summary="List registered AI models with observed confidence", tags=["Processing"])
     def list(self, request, *args, **kwargs):
@@ -243,7 +243,7 @@ class AIFeedbackStatsView(APIView):
     Detection feedback statistics, computed entirely from stored review
     outcomes (`Defect.is_false_positive` and review status).
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(summary="AI detection feedback statistics", tags=["Processing"])
     def get(self, request):

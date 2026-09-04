@@ -1,11 +1,13 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 import datetime
+import uuid
 from .models import Inspection, Checklist, Finding, StopWorkOrder
 from apps.projects.models import Project
 from apps.permits.models import Permit
@@ -14,13 +16,24 @@ from .serializers import (
     ChecklistSerializer, FindingSerializer, StopWorkOrderSerializer
 )
 from .services import InspectionService
+from common.permissions import scoped_projects
 
 User = get_user_model()
+
+
+def user_project_scope(user):
+    """QuerySet of projects the user may act on, or None for unrestricted
+    (superusers). Shared by the inspection viewsets for consistent
+    multi-tenant scoping (plan §8)."""
+    if user.is_superuser:
+        return None
+    return scoped_projects(user)
+
 
 class InspectionViewSet(viewsets.ModelViewSet):
     queryset = Inspection.objects.all().select_related('project', 'inspector', 'permit', 'parent_inspection').prefetch_related('findings', 'stop_work_orders')
     serializer_class = InspectionSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -29,6 +42,11 @@ class InspectionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        # Multi-tenant scoping (plan §8): government staff see their
+        # district/state scope, clients only their own projects. Without this
+        # every authenticated user could list every inspection.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            queryset = queryset.filter(project__in=scoped_projects(self.request.user))
         status_param = self.request.query_params.get('status')
         project_param = self.request.query_params.get('project')
         inspector_param = self.request.query_params.get('inspector')
@@ -56,10 +74,26 @@ class InspectionViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(status=status_param.upper())
 
         if project_param:
-            queryset = queryset.filter(project_id=project_param)
+            # Guard against non-UUID values ('undefined' from the frontend) —
+            # a raw value would raise a ValidationError (500).
+            try:
+                queryset = queryset.filter(project_id=uuid.UUID(str(project_param)))
+            except (ValueError, AttributeError, TypeError):
+                queryset = queryset.none()
 
         if inspector_param:
-            queryset = queryset.filter(Q(inspector_id=inspector_param) | Q(inspector_name__icontains=inspector_param))
+            # A UUID matches the inspector FK; anything else (a name) must
+            # only go through the name lookup — a raw non-UUID value in
+            # inspector_id would raise a ValidationError (500).
+            try:
+                inspector_uuid = uuid.UUID(str(inspector_param))
+            except (ValueError, AttributeError, TypeError):
+                inspector_uuid = None
+            if inspector_uuid is not None:
+                queryset = queryset.filter(
+                    Q(inspector_id=inspector_uuid) | Q(inspector_name__icontains=inspector_param))
+            else:
+                queryset = queryset.filter(inspector_name__icontains=inspector_param)
 
         if priority_param:
             queryset = queryset.filter(priority__iexact=priority_param)
@@ -98,6 +132,16 @@ class InspectionViewSet(viewsets.ModelViewSet):
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Multi-tenant scoping: a user may only request inspections for
+        # projects within their own scope — never for another tenant's site.
+        project = serializer.validated_data.get('project')
+        scope = user_project_scope(request.user)
+        if project is not None and scope is not None and project not in scope:
+            return Response({
+                'success': False,
+                'message': 'Target project is outside your assigned scope.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
         try:
             inspection = self.perform_create(serializer)
             out_serializer = InspectionSerializer(inspection)
@@ -117,14 +161,25 @@ class InspectionViewSet(viewsets.ModelViewSet):
         """Return counts for all 7 inspection tabs."""
         today = timezone.now().date()
 
-        requests_count = Inspection.objects.filter(status='REQUESTED').count()
-        schedule_count = Inspection.objects.filter(status='SCHEDULED').count()
-        active_count = Inspection.objects.filter(status='IN_PROGRESS').count()
-        findings_count = Finding.objects.filter(is_resolved=False).count()
-        stop_work_count = StopWorkOrder.objects.filter(status='ACTIVE').count()
-        re_inspections_count = Inspection.objects.filter(Q(status='RE_INSPECTION_REQUIRED') | Q(inspection_type='Re-Inspection')).distinct().count()
-        reports_count = Inspection.objects.filter(status='COMPLETED').count()
-        total = Inspection.objects.count()
+        # Multi-tenant scoping: counts reflect only the projects the user
+        # may see, so cross-tenant totals are never disclosed.
+        scope = user_project_scope(request.user)
+        inspections_qs = Inspection.objects.all()
+        findings_qs = Finding.objects.all()
+        swo_qs = StopWorkOrder.objects.all()
+        if scope is not None:
+            inspections_qs = inspections_qs.filter(project__in=scope)
+            findings_qs = findings_qs.filter(project__in=scope)
+            swo_qs = swo_qs.filter(project__in=scope)
+
+        requests_count = inspections_qs.filter(status='REQUESTED').count()
+        schedule_count = inspections_qs.filter(status='SCHEDULED').count()
+        active_count = inspections_qs.filter(status='IN_PROGRESS').count()
+        findings_count = findings_qs.filter(is_resolved=False).count()
+        stop_work_count = swo_qs.filter(status='ACTIVE').count()
+        re_inspections_count = inspections_qs.filter(Q(status='RE_INSPECTION_REQUIRED') | Q(inspection_type='Re-Inspection')).distinct().count()
+        reports_count = inspections_qs.filter(status='COMPLETED').count()
+        total = inspections_qs.count()
 
         return Response({
             'success': True,
@@ -150,10 +205,16 @@ class InspectionViewSet(viewsets.ModelViewSet):
 
         inspector_user = None
         if inspector_id:
+            # inspector_id may be a user UUID, username or email. A non-UUID
+            # value in the id lookup raises ValidationError, so only include
+            # it when it parses as a UUID.
+            lookup = Q(username=inspector_id) | Q(email=inspector_id)
             try:
-                inspector_user = User.objects.filter(Q(id=inspector_id) | Q(username=inspector_id) | Q(email=inspector_id)).first()
-            except Exception:
+                uuid.UUID(str(inspector_id))
+                lookup |= Q(id=inspector_id)
+            except (ValueError, AttributeError, TypeError):
                 pass
+            inspector_user = User.objects.filter(lookup).first()
 
         updated = InspectionService.assign_and_schedule(
             inspection=inspection,
@@ -197,13 +258,20 @@ class InspectionViewSet(viewsets.ModelViewSet):
         checklist_results = request.data.get('checklist_results')
         summary_notes = request.data.get('summary_notes', '')
 
-        updated = InspectionService.complete_inspection(
-            inspection=inspection,
-            outcome=outcome,
-            checklist_results=checklist_results,
-            summary_notes=summary_notes,
-            actor=request.user
-        )
+        try:
+            updated = InspectionService.complete_inspection(
+                inspection=inspection,
+                outcome=outcome,
+                checklist_results=checklist_results,
+                summary_notes=summary_notes,
+                actor=request.user
+            )
+        except DjangoValidationError as e:
+            # Invalid outcome (e.g. "EXCELLENT") is a client error, not a 500.
+            return Response({
+                'success': False,
+                'message': ' '.join(e.messages) if hasattr(e, 'messages') else str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({
             'success': True,
@@ -277,10 +345,13 @@ class InspectionViewSet(viewsets.ModelViewSet):
 class StopWorkOrderViewSet(viewsets.ModelViewSet):
     queryset = StopWorkOrder.objects.all().select_related('project', 'inspection', 'finding')
     serializer_class = StopWorkOrderSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        # Multi-tenant scoping (plan §8) — same helper as InspectionViewSet.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            queryset = queryset.filter(project__in=scoped_projects(self.request.user))
         status_param = self.request.query_params.get('status')
         project_param = self.request.query_params.get('project')
         search_param = self.request.query_params.get('search')
@@ -324,10 +395,18 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
         if not project:
             project = Project.objects.filter(Q(reference_number=str(project_id)) | Q(name__icontains=str(project_id))).first()
         if not project:
-            project = Project.objects.first()
-
-        if not project:
+            # A Stop-Work Order targets a specific project — never an
+            # arbitrary one. No silent Project.objects.first() fallback.
             return Response({'success': False, 'message': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Multi-tenant scoping: officers may only halt projects within their
+        # own jurisdiction — never another tenant's site.
+        scope = user_project_scope(request.user)
+        if scope is not None and project not in scope:
+            return Response({
+                'success': False,
+                'message': 'Target project is outside your assigned scope.'
+            }, status=status.HTTP_403_FORBIDDEN)
 
         inspection_id = request.data.get('inspection') or request.data.get('inspection_id')
         inspection = None
@@ -367,10 +446,15 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
     def stats(self, request):
         """Return SWO metrics."""
         thirty_days_ago = timezone.now() - datetime.timedelta(days=30)
-        active_count = StopWorkOrder.objects.filter(status='ACTIVE').count()
-        appeals_count = StopWorkOrder.objects.filter(status='APPEALED').count()
-        lifted_count = StopWorkOrder.objects.filter(status='LIFTED', lifted_at__gte=thirty_days_ago).count()
-        total = StopWorkOrder.objects.count()
+        swo_qs = StopWorkOrder.objects.all()
+        # Multi-tenant scoping — same helper as the list endpoint.
+        scope = user_project_scope(request.user)
+        if scope is not None:
+            swo_qs = swo_qs.filter(project__in=scope)
+        active_count = swo_qs.filter(status='ACTIVE').count()
+        appeals_count = swo_qs.filter(status='APPEALED').count()
+        lifted_count = swo_qs.filter(status='LIFTED', lifted_at__gte=thirty_days_ago).count()
+        total = swo_qs.count()
 
         return Response({
             'success': True,
@@ -404,10 +488,15 @@ class StopWorkOrderViewSet(viewsets.ModelViewSet):
 class FindingViewSet(viewsets.ModelViewSet):
     queryset = Finding.objects.all().select_related('inspection', 'project')
     serializer_class = FindingSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        # Multi-tenant scoping (plan §8) — same helper as InspectionViewSet.
+        # Without this every authenticated user could read and resolve any
+        # other tenant's findings.
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            queryset = queryset.filter(project__in=scoped_projects(self.request.user))
         severity_param = self.request.query_params.get('severity')
         resolved_param = self.request.query_params.get('is_resolved')
         project_param = self.request.query_params.get('project')
@@ -421,7 +510,12 @@ class FindingViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_resolved=False)
 
         if project_param:
-            queryset = queryset.filter(project_id=project_param)
+            # Guard against non-UUID values — a raw value in project_id
+            # would raise a ValidationError (500).
+            try:
+                queryset = queryset.filter(project_id=uuid.UUID(str(project_param)))
+            except (ValueError, AttributeError, TypeError):
+                queryset = queryset.none()
 
         return queryset
 
@@ -445,7 +539,7 @@ class FindingViewSet(viewsets.ModelViewSet):
 class ChecklistViewSet(viewsets.ModelViewSet):
     queryset = Checklist.objects.all()
     serializer_class = ChecklistSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
 
 from drf_spectacular.utils import extend_schema
@@ -463,6 +557,7 @@ class IssueViewSet(viewsets.ModelViewSet):
     """
     queryset = Issue.objects.select_related('project', 'session', 'created_by', 'assignee').prefetch_related('comments', 'comments__user').all().order_by('-created_at')
     serializer_class = IssueSerializer
+    permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
@@ -488,6 +583,12 @@ class NonConformanceReportViewSet(viewsets.ModelViewSet):
     """
     queryset = NonConformanceReport.objects.select_related('project', 'session').prefetch_related('corrective_actions').all().order_by('-created_at')
     serializer_class = NonConformanceReportSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        # ncr_number is unique and has no model default — generate a real
+        # reference instead of crashing with an IntegrityError (NULL pk value).
+        serializer.save(ncr_number=f"NCR-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}")
 
     @extend_schema(request=CorrectiveActionSerializer, responses={201: CorrectiveActionSerializer})
     @action(detail=True, methods=['post'])
@@ -507,3 +608,4 @@ class CorrectiveActionViewSet(viewsets.ModelViewSet):
     """
     queryset = CorrectiveAction.objects.select_related('ncr', 'assigned_to').all().order_by('-created_at')
     serializer_class = CorrectiveActionSerializer
+    permission_classes = [IsAuthenticated]

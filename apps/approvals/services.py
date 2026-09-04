@@ -2,6 +2,7 @@ import hashlib
 import uuid
 from decimal import Decimal
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 import datetime
 from .models import ApprovalRequest, ApprovalDecision, TechnicalReviewCriteria, ApprovalComment
 from apps.projects.models import Project
@@ -45,9 +46,11 @@ class ApprovalService:
         project_id = data.get('project_id') or data.get('project')
         project = Project.objects.filter(pk=project_id).first()
         if not project:
-            project = Project.objects.first()
+            raise ValidationError(
+                "A valid project_id is required — an approval request cannot be "
+                "attached to an arbitrary or non-existent project.")
 
-        submitted_by = data.get('submitted_by_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else 'Apex Engineering')
+        submitted_by = data.get('submitted_by_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else None)
         val_amount = Decimal(str(data.get('value_amount', 0.0)))
         due = data.get('due_date') or (timezone.now().date() + datetime.timedelta(days=7))
 
@@ -80,7 +83,7 @@ class ApprovalService:
             days_overdue=int(data.get('days_overdue', 0)),
             signatories_required=int(data.get('signatories_required', 1)),
             signatories_completed=int(data.get('signatories_completed', 0)),
-            attached_file_url=data.get('attached_file_url', 'https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/spec.pdf')
+            attached_file_url=data.get('attached_file_url')
         )
 
         # If Technical Review, initialize default evaluation checklist

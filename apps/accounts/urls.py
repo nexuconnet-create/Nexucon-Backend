@@ -2,15 +2,19 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
-    CustomLoginView, 
-    UserRegistrationView, 
-    UserMeView, 
-    UserOnboardingView, 
-    LogoutView, 
-    SessionListView, 
-    RevokeSessionView, 
+    CustomLoginView,
+    UserRegistrationView,
+    UserMeView,
+    UserOnboardingView,
+    LogoutView,
+    SessionListView,
+    RevokeSessionView,
     ChangePasswordView,
-    ApiKeyViewSet
+    ApiKeyViewSet,
+    TwoFactorStatusView,
+    TwoFactorSetupView,
+    TwoFactorVerifyView,
+    TwoFactorDisableView,
 )
 
 router = DefaultRouter()
@@ -28,4 +32,10 @@ urlpatterns = [
     path('sessions/', SessionListView.as_view(), name='sessions'),
     path('sessions/<uuid:session_id>/revoke/', RevokeSessionView.as_view(), name='revoke_session'),
     path('change-password/', ChangePasswordView.as_view(), name='change_password'),
+
+    # Two-factor authentication (TOTP) — plan §5 Week 6
+    path('2fa/', TwoFactorStatusView.as_view(), name='two_factor_status'),
+    path('2fa/setup/', TwoFactorSetupView.as_view(), name='two_factor_setup'),
+    path('2fa/verify/', TwoFactorVerifyView.as_view(), name='two_factor_verify'),
+    path('2fa/disable/', TwoFactorDisableView.as_view(), name='two_factor_disable'),
 ]

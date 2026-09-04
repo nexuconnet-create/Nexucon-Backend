@@ -1,20 +1,23 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q, Count
 from django.core.exceptions import ValidationError
 from django.contrib.auth import get_user_model
 from .models import Application
 from .serializers import ApplicationSerializer, ApplicationCreateSerializer
 from .services import ApplicationService
+from common.permissions import scoped_projects
 
 User = get_user_model()
 
 class ApplicationViewSet(viewsets.ModelViewSet):
     queryset = Application.objects.all().select_related('project', 'applicant', 'permit')
     serializer_class = ApplicationSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    # Permit applications carry applicant PII — they must never be readable
+    # by anonymous users, so reads are authenticated as well.
+    permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -23,6 +26,11 @@ class ApplicationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        # Multi-tenant scoping (plan §8) — a user only reaches applications
+        # for projects within their scope (state HQ sees all, district staff
+        # their district, clients their own projects).
+        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+            queryset = queryset.filter(project__in=scoped_projects(self.request.user))
         status_param = self.request.query_params.get('status')
         project_param = self.request.query_params.get('project')
         priority_param = self.request.query_params.get('priority')
@@ -84,6 +92,16 @@ class ApplicationViewSet(viewsets.ModelViewSet):
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Multi-tenant scoping: a user may only file applications for
+        # projects within their own scope — never for another tenant's site.
+        project = serializer.validated_data.get('project')
+        if project is not None and not request.user.is_superuser \
+                and project not in scoped_projects(request.user):
+            return Response({
+                'success': False,
+                'message': 'Target project is outside your assigned scope.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
         try:
             application = self.perform_create(serializer)
             out_serializer = ApplicationSerializer(application)
@@ -101,13 +119,17 @@ class ApplicationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):
         """Return counts for dashboard tabs and overview cards."""
-        total = Application.objects.count()
-        submitted = Application.objects.filter(status='SUBMITTED').count()
-        under_review = Application.objects.filter(status__in=['UNDER_REVIEW', 'REVIEW_COMPLETED', 'APPROVAL_REQUESTED']).count()
-        conditional = Application.objects.filter(status='CONDITIONAL_APPROVAL').count()
-        approved = Application.objects.filter(status='APPROVED').count()
-        rejected = Application.objects.filter(status='REJECTED').count()
-        expired = Application.objects.filter(status__in=['EXPIRED', 'RENEWED']).count()
+        # Multi-tenant scoping: counts reflect only the user's scoped projects.
+        qs = Application.objects.all()
+        if request.user.is_authenticated and not request.user.is_superuser:
+            qs = qs.filter(project__in=scoped_projects(request.user))
+        total = qs.count()
+        submitted = qs.filter(status='SUBMITTED').count()
+        under_review = qs.filter(status__in=['UNDER_REVIEW', 'REVIEW_COMPLETED', 'APPROVAL_REQUESTED']).count()
+        conditional = qs.filter(status='CONDITIONAL_APPROVAL').count()
+        approved = qs.filter(status='APPROVED').count()
+        rejected = qs.filter(status='REJECTED').count()
+        expired = qs.filter(status__in=['EXPIRED', 'RENEWED']).count()
 
         return Response({
             'success': True,
@@ -125,7 +147,7 @@ class ApplicationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='review-queue')
     def review_queue(self, request):
         """Queue for reviewing officers."""
-        applications = Application.objects.filter(
+        applications = self.get_queryset().filter(
             status__in=['SUBMITTED', 'UNDER_REVIEW', 'REVIEW_COMPLETED', 'APPROVAL_REQUESTED']
         ).select_related('project', 'applicant').order_by('submission_date', 'created_at')
         serializer = ApplicationSerializer(applications, many=True)
@@ -175,7 +197,10 @@ class ApplicationViewSet(viewsets.ModelViewSet):
         if reviewer_id:
             try:
                 reviewer_user = User.objects.get(pk=reviewer_id)
-            except User.DoesNotExist:
+            except (User.DoesNotExist, ValidationError, ValueError, TypeError):
+                # Unknown or malformed reviewer id (a non-UUID pk lookup raises
+                # ValidationError): fall through to the name/self-assignment
+                # paths instead of crashing with a 500.
                 pass
 
         if not reviewer_user and not reviewer_name:

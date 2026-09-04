@@ -255,5 +255,5 @@ class ComplianceStatsViewSet(viewsets.ViewSet):
             "scorecard": stats_data,
             "active_infractions": NonConformanceReportSerializer(open_ncrs[:10], many=True).data,
             "awarded_certificates": ComplianceCertificateSerializer(certs[:10], many=True).data,
-            "report_download_url": "https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/compliance_audit_report.pdf"
+            "report_download_url": None
         }, status=status.HTTP_200_OK)

@@ -144,11 +144,18 @@ class NotificationService:
         """
         Renders templates, checks idempotency, and delivers via active EmailProvider.
         """
-        # Deduplication check
+        # Deduplication check — an idempotency key marks the event; any prior
+        # attempt (sent, failed, or in-flight) means this exact email is not
+        # dispatched again.
         if idempotency_key:
             existing = EmailDelivery.objects.filter(idempotency_key=idempotency_key).first()
-            if existing and existing.status in ['SENT', 'DELIVERED']:
-                logger.info(f"Duplicate email prevented for idempotency key: {idempotency_key}")
+            if existing:
+                if existing.status in ['SENT', 'DELIVERED']:
+                    logger.info(f"Duplicate email prevented for idempotency key: {idempotency_key}")
+                else:
+                    logger.warning(
+                        "Duplicate email prevented for idempotency key: %s "
+                        "(previous attempt status: %s)", idempotency_key, existing.status)
                 return existing
 
         # Render HTML & Plain-text templates
@@ -222,7 +229,7 @@ class NotificationService:
             entity_type="Application",
             entity_id=str(application.id),
             action_url="/government/dashboard/applications",
-            metadata={"project_name": getattr(application, 'project_name', 'Commercial Tower'), "reference": application.reference_number}
+            metadata={"project_name": getattr(application, 'project_name', None), "reference": application.reference_number}
         )
 
     @staticmethod
@@ -272,7 +279,7 @@ class NotificationService:
         )
 
     @staticmethod
-    def notify_emergency_dispatch(title: str, message: str, location: str = "Lagos Central"):
+    def notify_emergency_dispatch(title: str, message: str, location: str = None):
         return NotificationService.dispatch_event(
             event_type="EMERGENCY_DISPATCH",
             title=f"🚨 EMERGENCY ALERT: {title}",
@@ -311,8 +318,6 @@ class NotificationService:
             entity_id=entity_id,
             action_url=action_url or "/government/dashboard/notifications/critical"
         )
-        for item in defaults:
-            Notification.objects.create(**item)
 
 import requests
 import json
@@ -390,8 +395,9 @@ class _LegacyNotificationServiceHelper:
             related_entity_id=defect.id
         )
         
-        # 2. Fire webhook payload (Simulated)
-        # In a real app, this would iterate over WebhookEndpoints and create WebhookDeliveries.
+        # 2. Fire the REAL webhook dispatch task — deliveries are recorded by
+        # WebhookService per endpoint; nothing is claimed as delivered here.
+        from apps.notifications.tasks import dispatch_webhooks
         payload = {
             "event": "defect.critical_stop_work",
             "defect_id": str(defect.id),
@@ -399,4 +405,4 @@ class _LegacyNotificationServiceHelper:
             "severity": defect.severity,
             "message": message
         }
-        logger.info(f"Webhook Payload Dispatched: {json.dumps(payload)}")
+        dispatch_webhooks.delay('defect.critical_stop_work', payload, str(project.id) if project else None)

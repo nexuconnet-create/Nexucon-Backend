@@ -44,11 +44,11 @@ class Developer(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     developer_id = models.CharField(max_length=100, default=generate_dev_id, db_index=True)
     name = models.CharField(max_length=255)
-    status = models.CharField(max_length=50, default='Verified')
+    status = models.CharField(max_length=50, default='Pending')
     active_projects_count = models.IntegerField(default=0)
-    portfolio_value = models.CharField(max_length=100, default='$1.2B')
-    hq_location = models.CharField(max_length=255, default='New York, NY')
-    primary_contact_name = models.CharField(max_length=255, default='Michael Thorne')
+    portfolio_value = models.CharField(max_length=100, blank=True, null=True)
+    hq_location = models.CharField(max_length=255, blank=True, null=True)
+    primary_contact_name = models.CharField(max_length=255, blank=True, null=True)
     primary_contact_email = models.EmailField(blank=True, null=True)
     primary_contact_phone = models.CharField(max_length=50, blank=True, null=True)
     color_theme = models.CharField(max_length=50, default='bg-blue-600')
@@ -64,12 +64,12 @@ class Developer(models.Model):
 class Contractor(BaseStakeholder):
     """General contractors and specialized subcontractors."""
     contractor_id = models.CharField(max_length=100, default=generate_con_id, db_index=True)
-    name = models.CharField(max_length=255, default='Apex Construction Services')
+    name = models.CharField(max_length=255, blank=True)
     contractor_type = models.CharField(max_length=100, default='General Contractor')
     status = models.CharField(max_length=50, default='Prequalified')
-    license_status = models.CharField(max_length=50, default='Valid')
+    license_status = models.CharField(max_length=50, default='Pending')
     license_number = models.CharField(max_length=100, blank=True, null=True)
-    compliance_score = models.IntegerField(default=90)
+    compliance_score = models.IntegerField(null=True, blank=True)
     active_permits = models.IntegerField(default=0)
     specialties = models.JSONField(default=list)
     color_theme = models.CharField(max_length=50, default='bg-blue-600')
@@ -81,11 +81,11 @@ class Contractor(BaseStakeholder):
 class Consultant(BaseStakeholder):
     """Specialized third-party advisory firms."""
     consultant_id = models.CharField(max_length=100, default=generate_cns_id, db_index=True)
-    name = models.CharField(max_length=255, default='EcoBalance Partners')
-    specialty = models.CharField(max_length=100, default='Environmental')
-    status = models.CharField(max_length=50, default='Verified')
+    name = models.CharField(max_length=255, blank=True)
+    specialty = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=50, default='Pending')
     active_roles_count = models.IntegerField(default=0)
-    hq_location = models.CharField(max_length=255, default='Seattle, WA')
+    hq_location = models.CharField(max_length=255, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     color_theme = models.CharField(max_length=100, default='bg-emerald-600 text-white')
 
@@ -96,12 +96,12 @@ class Consultant(BaseStakeholder):
 class Inspector(BaseStakeholder):
     """Government and approved third-party field inspection officers."""
     inspector_id = models.CharField(max_length=100, default=generate_ins_id, db_index=True)
-    name = models.CharField(max_length=255, default='Marcus Chen')
-    role_title = models.CharField(max_length=100, default='Structural Inspector')
+    name = models.CharField(max_length=255, blank=True)
+    role_title = models.CharField(max_length=100, blank=True, null=True)
     inspector_type = models.CharField(max_length=100, default='Internal (Gov)')
-    assigned_zone = models.CharField(max_length=100, default='Zone A (Downtown)')
+    assigned_zone = models.CharField(max_length=100, blank=True, null=True)
     active_inspections = models.IntegerField(default=0)
-    pass_rate = models.CharField(max_length=50, default='88%')
+    pass_rate = models.CharField(max_length=50, blank=True, null=True)
     ncrs_issued = models.IntegerField(default=0)
 
     def __str__(self):
@@ -116,10 +116,10 @@ class LicensedProfessional(models.Model):
     role_title = models.CharField(max_length=100)
     firm_name = models.CharField(max_length=255)
     license_authority = models.CharField(max_length=100, default='COREN')
-    license_status = models.CharField(max_length=50, default='Valid')
-    expiry_date = models.CharField(max_length=100, default='Dec 31, 2027')
+    license_status = models.CharField(max_length=50, default='Pending')
+    expiry_date = models.CharField(max_length=100, blank=True, null=True)
     active_projects_count = models.IntegerField(default=0)
-    is_verified = models.BooleanField(default=True)
+    is_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -129,10 +129,10 @@ class LicensedProfessional(models.Model):
 class ProjectStakeholderTeam(models.Model):
     """Cross-functional project stakeholder matrix."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    project_reference = models.CharField(max_length=100, default='PRJ-992', db_index=True)
-    project_name = models.CharField(max_length=255, default='Nexus Tower (Phase 1)')
-    location = models.CharField(max_length=255, default='Downtown Core')
-    status = models.CharField(max_length=100, default='Active Construction')
+    project_reference = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    project_name = models.CharField(max_length=255, blank=True, null=True)
+    location = models.CharField(max_length=255, blank=True, null=True)
+    status = models.CharField(max_length=100, blank=True, null=True)
     team_data = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -178,14 +178,14 @@ class StakeholderMeeting(models.Model):
     meeting_reference = models.CharField(max_length=100, default=generate_mtg_id, db_index=True)
     title = models.CharField(max_length=255)
     agenda = models.TextField()
-    project_name = models.CharField(max_length=255, default='Central Metro Transit Hub')
-    date = models.CharField(max_length=100, default='Oct 24, 2026')
-    time_slot = models.CharField(max_length=100, default='10:00 AM - 11:30 AM')
+    project_name = models.CharField(max_length=255, blank=True, null=True)
+    date = models.CharField(max_length=100, blank=True, null=True)
+    time_slot = models.CharField(max_length=100, blank=True, null=True)
     meeting_type = models.CharField(max_length=50, choices=MEETING_TYPE_CHOICES, default='Video Call')
     
     initiated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
-    initiator_name = models.CharField(max_length=255, default='Engr. Babatunde Sanwo')
-    initiator_role = models.CharField(max_length=100, default='Agency Head / Director General')
+    initiator_name = models.CharField(max_length=255, blank=True, null=True)
+    initiator_role = models.CharField(max_length=100, blank=True, null=True)
     
     room_id = models.CharField(max_length=100, default=generate_room_id)
     google_meet_url = models.CharField(max_length=500, blank=True, null=True, default='')
@@ -211,11 +211,11 @@ class StakeholderMessage(models.Model):
     """Real-time stakeholder messaging channels and direct communications."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
-    sender_name = models.CharField(max_length=255, default='Agency Officer')
-    sender_role = models.CharField(max_length=100, default='Government Safety Directorate')
+    sender_name = models.CharField(max_length=255, blank=True, null=True)
+    sender_role = models.CharField(max_length=100, blank=True, null=True)
     
-    channel_name = models.CharField(max_length=100, default='General Council', db_index=True)
-    project_name = models.CharField(max_length=255, default='Central Metro Transit Hub')
+    channel_name = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    project_name = models.CharField(max_length=255, blank=True, null=True)
     message_text = models.TextField(blank=True, default='')
     
     # File Attachments

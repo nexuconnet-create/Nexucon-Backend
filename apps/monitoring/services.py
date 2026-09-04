@@ -3,6 +3,7 @@ import uuid
 import datetime
 import hashlib
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from .models import (
     DailySiteUpdate, MissedSiteVisitRecord, FieldObservation, 
     SiteIssue, ConstructionMilestone, SiteVerification
@@ -14,10 +15,13 @@ from django.db.models import Q
 class MonitoringService:
     @staticmethod
     def get_project_instance(project_id):
+        """
+        Resolve a REAL project by id / reference / name. Records are never
+        attached to an arbitrary project — an unresolvable id is an error.
+        """
         if not project_id:
-            return Project.objects.first()
-        
-        import uuid
+            raise ValidationError("project_id is required.")
+
         try:
             val = uuid.UUID(str(project_id))
             p = Project.objects.filter(id=val).first()
@@ -27,23 +31,29 @@ class MonitoringService:
             pass
 
         p = Project.objects.filter(
-            Q(reference_number=str(project_id)) | 
+            Q(reference_number=str(project_id)) |
             Q(name__icontains=str(project_id))
         ).first()
 
-        return p or Project.objects.first()
+        if not p:
+            raise ValidationError(f"No project matches '{project_id}'.")
+        return p
 
     @staticmethod
-    def get_actor_name(user, default="Site Engineer / Officer"):
+    def get_actor_name(user, default=None):
+        """The real actor's name — never a fabricated placeholder person."""
         if user and getattr(user, 'is_authenticated', False):
-            return user.get_full_name() or getattr(user, 'email', default)
+            return user.get_full_name() or getattr(user, 'email', None) or default
         return default
 
     @staticmethod
     def log_audit(user, action, resource_id, previous_state=None, new_state=None):
         try:
+            actor = user if getattr(user, 'is_authenticated', False) else None
             AuditEvent.objects.create(
-                user=user if getattr(user, 'is_authenticated', False) else None,
+                user=actor,
+                # Attribute the real actor; 'System' only when there truly is none.
+                user_name=MonitoringService.get_actor_name(user) or 'System',
                 action=action,
                 resource_type="SiteMonitoring",
                 resource_id=str(resource_id),
@@ -61,10 +71,12 @@ class MonitoringService:
         
         progress = int(data.get('progress_percentage', 0))
         update_type = data.get('update_type', 'DAILY_PHOTO')
-        author_name = data.get('reported_by_name') or MonitoringService.get_actor_name(user, "Field Inspector")
-        
-        inspector_name = data.get('inspector_name') or author_name or 'Engr. Abdulwahab Onike'
-        inspector_badge = data.get('inspector_badge') or 'LASG-INSP-STR-042'
+        # 'Unattributed' marks a genuinely unattributed record (offline sync
+        # without a signed-in inspector) — no placeholder officer is invented.
+        author_name = data.get('reported_by_name') or MonitoringService.get_actor_name(user) or 'Unattributed'
+
+        inspector_name = data.get('inspector_name') or author_name
+        inspector_badge = data.get('inspector_badge')
         origin_type = data.get('origin_type', 'FIELD_INSPECTOR')
         
         # Parse inspection date if provided via calendar picker
@@ -136,8 +148,8 @@ class MonitoringService:
         project_id = data.get('project_id') or data.get('project')
         project = MonitoringService.get_project_instance(project_id)
         
-        inspector_name = data.get('inspector_name') or MonitoringService.get_actor_name(user, "Engr. Abdulwahab Onike")
-        inspector_badge = data.get('inspector_badge') or 'LASG-INSP-STR-042'
+        inspector_name = data.get('inspector_name') or MonitoringService.get_actor_name(user)
+        inspector_badge = data.get('inspector_badge')
         
         scheduled_date_val = datetime.date.today()
         raw_date = data.get('scheduled_date') or data.get('calendar_date')
@@ -357,14 +369,15 @@ class MonitoringService:
             try:
                 target_date_raw = datetime.datetime.strptime(target_date_raw.split('T')[0], '%Y-%m-%d').date()
             except Exception:
-                target_date_raw = timezone.now().date() + datetime.timedelta(days=30)
+                # Never invent a schedule: an unparseable target date is rejected.
+                raise ValidationError("Invalid target_date format. Expected YYYY-MM-DD.")
 
         planned_start_raw = data.get('planned_start_date')
         if planned_start_raw and isinstance(planned_start_raw, str):
             try:
                 planned_start_raw = datetime.datetime.strptime(planned_start_raw.split('T')[0], '%Y-%m-%d').date()
             except Exception:
-                planned_start_raw = timezone.now().date()
+                planned_start_raw = None
 
         duration = int(data.get('duration_days', 30) or 30)
         progress = int(data.get('progress_percentage', 0) or 0)
@@ -534,7 +547,17 @@ class MonitoringService:
         for pred in predecessors:
             pred_id = pred.get('id') or pred.get('code')
             if pred_id:
-                pred_obj = ConstructionMilestone.objects.filter(Q(id=pred_id) | Q(milestone_code=pred_id)).first()
+                # The reference may be a UUID or a milestone code (e.g. 'MS-A1B2');
+                # an id-shaped lookup on a code string is invalid, so resolve
+                # by UUID first and fall back to the milestone_code lookup.
+                pred_obj = None
+                try:
+                    if uuid.UUID(str(pred_id)):
+                        pred_obj = ConstructionMilestone.objects.filter(id=pred_id).first()
+                except (ValueError, AttributeError, TypeError):
+                    pred_obj = None
+                if pred_obj is None:
+                    pred_obj = ConstructionMilestone.objects.filter(milestone_code=pred_id).first()
                 if pred_obj and pred_obj.status not in ['VERIFIED', 'COMPLETED']:
                     pred_passed = False
                     blockers.append(f"Predecessor milestone '{pred_obj.name}' is {pred_obj.status}")
@@ -660,13 +683,16 @@ class MonitoringService:
         # Send notification to Building Control Officers
         try:
             from apps.notifications.services import NotificationService
-            NotificationService.send_notification({
-                'title': f"Milestone Verification Submitted: {milestone.name}",
-                'message': f"Contractor submitted '{milestone.name}' on {milestone.project.name} for statutory audit sign-off.",
-                'category': 'REGULATORY',
-                'priority': 'High',
-                'recipient_role': 'Director'
-            }, user=user)
+            NotificationService.dispatch_event(
+                event_type='MILESTONE_VERIFICATION_SUBMITTED',
+                title=f"Milestone Verification Submitted: {milestone.name}",
+                message=f"Contractor submitted '{milestone.name}' on {milestone.project.name} for statutory audit sign-off.",
+                category='REGULATORY',
+                priority='High',
+                recipient_role='Director',
+                entity_type='ConstructionMilestone',
+                entity_id=milestone.id,
+            )
         except Exception:
             pass
 
@@ -692,10 +718,12 @@ class MonitoringService:
             reasons = "; ".join(gate_evaluation['blockers'])
             raise ValueError(f"Verification gates failed: {reasons}")
 
-        actor_name = MonitoringService.get_actor_name(actor, "Engr. Abimbola Williams (Building Control Director)")
+        actor_name = MonitoringService.get_actor_name(actor)
         notes = data.get('notes') or data.get('verification_notes') or "Statutory milestone verification completed and certified in compliance with Lagos State Building Control Standards."
         cert_ref = f"CERT-MS-{datetime.datetime.now().year}-{uuid.uuid4().hex[:6].upper()}"
-        sig_hash = f"0xLASBCA-VERIFIED-{uuid.uuid4().hex[:8].upper()}"
+        # Real cryptographic seal over the verified milestone's identity.
+        seal_input = f"{milestone.id}:{getattr(milestone, 'name', '')}:{cert_ref}:{timezone.now().isoformat()}"
+        sig_hash = f"0x{hashlib.sha256(seal_input.encode('utf-8')).hexdigest()[:24].upper()}"
 
         milestone.status = 'VERIFIED'
         milestone.progress_percentage = 100
@@ -708,7 +736,7 @@ class MonitoringService:
             'certificate_reference': cert_ref,
             'signature_hash': sig_hash,
             'verified_by_name': actor_name,
-            'verified_by_role': getattr(actor, 'role', 'Director of Building Control') if getattr(actor, 'role', None) else 'Director of Building Control',
+            'verified_by_role': getattr(actor, 'role', None) if getattr(actor, 'role', None) else None,
             'verified_at': timezone.now().isoformat(),
             'notes': notes,
             'override_applied': override_gate,
@@ -730,13 +758,17 @@ class MonitoringService:
         # Send regulatory notification
         try:
             from apps.notifications.services import NotificationService
-            NotificationService.send_notification({
-                'title': f"Milestone Verified & Certified: {milestone.name}",
-                'message': f"Milestone '{milestone.name}' on {milestone.project.name} has been certified (Ref: {cert_ref}).",
-                'category': 'REGULATORY',
-                'priority': 'Normal',
-                'recipient_role': 'All'
-            }, user=actor)
+            NotificationService.dispatch_event(
+                event_type='CONSTRUCTION_MILESTONE_VERIFIED',
+                title=f"Milestone Verified & Certified: {milestone.name}",
+                message=f"Milestone '{milestone.name}' on {milestone.project.name} has been certified (Ref: {cert_ref}).",
+                category='REGULATORY',
+                priority='Normal',
+                recipient_role='All',
+                entity_type='ConstructionMilestone',
+                entity_id=milestone.id,
+                metadata={'reference': cert_ref, 'project_name': milestone.project.name},
+            )
         except Exception:
             pass
 
@@ -774,20 +806,25 @@ class MonitoringService:
                 milestone.variance_days = max(1, slippage)
                 milestone.target_date = revised_date
             except Exception:
-                milestone.variance_days = 7
+                # An unparseable revised date never fabricates a slippage figure;
+                # the recorded variance stays as previously computed.
+                pass
 
         milestone.save()
 
         # Send Delay Alert Notification
         try:
             from apps.notifications.services import NotificationService
-            NotificationService.send_notification({
-                'title': f"Schedule Delay Flagged: {milestone.name}",
-                'message': f"Milestone '{milestone.name}' on {milestone.project.name} is delayed. Reason: {reason}",
-                'category': 'ALERT',
-                'priority': 'High',
-                'recipient_role': 'All'
-            }, user=actor)
+            NotificationService.dispatch_event(
+                event_type='CONSTRUCTION_MILESTONE_DELAY_FLAGGED',
+                title=f"Schedule Delay Flagged: {milestone.name}",
+                message=f"Milestone '{milestone.name}' on {milestone.project.name} is delayed. Reason: {reason}",
+                category='ALERT',
+                priority='High',
+                recipient_role='All',
+                entity_type='ConstructionMilestone',
+                entity_id=milestone.id,
+            )
         except Exception:
             pass
 
@@ -872,18 +909,10 @@ class MonitoringService:
         status = data.get('status', default_status)
         verifier_name = data.get('verified_by_name') or MonitoringService.get_actor_name(user, "Field Surveyor")
 
-        # Default telemetry if not provided
-        telemetry = data.get('telemetry_data', {})
-        if not telemetry:
-            telemetry = {
-                'satellites_tracked': 28,
-                'constellations': ['GPS', 'Galileo', 'GLONASS', 'BeiDou'],
-                'hdop': 0.65,
-                'vdop': 0.82,
-                'rtk_fix_status': 'FIXED_RTK_HIGH_PRECISION',
-                'correction_latency_sec': 0.4,
-                'base_station_ref': 'LASG-CORS-VICTORIA-ISLAND-01'
-            }
+        # Telemetry comes from the surveying device's own payload. Instrument
+        # readings (satellites, HDOP/VDOP, RTK fix, base station) are never
+        # invented — an absent payload is recorded as absent.
+        telemetry = data.get('telemetry_data', {}) or {}
 
         verification = SiteVerification.objects.create(
             project=project,
@@ -1011,70 +1040,64 @@ class MonitoringService:
 
     @staticmethod
     def get_verification_telemetry(verification_id):
-        """Return GNSS RTK telemetry diagnostics for the verification instrument."""
+        """Return the GNSS RTK telemetry actually recorded on the verification instrument."""
         try:
             vrf = SiteVerification.objects.get(id=verification_id)
-            if vrf.telemetry_data:
-                return vrf.telemetry_data
-        except Exception:
-            pass
-
-        return {
-            'satellites_tracked': 26,
-            'constellations': ['GPS', 'Galileo', 'GLONASS', 'BeiDou'],
-            'hdop': 0.71,
-            'vdop': 0.88,
-            'rtk_fix_status': 'FIXED_RTK_HIGH_PRECISION',
-            'correction_latency_sec': 0.3,
-            'base_station_ref': 'LASG-CORS-CENTRAL-01'
-        }
+            return vrf.telemetry_data or {}
+        except SiteVerification.DoesNotExist:
+            return {}
 
     @staticmethod
     def get_verification_audit_trail(verification_id):
         """Retrieve audit trail logs for a site verification."""
-        try:
-            events = AuditLog.objects.filter(
-                resource_id=str(verification_id)
-            ).order_by('-timestamp')
+        events = AuditEvent.objects.filter(
+            resource_type="SiteMonitoring",
+            resource_id=str(verification_id)
+        ).order_by('-timestamp')
 
-            return [
-                {
-                    "id": str(e.id),
-                    "action": e.action,
-                    "user_name": e.actor_name or "Cadastral Officer",
-                    "user_role": "Building Control Authority",
-                    "timestamp": e.timestamp.isoformat(),
-                    "previous_state": e.previous_state,
-                    "new_state": e.new_state
-                }
-                for e in events
-            ]
-        except Exception:
-            return []
+        return [
+            {
+                "id": str(e.id),
+                "audit_reference": e.audit_reference,
+                "action": e.action,
+                "user_name": e.user_name or (e.user.get_full_name() if e.user else "Cadastral Officer"),
+                "user_role": e.user_role or "Building Control Authority",
+                "timestamp": e.timestamp.isoformat(),
+                "previous_state": e.previous_state,
+                "new_state": e.new_state
+            }
+            for e in events
+        ]
 
     @staticmethod
-    def get_project_progress_details(project_id=None):
+    def get_project_progress_details(project_id=None, projects=None):
         """
         Compute deep physical progress, milestone stages, photo feed, workforce metrics,
         and schedule health for a project or all active projects.
+
+        `projects` lets callers pass an explicit (already-authorized) queryset,
+        e.g. the requesting user's scoped_projects().
         """
-        if project_id:
+        if projects is not None:
+            project_list = list(projects)
+        elif project_id:
             project = MonitoringService.get_project_instance(project_id)
-            projects = [project] if project else []
+            project_list = [project] if project else []
         else:
-            projects = list(Project.objects.filter(status__in=['ACTIVE', 'IN_PROGRESS', 'UNDER_CONSTRUCTION'])) or list(Project.objects.all()[:5])
+            project_list = list(Project.objects.filter(status__in=['ACTIVE', 'IN_PROGRESS', 'UNDER_CONSTRUCTION'])) or list(Project.objects.all()[:5])
 
         results = []
-        for p in projects:
+        for p in project_list:
             updates = list(DailySiteUpdate.objects.filter(project=p).order_by('-created_at'))
             milestones = list(ConstructionMilestone.objects.filter(project=p).order_by('target_date'))
             observations = list(FieldObservation.objects.filter(project=p).order_by('-created_at'))
             issues = list(SiteIssue.objects.filter(project=p).order_by('-created_at'))
 
             latest_update = updates[0] if updates else None
-            
-            # Overall progress from project model or latest update
-            verified_progress = getattr(p, 'progress', 0) or (latest_update.progress_percentage if latest_update else 0) or 60
+
+            # Overall progress from the project model or latest update. When no
+            # progress has ever been reported, it is 0 — a figure is never invented.
+            verified_progress = getattr(p, 'progress', 0) or (latest_update.progress_percentage if latest_update else 0) or 0
 
             # Schedule health analysis
             delayed_milestones_count = sum(1 for m in milestones if m.status == 'DELAYED' or m.is_delayed)
@@ -1157,14 +1180,16 @@ class MonitoringService:
                 'project_id': str(p.id),
                 'project_name': p.name,
                 'reference_number': getattr(p, 'reference_number', None) or str(p.id)[:8],
-                'project_type': getattr(p, 'project_type', 'Commercial Multi-Story Structure'),
-                'site_address': getattr(p, 'site_address', None) or getattr(p, 'location', 'Lagos State'),
+                'project_type': getattr(p, 'project_type', None),
+                'site_address': getattr(p, 'site_address', None),
                 'status': getattr(p, 'status', 'ACTIVE'),
                 'verified_progress': verified_progress,
                 'schedule_status': schedule_status,
                 'schedule_label': schedule_label,
-                'workforce_on_site': latest_update.workforce_count if latest_update else 35,
-                'weather_condition': latest_update.weather_condition if latest_update else 'Clear / Sunny (31°C)',
+                # Workforce / weather come from the latest real field update;
+                # absent data is reported as absent, never as an invented figure.
+                'workforce_on_site': latest_update.workforce_count if latest_update else None,
+                'weather_condition': latest_update.weather_condition if latest_update else None,
                 'total_photos_count': len(photos),
                 'photos': photos,
                 'milestones_total': len(milestones),
@@ -1267,73 +1292,98 @@ class MonitoringService:
         return issue
 
     @staticmethod
-    def calculate_location_telemetry(lat, lng, project_id=None):
-        """Calculate spatial distance, Google Maps link, setback clearance & telemetry payload."""
+    def calculate_location_telemetry(lat, lng, project_id=None, telemetry_source=None):
+        """
+        Build a location telemetry payload from REAL inputs only. Instrument
+        readings (accuracy, altitude, laser distance, setback, RTK status,
+        satellites) are taken from the device's own telemetry payload when
+        provided — they are never invented.
+        """
         try:
             lat = float(lat)
             lng = float(lng)
         except (TypeError, ValueError):
-            lat, lng = 6.42814, 3.42197
+            raise ValidationError("Valid latitude/longitude coordinates are required for location telemetry.")
 
-        project = MonitoringService.get_project_instance(project_id)
-        
-        # Reference project cadastral centroid (default Lagos Island / VI baseline)
-        ref_lat = 6.42814
-        ref_lng = 3.42197
-        
-        # Haversine distance in meters
-        d_lat = math.radians(lat - ref_lat)
-        d_lng = math.radians(lng - ref_lng)
-        a = math.sin(d_lat / 2)**2 + math.cos(math.radians(ref_lat)) * math.cos(math.radians(lat)) * math.sin(d_lng / 2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        distance_meters = round(6371000 * c, 3)
+        project = MonitoringService.get_project_instance(project_id) if project_id else None
+        src = telemetry_source or {}
 
-        # Optical laser EDM simulated distance or calculated offset
-        laser_distance = distance_meters if 0 < distance_meters < 500 else 14.852
-        setback_measured = 3.42
-        setback_target = 3.0
+        # Reference point: the project's own recorded site coordinates.
+        ref_lat = getattr(project, 'latitude', None) if project else None
+        ref_lng = getattr(project, 'longitude', None) if project else None
+
+        distance_meters = None
+        if ref_lat is not None and ref_lng is not None:
+            d_lat = math.radians(lat - ref_lat)
+            d_lng = math.radians(lng - ref_lng)
+            a = math.sin(d_lat / 2)**2 + math.cos(math.radians(ref_lat)) * math.cos(math.radians(lat)) * math.sin(d_lng / 2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            distance_meters = round(6371000 * c, 3)
+
+        laser_distance = src.get('laser_distance_meters')
+        setback_measured = src.get('setback_measured_meters')
+        setback_target = src.get('setback_target_meters')
+
+        setback_status = None
+        if setback_measured is not None and setback_target is not None:
+            try:
+                setback_status = 'PASS' if float(setback_measured) >= float(setback_target) else 'FAIL'
+            except (TypeError, ValueError):
+                setback_status = None
 
         return {
             'latitude': lat,
             'longitude': lng,
-            'accuracy_meters': 1.2,
-            'altitude_meters': 12.4,
+            'accuracy_meters': src.get('accuracy'),
+            'altitude_meters': src.get('altitude_meters'),
             'distance_to_centroid_meters': distance_meters,
             'laser_distance_meters': laser_distance,
             'setback_measured_meters': setback_measured,
             'setback_target_meters': setback_target,
-            'setback_status': 'PASS' if setback_measured >= setback_target else 'FAIL',
+            'setback_status': setback_status,
             'google_maps_url': f"https://www.google.com/maps?q={lat},{lng}",
-            'source': 'GPS_HARDWARE',
-            'address': f"{project.name if project else 'Lagos Development Sector'}, LGA: {project.lga if project and getattr(project, 'lga', None) else 'Victoria Island'}, Lagos",
-            'cors_station_ref': 'LASG-CORS-VICTORIA-ISLAND-01',
-            'rtk_fix_status': 'FIXED_RTK_HIGH_PRECISION',
-            'satellites_tracked': 32,
-            'cloudflare_r2_sync': True,
+            'source': src.get('source') or 'GPS',
+            'address': src.get('address') or (
+                f"{project.name}, LGA: {project.lga}, Lagos"
+                if project and getattr(project, 'lga', None) else None),
+            'cors_station_ref': src.get('cors_station_ref'),
+            'rtk_fix_status': src.get('rtk_fix_status'),
+            'satellites_tracked': src.get('satellites_tracked'),
+            'cloudflare_r2_sync': None,
             'timestamp': timezone.now().isoformat()
         }
 
     @staticmethod
     def get_daily_update_telemetry(update_id):
-        """Retrieve full GPS / Location telemetry for a daily site update."""
-        try:
-            update = DailySiteUpdate.objects.get(id=update_id)
-            gps = update.gps_coordinates or {}
-            lat = gps.get('lat') or gps.get('latitude') or 6.42814
-            lng = gps.get('lng') or gps.get('longitude') or 3.42197
-            
-            telemetry = MonitoringService.calculate_location_telemetry(lat, lng, update.project_id)
-            if gps.get('laser_distance_meters'):
-                telemetry['laser_distance_meters'] = gps['laser_distance_meters']
-            if gps.get('setback_measured_meters'):
-                telemetry['setback_measured_meters'] = gps['setback_measured_meters']
-            if gps.get('accuracy'):
-                telemetry['accuracy_meters'] = gps['accuracy']
-            if gps.get('address'):
-                telemetry['address'] = gps['address']
-            return telemetry
-        except Exception:
-            return MonitoringService.calculate_location_telemetry(6.42814, 3.42197)
+        """Retrieve the GPS / location telemetry actually recorded on a daily site update."""
+        update = DailySiteUpdate.objects.get(id=update_id)
+        gps = update.gps_coordinates or {}
+        lat = gps.get('lat') or gps.get('latitude')
+        lng = gps.get('lng') or gps.get('longitude')
+
+        if lat is None or lng is None:
+            return {
+                'latitude': None,
+                'longitude': None,
+                'accuracy_meters': gps.get('accuracy'),
+                'altitude_meters': gps.get('altitude_meters'),
+                'distance_to_centroid_meters': None,
+                'laser_distance_meters': gps.get('laser_distance_meters'),
+                'setback_measured_meters': gps.get('setback_measured_meters'),
+                'setback_target_meters': gps.get('setback_target_meters'),
+                'setback_status': None,
+                'google_maps_url': None,
+                'source': gps.get('source'),
+                'address': gps.get('address'),
+                'cors_station_ref': gps.get('cors_station_ref'),
+                'rtk_fix_status': gps.get('rtk_fix_status'),
+                'satellites_tracked': gps.get('satellites_tracked'),
+                'cloudflare_r2_sync': None,
+                'timestamp': timezone.now().isoformat()
+            }
+
+        return MonitoringService.calculate_location_telemetry(
+            lat, lng, update.project_id, telemetry_source=gps)
 
     @staticmethod
     def update_daily_update_telemetry(update, telemetry_data, user):

@@ -20,9 +20,13 @@ if env_file.exists():
     except Exception:
         pass
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dummy-secret-key-for-dev")
 DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
-ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
+# Dev-only fallback secret. Production (settings/production.py) refuses to
+# boot without DJANGO_SECRET_KEY — a real key is never committed.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dummy-secret-key-for-dev-only" if DEBUG else "")
+if not SECRET_KEY and not DEBUG:
+    raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=False.")
+ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_HEADERS = True
 CORS_ALLOWED_ORIGINS = [
@@ -81,6 +85,7 @@ INSTALLED_APPS += [
     'apps.monitoring',
     'apps.documents',
     'apps.digital_eye',
+    'apps.evidence',
     'apps.stakeholders',
     'apps.settings',
     'apps.analytics',
@@ -158,6 +163,7 @@ DATABASES = {
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'apps.accounts.authentication.CookieJWTAuthentication',
+        'apps.accounts.authentication.ApiKeyAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -201,9 +207,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Cloudflare R2 / S3 Document Storage
 STORAGE_PROVIDER = os.getenv('STORAGE_PROVIDER', '').lower()  # 'cloudflare_r2' enables R2 as default Django storage
-CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID') or os.getenv('CLOUDFLARE_R2_ACCOUNT_ID', 'ba64cd9c51c2da4db93a1886397fd7b3')
+CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID') or os.getenv('CLOUDFLARE_R2_ACCOUNT_ID', '')
 CLOUDFLARE_R2_BUCKET_NAME = os.getenv('CLOUDFLARE_R2_BUCKET_NAME', 'nexucondocument')
-CLOUDFLARE_R2_ENDPOINT_URL = os.getenv('CLOUDFLARE_R2_ENDPOINT_URL', f"https://{CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com")
+CLOUDFLARE_R2_ENDPOINT_URL = os.getenv('CLOUDFLARE_R2_ENDPOINT_URL', f"https://{CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com" if CLOUDFLARE_ACCOUNT_ID else '')
 CLOUDFLARE_R2_ACCESS_KEY_ID = os.getenv('CLOUDFLARE_R2_ACCESS_KEY_ID')
 CLOUDFLARE_R2_SECRET_ACCESS_KEY = os.getenv('CLOUDFLARE_R2_SECRET_ACCESS_KEY')
 
@@ -232,9 +238,8 @@ if STORAGE_PROVIDER == 'cloudflare_r2' and CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUD
             "querystring_expire": 3600,
         },
     }
-else:
-    MEDIA_URL = '/media/'
-    MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Google Cloud Service Account & Translation / Calendar APIs
 _google_sa_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', str(BASE_DIR / 'config' / 'google_service_account.json'))
@@ -248,3 +253,53 @@ GOOGLE_MEETING_PROJECT_ID = os.getenv('GOOGLE_MEETING_PROJECT_ID', GOOGLE_CLOUD_
 GOOGLE_MEETING_CLIENT_EMAIL = os.getenv('GOOGLE_MEETING_CLIENT_EMAIL', '')
 GOOGLE_MEETING_PRIVATE_KEY = os.getenv('GOOGLE_MEETING_PRIVATE_KEY', '').replace('\\n', '\n')
 
+# ======================================================================
+# Trimble Connect Platform API (OAuth 2.0 + PKCE) — names only, never
+# committed values. Obtain credentials from the Trimble Developer Console.
+# ======================================================================
+TRIMBLE_CLIENT_ID = os.getenv('TRIMBLE_CLIENT_ID', '')
+TRIMBLE_CLIENT_SECRET = os.getenv('TRIMBLE_CLIENT_SECRET', '')
+TRIMBLE_REDIRECT_URI = os.getenv('TRIMBLE_REDIRECT_URI', '')
+TRIMBLE_AUTHORIZE_URL = os.getenv(
+    'TRIMBLE_AUTHORIZE_URL',
+    'https://app.connect.trimble.com/connect/oauth/authorize',
+)
+TRIMBLE_TOKEN_URL = os.getenv(
+    'TRIMBLE_TOKEN_URL',
+    'https://app.connect.trimble.com/connect/oauth/token',
+)
+TRIMBLE_API_BASE = os.getenv(
+    'TRIMBLE_API_BASE',
+    'https://app.connect.trimble.com/connect/api',
+)
+
+
+
+# ======================================================================
+# Celery broker & task routing (names only — no credentials committed).
+# ======================================================================
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', '')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', '')
+
+CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', 'False').lower() in ('true', '1')
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+
+# ======================================================================
+# Django Channels layer for WebSocket processing-status streams. Uses Redis
+# when a broker URL is configured; the in-memory layer otherwise (single
+# process — development / tests only).
+# ======================================================================
+if CELERY_BROKER_URL:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {'hosts': [CELERY_BROKER_URL]},
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'},
+    }

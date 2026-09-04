@@ -116,7 +116,11 @@ class CorrectiveActionSerializer(serializers.ModelSerializer):
         from .models import CorrectiveAction
         model = CorrectiveAction
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at', 'ncr']
+        # ncr stays writable (the standalone endpoint needs it) but optional,
+        # because the nested add_corrective_action endpoint validates the
+        # payload before attaching the parent NCR.
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        extra_kwargs = {'ncr': {'required': False}}
 
 
 class NonConformanceReportSerializer(serializers.ModelSerializer):

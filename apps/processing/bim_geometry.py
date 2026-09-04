@@ -303,7 +303,9 @@ class _ZRayGrid:
                 continue
             safe_det = np.where(ok, det, 1.0)
             u = ((px - v0[:, 0]) * -e2[:, 1] + e2[:, 0] * (py - v0[:, 1])) / safe_det
-            v = (e1[:, 0] * (py - v0[:, 1]) - (px - v0[:, 0]) * e1[:, 1]) / safe_det
+            # barycentric v: (p - v0) . (e1 x d) with d = (0,0,1),
+            # i.e. (px-v0x)*e1y - e1x*(py-v0y)
+            v = ((px - v0[:, 0]) * e1[:, 1] - e1[:, 0] * (py - v0[:, 1])) / safe_det
             t = (v0[:, 2] + u * e1[:, 2] + v * e2[:, 2]) - p[2]
             hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > tol)
             if hit.any():
@@ -356,14 +358,16 @@ def detect_scan_clashes(points, elements, tolerance_mm=50.0, max_report=20):
                 "type": "scan_intrusion",
             })
 
-    # points far outside any design surface but horizontally within the BIM footprint
+    # points far outside any design surface but horizontally within the BIM
+    # footprint. Points already inside a design solid are reported above as
+    # intrusions — they are not "outside design surfaces".
     bim_min = np.min([el["bbox"][0] for el in elements], axis=0)
     bim_max = np.max([el["bbox"][1] for el in elements], axis=0)
     within_xy = (
         (points[:, 0] >= bim_min[0]) & (points[:, 0] <= bim_max[0]) &
         (points[:, 1] >= bim_min[1]) & (points[:, 1] <= bim_max[1])
     )
-    stray = np.where(far & within_xy)[0]
+    stray = np.where(far & within_xy & (inside < 0))[0]
     if len(stray) > 5:
         # cluster strays into rough zones via a coarse voxel grouping
         vox = np.floor(points[stray] / 5.0).astype(int)

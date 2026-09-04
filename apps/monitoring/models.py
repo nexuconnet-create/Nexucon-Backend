@@ -56,8 +56,8 @@ class DailySiteUpdate(models.Model):
     
     # Direct Field Inspector Attribution
     inspector = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='inspected_daily_updates')
-    inspector_name = models.CharField(max_length=255, default='Engr. Abdulwahab Onike')
-    inspector_badge = models.CharField(max_length=100, default='LASG-INSP-STR-042')
+    inspector_name = models.CharField(max_length=255, blank=True, null=True)
+    inspector_badge = models.CharField(max_length=100, blank=True, null=True)
     inspection_date = models.DateField(default=datetime.date.today)
     origin_type = models.CharField(max_length=50, choices=ORIGIN_CHOICES, default='FIELD_INSPECTOR')
     field_verification_stamp = models.JSONField(default=dict, blank=True, help_text="GPS Lock, timestamp, and field seal")
@@ -119,8 +119,8 @@ class MissedSiteVisitRecord(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='missed_visits')
     
     inspector = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='missed_site_visits')
-    inspector_name = models.CharField(max_length=255, default='Engr. Abdulwahab Onike')
-    inspector_badge = models.CharField(max_length=100, default='LASG-INSP-STR-042')
+    inspector_name = models.CharField(max_length=255, blank=True, null=True)
+    inspector_badge = models.CharField(max_length=100, blank=True, null=True)
     
     scheduled_date = models.DateField(default=datetime.date.today)
     reason_category = models.CharField(max_length=60, choices=REASON_CHOICES, default='ADVERSE_WEATHER')
@@ -404,7 +404,7 @@ class SiteVerification(models.Model):
     digital_cert_ref = models.CharField(max_length=100, blank=True, null=True, help_text="Statutory certificate reference e.g. CERT-VRF-2026-0042")
     signature_hash = models.CharField(max_length=255, blank=True, null=True, help_text="SHA-256 cryptographic verification signature")
     verified_by_name = models.CharField(max_length=255, blank=True, null=True)
-    verified_by_role = models.CharField(max_length=255, blank=True, null=True, default='Directorate of Cadastral & Structural Survey')
+    verified_by_role = models.CharField(max_length=255, blank=True, null=True)
     verified_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True, null=True)
     

@@ -38,6 +38,10 @@ urlpatterns = [
     path('api/v1/digital-eye/', include('apps.digital_eye.urls')),
     path('api/v1/', include('apps.reports.urls')),
     path('api/v1/processing/', include('apps.processing.urls')),
+
+    # Digital Eye & Evidence Intelligence
+    path('api/v1/digital-eye/', include('apps.digital_eye.urls')),
+    path('api/v1/evidence/', include('apps.evidence.urls')),
 ]
 
 from django.conf import settings

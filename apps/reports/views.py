@@ -2,7 +2,7 @@ import logging
 from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, serializers
 from apps.scans.selectors import ScanSelector
 from .models import QualityReport
@@ -18,7 +18,7 @@ from django_ratelimit.decorators import ratelimit
 
 
 class QualityReportListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     """
     List every generated QA/QC report (most recent first) so the reports
     dashboard can show real defect / anomaly / confidence figures instead of
@@ -35,7 +35,7 @@ class QualityReportListView(APIView):
 
 
 class GenerateReportView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     """
     Generate a QA/QC report for a completed scan session.
 
@@ -86,7 +86,7 @@ class GenerateReportView(APIView):
 
 
 class DownloadReportView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     """
     Return a pre-signed download URL for a previously generated QA/QC report.
 
@@ -136,8 +136,18 @@ class DownloadReportView(APIView):
             .first()
         )
         if report is None:
-            # Auto-generate if no stored report exists for this template
-            report = ReportService.generate_qaqc_report(session, report_type=report_type)
+            # No stored report for this template — the caller must generate it
+            # first (POST generate_report). Nothing is fabricated on download.
+            return Response(
+                {
+                    "error": (
+                        f"No {report_type} report has been generated for this scan "
+                        "session yet. Generate the report first via the report "
+                        "generation endpoint."
+                    )
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         has_cover_overrides = any(v for v in cover_overrides.values())
 
@@ -181,6 +191,181 @@ class DownloadReportView(APIView):
 
 
 # ---------------------------------------------------------------------------
+# AI Report Generator (implementation plan §5 Weeks 5–6): auditable PDF
+# reports for project intelligence, statutory inspections and NCRs.
+# ---------------------------------------------------------------------------
+from django.http import HttpResponse
+from rest_framework.permissions import IsAuthenticated
+
+from common.permissions import scoped_projects
+
+
+def _pdf_response(pdf_bytes, filename):
+    response = HttpResponse(pdf_bytes, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+class ProjectIntelligenceReportView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/intelligence-report/
+    AI-assisted project intelligence report (scores, findings, HITL status,
+    recommendations, sign-off block) rendered from live records.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from .ai_reports import AIReportService
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            pdf_bytes = AIReportService.generate_project_intelligence_report(project, request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('Project intelligence report generation failed')
+            return Response({'detail': f'Report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _pdf_response(pdf_bytes, f'intelligence_report_{project_id}.pdf')
+
+
+class InspectionReportView(APIView):
+    """
+    GET /api/v1/reports/inspections/{inspection_id}/report/
+    Statutory inspection execution report with mandatory GPS verification,
+    checklist results and sign-off block.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, inspection_id):
+        from apps.inspections.models import Inspection
+        from .ai_reports import AIReportService
+        inspection = (Inspection.objects
+                      .filter(pk=inspection_id,
+                              project__in=scoped_projects(request.user))
+                      .select_related('project', 'inspector')).first()
+        if not inspection:
+            return Response({'detail': 'Inspection not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            pdf_bytes = AIReportService.generate_inspection_report(inspection, request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('Inspection report generation failed')
+            return Response({'detail': f'Report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _pdf_response(pdf_bytes, f'inspection_{inspection.inspection_reference}.pdf')
+
+
+class NCRReportView(APIView):
+    """
+    GET /api/v1/reports/ncrs/{ncr_id}/report/
+    Formal Non-Conformance Report document with corrective actions and the
+    originating AI correlation finding when applicable.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, ncr_id):
+        from apps.compliance.models import NonConformanceReport
+        from .ai_reports import AIReportService
+        ncr = (NonConformanceReport.objects
+               .filter(pk=ncr_id, project__in=scoped_projects(request.user))
+               .select_related('project', 'reporter')).first()
+        if not ncr:
+            return Response({'detail': 'NCR not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            pdf_bytes = AIReportService.generate_ncr_report(ncr, request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('NCR report generation failed')
+            return Response({'detail': f'Report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _pdf_response(pdf_bytes, f'ncr_{ncr.ncr_reference}.pdf')
+
+
+class NDTReportView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-report/
+    Lagos State Materials Testing Laboratory-style ultrasonic pulse velocity
+    (PUNDIT) NDT report rendered from live digital-eye records for the
+    project. The exact generated bytes are also archived (checksummed) so the
+    certified dossier registry lists real, re-downloadable documents —
+    identical content is not archived twice.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from .ndt_reports import NDTReportService
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('NDT report generation failed')
+            return Response({'detail': f'Report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        try:
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes)
+        except Exception:  # noqa: BLE001 — archive failure must not block the stream
+            logger.exception('NDT report archiving failed')
+        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}.pdf')
+
+
+class ArchivedReportListView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/archived-reports/?kind=ndt
+    Lists the checksummed dossiers generated for a project, newest first.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from .models import ArchivedReport
+        from .serializers import ArchivedReportSerializer
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        kind = request.query_params.get('kind') or 'ndt'
+        reports = (ArchivedReport.objects
+                   .filter(project=project, report_kind=kind)
+                   .select_related('project', 'generated_by'))
+        return Response(ArchivedReportSerializer(reports, many=True).data)
+
+
+class ArchivedReportDownloadView(APIView):
+    """
+    GET /api/v1/reports/archived-reports/{report_id}/download/
+    Streams the exact archived PDF bytes for the stored dossier.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        from .models import ArchivedReport
+        report = (ArchivedReport.objects
+                  .filter(pk=report_id, project__in=scoped_projects(request.user))
+                  .select_related('project').first())
+        if not report:
+            return Response({'detail': 'Archived report not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if not report.file:
+            return Response({'detail': 'The archived file for this dossier is missing '
+                                       'from storage.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            file_bytes = report.file.read()
+        except Exception as exc:  # noqa: BLE001 — remote storage may raise
+            logger.exception('Failed to read archived report %s', report.id)
+            return Response({'detail': f'Could not retrieve the archived file: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        filename = f"ndt_report_{report.report_reference.replace(' / ', '_').replace('/', '_')}.pdf"
+        return _pdf_response(file_bytes, filename)
+
+
+# ---------------------------------------------------------------------------
 # Report template catalogue
 # ---------------------------------------------------------------------------
 from rest_framework import viewsets
@@ -190,7 +375,7 @@ from .serializers import ReportTemplateSerializer
 
 
 class ReportTemplateViewSet(viewsets.ModelViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     """
     Catalogue of report types the platform can produce, so the dashboard does
     not have to hardcode the list.

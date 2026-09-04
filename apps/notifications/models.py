@@ -261,3 +261,38 @@ class InAppNotification(models.Model):
 
     def __str__(self):
         return f"[{self.type.upper()}] {self.title}"
+
+
+class PushDeviceToken(models.Model):
+    """
+    A registered FCM (Firebase Cloud Messaging) device token for mobile push
+    delivery (implementation plan §5 Week 6). Tokens are real device
+    registrations from the mobile apps — one row per device.
+    """
+    PLATFORM_CHOICES = [
+        ('android', 'Android'),
+        ('ios', 'iOS'),
+        ('web', 'Web Push'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='push_devices',
+    )
+    token = models.CharField(max_length=512, db_index=True,
+                             help_text="FCM device registration token")
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES, default='android')
+    device_name = models.CharField(max_length=150, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['token'], name='unique_push_token'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.platform} ({self.token[:12]}…)"

@@ -297,12 +297,13 @@ class TrimbleConnectService:
         access_token = cls._get_access_token()
 
         if not access_token:
-            # Simulation mode — no real upload
-            logger.info(
-                f"[SIMULATION] Trimble sync skipped (no credentials). "
-                f"Would have uploaded: defects.csv, inspection_summary.json, ai_overlay.json"
+            # No credentials — nothing was uploaded, so no success is reported.
+            logger.warning(
+                "Trimble Connect sync skipped: no OAuth credentials/token "
+                "(TRIMBLE_CLIENT_ID / TRIMBLE_CLIENT_SECRET, or pending authorization). "
+                "No files were uploaded."
             )
-            return True
+            return False
 
         import requests
 

@@ -16,11 +16,6 @@ class NotificationViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         user = self.request.user
 
-        # Seed baseline notifications if database is clean
-        if not qs.exists():
-            self.seed_defaults()
-            qs = Notification.objects.all()
-
         category = self.request.query_params.get('category')
         priority = self.request.query_params.get('priority')
         is_read = self.request.query_params.get('is_read')
@@ -36,19 +31,6 @@ class NotificationViewSet(viewsets.ModelViewSet):
             qs = qs.filter(is_acknowledged=(is_ack.lower() == 'true'))
 
         return qs
-
-    def seed_defaults(self):
-        defaults = [
-            {"title": "Emergency Dispatch: Scaffold Collapse Alert", "message": "Emergency response team dispatched to Sector 4 Marina coastal site.", "category": "EMERGENCY", "priority": "Critical", "location": "Marina Waterfront Block B", "action_url": "/government/dashboard/notifications/emergency"},
-            {"title": "Critical Finding: Foundation Slab Deflection", "message": "LiDAR survey detected 4.2mm structural settlement on Pier 12.", "category": "CRITICAL", "priority": "Critical", "location": "Lekki Deep Sea Logistics Hub", "action_url": "/government/dashboard/inspections/findings"},
-            {"title": "New Permit Application: Marina Tower Phase 2", "message": "High-rise commercial construction permit submitted by Apex Engineering.", "category": "APPLICATIONS", "priority": "High", "action_url": "/government/dashboard/applications"},
-            {"title": "Inspection Request: Rebar Placement Check", "message": "Stage 3 foundation reinforcement inspection scheduled for tomorrow 10:00 AM.", "category": "INSPECTIONS", "priority": "Medium", "action_url": "/government/dashboard/inspections/requests"},
-            {"title": "Technical Review Required: Structural Calculations", "message": "Delegation of Authority approval pending for Eko Atlantic Marina Tower.", "category": "APPROVALS", "priority": "High", "action_url": "/government/dashboard/approvals/pending"},
-            {"title": "Overdue CAPA: Water Drainage Containment", "message": "Corrective action plan overdue by 48 hours for non-conformance NCR-041.", "category": "OVERDUE", "priority": "High", "action_url": "/government/dashboard/compliance/corrective-actions"},
-            {"title": "Compliance NCR Flagged: Batch Steel Test Missing", "message": "Statutory rebar tensile test certificates required before concrete pour.", "category": "COMPLIANCE", "priority": "High", "action_url": "/government/dashboard/compliance/non-conformances"},
-        ]
-        for d in defaults:
-            Notification.objects.get_or_create(title=d["title"], defaults=d)
 
     @action(detail=True, methods=['post'], url_path='read')
     def mark_read(self, request, pk=None):
@@ -137,7 +119,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
             "overdue": all_notifs.filter(category='OVERDUE', is_read=False).count(),
         }, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get', 'put', 'patch'], url_path='preferences')
+    @action(detail=False, methods=['get', 'post', 'put', 'patch'], url_path='preferences')
     def preferences(self, request):
         if not request.user or not request.user.is_authenticated:
             # Return standard default preferences for anonymous/demo
@@ -158,7 +140,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
 
         pref, _ = NotificationPreference.objects.get_or_create(user=request.user)
-        if request.method in ['PUT', 'PATCH']:
+        if request.method in ['POST', 'PUT', 'PATCH']:
             serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
@@ -210,3 +192,60 @@ class WebhookEndpointViewSet(viewsets.ModelViewSet):
     queryset = WebhookEndpoint.objects.all().order_by('-created_at')
     serializer_class = WebhookEndpointSerializer
 
+
+
+# ---------------------------------------------------------------------------
+# Mobile push (FCM) device registration — plan §5 Week 6
+# ---------------------------------------------------------------------------
+from rest_framework import serializers as push_serializers
+
+from .models import PushDeviceToken
+
+
+class PushDeviceTokenSerializer(push_serializers.ModelSerializer):
+    class Meta:
+        model = PushDeviceToken
+        fields = ['id', 'token', 'platform', 'device_name', 'is_active',
+                  'last_used_at', 'created_at']
+        read_only_fields = ['id', 'is_active', 'last_used_at', 'created_at']
+
+
+class PushDeviceTokenViewSet(viewsets.ModelViewSet):
+    """
+    Register / list / remove FCM device tokens for push notifications.
+    A device registers its real FCM token after the mobile app obtains it
+    from Firebase — tokens are never generated server-side.
+    """
+    serializer_class = PushDeviceTokenSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+    filterset_fields = ['platform', 'is_active']
+
+    def get_queryset(self):
+        return PushDeviceToken.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        from django.db import IntegrityError
+        token = serializer.validated_data.get('token')
+        existing = PushDeviceToken.objects.filter(token=token).first()
+        if existing:
+            # Re-registration (app reinstall / token refresh): keep one row.
+            existing.user = self.request.user
+            existing.platform = serializer.validated_data.get('platform', existing.platform)
+            existing.device_name = serializer.validated_data.get('device_name', existing.device_name)
+            existing.is_active = True
+            existing.save()
+            self.existing = existing
+            return
+        serializer.save(user=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        instance = getattr(self, 'existing', None) or serializer.instance
+        if instance is None:
+            instance = PushDeviceToken.objects.filter(
+                token=serializer.validated_data['token']).first()
+        return Response(self.get_serializer(instance).data,
+                        status=status.HTTP_201_CREATED)

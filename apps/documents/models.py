@@ -88,17 +88,17 @@ class Document(models.Model):
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='APPROVED')
     
     current_version = models.CharField(max_length=50, default='v1.0')
-    file_url = models.CharField(max_length=500, blank=True, null=True, default='https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/sample.pdf')
-    file_size = models.CharField(max_length=50, default='12.4 MB')
+    file_url = models.CharField(max_length=500, blank=True, null=True)
+    file_size = models.CharField(max_length=50, blank=True, null=True)
     file_format = models.CharField(max_length=20, default='PDF')
-    pages_count = models.IntegerField(default=12)
+    pages_count = models.IntegerField(null=True, blank=True)
     
     is_starred = models.BooleanField(default=False)
     is_shared = models.BooleanField(default=True)
     expiry_date = models.DateField(null=True, blank=True)
     
     uploader = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='uploaded_documents')
-    uploader_name = models.CharField(max_length=255, default='S. Jenkins')
+    uploader_name = models.CharField(max_length=255, blank=True, null=True)
     
     # Official Government Digital Stamping & Verification Vault
     is_digitally_stamped = models.BooleanField(default=False)
@@ -145,7 +145,7 @@ class Version(models.Model):
     author_role = models.CharField(max_length=255, default='Review Team')
     
     file_url = models.CharField(max_length=500, blank=True, null=True)
-    file_size = models.CharField(max_length=50, default='12.4 MB')
+    file_size = models.CharField(max_length=50, blank=True, null=True)
     status = models.CharField(max_length=50, default='Current')
     signature_hash = models.CharField(max_length=255, blank=True, null=True)
     
@@ -298,7 +298,7 @@ class DocumentTemplate(models.Model):
     description = models.TextField()
     
     file_format = models.CharField(max_length=20, default='PDF')
-    file_url = models.CharField(max_length=500, blank=True, null=True, default='https://ba64cd9c51c2da4db93a1886397fd7b3.r2.cloudflarestorage.com/nexucondocument/template.pdf')
+    file_url = models.CharField(max_length=500, blank=True, null=True)
     file_size = models.CharField(max_length=50, default='450 KB')
     usage_count = models.IntegerField(default=0)
     

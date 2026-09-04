@@ -128,9 +128,7 @@ def main():
             u.save()
             print(f"Updated DailySiteUpdate {u.update_reference} with Cloudinary URLs: {u.photos}")
     else:
-        print("No existing updates found in database. Running seed...")
-        from apps.monitoring.seed_monitoring import run as seed_run
-        seed_run()
+        print("No existing updates found in database. Nothing to migrate.")
 
     print("\nCloudinary image migration completed successfully!")
 

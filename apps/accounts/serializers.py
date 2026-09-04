@@ -47,9 +47,12 @@ class UserMeSerializer(serializers.ModelSerializer):
                     if p not in perms:
                         perms.append(p)
             return perms
-        if obj.is_superuser or hasattr(obj, 'government_profile'):
+        if hasattr(obj, 'government_profile'):
             return default_agency_perms
-        return default_agency_perms
+        # Non-government users (client developers, stakeholders) get no
+        # elevated permissions — their access is scoped per-request by the
+        # helpers in common.permissions.
+        return []
 
     def get_role_name(self, obj):
         if hasattr(obj, 'government_profile') and obj.government_profile and obj.government_profile.role:
@@ -57,8 +60,8 @@ class UserMeSerializer(serializers.ModelSerializer):
         if hasattr(obj, 'government_profile') and obj.government_profile:
             return 'Agency Head'
         if obj.is_superuser:
-            return 'Agency Head'
-        return 'Agency Head'
+            return 'Director'
+        return 'Client'
         
     def get_agency_code(self, obj):
         if hasattr(obj, 'government_profile') and obj.government_profile and obj.government_profile.agency:
@@ -80,14 +83,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             token['role'] = user.government_profile.role.name
             token['permissions'] = user.government_profile.role.permissions
         else:
-            token['role'] = 'Agency Head'
-            token['permissions'] = [
-                'admin',
-                'projects.view', 'projects.create', 'projects.edit', 'projects.delete',
-                'applications.view', 'applications.create', 'applications.approve', 'applications.reject',
-                'inspections.view', 'inspections.create', 'inspections.update', 'inspections.delete',
-                'analytics.view_industry', 'all.delete'
-            ]
+            # Non-government users (client developers, stakeholders) get NO
+            # elevated claims — authorization is decided per-request from the
+            # role-scoped helpers in common.permissions, never from this token.
+            token['role'] = 'Client'
+            token['permissions'] = []
+        if user.is_superuser:
+            token['role'] = 'Director'
         return token
 
     def validate(self, attrs):
