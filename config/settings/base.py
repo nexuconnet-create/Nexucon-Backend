@@ -48,7 +48,19 @@ CORS_ALLOWED_ORIGINS = [
     "https://nexucon-frontend-8x3a.vercel.app",
     "https://nexucon.net",
     "https://www.nexucon.net",
+    "https://api.nexucon.net",
+    "http://api.nexucon.net",
+    "http://187.7.20.123",
+    "https://187.7.20.123",
+    "http://187.7.20.123:8000",
 ]
+_extra_cors = os.getenv("CORS_ALLOWED_ORIGINS", "") or os.getenv("DJANGO_CORS_ALLOWED_ORIGINS", "")
+if _extra_cors:
+    for _orig in _extra_cors.split(","):
+        _orig = _orig.strip()
+        if _orig and _orig not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(_orig)
+
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -62,7 +74,19 @@ CSRF_TRUSTED_ORIGINS = [
     "https://nexucon-backend.onrender.com",
     "https://nexucon.net",
     "https://www.nexucon.net",
+    "https://api.nexucon.net",
+    "http://api.nexucon.net",
+    "http://187.7.20.123",
+    "https://187.7.20.123",
+    "http://187.7.20.123:8000",
 ]
+_extra_csrf = os.getenv("CSRF_TRUSTED_ORIGINS", "") or os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "")
+if _extra_csrf:
+    for _orig in _extra_csrf.split(","):
+        _orig = _orig.strip()
+        if _orig and _orig not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(_orig)
+
 
 INSTALLED_APPS = [
     'django.contrib.admin',
