@@ -15,8 +15,17 @@ def custom_exception_handler(exc, context):
     if response is not None:
         errors = response.data
         message = "A validation or processing error occurred."
-        if isinstance(errors, dict) and "detail" in errors:
-            message = errors.pop("detail")
+        if isinstance(errors, dict):
+            if "detail" in errors:
+                message = errors.pop("detail")
+            else:
+                for field, err_list in errors.items():
+                    if isinstance(err_list, list) and len(err_list) > 0:
+                        message = f"{err_list[0]}"
+                        break
+                    elif isinstance(err_list, str):
+                        message = err_list
+                        break
         elif isinstance(errors, list) and len(errors) > 0 and isinstance(errors[0], str):
             message = errors[0]
             
