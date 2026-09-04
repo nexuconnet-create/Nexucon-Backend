@@ -58,20 +58,25 @@ CSRF_TRUSTED_ORIGINS = [
     "https://nexucon-backend.onrender.com",
 ]
 
-# Dynamically add any env-defined origins
-for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS", "DJANGO_ALLOWED_HOSTS"):
+# Dynamically add any env-defined origins ensuring proper schemes
+for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS"):
     _val = os.getenv(_env_key, "").strip()
     if _val:
         for _item in _val.split(","):
             _cleaned = _item.strip().rstrip("/")
             if _cleaned and _cleaned != "*":
-                if _cleaned not in CORS_ALLOWED_ORIGINS:
-                    CORS_ALLOWED_ORIGINS.append(_cleaned)
-                if _cleaned not in CSRF_TRUSTED_ORIGINS:
-                    CSRF_TRUSTED_ORIGINS.append(_cleaned)
-                if not _cleaned.startswith("http://") and not _cleaned.startswith("https://"):
-                    CSRF_TRUSTED_ORIGINS.append(f"https://{_cleaned}")
-                    CSRF_TRUSTED_ORIGINS.append(f"http://{_cleaned}")
+                if _cleaned.startswith("http://") or _cleaned.startswith("https://"):
+                    if _cleaned not in CORS_ALLOWED_ORIGINS:
+                        CORS_ALLOWED_ORIGINS.append(_cleaned)
+                    if _cleaned not in CSRF_TRUSTED_ORIGINS:
+                        CSRF_TRUSTED_ORIGINS.append(_cleaned)
+                else:
+                    for _scheme in ("https://", "http://"):
+                        _with_scheme = f"{_scheme}{_cleaned}"
+                        if _with_scheme not in CORS_ALLOWED_ORIGINS:
+                            CORS_ALLOWED_ORIGINS.append(_with_scheme)
+                        if _with_scheme not in CSRF_TRUSTED_ORIGINS:
+                            CSRF_TRUSTED_ORIGINS.append(_with_scheme)
 
 INSTALLED_APPS = [
     'django.contrib.admin',

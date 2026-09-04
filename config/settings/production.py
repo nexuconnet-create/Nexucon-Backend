@@ -68,13 +68,18 @@ for raw in raw_origins:
         for item in raw.split(","):
             cleaned = item.strip().rstrip("/")
             if cleaned:
-                if cleaned not in CORS_ALLOWED_ORIGINS:
-                    CORS_ALLOWED_ORIGINS.append(cleaned)
-                if cleaned not in CSRF_TRUSTED_ORIGINS:
-                    CSRF_TRUSTED_ORIGINS.append(cleaned)
-                if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
-                    CSRF_TRUSTED_ORIGINS.append(f"https://{cleaned}")
-                    CSRF_TRUSTED_ORIGINS.append(f"http://{cleaned}")
+                if cleaned.startswith("http://") or cleaned.startswith("https://"):
+                    if cleaned not in CORS_ALLOWED_ORIGINS:
+                        CORS_ALLOWED_ORIGINS.append(cleaned)
+                    if cleaned not in CSRF_TRUSTED_ORIGINS:
+                        CSRF_TRUSTED_ORIGINS.append(cleaned)
+                else:
+                    for scheme in ("https://", "http://"):
+                        with_scheme = f"{scheme}{cleaned}"
+                        if with_scheme not in CORS_ALLOWED_ORIGINS:
+                            CORS_ALLOWED_ORIGINS.append(with_scheme)
+                        if with_scheme not in CSRF_TRUSTED_ORIGINS:
+                            CSRF_TRUSTED_ORIGINS.append(with_scheme)
 
 # Also add all ALLOWED_HOSTS as trusted HTTPS origins for Django Admin CSRF
 for host in ALLOWED_HOSTS:
