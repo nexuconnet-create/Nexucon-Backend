@@ -338,3 +338,79 @@ class RegisterLoginEndpointsTestCase(TestCase):
             'password': 'WrongPassword!',
         })
         self.assertEqual(res.status_code, 401)
+
+
+class EmailVerificationTestCase(TestCase):
+    """
+    Tests for the 6-digit email OTP verification flow:
+    - Code generation upon registration
+    - Verification endpoint /api/v1/auth/verify-email/
+    - Resend endpoint /api/v1/auth/resend-verification/
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='unverified@nexucon.net',
+            email='unverified@nexucon.net',
+            password='Password123!',
+            first_name='Kelechi',
+            last_name='Eze',
+            is_verified=False
+        )
+
+    def test_register_dispatches_verification_code(self):
+        from apps.accounts.models import EmailVerificationCode
+        res = self.client.post('/api/v1/auth/register/', {
+            'email': 'verify_target@nexucon.net',
+            'first_name': 'Amina',
+            'last_name': 'Bello',
+            'password': 'Password123!',
+        })
+        self.assertEqual(res.status_code, 201)
+        code_obj = EmailVerificationCode.objects.filter(email='verify_target@nexucon.net').first()
+        self.assertIsNotNone(code_obj)
+        self.assertEqual(len(code_obj.code), 6)
+        self.assertTrue(code_obj.is_valid())
+
+    def test_verify_email_success(self):
+        from apps.accounts.verification import send_verification_code_for_user
+        code = send_verification_code_for_user(user=self.user)
+
+        res = self.client.post('/api/v1/auth/verify-email/', {
+            'email': self.user.email,
+            'code': code
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        self.assertIn('access', res.data['data'])
+        self.assertIn('access_token', res.cookies)
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_verified)
+
+    def test_verify_email_wrong_code_fails(self):
+        from apps.accounts.verification import send_verification_code_for_user
+        send_verification_code_for_user(user=self.user)
+
+        res = self.client.post('/api/v1/auth/verify-email/', {
+            'email': self.user.email,
+            'code': '000000'
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(res.data['success'])
+
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_verified)
+
+    def test_resend_verification_code(self):
+        from apps.accounts.models import EmailVerificationCode
+        res = self.client.post('/api/v1/auth/resend-verification/', {
+            'email': self.user.email
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        
+        codes = EmailVerificationCode.objects.filter(email=self.user.email)
+        self.assertGreaterEqual(codes.count(), 1)
+

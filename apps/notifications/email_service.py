@@ -137,3 +137,30 @@ class EmailService:
             subject=subject,
             html_content=html_content
         )
+
+    @classmethod
+    def send_verification_otp_email(cls, email: str, name: str, otp_code: str, expires_minutes: int = 15) -> dict:
+        """
+        Dispatch a 6-digit Email Verification Passcode for account activation.
+        """
+        subject = f"🔐 {otp_code} is your Nexucon Email Verification Code"
+        context = {
+            'email': email,
+            'name': name or 'Valued User',
+            'otp_code': otp_code,
+            'expires_minutes': expires_minutes,
+            'current_year': timezone.now().year
+        }
+
+        try:
+            html_content = render_to_string('emails/verify_email.html', context)
+        except Exception as e:
+            logger.warning(f"Could not render emails/verify_email.html, falling back to 2FA template: {e}")
+            html_content = render_to_string('emails/two_factor_auth.html', context)
+
+        return cls.send_email(
+            to_email=email,
+            subject=subject,
+            html_content=html_content
+        )
+

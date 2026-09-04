@@ -130,3 +130,28 @@ class TwoFactorSecret(models.Model):
             from .two_factor import generate_secret
             self.secret = generate_secret()
         super().save(*args, **kwargs)
+
+
+class EmailVerificationCode(models.Model):
+    """
+    Stores 6-digit email verification codes (OTP) for user registration
+    and email verification.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='verification_codes', null=True, blank=True)
+    email = models.EmailField(db_index=True)
+    code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'accounts_email_verification_code'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Code for {self.email} ({'used' if self.is_used else 'active'})"
+
+    def is_valid(self):
+        return not self.is_used and timezone.now() <= self.expires_at
+

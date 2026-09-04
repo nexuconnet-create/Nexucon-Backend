@@ -120,6 +120,14 @@ class UserRegistrationView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         
+        # Dispatch 6-digit email verification code for onboarding
+        try:
+            from .verification import send_verification_code_for_user
+            send_verification_code_for_user(user=user, name=user.get_full_name())
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send email verification code on registration: {e}")
+
         # Optionally generate tokens immediately upon registration
         refresh = RefreshToken.for_user(user)
         # Using the custom get_token to include claims
@@ -143,7 +151,7 @@ class UserRegistrationView(generics.CreateAPIView):
         
         res = Response({
             'success': True,
-            'message': 'User registered successfully',
+            'message': 'User registered successfully. A verification code has been sent to your email.',
             'data': {
                 'user': UserMeSerializer(user).data,
                 'access': access_token,
@@ -169,6 +177,141 @@ class UserRegistrationView(generics.CreateAPIView):
             samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
         )
         return res
+
+
+class VerifyEmailView(APIView):
+    """
+    Validates a 6-digit email verification code and marks the account as verified.
+    Returns refreshed access/refresh JWTs.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        from django.contrib.auth import get_user_model
+        from .verification import verify_code_for_email
+
+        email = (request.data.get('email') or '').strip().lower()
+        code = str(request.data.get('code') or '').strip()
+
+        if not email or not code:
+            return Response({
+                'success': False,
+                'message': 'Email and 6-digit verification code are required.',
+                'errors': [{'field': 'code' if not code else 'email', 'message': 'This field is required.'}]
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({
+                'success': False,
+                'message': 'No account found with this email address.',
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if not verify_code_for_email(email, code):
+            return Response({
+                'success': False,
+                'message': 'Invalid or expired verification code. Please check your code or request a new one.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mark user as verified
+        user.is_verified = True
+        user.save(update_fields=['is_verified'])
+
+        # Generate fresh JWT tokens
+        refresh = CustomTokenObtainPairSerializer.get_token(user)
+        access_token = str(refresh.access_token)
+        refresh_token = str(refresh)
+
+        # Create session
+        user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown Device')
+        ip = request.META.get('REMOTE_ADDR')
+        import jwt
+        decoded = jwt.decode(refresh_token, options={"verify_signature": False})
+        jti = decoded.get('jti')
+
+        UserSession.objects.create(
+            user=user,
+            device_info=user_agent,
+            ip_address=ip,
+            refresh_jti=jti
+        )
+
+        res = Response({
+            'success': True,
+            'message': 'Email verified successfully.',
+            'data': {
+                'user': UserMeSerializer(user).data,
+                'access': access_token,
+                'refresh': refresh_token,
+            },
+            'errors': None
+        }, status=status.HTTP_200_OK)
+
+        res.set_cookie(
+            settings.SIMPLE_JWT['AUTH_COOKIE'],
+            access_token,
+            max_age=settings.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'].total_seconds(),
+            secure=settings.SIMPLE_JWT['AUTH_COOKIE_SECURE'],
+            httponly=settings.SIMPLE_JWT['AUTH_COOKIE_HTTP_ONLY'],
+            samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
+        )
+        res.set_cookie(
+            settings.SIMPLE_JWT['AUTH_COOKIE_REFRESH'],
+            refresh_token,
+            max_age=settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds(),
+            secure=settings.SIMPLE_JWT['AUTH_COOKIE_SECURE'],
+            httponly=settings.SIMPLE_JWT['AUTH_COOKIE_HTTP_ONLY'],
+            samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
+        )
+        return res
+
+
+class ResendVerificationView(APIView):
+    """
+    Dispatches a new 6-digit verification code to the user's email.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        from django.contrib.auth import get_user_model
+        from .verification import send_verification_code_for_user
+
+        email = (request.data.get('email') or '').strip().lower()
+        if not email:
+            return Response({
+                'success': False,
+                'message': 'Email address is required.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({
+                'success': False,
+                'message': 'No registered account found with this email address.',
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if user.is_verified:
+            return Response({
+                'success': True,
+                'message': 'Your account is already verified. Please sign in.',
+            }, status=status.HTTP_200_OK)
+
+        try:
+            send_verification_code_for_user(user=user, name=user.get_full_name())
+            return Response({
+                'success': True,
+                'message': 'A new 6-digit verification code has been sent to your email.',
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error resending verification code: {e}")
+            return Response({
+                'success': False,
+                'message': 'Failed to send verification code. Please try again.',
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 class UserMeView(APIView):
