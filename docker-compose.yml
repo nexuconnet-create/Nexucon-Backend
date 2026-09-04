@@ -1,12 +1,11 @@
 services:
   db:
     image: postgis/postgis:15-3.4
+    restart: always
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nexucon}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexucon_secure_pass}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,12 +16,12 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: always
 
   web:
     build: .
-    command: python manage.py runserver 0.0.0.0:8000
+    restart: always
+    command: /app/entrypoint.sh
     volumes:
       - .:/app
     ports:
@@ -35,19 +34,22 @@ services:
     env_file:
       - .env
     environment:
-      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DJANGO_SETTINGS_MODULE=config.settings.production
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}
-      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-nexucon_secure_pass}
       - DATABASE_HOST=db
       - DATABASE_PORT=5432
       - DATABASE_ENGINE=django.contrib.gis.db.backends.postgis
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - FRONTEND_URL=${FRONTEND_URL:-https://nexucon.net}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,187.7.20.123,localhost,127.0.0.1}
 
   celery:
     build: .
+    restart: always
     command: celery -A config worker -l info
     volumes:
       - .:/app
@@ -59,11 +61,11 @@ services:
     env_file:
       - .env
     environment:
-      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DJANGO_SETTINGS_MODULE=config.settings.production
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}
-      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-nexucon_secure_pass}
       - DATABASE_HOST=db
       - DATABASE_PORT=5432
       - DATABASE_ENGINE=django.contrib.gis.db.backends.postgis
@@ -72,4 +74,3 @@ services:
 
 volumes:
   postgres_data:
-
