@@ -36,6 +36,7 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,www.nexucon.net,187.7.20.123,localhost,127.0.0.1}
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}
@@ -60,6 +61,7 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,www.nexucon.net,187.7.20.123,localhost,127.0.0.1}
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}

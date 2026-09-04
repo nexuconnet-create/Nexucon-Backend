@@ -26,7 +26,12 @@ DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dummy-secret-key-for-dev-only" if DEBUG else "")
 if not SECRET_KEY and not DEBUG:
     raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=False.")
-ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+_default_allowed_hosts = "localhost,127.0.0.1,testserver,api.nexucon.net,nexucon.net,www.nexucon.net,187.7.20.123,nexucon-backend.onrender.com"
+raw_allowed_hosts = os.getenv("DJANGO_ALLOWED_HOSTS", _default_allowed_hosts)
+ALLOWED_HOSTS = [h.strip() for h in raw_allowed_hosts.split(",") if h.strip()]
+for _h in ["api.nexucon.net", "nexucon.net", "www.nexucon.net", "187.7.20.123", "localhost", "127.0.0.1"]:
+    if _h not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_h)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_HEADERS = True
 CORS_ALLOWED_ORIGINS = [
