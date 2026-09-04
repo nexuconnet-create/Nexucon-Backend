@@ -133,6 +133,5 @@ if 'SIMPLE_JWT' in locals():
     SIMPLE_JWT['AUTH_COOKIE_SAMESITE'] = 'None'
     SIMPLE_JWT['AUTH_COOKIE_SECURE'] = True
 
-# Alternatively, allow all if explicitly set (useful for initial Vercel setup)
-if os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True":
-    CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_METHODS = ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"]
