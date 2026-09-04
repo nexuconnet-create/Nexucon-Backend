@@ -11,9 +11,12 @@ from .serializers import (
     UserRegistrationSerializer, 
     UserMeSerializer,
 )
-from .models import UserSession
+from .models import UserSession, EmailVerificationToken
 from django.conf import settings
+from django.utils import timezone
 from rest_framework_simplejwt.exceptions import TokenError
+from apps.notifications.email_service import EmailService
+
 
 class CustomLoginView(TokenObtainPairView):
     permission_classes = (AllowAny,)
@@ -119,38 +122,131 @@ class UserRegistrationView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        
-        # Optionally generate tokens immediately upon registration
-        refresh = RefreshToken.for_user(user)
-        # Using the custom get_token to include claims
+        user.is_verified = False
+        user.save(update_fields=['is_verified'])
+
+        # Generate 6-digit email verification token
+        otp_token = EmailVerificationToken.generate_token(email=user.email, user=user)
+
+        # Dispatch verification email via Resend
+        full_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        try:
+            EmailService.send_verification_otp_email(
+                email=user.email,
+                name=full_name,
+                otp_code=otp_token.code,
+                expires_minutes=15
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send verification email to {user.email}: {e}")
+
+        return Response({
+            'success': True,
+            'message': 'Registration initiated. We have sent a 6-digit verification code to your email address.',
+            'data': {
+                'user': UserMeSerializer(user).data,
+                'email': user.email,
+                'requires_verification': True,
+                'is_verified': False,
+            },
+            'errors': None
+        }, status=status.HTTP_201_CREATED)
+
+
+class VerifyEmailView(APIView):
+    """
+    POST /api/v1/auth/verify-email/
+    Receives { email, code } to confirm email verification and complete registration.
+    On success, issues JWT tokens and active UserSession.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        code = str(request.data.get('code') or request.data.get('otp') or '').strip()
+
+        if not email or not code:
+            return Response({
+                'success': False,
+                'message': 'Email address and verification code are required.',
+                'errors': [{'field': 'code', 'message': 'Email and 6-digit code are required.'}]
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({
+                'success': False,
+                'message': 'No account associated with this email address.',
+                'errors': [{'field': 'email', 'message': 'Account not found.'}]
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        token = EmailVerificationToken.objects.filter(
+            email__iexact=email,
+            is_used=False
+        ).order_by('-created_at').first()
+
+        if not token or timezone.now() > token.expires_at:
+            return Response({
+                'success': False,
+                'message': 'Verification code has expired or is invalid. Please request a new code.',
+                'errors': [{'field': 'code', 'message': 'Expired or invalid code.'}]
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if token.attempts >= 5:
+            return Response({
+                'success': False,
+                'message': 'Too many failed verification attempts. Please request a new code.',
+                'errors': [{'field': 'code', 'message': 'Maximum attempts exceeded.'}]
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if token.code != code:
+            token.attempts += 1
+            token.save(update_fields=['attempts'])
+            return Response({
+                'success': False,
+                'message': 'Invalid verification code. Please check and try again.',
+                'errors': [{'field': 'code', 'message': 'Incorrect code.'}]
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Code matched! Mark used & user verified
+        token.is_used = True
+        token.save(update_fields=['is_used'])
+
+        user.is_verified = True
+        user.save(update_fields=['is_verified'])
+
+        # Generate JWT tokens
         refresh = CustomTokenObtainPairSerializer.get_token(user)
         access_token = str(refresh.access_token)
         refresh_token = str(refresh)
-        
-        # Create session
+
+        # Create active user session
         user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown Device')
         ip = request.META.get('REMOTE_ADDR')
         import jwt
         decoded = jwt.decode(refresh_token, options={"verify_signature": False})
         jti = decoded.get('jti')
-        
+
         UserSession.objects.create(
             user=user,
             device_info=user_agent,
             ip_address=ip,
             refresh_jti=jti
         )
-        
+
         res = Response({
             'success': True,
-            'message': 'User registered successfully',
+            'message': 'Email address verified successfully. Welcome to Nexucon!',
             'data': {
                 'user': UserMeSerializer(user).data,
                 'access': access_token,
                 'refresh': refresh_token,
             },
             'errors': None
-        }, status=status.HTTP_201_CREATED)
+        }, status=status.HTTP_200_OK)
 
         res.set_cookie(
             settings.SIMPLE_JWT['AUTH_COOKIE'],
@@ -169,6 +265,72 @@ class UserRegistrationView(generics.CreateAPIView):
             samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
         )
         return res
+
+
+class ResendVerificationCodeView(APIView):
+    """
+    POST /api/v1/auth/resend-verification/
+    Receives { email } to dispatch a new 6-digit OTP email.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        if not email:
+            return Response({
+                'success': False,
+                'message': 'Email address is required.',
+                'errors': [{'field': 'email', 'message': 'Email is required.'}]
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({
+                'success': False,
+                'message': 'No account associated with this email address.',
+                'errors': [{'field': 'email', 'message': 'Account not found.'}]
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if user.is_verified:
+            return Response({
+                'success': True,
+                'message': 'Your email address is already verified. You can proceed to log in.',
+                'data': {'already_verified': True}
+            })
+
+        # Rate-limiting: minimum 30s between consecutive OTP dispatches
+        last_token = EmailVerificationToken.objects.filter(
+            email__iexact=email
+        ).order_by('-created_at').first()
+        if last_token and (timezone.now() - last_token.created_at).total_seconds() < 30:
+            wait_sec = int(30 - (timezone.now() - last_token.created_at).total_seconds())
+            return Response({
+                'success': False,
+                'message': f'Please wait {wait_sec} seconds before requesting a new code.',
+                'errors': [{'field': 'rate_limit', 'message': f'Wait {wait_sec}s'}]
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        otp_token = EmailVerificationToken.generate_token(email=user.email, user=user)
+        full_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        try:
+            EmailService.send_verification_otp_email(
+                email=user.email,
+                name=full_name,
+                otp_code=otp_token.code,
+                expires_minutes=15
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to resend verification email to {user.email}: {e}")
+
+        return Response({
+            'success': True,
+            'message': 'A new 6-digit verification code has been sent to your email address.',
+            'data': {'email': user.email}
+        })
+
 
 
 class UserMeView(APIView):

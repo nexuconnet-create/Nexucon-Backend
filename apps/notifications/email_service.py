@@ -2,6 +2,7 @@ import os
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import logging
 from django.conf import settings
 from django.template.loader import render_to_string
@@ -9,30 +10,50 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-# Resend API Configuration
-RESEND_API_KEY = getattr(settings, 'RESEND_API_KEY', os.environ.get('RESEND_API_KEY', ''))
 RESEND_API_URL = 'https://api.resend.com/emails'
-DEFAULT_FROM_EMAIL = getattr(settings, 'RESEND_FROM_EMAIL', os.environ.get('RESEND_FROM_EMAIL', 'Nexucon Email notifications <notifications@nexucon.net>'))
-DEFAULT_FRONTEND_URL = getattr(settings, 'FRONTEND_URL', os.environ.get('FRONTEND_URL', 'https://nexucon-frontend-8x3a.vercel.app'))
+
 
 class EmailService:
     """
-    Centralized Resend Email Service for Nexucon Government System.
-    Dispatches HTML role invitations, 2FA OTP codes, and statutory alerts.
+    Centralized Resend Email Service for Nexucon Government & Construction System.
+    Dispatches HTML role invitations, registration verification OTPs, 2FA codes, and statutory alerts.
     """
 
-    @staticmethod
-    def send_email(to_email: str, subject: str, html_content: str, text_content: str = None, from_email: str = None) -> dict:
+    @classmethod
+    def get_api_key(cls) -> str:
+        return getattr(settings, 'RESEND_API_KEY', '') or os.environ.get('RESEND_API_KEY', '')
+
+    @classmethod
+    def get_from_email(cls) -> str:
+        return getattr(
+            settings,
+            'RESEND_FROM_EMAIL',
+            ''
+        ) or os.environ.get(
+            'RESEND_FROM_EMAIL',
+            'Nexucon Notifications <notifications@nexucon.net>'
+        )
+
+    @classmethod
+    def get_frontend_url(cls) -> str:
+        return (
+            getattr(settings, 'FRONTEND_URL', '')
+            or os.environ.get('FRONTEND_URL', 'https://nexucon.net')
+        ).rstrip('/')
+
+    @classmethod
+    def send_email(cls, to_email: str, subject: str, html_content: str, text_content: str = None, from_email: str = None) -> dict:
         """
         Send an email via the Resend REST API.
         """
-        api_key = RESEND_API_KEY
+        api_key = cls.get_api_key()
         if not api_key:
-            logger.error("Resend API key is missing. Email dispatch aborted.")
+            logger.warning("Resend API key is missing. Email dispatch aborted.")
             return {"success": False, "error": "RESEND_API_KEY not configured"}
 
+        sender = from_email or cls.get_from_email()
         payload = {
-            "from": from_email or DEFAULT_FROM_EMAIL,
+            "from": sender,
             "to": [to_email] if isinstance(to_email, str) else to_email,
             "subject": subject,
             "html": html_content,
@@ -58,22 +79,50 @@ class EmailService:
                 return {"success": True, "id": resp_data.get('id'), "data": resp_data}
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8')
-            logger.error(f"Resend HTTP Error ({e.code}): {error_body}")
+            logger.error(f"Resend HTTP Error ({e.code}) sending to {to_email}: {error_body}")
             return {"success": False, "error": error_body, "status_code": e.code}
         except Exception as ex:
             logger.error(f"Failed to dispatch email to {to_email}: {str(ex)}")
             return {"success": False, "error": str(ex)}
 
     @classmethod
+    def send_verification_otp_email(cls, email: str, name: str, otp_code: str, expires_minutes: int = 15) -> dict:
+        """
+        Dispatch a branded email verification OTP code to activate newly registered accounts.
+        """
+        subject = f"✉️ {otp_code} is your Nexucon verification code"
+        context = {
+            'email': email,
+            'name': name or email.split('@')[0].capitalize(),
+            'otp_code': otp_code,
+            'expires_minutes': expires_minutes,
+            'current_year': timezone.now().year,
+        }
+
+        try:
+            html_content = render_to_string('emails/email_verification.html', context)
+        except Exception as e:
+            logger.warning(f"Could not render email_verification.html, falling back to basic template: {e}")
+            html_content = render_to_string('emails/two_factor_auth.html', context)
+
+        return cls.send_email(
+            to_email=email,
+            subject=subject,
+            html_content=html_content
+        )
+
+    @classmethod
     def send_invitation_email(cls, email: str, name: str, role: str, department: str = "Urban Planning", invite_token: str = None, invited_by=None, base_url: str = None, temp_password: str = None) -> dict:
         """
         Dispatch a tailored, role-specific HTML invitation email.
         """
-        base = base_url or DEFAULT_FRONTEND_URL
+        base = (base_url or cls.get_frontend_url()).rstrip('/')
         token = invite_token or "invite-token-sample"
-        invite_url = f"{base}/auth/accept-invite?token={token}&email={encodeURIComponent(email) if 'encodeURIComponent' in locals() else email}&role={role}"
+        encoded_email = urllib.parse.quote(email)
+        encoded_role = urllib.parse.quote(role or '')
+        invite_url = f"{base}/auth/accept-invite?token={token}&email={encoded_email}&role={encoded_role}"
         if temp_password:
-            invite_url += f"&temp={temp_password}"
+            invite_url += f"&temp={urllib.parse.quote(temp_password)}"
 
         # Choose template based on designated authority role
         role_lower = (role or '').lower()
