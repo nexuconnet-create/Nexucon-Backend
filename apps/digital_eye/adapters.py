@@ -97,7 +97,7 @@ class PUNDITAdapter:
         return (crack_path_length_mm / 2.0) * math.sqrt(ratio ** 2 - 1)
 
     @classmethod
-    def analyze(cls, test):
+    def analyze(cls, test, use_llm=True):
         """
         Run the deterministic analysis on a PUNDITTest, persist the computed
         fields on the test and create an AIAnalysisRecord in the Evidence
@@ -109,6 +109,11 @@ class PUNDITAdapter:
         measurements when a provider is configured; on any provider failure
         the deterministic record still stands — no fabricated narrative is
         ever stored.
+
+        use_llm=False skips the narrative layer: used by analyze_project,
+        which runs per-test deterministic passes and then makes ONE
+        project-level LLM call — N tests must not fire N LLM requests
+        (provider rate limits killed the endpoint when it did).
         """
         from apps.evidence.models import AIAnalysisRecord
         from apps.evidence.ingestion import EvidenceIngestionService
@@ -220,7 +225,8 @@ class PUNDITAdapter:
         # the deterministic observations above stand — never fabricated.
         observations = deterministic_observations
         provider, model_version = 'deterministic', 'BS 1881-203 / ASTM C597 v1'
-        llm_result = cls._llm_observations(test, rows, velocity, grade, crack_depth)
+        llm_result = (cls._llm_observations(test, rows, velocity, grade, crack_depth)
+                      if use_llm else None)
         if llm_result is not None:
             observations, provider, model_version = llm_result
             steps.append(

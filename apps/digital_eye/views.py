@@ -375,7 +375,10 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
 
         records = []
         for test in tests:
-            record = PUNDITAdapter.analyze(test)
+            # Deterministic pass only — the ONE project-level narrative below
+            # is the single LLM call (N tests must not fire N LLM requests;
+            # provider rate limits 504'd the endpoint when they did).
+            record = PUNDITAdapter.analyze(test, use_llm=False)
             records.append(record)
         project_record = PUNDITAdapter.analyze_project(project, request.user)
         _record_audit(request.user, 'digital_eye.pundit_test.analyze_project',
