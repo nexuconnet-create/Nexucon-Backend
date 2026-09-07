@@ -18,3 +18,4 @@ media/
 *.backup
 test video.png
 
+staticfiles/
