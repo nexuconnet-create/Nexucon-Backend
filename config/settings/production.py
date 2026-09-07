@@ -52,26 +52,43 @@ if os.getenv("CELERY_BROKER_URL"):
 # The render.yaml sets DJANGO_ALLOWED_HOSTS to nexucon-backend.onrender.com
 # ALLOWED_HOSTS is loaded from base.py via the DJANGO_ALLOWED_HOSTS env var
 
-# CORS and CSRF for Vercel
-try:
-    CSRF_TRUSTED_ORIGINS = list(CSRF_TRUSTED_ORIGINS)
-except NameError:
-    CSRF_TRUSTED_ORIGINS = []
+# Auto-populate trusted origins from FRONTEND_URL, NEXT_PUBLIC_API_URL, DJANGO_ALLOWED_HOSTS, and CSRF_TRUSTED_ORIGINS env var
+raw_origins = [
+    os.getenv("FRONTEND_URL", ""),
+    os.getenv("NEXT_PUBLIC_API_URL", ""),
+    os.getenv("CSRF_TRUSTED_ORIGINS", ""),
+    "https://api.nexucon.net",
+    "https://nexucon.net",
+    "http://187.7.20.123",
+    "http://187.7.20.123:8000",
+]
 
-try:
-    CORS_ALLOWED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
-except NameError:
-    CORS_ALLOWED_ORIGINS = []
+for raw in raw_origins:
+    if raw:
+        for item in raw.split(","):
+            cleaned = item.strip().rstrip("/")
+            if cleaned:
+                if cleaned.startswith("http://") or cleaned.startswith("https://"):
+                    if cleaned not in CORS_ALLOWED_ORIGINS:
+                        CORS_ALLOWED_ORIGINS.append(cleaned)
+                    if cleaned not in CSRF_TRUSTED_ORIGINS:
+                        CSRF_TRUSTED_ORIGINS.append(cleaned)
+                else:
+                    for scheme in ("https://", "http://"):
+                        with_scheme = f"{scheme}{cleaned}"
+                        if with_scheme not in CORS_ALLOWED_ORIGINS:
+                            CORS_ALLOWED_ORIGINS.append(with_scheme)
+                        if with_scheme not in CSRF_TRUSTED_ORIGINS:
+                            CSRF_TRUSTED_ORIGINS.append(with_scheme)
 
-if os.getenv("FRONTEND_URL"):
-    frontend_raw = os.getenv("FRONTEND_URL", "").strip()
-    for item in frontend_raw.split(","):
-        cleaned = item.strip().rstrip("/")
-        if cleaned:
-            if cleaned not in CORS_ALLOWED_ORIGINS:
-                CORS_ALLOWED_ORIGINS.append(cleaned)
-            if cleaned not in CSRF_TRUSTED_ORIGINS:
-                CSRF_TRUSTED_ORIGINS.append(cleaned)
+# Also add all ALLOWED_HOSTS as trusted HTTPS origins for Django Admin CSRF
+for host in ALLOWED_HOSTS:
+    h = host.strip().lstrip(".").rstrip("/")
+    if h and h != "*":
+        for scheme in ("https://", "http://"):
+            origin = f"{scheme}{h}"
+            if origin not in CSRF_TRUSTED_ORIGINS:
+                CSRF_TRUSTED_ORIGINS.append(origin)
 
 def _sanitize_origin(origin):
     origin = origin.strip().rstrip("/")
@@ -93,6 +110,8 @@ def _sanitize_csrf_origin(origin):
         return f"{scheme}://{rest}"
     return origin
 
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_HEADERS = True
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys([_sanitize_origin(o) for o in CORS_ALLOWED_ORIGINS if o]))
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys([_sanitize_csrf_origin(o) for o in CSRF_TRUSTED_ORIGINS if o]))
 
@@ -114,6 +133,5 @@ if 'SIMPLE_JWT' in locals():
     SIMPLE_JWT['AUTH_COOKIE_SAMESITE'] = 'None'
     SIMPLE_JWT['AUTH_COOKIE_SECURE'] = True
 
-# Alternatively, allow all if explicitly set (useful for initial Vercel setup)
-if os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True":
-    CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_METHODS = ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"]
