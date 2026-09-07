@@ -120,6 +120,7 @@ class SensorDataFile(models.Model):
         ('gpr_raw', 'GPR Raw Dataset'),
         ('pundit_raw', 'PUNDIT Raw Export'),
         ('gnss_rinex', 'GNSS RINEX Log'),
+        ('bim_model', 'BIM Model File (.ifc / .rvt, kept for re-import)'),
         ('photo', 'Site Photo'),
         ('video', 'Video'),
         ('other', 'Other'),
@@ -133,6 +134,13 @@ class SensorDataFile(models.Model):
     sha256_checksum = models.CharField(max_length=64, blank=True, default='', db_index=True,
                                        help_text="SHA-256 of the file content at upload time")
     description = models.CharField(max_length=255, blank=True, default='')
+    # Optional project link for project-level artifacts (e.g. a screenshot of
+    # the BIM model 3D preview captured for the report) that are not attached
+    # to any single test/survey.
+    project = models.ForeignKey(
+        'projects.Project', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sensor_files',
+    )
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='sensor_data_files',
@@ -308,6 +316,14 @@ class PUNDITTest(models.Model):
     test_type = models.CharField(max_length=30, choices=TEST_TYPES, default='pulse_velocity')
     structural_element = models.CharField(max_length=100, blank=True, default='',
                                           help_text="Element tested, e.g. COL-C24")
+    floor = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text="Floor/level of the test station, e.g. 'Ground Floor', 'First Floor'",
+    )
+    weather_condition = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text="Weather condition at test time, recorded by the operator on site",
+    )
 
     device_model = models.CharField(max_length=100, default='Proceq Pundit PL-200 UPV', blank=True)
     transducer_frequency_khz = models.PositiveIntegerField(null=True, blank=True, help_text="e.g. 54 kHz")
@@ -366,6 +382,73 @@ class PUNDITTest(models.Model):
     def __str__(self):
         return f"{self.test_reference} — {self.structural_element or self.structural_element_name or self.get_test_type_display()}"
 
+    def reading_rows(self):
+        """
+        Ordered per-point rows for this test — the single data path the
+        report, charts and AI consume. Returns dicts:
+            {label, path_mm, transit_us, velocity_km_s, ecs_mpa,
+             uncracked_us, crack_depth_mm, surface_condition}
+        Tests recorded through the multi-reading model return their real
+        A/B/C… rows; legacy single-reading tests return their scalar
+        measurement as one 'A' row (values never invented — missing
+        measurements stay None).
+        """
+        readings = list(self.readings.all())
+        if readings:
+            return [
+                {'label': r.point_label,
+                 'path_mm': r.path_length_mm,
+                 'transit_us': r.transit_time_us,
+                 'velocity_km_s': r.velocity_km_s,
+                 'ecs_mpa': r.ecs_mpa,
+                 'uncracked_us': r.uncracked_transit_time_us,
+                 'crack_depth_mm': r.crack_depth_mm,
+                 'surface_condition': r.surface_condition}
+                for r in readings
+            ]
+        from apps.digital_eye.adapters import PUNDITAdapter
+        from apps.reports.ndt_reports import estimated_compressive_strength
+        row = {'label': 'A', 'path_mm': None, 'transit_us': None,
+               'velocity_km_s': None, 'ecs_mpa': None, 'uncracked_us': None,
+               'crack_depth_mm': None, 'surface_condition': None}
+        if self.test_type == 'crack_depth':
+            row.update({
+                'path_mm': self.crack_path_length_mm,
+                'transit_us': self.crack_pulse_time_us,
+                'uncracked_us': self.uncracked_pulse_time_us,
+                'crack_depth_mm': PUNDITAdapter.compute_crack_depth_mm(
+                    self.crack_path_length_mm, self.crack_pulse_time_us,
+                    self.uncracked_pulse_time_us),
+            })
+        elif self.test_type == 'surface_quality':
+            row['surface_condition'] = self.surface_condition or None
+        else:
+            velocity = self.velocity_km_s
+            if velocity is None:
+                velocity = PUNDITAdapter.compute_velocity_km_s(
+                    self.path_length_mm, self.pulse_time_us)
+            row.update({
+                'path_mm': self.path_length_mm,
+                'transit_us': self.pulse_time_us,
+                'velocity_km_s': velocity,
+                'ecs_mpa': estimated_compressive_strength(velocity) if velocity is not None else None,
+            })
+        return [row]
+
+    def element_mean_velocity_km_s(self):
+        """Mean pulse velocity over this test's readings (the element verdict
+        basis per A1); None when no reading is computable."""
+        velocities = [row['velocity_km_s'] for row in self.reading_rows()
+                      if row['velocity_km_s'] is not None]
+        return (sum(velocities) / len(velocities)) if velocities else None
+
+    def element_mean_crack_depth_mm(self):
+        """Mean crack depth over this test's readings (the element verdict
+        for multi-point crack tests); None when no point yields a depth."""
+        depths = [row['crack_depth_mm'] for row in self.reading_rows()
+                  if row['crack_depth_mm'] is not None]
+        return (sum(depths) / len(depths)) if depths else None
+
     def save(self, *args, **kwargs):
         # Ensure test_date is a date object, not a datetime
         if self.test_date is not None and isinstance(self.test_date, datetime):
@@ -400,6 +483,121 @@ class PUNDITTest(models.Model):
 
 # Alias PunditTest to PUNDITTest for backwards compatibility with origin/main
 PunditTest = PUNDITTest
+
+
+class PUNDITReading(models.Model):
+    """
+    One reading at one test point of a PUNDIT test (A1 of the 4 Sep 2026
+    review meeting: a structural element is tested at a minimum of three
+    points — upper/middle/lower, open-ended — with the path length and
+    transducer held constant and only the measurement varying).
+
+    The operator records ONLY the field measurement at each point:
+      - pulse-velocity testing: the transit time t (v = L / t);
+      - crack-depth testing (time-difference method): the cracked transit
+        time t_c and the uncracked transit time t_0 (d = L/2·√((t_c/t_0)²−1));
+      - surface-quality testing: the observed surface condition.
+    Computed outputs (velocity, E.C.S, crack depth) are derived on save and
+    read-only through the API — they cannot be typed in or doctored.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    test = models.ForeignKey(PUNDITTest, on_delete=models.CASCADE,
+                             related_name='readings')
+    point_label = models.CharField(
+        max_length=10,
+        help_text="Test point on the element: 'A', 'B', 'C', ... (A is the first point)",
+    )
+    path_length_mm = models.FloatField(null=True, blank=True,
+                                       help_text="Transducer path length shared by the element's points")
+    transit_time_us = models.FloatField(
+        null=True, blank=True,
+        help_text="The measured transit time at this point (t for pulse velocity, "
+                  "t_cracked for crack depth; not measured for surface quality)")
+    uncracked_transit_time_us = models.FloatField(
+        null=True, blank=True,
+        help_text="Crack-depth method only: the uncracked-path transit time t_0 "
+                  "measured at this point")
+    velocity_km_s = models.FloatField(null=True, blank=True,
+                                      help_text="Computed v = L/t (read-only; never operator-entered)")
+    ecs_mpa = models.FloatField(null=True, blank=True,
+                                help_text="Computed E.C.S from the platform calibration curve (read-only)")
+    crack_depth_mm = models.FloatField(
+        null=True, blank=True,
+        help_text="Computed time-difference crack depth at this point (read-only)")
+    surface_condition = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text="Surface-quality method only: the condition observed at this point")
+    notes = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['point_label']
+        constraints = [
+            models.UniqueConstraint(fields=['test', 'point_label'],
+                                    name='uniq_reading_point_per_test'),
+        ]
+
+    def __str__(self):
+        return f"{self.test.test_reference} point {self.point_label}"
+
+    def compute(self):
+        """Deterministic per-point derivations — never a guessed number.
+        v = L / t (mm/us == km/s) for pulse-velocity points;
+        d = L/2·√((t_c/t_0)²−1) for crack-depth points. Each output is only
+        set when its inputs exist and are valid."""
+        from apps.digital_eye.adapters import PUNDITAdapter
+        from apps.reports.ndt_reports import estimated_compressive_strength
+        is_crack_point = (self.transit_time_us is not None
+                          and self.uncracked_transit_time_us is not None)
+        if not is_crack_point \
+                and self.path_length_mm and self.transit_time_us \
+                and self.path_length_mm > 0 and self.transit_time_us > 0:
+            # Pulse-velocity point: v = L / t. (Crack points carry the
+            # CRACKED-path time — L/t_c is not a valid velocity, so none is
+            # computed for them.)
+            self.velocity_km_s = self.path_length_mm / self.transit_time_us
+            self.ecs_mpa = estimated_compressive_strength(self.velocity_km_s)
+        else:
+            self.velocity_km_s = None
+            self.ecs_mpa = None
+        self.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
+            self.path_length_mm, self.transit_time_us,
+            self.uncracked_transit_time_us)
+
+    def save(self, *args, **kwargs):
+        self.compute()
+        super().save(*args, **kwargs)
+
+
+
+# ======================================================================
+# Rebar Scanning (Profoscope / Electromagnetic Locator)
+# ======================================================================
+
+class RebarTest(models.Model):
+    """
+    A concrete rebar scan test, typically captured via electromagnetic rebar locators
+    (e.g., Profoscope) to determine cover depth, spacing, and estimate bar sizes.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    test_reference = models.CharField(max_length=40, unique=True, default=generate_test_ref)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='rebar_tests')
+    device = models.ForeignKey('FieldDevice', on_delete=models.SET_NULL, null=True, blank=True, related_name='rebar_tests')
+    
+    structural_element = models.CharField(max_length=200, blank=True, default='Column')
+    test_location = models.CharField(max_length=200, blank=True, default='Ground Floor')
+    
+    main_bar_mm = models.FloatField(null=True, blank=True, help_text="Estimated main bar diameter in mm")
+    links_mm = models.FloatField(null=True, blank=True, help_text="Estimated link/stirrup diameter in mm")
+    spacing_mm = models.CharField(max_length=50, blank=True, default='', help_text="Spacing of bars/links (can be numeric or '-' if unknown)")
+    cover_depth_mm = models.FloatField(null=True, blank=True, help_text="Measured concrete cover depth over rebar in mm")
+    
+    notes = models.TextField(blank=True, default='')
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.test_reference} - {self.structural_element} ({self.test_location})"
 
 
 # ======================================================================
@@ -655,6 +853,36 @@ class BIMElementMapping(models.Model):
         return f"{self.element_id or self.bim_guid} ({self.project_id})"
 
 
+class BIMModelGeometry(models.Model):
+    """
+    Tessellated 3D preview meshes for a project's imported BIM model (IFC
+    upload or RVT translated to IFC via Autodesk APS). Built once at import
+    time from the same file the element mappings were extracted from, so the
+    data-collection page can render a live model preview and highlight the
+    target structural element the operator picks. One row per project — a
+    re-import replaces the preview alongside the mapping upserts.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE,
+                                   related_name='bim_model_geometry')
+    source_file = models.CharField(max_length=255, blank=True, default='',
+                                   help_text="Original uploaded file name")
+    translated_from_rvt = models.BooleanField(default=False)
+    element_count = models.IntegerField(default=0)
+    # [{"guid", "name", "type", "verts": [x, y, z, ...], "faces": [i, j, k, ...]}]
+    elements = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name='bim_model_geometry_created')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'BIM model geometries'
+
+    def __str__(self):
+        return f"{self.source_file or 'BIM model'} ({self.element_count} elements, {self.project_id})"
+
+
 class LiveStream(models.Model):
     """
     A live video stream mapped to BIM element coordinates for visual overlay.
@@ -881,13 +1109,18 @@ class DeviceReportRecord(models.Model):
     element_name = models.CharField(max_length=255, blank=True, null=True)
     report_type = models.CharField(max_length=100, default='Ultrasonic Pulse Velocity (UPV) QA/QC Report')
     standards_cited = models.JSONField(default=list, blank=True)
-    compliance_status = models.CharField(max_length=50, default='COMPLIANT')
+    # Honest defaults: a report is not compliant until something assessed it,
+    # and no engineer has certified it until a real name is recorded. These
+    # previously defaulted to 'COMPLIANT' and a fabricated
+    # 'Engr. T. Oladipo, FNSE, COREN Reg.', which attributed a statutory
+    # certification to a named person who never gave it.
+    compliance_status = models.CharField(max_length=50, default='NOT_ASSESSED')
     executive_summary = models.TextField(blank=True, default='')
     metrics = models.JSONField(default=dict, blank=True)
-    generated_by = models.CharField(max_length=255, default='Nexucon AI Automated Compliance Engine')
-    certified_engineer = models.CharField(max_length=255, default='Engr. T. Oladipo, FNSE, COREN Reg.')
+    generated_by = models.CharField(max_length=255, blank=True, default='')
+    certified_engineer = models.CharField(max_length=255, blank=True, default='')
     stamped_at = models.DateTimeField(default=timezone.now)
-    file_size = models.CharField(max_length=50, default='2.4 MB')
+    file_size = models.CharField(max_length=50, blank=True, default='')
     download_url = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

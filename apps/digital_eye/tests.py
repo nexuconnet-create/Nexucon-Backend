@@ -13,6 +13,7 @@ Covers:
 """
 import hashlib
 from unittest import mock
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -23,14 +24,15 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.audit.models import AuditEvent
+from apps.common.ai_service import AIProviderUnavailable
 from apps.evidence.models import AIAnalysisRecord, EvidenceRecord
 from apps.projects.models import Project
 
 from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
-    BIMElementMapping, FieldDevice, GPRAnomaly, GPRSurvey, GnssBenchmark,
-    GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITTest, SensorDataFile,
-    TrimbleConnection, TrimbleProject,
+    BIMElementMapping, BIMModelGeometry, FieldDevice, GPRAnomaly, GPRSurvey,
+    GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITReading,
+    PUNDITTest, SensorDataFile, TrimbleConnection, TrimbleProject,
 )
 
 User = get_user_model()
@@ -370,6 +372,409 @@ class PUNDITAPITestCase(DigitalEyeAPITestBase):
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('transducer_type', response.data['errors'])
+
+    def test_multi_reading_auto_assigns_point_labels_when_omitted(self):
+        """Review Meeting A1: Multi-point pulse-velocity test accepts readings without
+        point_label, auto-assigning A, B, C... and computing element-mean velocity and grade."""
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-C24',
+            'path_length_mm': 250.0,
+            'readings': [
+                {'transit_time_us': 62.5},
+                {'transit_time_us': 62.5},
+                {'transit_time_us': 62.5},
+            ],
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, msg=response.data)
+        test_id = response.data['id']
+        test = PUNDITTest.objects.get(pk=test_id)
+        readings = list(test.readings.all().order_by('point_label'))
+        self.assertEqual(len(readings), 3)
+        self.assertEqual([r.point_label for r in readings], ['A', 'B', 'C'])
+        for r in readings:
+            self.assertEqual(r.path_length_mm, 250.0)
+            self.assertAlmostEqual(r.velocity_km_s, 4.0)
+        self.assertAlmostEqual(test.velocity_km_s, 4.0)
+        self.assertEqual(test.quality_grade, 'good')
+
+    def test_multi_reading_rejects_duplicate_point_labels(self):
+        """Duplicate point labels on the same element are rejected with validation error."""
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-C24',
+            'path_length_mm': 250.0,
+            'readings': [
+                {'point_label': 'A', 'transit_time_us': 62.5},
+                {'point_label': 'A', 'transit_time_us': 60.0},
+            ],
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('readings', response.data['errors'])
+
+    def test_multi_reading_crack_depth_points_and_element_mean(self):
+        """A1 for crack depth: one element = N test points, each with its own
+        t_c / t_0 pair. Labels auto-assign A, B, C…; per-point depths and the
+        element-mean depth are computed server-side; the cracked path never
+        yields a bogus pulse velocity."""
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'crack_depth',
+            'structural_element': 'COL-C24',
+            'crack_path_length_mm': 300.0,
+            'readings': [
+                {'transit_time_us': 70.0, 'uncracked_transit_time_us': 62.5},
+                {'transit_time_us': 75.0, 'uncracked_transit_time_us': 62.5},
+                {'transit_time_us': 80.0, 'uncracked_transit_time_us': 62.5},
+            ],
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, msg=response.data)
+        test = PUNDITTest.objects.get(pk=response.data['id'])
+        readings = list(test.readings.all().order_by('point_label'))
+        self.assertEqual([r.point_label for r in readings], ['A', 'B', 'C'])
+        for r in readings:
+            self.assertEqual(r.path_length_mm, 300.0)
+            # The cracked-path time is not a velocity measurement.
+            self.assertIsNone(r.velocity_km_s)
+            self.assertIsNone(r.ecs_mpa)
+        # d = L/2 * sqrt((t_c/t_0)^2 - 1) per point.
+        self.assertAlmostEqual(readings[0].crack_depth_mm, 75.657, places=2)
+        self.assertAlmostEqual(readings[1].crack_depth_mm, 99.4987, places=2)
+        self.assertAlmostEqual(readings[2].crack_depth_mm, 119.8499, places=2)
+        # Element verdict = the mean of the per-point depths, persisted on
+        # the test for the report / registry.
+        self.assertAlmostEqual(test.crack_depth_mm, 98.335, places=2)
+        self.assertAlmostEqual(test.estimated_crack_depth_mm, 98.335, places=2)
+        # Point A's measurements are written back to the scalar columns for
+        # legacy consumers.
+        self.assertEqual(test.crack_path_length_mm, 300.0)
+        self.assertEqual(test.crack_pulse_time_us, 70.0)
+        self.assertEqual(test.uncracked_pulse_time_us, 62.5)
+        self.assertIsNone(test.velocity_km_s)
+
+    def test_multi_reading_crack_point_without_measurable_depth_is_honest(self):
+        """A point whose cracked time is not slower than its uncracked time
+        honestly yields no depth (None) — never zero, never invented. The
+        element mean runs over the measurable points only."""
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'crack_depth',
+            'structural_element': 'BEAM-B2',
+            'crack_path_length_mm': 300.0,
+            'readings': [
+                {'transit_time_us': 70.0, 'uncracked_transit_time_us': 62.5},
+                {'transit_time_us': 60.0, 'uncracked_transit_time_us': 62.5},
+            ],
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, msg=response.data)
+        test = PUNDITTest.objects.get(pk=response.data['id'])
+        readings = list(test.readings.all().order_by('point_label'))
+        self.assertAlmostEqual(readings[0].crack_depth_mm, 75.657, places=2)
+        self.assertIsNone(readings[1].crack_depth_mm)
+        self.assertAlmostEqual(test.crack_depth_mm, 75.657, places=2)
+
+    def test_multi_reading_crack_requires_both_times_per_point(self):
+        """A crack point missing either measurement is a validation error —
+        the depth cannot be computed from half a pair."""
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'crack_depth',
+            'crack_path_length_mm': 300.0,
+            'readings': [{'transit_time_us': 70.0}],
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('readings', response.data['errors'])
+
+    def test_multi_reading_surface_conditions_per_point(self):
+        """A1 for surface quality: one element = N test points, each carrying
+        the condition observed there. Labels auto-assign A, B, C…; point A's
+        condition is written back to the legacy scalar column."""
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'surface_quality',
+            'structural_element': 'SLAB-S1',
+            'readings': [
+                {'surface_condition': 'Smooth finished, no visible cracking'},
+                {'surface_condition': 'Honeycombing at mid-height'},
+                {'surface_condition': 'Hairline cracks near the support'},
+            ],
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, msg=response.data)
+        test = PUNDITTest.objects.get(pk=response.data['id'])
+        readings = list(test.readings.all().order_by('point_label'))
+        self.assertEqual([r.point_label for r in readings], ['A', 'B', 'C'])
+        self.assertEqual(readings[1].surface_condition, 'Honeycombing at mid-height')
+        # No transit times exist for surface points — nothing is invented.
+        for r in readings:
+            self.assertIsNone(r.transit_time_us)
+            self.assertIsNone(r.crack_depth_mm)
+        self.assertEqual(test.surface_condition, 'Smooth finished, no visible cracking')
+
+    def test_multi_reading_surface_requires_condition_per_point(self):
+        response = self._post_test({
+            'project': str(self.project.id),
+            'test_type': 'surface_quality',
+            'readings': [{'surface_condition': '   '}],
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('readings', response.data['errors'])
+
+
+class PunditExcelImportTestCase(DigitalEyeAPITestBase):
+    """Batch upload of readings from the .xlsx template (review meeting A2).
+    One row per test point; an element's consecutive rows form one test with
+    points A, B, C... Everything computed stays server-side; the import is
+    all-or-nothing."""
+
+    def _workbook(self, rows, name='readings.xlsx'):
+        """rows: list of dicts keyed by template header (None => blank).
+        The template ships with sample rows — delete them so each test writes
+        exactly its own rows."""
+        import io
+        from .excel_import import TEMPLATE_COLUMNS, build_template_bytes
+        workbook = build_template_bytes()
+        sheet = workbook['READINGS']
+        for row_number in range(sheet.max_row, 1, -1):
+            sheet.delete_rows(row_number)
+        for row_number, row in enumerate(rows, start=2):
+            for column, header in enumerate(TEMPLATE_COLUMNS, start=1):
+                if header in row:
+                    sheet.cell(row=row_number, column=column, value=row[header])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        return SimpleUploadedFile(name, buffer.getvalue())
+
+    def _post_import(self, file):
+        return self.client.post(
+            reverse('pundit-test-import-readings'),
+            {'project': str(self.project.id), 'file': file},
+            format='multipart')
+
+    def test_template_downloads_with_headers_and_sample_rows(self):
+        import io
+        from openpyxl import load_workbook
+        from .excel_import import TEMPLATE_COLUMNS
+        response = self.client.get(reverse('pundit-test-import-template'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('spreadsheetml', response['Content-Type'])
+        self.assertIn('attachment', response['Content-Disposition'])
+        workbook = load_workbook(io.BytesIO(b''.join(response.streaming_content)
+                                            if hasattr(response, 'streaming_content')
+                                            else response.content))
+        sheet = workbook['READINGS']
+        headers = [c.value for c in sheet[1] if c.value is not None]
+        self.assertEqual(headers, TEMPLATE_COLUMNS)
+        # The template ships pre-filled with clearly-labelled sample rows so
+        # it can be uploaded as-is to try the flow.
+        self.assertGreater(sheet.max_row, 1)
+        sample_note = sheet.cell(row=2, column=TEMPLATE_COLUMNS.index('NOTES') + 1).value
+        self.assertIn('SAMPLE ROW', str(sample_note))
+        elements = {sheet.cell(row=r, column=1).value
+                    for r in range(2, sheet.max_row + 1)}
+        self.assertIn('COL-A1', elements)      # pulse velocity
+        self.assertIn('BEAM-B2', elements)     # crack depth
+        self.assertIn('WALL-W1', elements)     # surface quality
+        self.assertIn('HOW TO FILL', workbook.sheetnames)
+
+    def test_uploaded_template_imports_its_sample_rows(self):
+        # The as-downloaded template must import cleanly: the sample rows are
+        # valid operator-shaped readings and exercise the full flow end to end.
+        import io
+        from .excel_import import build_template_bytes
+        buffer = io.BytesIO()
+        build_template_bytes().save(buffer)
+        buffer.seek(0)
+        upload = SimpleUploadedFile('template.xlsx', buffer.read(),
+                                    content_type='application/vnd.openxmlformats-'
+                                                 'officedocument.spreadsheetml.sheet')
+        response = self.client.post(
+            reverse('pundit-test-import-readings'),
+            {'project': str(self.project.id), 'file': upload}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['tests_created'], 3)
+        self.assertEqual(response.data['points_imported'], 7)
+        self.assertEqual(PUNDITTest.objects.count(), 3)
+        # The sample element names match no BIM element of the project, so the
+        # result must say so honestly instead of implying a model link.
+        self.assertTrue(all(t['bim_linked'] is False for t in response.data['tests']))
+
+    def test_import_creates_tests_with_computed_means(self):
+        rows = [
+            # One element, three pulse-velocity points -> ONE test, A/B/C.
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'FLOOR': 'First Floor',
+             'TEST TYPE': 'PULSE VELOCITY', 'PATH LENGTH L (MM)': 120,
+             'TRANSIT TIME T (US)': 31.2, 'WEATHER CONDITION': 'Sunny',
+             'TRANSDUCER FREQUENCY (KHZ)': 54},
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'FLOOR': 'First Floor',
+             'TEST TYPE': 'PULSE VELOCITY', 'PATH LENGTH L (MM)': 120,
+             'TRANSIT TIME T (US)': 32.2},
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'FLOOR': 'First Floor',
+             'TEST TYPE': 'PULSE VELOCITY', 'PATH LENGTH L (MM)': 120,
+             'TRANSIT TIME T (US)': 30.1},
+            # A second element, single point.
+            {'STRUCTURAL ELEMENT': 'SLAB-S1', 'FLOOR': 'Second Floor',
+             'TEST TYPE': 'PULSE VELOCITY', 'PATH LENGTH L (MM)': 120,
+             'TRANSIT TIME T (US)': 29.8},
+            # Crack depth: two points with cracked + uncracked times.
+            {'STRUCTURAL ELEMENT': 'BEAM-B2', 'FLOOR': 'Ground Floor',
+             'TEST TYPE': 'CRACK DEPTH', 'PATH LENGTH L (MM)': 300,
+             'TRANSIT TIME T (US)': 70, 'T UNCRACKED (US)': 62.5},
+            {'STRUCTURAL ELEMENT': 'BEAM-B2', 'FLOOR': 'Ground Floor',
+             'TEST TYPE': 'CRACK DEPTH', 'PATH LENGTH L (MM)': 300,
+             'TRANSIT TIME T (US)': 75, 'T UNCRACKED (US)': 62.5},
+            # Surface quality: observed conditions only.
+            {'STRUCTURAL ELEMENT': 'WALL-W1', 'TEST TYPE': 'SURFACE QUALITY',
+             'SURFACE CONDITION': 'Smooth finished, no visible cracking'},
+            {'STRUCTURAL ELEMENT': 'WALL-W1', 'TEST TYPE': 'SURFACE QUALITY',
+             'SURFACE CONDITION': 'Hairline map cracking near the joint'},
+        ]
+        response = self._post_import(self._workbook(rows))
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['tests_created'], 4)
+        self.assertEqual(response.data['points_imported'], 8)
+
+        column = PUNDITTest.objects.get(structural_element='COL-C24')
+        self.assertEqual(column.floor, 'First Floor')
+        self.assertEqual(column.weather_condition, 'Sunny')
+        self.assertEqual(column.transducer_frequency_khz, 54)
+        labels = list(column.readings.order_by('point_label')
+                      .values_list('point_label', flat=True))
+        self.assertEqual(labels, ['A', 'B', 'C'])
+        # Velocity / grade / E.C.S are the element means, computed server-side.
+        mean_v = (120 / 31.2 + 120 / 32.2 + 120 / 30.1) / 3
+        self.assertAlmostEqual(column.velocity_km_s, mean_v, places=3)
+        self.assertAlmostEqual(column.pulse_velocity_ms, mean_v * 1000, places=0)
+        self.assertEqual(column.quality_grade, 'good')
+        self.assertAlmostEqual(column.estimated_compressive_strength_mpa,
+                               8.961 * mean_v - 7.97, places=2)
+
+        beam = PUNDITTest.objects.get(structural_element='BEAM-B2')
+        self.assertIsNone(beam.velocity_km_s)  # a cracked path time is not a velocity
+        mean_depth = (150 * ((70 / 62.5) ** 2 - 1) ** 0.5
+                      + 150 * ((75 / 62.5) ** 2 - 1) ** 0.5) / 2
+        self.assertAlmostEqual(beam.estimated_crack_depth_mm, mean_depth, places=2)
+
+        wall = PUNDITTest.objects.get(structural_element='WALL-W1')
+        self.assertEqual(wall.readings.count(), 2)
+        self.assertEqual(wall.readings.order_by('point_label').first().point_label, 'A')
+
+    def test_import_is_all_or_nothing_with_row_errors(self):
+        rows = [
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'TEST TYPE': 'PULSE VELOCITY',
+             'PATH LENGTH L (MM)': 120, 'TRANSIT TIME T (US)': 31.2},
+            # Row 3 has no transit time — the whole file must be rejected.
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'TEST TYPE': 'PULSE VELOCITY',
+             'PATH LENGTH L (MM)': 120},
+        ]
+        response = self._post_import(self._workbook(rows))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        error_rows = [e['row'] for e in response.data['errors'] if 'row' in e]
+        self.assertIn(3, error_rows)
+        self.assertFalse(PUNDITTest.objects.filter(
+            structural_element='COL-C24').exists())
+
+    def test_import_rejects_element_split_across_blocks(self):
+        rows = [
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'TEST TYPE': 'PULSE VELOCITY',
+             'PATH LENGTH L (MM)': 120, 'TRANSIT TIME T (US)': 31.2},
+            {'STRUCTURAL ELEMENT': 'SLAB-S1', 'TEST TYPE': 'PULSE VELOCITY',
+             'PATH LENGTH L (MM)': 120, 'TRANSIT TIME T (US)': 29.8},
+            # Back to COL-C24 — a second block for the same element+type.
+            {'STRUCTURAL ELEMENT': 'COL-C24', 'TEST TYPE': 'PULSE VELOCITY',
+             'PATH LENGTH L (MM)': 120, 'TRANSIT TIME T (US)': 30.1},
+        ]
+        response = self._post_import(self._workbook(rows))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(any('two separate blocks' in e['message']
+                            for e in response.data['errors']))
+        self.assertEqual(PUNDITTest.objects.filter(
+            project=self.project).count(), 0)
+
+    def test_import_rejects_non_xlsx_and_missing_file(self):
+        response = self.client.post(
+            reverse('pundit-test-import-readings'),
+            {'project': str(self.project.id),
+             'file': SimpleUploadedFile('readings.csv', b'a,b,c')},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('template', response.data['detail'])
+        response = self.client.post(
+            reverse('pundit-test-import-readings'),
+            {'project': str(self.project.id)}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_import_links_bim_guid_from_element_name(self):
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='3rNg7Ib9P5$wfO4JiGtdVn',
+            element_name='COL-C24', element_id='COL-C24', element_type='IfcColumn')
+        rows = [{'STRUCTURAL ELEMENT': 'COL-C24', 'TEST TYPE': 'PULSE VELOCITY',
+                 'PATH LENGTH L (MM)': 120, 'TRANSIT TIME T (US)': 31.2}]
+        response = self._post_import(self._workbook(rows))
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        test = PUNDITTest.objects.get(structural_element='COL-C24')
+        self.assertEqual(test.structural_element_guid, '3rNg7Ib9P5$wfO4JiGtdVn')
+        # The created-test listing says it linked.
+        self.assertTrue(response.data['tests'][0]['bim_linked'])
+
+    def test_template_scopes_sample_rows_to_project_bim_elements(self):
+        # ?project= resolves REAL element names from the imported model so the
+        # untouched template's sample rows link to actual members on upload.
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='wallguid0000000000000000',
+            element_name='Basic Wall:Exterior', element_id='wall-1', element_type='IfcWall')
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='beamguid0000000000000000',
+            element_name='M_Concrete-Rectangular Beam:225 x 600mm:801629',
+            element_id='beam-1', element_type='IfcBeam')
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='slabguid0000000000000000',
+            element_name='Floor:200THK RC SLAB:780904',
+            element_id='slab-1', element_type='IfcSlab')
+        response = self.client.get(
+            reverse('pundit-test-import-template'), {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        import io
+        from openpyxl import load_workbook
+        workbook = load_workbook(io.BytesIO(response.content))
+        elements = {workbook['READINGS'].cell(row=r, column=1).value
+                    for r in range(2, 8)}
+        self.assertIn('M_Concrete-Rectangular Beam:225 x 600mm:801629', elements)
+        self.assertIn('Floor:200THK RC SLAB:780904', elements)
+
+        # And uploading that template as-is now creates linked tests.
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        upload = SimpleUploadedFile('template.xlsx', buffer.read(),
+                                    content_type='application/vnd.openxmlformats-'
+                                                 'officedocument.spreadsheetml.sheet')
+        response = self.client.post(
+            reverse('pundit-test-import-readings'),
+            {'project': str(self.project.id), 'file': upload}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        linked = [t['bim_linked'] for t in response.data['tests']]
+        self.assertTrue(all(linked), response.data['tests'])
+        guids = set(PUNDITTest.objects.filter(project=self.project)
+                    .values_list('structural_element_guid', flat=True))
+        self.assertIn('slabguid0000000000000000', guids)
+
+    def test_import_rejects_project_outside_scope(self):
+        other = User.objects.create_user(
+            username='excel_scoped@nexucon.com', email='excel_scoped@nexucon.com',
+            password='Password123!')
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(other).access_token}')
+        response = self.client.post(
+            reverse('pundit-test-import-readings'),
+            {'project': str(self.project.id),
+             'file': self._workbook([{'STRUCTURAL ELEMENT': 'COL-C24',
+                                      'TEST TYPE': 'PULSE VELOCITY',
+                                      'PATH LENGTH L (MM)': 120,
+                                      'TRANSIT TIME T (US)': 31.2}])},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
 
 class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
@@ -759,11 +1164,13 @@ class GPRAdapterTestCase(TestCase):
 # PUNDIT adapter — persistence & crack-depth escalation
 # ======================================================================
 
+@patch("apps.common.ai_service.AIService.generate_structured_json",
+       side_effect=AIProviderUnavailable("no provider configured"))
 class PUNDITAdapterAnalysisTestCase(TestCase):
     def setUp(self):
         self.project = Project.objects.create(name='PUNDIT Adapter Test Site')
 
-    def test_analyze_persists_computed_fields_and_evidence(self):
+    def test_analyze_persists_computed_fields_and_evidence(self, _mock):
         test = PUNDITTest.objects.create(
             project=self.project, test_type='pulse_velocity',
             structural_element='COL-C24',
@@ -783,7 +1190,7 @@ class PUNDITAdapterAnalysisTestCase(TestCase):
         # Evidence + AI analysis are linked.
         self.assertEqual(record.evidence.count(), 1)
 
-    def test_deep_crack_escalates_risk_beyond_grade_band(self):
+    def test_deep_crack_escalates_risk_beyond_grade_band(self, _mock):
         # 300 mm path, cracked 70 us vs uncracked 60 us ->
         # d = 150 * sqrt((70/60)^2 - 1) = ~96.8 mm > 25 mm.
         test = PUNDITTest.objects.create(
@@ -805,7 +1212,7 @@ class PUNDITAdapterAnalysisTestCase(TestCase):
         recs = [r['recommendation'] for r in record.recommendations]
         self.assertTrue(any('crack-depth exceedance' in r for r in recs))
 
-    def test_poor_grade_requires_urgent_structural_review(self):
+    def test_poor_grade_requires_urgent_structural_review(self, _mock):
         test = PUNDITTest.objects.create(
             project=self.project, test_type='pulse_velocity',
             path_length_mm=250.0, pulse_time_us=125.0,  # 2.0 km/s -> 'poor'
@@ -817,7 +1224,7 @@ class PUNDITAdapterAnalysisTestCase(TestCase):
         self.assertTrue(any('Immediate structural engineering review' in r for r in recs))
         self.assertTrue(any(r['priority'] == 'Urgent' for r in record.recommendations))
 
-    def test_unmeasured_test_reports_insufficient_measurements(self):
+    def test_unmeasured_test_reports_insufficient_measurements(self, _mock):
         test = PUNDITTest.objects.create(
             project=self.project, test_type='pulse_velocity',
         )
@@ -827,6 +1234,111 @@ class PUNDITAdapterAnalysisTestCase(TestCase):
                          ['Insufficient measurements to compute an NDT result.'])
         self.assertIsNone(record.confidence)
         self.assertEqual(record.recommendations, [])
+
+
+@patch("apps.common.ai_service.AIService.generate_structured_json",
+       return_value={"observations": [
+           "Velocity 4.0 km/s places the element in the good band.",
+           "Point-to-point variation is within normal bounds.",
+       ]})
+class PUNDITAdapterLLMNarrativeTestCase(TestCase):
+    """D1: when a provider is configured the observations come from the LLM
+    (fed only the real fact pack); the deterministic math is unchanged."""
+
+    def setUp(self):
+        self.project = Project.objects.create(name='PUNDIT LLM Narrative Site')
+
+    @patch("apps.common.ai_service.AIService._get_provider", return_value="openai")
+    @patch("apps.common.ai_service.AIService._get_openai_model",
+           return_value="gpt-4o-mini")
+    def test_llm_observations_replace_deterministic(self, _model, _provider, _mock):
+        test = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='COL-C24',
+            path_length_mm=250.0, pulse_time_us=62.5,
+        )
+        record = PUNDITAdapter.analyze(test)
+
+        test.refresh_from_db()
+        # Deterministic math untouched by the LLM layer.
+        self.assertAlmostEqual(test.velocity_km_s, 4.0)
+        self.assertEqual(test.quality_grade, 'good')
+        self.assertEqual(record.model_provider, 'openai')
+        self.assertEqual(record.model_version, 'gpt-4o-mini')
+        self.assertEqual(record.observations[0],
+                         "Velocity 4.0 km/s places the element in the good band.")
+        self.assertIn("Narrative synthesised by openai", record.reasoning_log)
+
+    def test_unmeasured_test_never_calls_the_llm(self, _mock):
+        # Empty measurements: honest deterministic record, no LLM narrative
+        # is attempted (nothing to contextualise, nothing to fabricate).
+        test = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+        )
+        record = PUNDITAdapter.analyze(test)
+
+        self.assertEqual(record.observations,
+                         ['Insufficient measurements to compute an NDT result.'])
+        self.assertEqual(record.model_provider, 'deterministic')
+
+
+@patch("apps.common.ai_service.AIService.generate_structured_json",
+       side_effect=AIProviderUnavailable("no provider configured"))
+class PUNDITProjectAnalysisTestCase(TestCase):
+    """D1: project-level roll-up over per-element means."""
+
+    def setUp(self):
+        self.project = Project.objects.create(name='PUNDIT Project Roll-up Site')
+        self.good = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='COL-G01', floor='Ground Floor',
+            path_length_mm=250.0, pulse_time_us=62.5,  # 4.0 km/s -> good
+        )
+        PUNDITReading.objects.create(
+            test=self.good, point_label='A',
+            path_length_mm=250.0, transit_time_us=62.5,
+        )
+        PUNDITReading.objects.create(
+            test=self.good, point_label='B',
+            path_length_mm=250.0, transit_time_us=60.0,
+        )
+        self.poor = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='COL-G02', floor='Ground Floor',
+            path_length_mm=250.0, pulse_time_us=125.0,  # 2.0 km/s -> poor
+        )
+
+    def test_project_record_aggregates_and_recommends(self, _mock):
+        record = PUNDITAdapter.analyze_project(self.project)
+
+        self.assertEqual(record.analysis_type, 'pundit')
+        self.assertEqual(record.model_provider, 'deterministic')
+        # Worst element risk wins (2.0 km/s -> 'poor' -> high).
+        self.assertEqual(record.risk_level, 'high')
+        self.assertIn('1 graded good or better', record.observations[0])
+        recs = [r['recommendation'] for r in record.recommendations]
+        self.assertTrue(any('graded poor or very poor' in r for r in recs))
+        # Per-element means appear in the reasoning log.
+        self.assertIn('COL-G01 (Ground Floor)', record.reasoning_log)
+
+    def test_analyze_project_endpoint_runs_both_layers(self, _mock):
+        director = User.objects.create_superuser(
+            username='pundit-dir@nexucon.com',
+            email='pundit-dir@nexucon.com', password='Password123!')
+        from rest_framework.test import APIClient
+        api_client = APIClient()
+        api_client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(director).access_token}')
+        response = api_client.post(
+            reverse('pundit-test-analyze-project'),
+            {'project': str(self.project.id)}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['tests_analysed'], 2)
+        self.assertIn('analysis_id', response.data)
+        # Per-test means were persisted by the deterministic pass.
+        self.good.refresh_from_db()
+        self.assertAlmostEqual(self.good.velocity_km_s, (4.0 + 250 / 60) / 2, places=3)
 
 
 # ======================================================================
@@ -1262,6 +1774,46 @@ ENDSEC;
 END-ISO-10303-21;
 """
 
+# A schema-valid IFC4 file whose column carries a property set, a quantity
+# set, a Tag, a family type and a material layer set; its placements
+# accumulate to world coordinates (100,200,300 twice = 200,400,600).
+# Attribute order is IFC4: GlobalId, OwnerHistory, Name, Description,
+# ObjectType, ObjectPlacement, Representation, Tag, PredefinedType.
+IFC4_WITH_PSETS = b"""ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('test.ifc','2026-09-06T00:00:00Z',(''),(''),'','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0YvctVUKr0kugbFTf53O9L',$,'Test',$,$,$,$,(#20),#5);
+#5=IFCUNITASSIGNMENT((#6));
+#6=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#7=IFCCARTESIANPOINT((100.,200.,300.));
+#8=IFCDIRECTION((0.,0.,1.));
+#9=IFCDIRECTION((1.,0.,0.));
+#10=IFCAXIS2PLACEMENT3D(#7,#8,#9);
+#20=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#10,$);
+#30=IFCLOCALPLACEMENT($,#10);
+#31=IFCLOCALPLACEMENT(#30,#10);
+#40=IFCCOLUMN('3rNg7Ib9P5$wfO4JiGtdVn',$,'COL-C24','Column',$,#31,$,'E-24',$);
+#100=IFCPROPERTYSET('1YAoxVd4zCRQ8RrOzz4cRk',$,'Pset_ConcreteElementCommon',$,(#101,#102));
+#101=IFCPROPERTYSINGLEVALUE('Mark',$,IFCLABEL('COL-C24'),$);
+#102=IFCPROPERTYSINGLEVALUE('LoadBearing',$,IFCBOOLEAN(.T.),$);
+#103=IFCRELDEFINESBYPROPERTIES('2YAoxVd4zCRQ8RrOzz4cRk',$,$,$,(#40),#100);
+#110=IFCELEMENTQUANTITY('3YAoxVd4zCRQ8RrOzz4cRk',$,'Qto_ColumnBaseQuantities',$,$,(#111));
+#111=IFCQUANTITYVOLUME('NetVolume',$,$,0.5);
+#112=IFCRELDEFINESBYPROPERTIES('4YAoxVd4zCRQ8RrOzz4cRk',$,$,$,(#40),#110);
+#120=IFCCOLUMNTYPE('5YvctVUKr0kugbFTf53O9L',$,'RC Column 400x400',$,$,$,$,$,$,.COLUMN.);
+#121=IFCRELDEFINESBYTYPE('6YvctVUKr0kugbFTf53O9L',$,$,$,(#40),#120);
+#130=IFCMATERIAL('Concrete - Cast-in-Place Concrete');
+#131=IFCMATERIALLAYERSET((#132),'Column make-up');
+#132=IFCMATERIALLAYER(#130,0.2,$,$,$,$);
+#133=IFCRELASSOCIATESMATERIAL('7YvctVUKr0kugbFTf53O9L',$,$,$,(#40),#131);
+ENDSEC;
+END-ISO-10303-21;
+"""
+
 
 class BIMElementImportTestCase(DigitalEyeAPITestBase):
     def test_import_rejects_project_outside_scope(self):
@@ -1303,6 +1855,50 @@ class BIMElementImportTestCase(DigitalEyeAPITestBase):
         self.assertEqual(mapping.element_id, 'COL-C24')
         self.assertEqual(mapping.element_type, 'IFCCOLUMN')
         self.assertEqual(mapping.source, 'ifc_upload')
+
+    def test_import_captures_full_ifc_property_sets_and_world_coordinates(self):
+        """Every property-set AND quantity-set value the model carries is
+        stored on the mapping, keyed 'PsetOrQtoName.Key' — these are what
+        the element-properties panel attributes to each element. Placement
+        coordinates are WORLD coordinates (accumulated up the spatial
+        hierarchy), not the local 0,0,0 Revit exports typically use."""
+        response = self.client.post(
+            reverse('bim-element-import-ifc'),
+            {'project': str(self.project.id),
+             'file': SimpleUploadedFile('model.ifc', IFC4_WITH_PSETS)},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+        mapping = BIMElementMapping.objects.get(
+            bim_guid='3rNg7Ib9P5$wfO4JiGtdVn')
+        self.assertEqual(mapping.element_id, 'COL-C24')
+        self.assertEqual(
+            mapping.properties['Pset_ConcreteElementCommon.Mark'], 'COL-C24')
+        self.assertEqual(
+            mapping.properties['Pset_ConcreteElementCommon.LoadBearing'], 'True')
+        self.assertEqual(
+            mapping.properties['Qto_ColumnBaseQuantities.NetVolume'], '0.5')
+        # Direct attributes/associations are captured alongside (and survive
+        # even when a translation carries no property sets at all — e.g.
+        # Autodesk APS RVT->IFC exports geometry only).
+        self.assertEqual(mapping.properties['Tag'], 'E-24')
+        self.assertEqual(mapping.properties['ElementType'], 'RC Column 400x400')
+        # The category stays the clean IFC class name — the type ENTITY
+        # (whose str() is a raw STEP line like "#64=IfcSlabType(...)") must
+        # only ever land in the ElementType property, never element_type.
+        self.assertEqual(mapping.element_type, 'IfcColumn')
+        # Layer thickness is normalised to mm whatever unit the file uses
+        # (this file is in metres, the layer is 0.2 m = 200 mm).
+        self.assertEqual(
+            mapping.properties['Material'],
+            'Concrete - Cast-in-Place Concrete (200 mm)')
+        # ifcopenshell's bookkeeping 'id' key is not a model property.
+        self.assertFalse(
+            [k for k in mapping.properties if k.endswith('.id')])
+        self.assertEqual(mapping.coordinates['source'], 'ifc_world_placement')
+        self.assertEqual(mapping.coordinates['x'], 200.0)
+        self.assertEqual(mapping.coordinates['y'], 400.0)
+        self.assertEqual(mapping.coordinates['z'], 600.0)
 
     def test_import_rejects_unsupported_format(self):
         response = self.client.post(
@@ -1377,6 +1973,287 @@ class BIMElementImportTestCase(DigitalEyeAPITestBase):
         self.assertIn('could not translate', response.data['detail'])
         self.assertEqual(
             BIMElementMapping.objects.filter(project=self.project).count(), 0)
+
+    # ----- B5/B6: import-card status + platform file picker -----
+
+    def _import_ifc(self, name='model.ifc'):
+        return self.client.post(
+            reverse('bim-element-import-ifc'),
+            {'project': str(self.project.id),
+             'file': SimpleUploadedFile(name, IFC_STEP_CONTENT)},
+            format='multipart')
+
+    def _status(self):
+        return self.client.get(
+            reverse('bim-element-import-ifc'), {'project': str(self.project.id)})
+
+    def test_import_status_is_honest_before_any_import(self):
+        response = self._status()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['currently_imported'])
+        self.assertEqual(response.data['stored_files'], [])
+
+    def test_import_keeps_model_file_for_reimport_and_status_lists_it(self):
+        """The uploaded model file is kept on the platform (checksum-deduped
+        per project) and the status endpoint reports the genuine file name of
+        the model currently imported — the import card shows exactly what was
+        uploaded, so a mismatched project/model is visible at a glance."""
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        with override_settings(MEDIA_ROOT=tmp):
+            try:
+                first = self._import_ifc(name='proposed stacking area.ifc')
+                self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+                kept = SensorDataFile.objects.get(
+                    project=self.project, file_type='bim_model')
+                self.assertEqual(kept.file_name, 'proposed stacking area.ifc')
+                self.assertEqual(kept.sha256_checksum,
+                                 hashlib.sha256(IFC_STEP_CONTENT).hexdigest())
+                self.assertEqual(kept.file_size_bytes, len(IFC_STEP_CONTENT))
+                self.assertEqual(first.data['stored_file'], str(kept.id))
+                # A real copy of the model bytes is kept in storage.
+                self.assertTrue(kept.file.name)
+                self.assertEqual(kept.file.size, len(IFC_STEP_CONTENT))
+
+                # Re-importing the same content must not duplicate the kept file.
+                second = self._import_ifc(name='renamed copy.ifc')
+                self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(SensorDataFile.objects.filter(
+                    project=self.project, file_type='bim_model').count(), 1)
+                self.assertEqual(second.data['stored_file'], str(kept.id))
+
+                status_response = self._status()
+                self.assertEqual(status_response.status_code, status.HTTP_200_OK)
+                self.assertEqual(
+                    status_response.data['currently_imported']['source_file'],
+                    'renamed copy.ifc')
+                self.assertFalse(
+                    status_response.data['currently_imported']['translated_from_rvt'])
+                self.assertEqual(len(status_response.data['stored_files']), 1)
+                self.assertEqual(
+                    status_response.data['stored_files'][0]['file_name'],
+                    'proposed stacking area.ifc')
+                self.assertEqual(
+                    status_response.data['stored_files'][0]['sha256_checksum'],
+                    kept.sha256_checksum)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_import_from_stored_model_file_reimports_without_a_new_copy(self):
+        """The picker's platform path: POSTing a stored model's id re-runs the
+        full import from the kept file (extract → mappings → geometry)."""
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        with override_settings(MEDIA_ROOT=tmp):
+            try:
+                first = self._import_ifc()
+                self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+                kept_id = first.data['stored_file']
+                self.assertTrue(kept_id)
+                # Prove the re-import genuinely re-extracts from the file.
+                BIMElementMapping.objects.filter(project=self.project).delete()
+
+                response = self.client.post(
+                    reverse('bim-element-import-ifc'),
+                    {'project': str(self.project.id), 'sensor_file': kept_id},
+                    format='json')
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+                self.assertEqual(response.data['file'], 'model.ifc')
+                self.assertEqual(response.data['elements_extracted'], 2)
+                self.assertEqual(response.data['mappings_created'], 2)
+                self.assertEqual(
+                    BIMElementMapping.objects.filter(project=self.project).count(), 2)
+                # No second platform copy is made from a platform copy.
+                self.assertEqual(SensorDataFile.objects.filter(
+                    project=self.project, file_type='bim_model').count(), 1)
+                self.assertIsNone(response.data['stored_file'])
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_import_from_stored_file_rejects_non_model_files(self):
+        response = self.client.post(
+            reverse('bim-element-import-ifc'),
+            {'project': str(self.project.id), 'sensor_file': 'not-a-uuid'},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        # A sensor file of another type (e.g. a photo) can never masquerade
+        # as a model file for the import path.
+        photo = SensorDataFile.objects.create(
+            project=self.project, file_type='photo', file_name='site.ifc')
+        response = self.client.post(
+            reverse('bim-element-import-ifc'),
+            {'project': str(self.project.id), 'sensor_file': str(photo.id)},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            BIMElementMapping.objects.filter(project=self.project).count(), 0)
+
+
+# ======================================================================
+# 3D model preview geometry (stored at import time, served verbatim)
+# ======================================================================
+
+PREVIEW_MESH = [{
+    'guid': '3rNg7Ib9P5$wfO4JiGtdVn', 'name': 'COL-C24', 'type': 'IfcColumn',
+    'verts': [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    'faces': [0, 1, 2],
+}]
+
+
+class FakeArray(list):
+    """list that quacks like a numpy array for reshape(-1).tolist()."""
+
+    def reshape(self, _dims):
+        return self
+
+    def tolist(self):
+        return list(self)
+
+
+FakeVerts = FakeArray([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+FakeFaces = FakeArray([0, 1, 2])
+
+
+class BIMModelGeometryTestCase(DigitalEyeAPITestBase):
+    """The import stores tessellated preview meshes; the geometry endpoint
+    serves them verbatim. Tessellation failure degrades to an honest empty
+    preview — the metadata import is the primary product."""
+
+    def _import_ifc(self, name='model.ifc', content=IFC_STEP_CONTENT):
+        return self.client.post(
+            reverse('bim-element-import-ifc'),
+            {'project': str(self.project.id),
+             'file': SimpleUploadedFile(name, content)},
+            format='multipart')
+
+    def test_import_stores_preview_geometry(self):
+        with mock.patch('apps.digital_eye.bim_preview.tessellate_ifc',
+                        return_value=[{
+                            'guid': '3rNg7Ib9P5$wfO4JiGtdVn', 'name': 'COL-C24',
+                            'type': 'IfcColumn',
+                            'verts': FakeVerts, 'faces': FakeFaces,
+                            'bbox': (None, None),
+                        }]):
+            response = self._import_ifc()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['preview_elements'], 1)
+
+        geometry = BIMModelGeometry.objects.get(project=self.project)
+        self.assertEqual(geometry.source_file, 'model.ifc')
+        self.assertFalse(geometry.translated_from_rvt)
+        self.assertEqual(geometry.element_count, 1)
+        self.assertEqual(geometry.elements, PREVIEW_MESH)
+
+    def test_tessellation_failure_still_imports_with_honest_empty_preview(self):
+        with mock.patch('apps.digital_eye.bim_preview.tessellate_ifc',
+                        side_effect=RuntimeError('ifcopenshell cannot open')):
+            response = self._import_ifc()
+        # The metadata import is the primary product — it must succeed.
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['preview_elements'], 0)
+        self.assertIn('preview_detail', response.data)
+
+        geometry = BIMModelGeometry.objects.get(project=self.project)
+        self.assertEqual(geometry.element_count, 0)
+        self.assertEqual(geometry.elements, [])
+        self.assertEqual(
+            BIMElementMapping.objects.filter(project=self.project).count(), 2)
+
+    def test_rvt_import_stores_geometry_with_rvt_flag(self):
+        import os
+        import tempfile
+
+        def fake_ensure_ifc(rvt_path):
+            fd, ifc_path = tempfile.mkstemp(suffix='.ifc')
+            with os.fdopen(fd, 'wb') as f:
+                f.write(IFC_STEP_CONTENT)
+            return ifc_path
+
+        with mock.patch('apps.processing.bim_geometry.ensure_ifc',
+                        side_effect=fake_ensure_ifc), \
+             mock.patch('apps.digital_eye.bim_preview.tessellate_ifc',
+                        return_value=[{
+                            'guid': '3rNg7Ib9P5$wfO4JiGtdVn', 'name': 'COL-C24',
+                            'type': 'IfcColumn',
+                            'verts': FakeVerts, 'faces': FakeFaces,
+                            'bbox': (None, None),
+                        }]):
+            response = self._import_ifc(name='model.rvt', content=b'fake-rvt-bytes')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertTrue(response.data['translated_from_rvt'])
+        self.assertEqual(response.data['preview_elements'], 1)
+
+        geometry = BIMModelGeometry.objects.get(project=self.project)
+        self.assertTrue(geometry.translated_from_rvt)
+        self.assertEqual(geometry.element_count, 1)
+
+    def test_reimport_replaces_preview_geometry(self):
+        first_mesh = [{'guid': 'g1', 'name': 'E1', 'type': 'IfcColumn',
+                       'verts': FakeVerts, 'faces': FakeFaces, 'bbox': (None, None)}]
+        second_mesh = [{'guid': 'g1', 'name': 'E1', 'type': 'IfcColumn',
+                        'verts': FakeVerts, 'faces': FakeFaces, 'bbox': (None, None)},
+                       {'guid': 'g2', 'name': 'E2', 'type': 'IfcSlab',
+                        'verts': FakeVerts, 'faces': FakeFaces, 'bbox': (None, None)}]
+
+        with mock.patch('apps.digital_eye.bim_preview.tessellate_ifc',
+                        return_value=first_mesh):
+            self._import_ifc(name='first.ifc')
+        with mock.patch('apps.digital_eye.bim_preview.tessellate_ifc',
+                        return_value=second_mesh):
+            self._import_ifc(name='second.ifc')
+
+        # OneToOne — one row per project, replaced by the latest import.
+        self.assertEqual(BIMModelGeometry.objects.filter(
+            project=self.project).count(), 1)
+        geometry = BIMModelGeometry.objects.get(project=self.project)
+        self.assertEqual(geometry.source_file, 'second.ifc')
+        self.assertEqual(geometry.element_count, 2)
+
+    def test_geometry_endpoint_serves_stored_elements_verbatim(self):
+        with mock.patch('apps.digital_eye.bim_preview.tessellate_ifc',
+                        return_value=[{
+                            'guid': '3rNg7Ib9P5$wfO4JiGtdVn', 'name': 'COL-C24',
+                            'type': 'IfcColumn',
+                            'verts': FakeVerts, 'faces': FakeFaces,
+                            'bbox': (None, None),
+                        }]):
+            self._import_ifc()
+
+        response = self.client.get(
+            reverse('bim-element-geometry'),
+            {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['project'], str(self.project.id))
+        self.assertEqual(response.data['source_file'], 'model.ifc')
+        self.assertEqual(response.data['element_count'], 1)
+        self.assertEqual(response.data['elements'], PREVIEW_MESH)
+
+    def test_geometry_endpoint_requires_authentication(self):
+        self.client.credentials()  # drop the bearer token
+        response = self.client.get(
+            reverse('bim-element-geometry'),
+            {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_geometry_endpoint_404_without_imported_model(self):
+        response = self.client.get(
+            reverse('bim-element-geometry'),
+            {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('No BIM model imported', response.data['detail'])
+
+    def test_geometry_endpoint_hides_out_of_scope_projects(self):
+        other = User.objects.create_user(
+            username='geo_scoped@nexucon.com', email='geo_scoped@nexucon.com',
+            password='Password123!')
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(other).access_token}')
+        response = self.client.get(
+            reverse('bim-element-geometry'),
+            {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
 
 # ======================================================================

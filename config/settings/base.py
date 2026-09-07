@@ -272,6 +272,12 @@ if STORAGE_PROVIDER == 'cloudflare_r2' and CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUD
         },
     }
 MEDIA_URL = '/media/'
+
+# Google Maps Static API key for the NDT report's site location map (C6):
+# a 500 m radius map image around the project's recorded GNSS coordinates.
+# Empty/absent means the report honestly falls back to the operator's map
+# photo / BIM captures — no map is ever fabricated.
+GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Google Cloud Service Account & Translation / Calendar APIs
