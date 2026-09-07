@@ -19,7 +19,9 @@ router.register(r'live-streams', views.LiveStreamViewSet, basename='live-stream'
 router.register(r'trimble/connections', views.TrimbleConnectionViewSet, basename='trimble-connection')
 router.register(r'trimble/projects', views.TrimbleProjectViewSet, basename='trimble-project')
 
-# Scan-to-BIM & AI analytics endpoints (origin/main)
+# Scan-to-BIM & AI analytics read endpoints. Read-only mirrors of the data
+# owned by the scoped viewsets above — the authoritative write paths are
+# 'pundit-tests', 'gpr-surveys' and 'bim-elements'.
 router.register(r'elements', views.BIMStructuralElementViewSet, basename='digital-eye-elements')
 router.register(r'gpr', views.GPRScanViewSet, basename='digital-eye-gpr')
 router.register(r'pundit', views.PunditTestViewSet, basename='digital-eye-pundit')
@@ -33,12 +35,14 @@ urlpatterns = [
     # Custom endpoints (HEAD)
     path('bim-elements/import-ifc/', views.BIMElementImportView.as_view(),
          name='bim-element-import-ifc'),
+    path('bim-elements/geometry/', views.BIMModelGeometryView.as_view(),
+         name='bim-element-geometry'),
 
-    # Custom endpoints (origin/main)
-    path('stats/', views.digital_eye_stats, name='digital-eye-stats'),
-    path('trimble/status/', views.trimble_status, name='digital-eye-trimble-status'),
-    path('trimble/sync/', views.trimble_sync, name='digital-eye-trimble-sync'),
-    path('reports/download/pdf/', views.download_pdf_report, name='digital-eye-download-pdf'),
+    # Removed: 'stats/', 'trimble/status/', 'trimble/sync/' and
+    # 'reports/download/pdf/' returned fabricated counters, a fake CONNECTED
+    # Trimble connection, invented sync totals and a stub PDF respectively.
+    # See the note in views.py. Trimble state lives at 'trimble/connections/';
+    # real dossiers stream from the reports app.
 
     path('', include(router.urls)),
 ]

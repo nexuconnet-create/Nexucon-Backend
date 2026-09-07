@@ -1008,6 +1008,17 @@ class HITLReviewAPITestCase(APITestCase):
         self.finding.refresh_from_db()
         self.assertEqual(self.finding.status, "pending_review")
 
+    def test_ai_diagnose_action_returns_acoustic_inversion_and_ncr_draft(self):
+        url = reverse("correlation-finding-ai-diagnose", kwargs={"pk": str(self.finding.id)})
+        response = self.client.post(url, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("acoustic_inversion", response.data)
+        self.assertIn("estimated_velocity_km_s", response.data["acoustic_inversion"])
+        self.assertIn("standards_compliance", response.data)
+        self.assertIn("recommended_corrective_actions", response.data)
+        self.assertIn("ncr_remedial_draft", response.data)
+        self.assertEqual(response.data["finding_reference"], self.finding.finding_reference)
+
     def test_director_signoff_requires_director_role(self):
         self.client.force_authenticate(user=self.plain_user)
         url = reverse("correlation-finding-director-signoff",

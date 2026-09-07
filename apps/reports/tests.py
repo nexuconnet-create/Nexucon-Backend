@@ -1284,19 +1284,26 @@ from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.files.base import File as DjangoFile
 
-from apps.digital_eye.models import FieldDevice, PUNDITTest, SensorDataFile
+from apps.digital_eye.models import (FieldDevice, PUNDITReading, PUNDITTest,
+                                     SensorDataFile)
 from apps.projects.models import Project
 from apps.reports.ndt_reports import (
-    ECS_CALIBRATION_SOURCE, NDTReportService, estimated_compressive_strength,
+    ECS_CALIBRATION_SOURCE, NDTReportService, _element_display,
+    estimated_compressive_strength,
 )
-from apps.digital_eye.adapters import PUNDITAdapter
 from PIL import Image
 
 
 def _pdf_text(data):
-    """Extract the full text of a rendered PDF through pypdf."""
+    """Extract the full text of a rendered PDF through pypdf.
+
+    pypdf reconstructs spacing from glyph positions, so justified Cambria
+    text extracts with doubled spaces and adjacent cells land on separate
+    lines. Collapse each page's whitespace to single spaces so phrase
+    assertions are layout-robust; pages stay '\n'-separated.
+    """
     from pypdf import PdfReader
-    return '\n'.join(p.extract_text() or ''
+    return '\n'.join(' '.join((p.extract_text() or '').split())
                      for p in PdfReader(io.BytesIO(data)).pages)
 
 
@@ -1391,10 +1398,10 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         for expected in (
             'LAGOS STATE MATERIALS TESTING LABORATORY',
             'OJODU BERGER, LAGOS.',
-            'TABLE OF CONTENTS',
+            'TABLE OF CONTENT',
             '1.0 INTRODUCTION',
             '4.2 METHODOLOGY',
-            '5.0 ANALYSIS OF TEST RESULTS',
+            'ANALYSIS OF TEST RESULT',
             '7.0 CONCLUSION',
             '8.96',  # calibration curve disclosed in the report
         ):
@@ -1413,16 +1420,319 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
         toc_text = reader.pages[1].extract_text() or ''
-        entries = re.findall(r'(\d\.\d [A-Z][A-Z /(),\-]+?)\s+(\d+)\b',
+        # Reference TOC entries are Title Case ("1.0. Introduction 1"),
+        # so parse number + title-case heading + arabic page number.
+        entries = re.findall(r'(\d\.\d)\.?\s+([A-Za-z][A-Za-z /(),&\-]+?)\s+(\d+)\b',
                              toc_text)
         self.assertTrue(entries, 'TOC entries not parsed from the document')
-        for name, page in entries:
-            page = int(page)
+        # The Title-Case TOC wording maps onto the ALL-CAPS body headings
+        # (the reference diverges: "Field Work/Equipment Status Check" for
+        # the body's "FIELD WORK", plural "Recommendations", ...).
+        body_headings = {
+            'Introduction': 'INTRODUCTION',
+            'Purpose of investigation': 'PURPOSE OF INVESTIGATION',
+            'Literature Review': 'LITERATURE REVIEW',
+            'Location Map/ Weather Condition': 'LOCATION MAP/ WEATHER',
+            'Field Work/Equipment Status Check': 'FIELD WORK',
+            'Visual Test': 'VISUAL TEST',
+            'Methodology': 'METHODOLOGY',
+            'Reinforcing Bar (Rebar) Assessment':
+                'REINFORCING BAR (REBAR) ASSESSMENT',
+            'Equipment/Rebar Assessment Table':
+                'EQUIPMENT/REBAR ASSESSMENT TABLE',
+            'Analysis of Test Results': 'ANALYSIS OF TEST RESULT',
+            'Recommendations': 'RECOMMENDATION',
+            'Conclusion': 'CONCLUSION',
+        }
+        # TOC numbers are BODY page numbers (reference numbering:
+        # Introduction = page 1; cover/TOC/summary pages are unnumbered).
+        # Locate the physical Introduction page to recover the offset.
+        intro_page = None
+        for idx in range(2, len(reader.pages)):
+            flat = ' '.join((reader.pages[idx].extract_text() or '').split())
+            if '1.0 INTRODUCTION' in flat:
+                intro_page = idx + 1
+                break
+        self.assertIsNotNone(intro_page,
+                             'physical Introduction page not found')
+        offset = intro_page - 1
+        for num, title, page in entries:
+            heading = body_headings.get(title, title.upper())
+            page = int(page) + offset       # body number -> physical page
             self.assertLessEqual(page, len(reader.pages))
             body = reader.pages[page - 1].extract_text() or ''
-            self.assertIn(name.split(' ', 1)[1][:12], body,
-                          f'TOC says {name!r} is on page {page} but the '
-                          f'heading is not there')
+            if page < len(reader.pages):
+                body += '\n' + (reader.pages[page].extract_text() or '')
+            # Divider pages (e.g. '5.0 ANALYSIS OF TEST RESULT') draw the
+            # title on separate centred lines, so compare with whitespace
+            # collapsed.
+            body_flat = ' '.join(body.split())
+            self.assertIn(heading, body_flat,
+                          f'TOC says {num} {title!r} is on page {page} but '
+                          f'the heading is not there (or on the next page)')
+
+    def test_executive_summary_present_but_absent_from_toc(self):
+        # C1: the executive summary is a real page but deliberately not a
+        # TOC entry (reference layout).
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        data = NDTReportService.generate_ndt_report(self.project)
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        full = _pdf_text(data)
+        self.assertIn('EXECUTIVE SUMMARY', full)
+        toc_text = reader.pages[1].extract_text() or ''
+        self.assertNotIn('EXECUTIVE SUMMARY', toc_text)
+
+    def test_storey_count_from_test_floors_and_bim_levels(self):
+        # The building profile is quantified only from real records: test
+        # floors and imported BIM levels both count, unmapped labels (Roof,
+        # FLOOR NOT RECORDED) contribute nothing, and nothing recorded
+        # leaves the profile unquantified (None).
+        self.assertIsNone(NDTReportService._storey_count(
+            ['FLOOR NOT RECORDED'], []))
+        self.assertEqual(NDTReportService._storey_count(
+            ['Ground Floor', 'First Floor'], []), 2)
+        self.assertEqual(NDTReportService._storey_count(
+            ['Ground Floor'], ['0. NGL', '1. First Floor']), 2)
+        self.assertEqual(NDTReportService._storey_count(
+            ['Roof'], ['0. NGL']), 1)
+
+    def test_executive_summary_building_profile_and_arrangement(self):
+        # Reference p3 paragraph 1: "…of an existing 2-floor building (A, B
+        # &C) belonging to …, at …" — the storey count derives only from
+        # recorded levels; paragraph 3 states the drawing availability
+        # honestly either way.
+        from apps.digital_eye.models import BIMElementMapping
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        # Nothing recorded: unquantified profile + reference's no-drawing
+        # statement.
+        self.assertIn('of an existing building ("Marina NDT Test Project") '
+                      'belonging to', flat)
+        self.assertIn('no structural drawing was provided', flat)
+
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='a' * 22, element_id='S-101',
+            element_name='RC Slab 200', element_type='IfcSlab',
+            level='0. NGL', source='ifc_upload')
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='b' * 22, element_id='C-201',
+            element_name='RC Column', element_type='IfcColumn',
+            level='1. First Floor', source='ifc_upload')
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        self.assertIn('an existing 2-floor building ("Marina NDT Test '
+                      'Project")', flat)
+        self.assertIn('referenced from the structural information available '
+                      'on the platform', flat)
+
+    def test_appendix_schedule_lists_imported_bim_elements(self):
+        # The appendix schedule lists the REAL imported elements
+        # (BIMElementMapping) with the properties the import recorded —
+        # never the legacy demo table.
+        from apps.digital_eye.models import BIMElementMapping
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='c' * 22, element_id='S-780904',
+            element_name='Floor:200THK RC SLAB:780904',
+            element_type='IfcSlab', level='0. NGL', source='ifc_upload',
+            properties={'Tag': '780904',
+                        'Material': 'Concrete - Cast-in-Place Concrete '
+                                    '(200 mm)'})
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        # The appendix 'drawing' page is registered in the TOC and carries
+        # the project-name label; the heading itself is deliberately not
+        # rendered (reference layout).
+        self.assertIn('Drawing of the Building', flat)
+        # One Revit segment per line — whole tokens, no mid-word breaks.
+        self.assertIn('Floor 200THK RC SLAB 780904', flat)
+        # The CATEGORY column reads as plain words for non-technical
+        # reviewers — never the raw IFC class name or a STEP dump.
+        self.assertIn(' Slab ', flat)
+        self.assertNotIn('IfcSlab', flat)
+        self.assertIn('MATERIAL / GRADE RECORDED', flat)
+        self.assertIn('Concrete - Cast-in-Place Concrete (200 mm)', flat)
+
+    def test_visual_observations_are_reference_style_sentences(self):
+        # §4.1 reads like the reference — 'Tacky floor observed on <element>
+        # (see pic i).' — not raw record dumps: the '[MANUAL_FIELD_ENTRY —
+        # Station …]' provenance stamp never prints, the observation words
+        # stay the operator's own, and the element/location are appended as
+        # context.
+        t1 = self.make_test(
+            self.project, self.device,
+            structural_element='Floor:200THK RC SLAB:780904',
+            test_location='First Floor',
+            notes='[MANUAL_FIELD_ENTRY — Station UPV-FLD-2026-002] tacky '
+                  'floor')
+        t2 = self.make_test(
+            self.project, self.device,
+            structural_element='M_Footing-Rectangular:900 x 900 x 200mm:803486',
+            surface_condition='dsmooth finishing')
+        obs = NDTReportService._visual_observations([t1, t2])
+        self.assertEqual(obs, [
+            'Tacky floor observed at First Floor on '
+            'Floor:200THK RC SLAB:780904.',
+            'Dsmooth finishing observed on '
+            'M_Footing-Rectangular:900 x 900 x 200mm:803486.',
+        ])
+
+    def test_visual_observation_references_appendix_photo(self):        # The '(see pic N)' cross-reference must point at the photograph the
+        # appendix actually numbers — same walk, same roman numeral.
+        media = tempfile.mkdtemp(prefix="ndt_media_")
+        hermetic = dict(
+            MEDIA_ROOT=media,
+            MEDIA_URL='/media/',
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+        )
+        try:
+            with self.settings(**hermetic):
+                png_path = os.path.join(media, "slab_photo.png")
+                Image.new("RGB", (60, 40), (200, 30, 30)).save(png_path)
+                with open(png_path, "rb") as fh:
+                    data_file = SensorDataFile.objects.create(
+                        file_type="photo",
+                        file_name="slab_photo.png",
+                        file_size_bytes=os.path.getsize(png_path),
+                    )
+                    data_file.file.save("slab_photo.png", DjangoFile(fh),
+                                        save=True)
+                test = self.make_test(
+                    self.project, self.device,
+                    structural_element='Floor:200THK RC SLAB:780904',
+                    path_length_mm=250.0, pulse_time_us=62.5,
+                    notes='[MANUAL_FIELD_ENTRY — Station UPV-FLD-2026-002] '
+                          'tacky floor')
+                test.files.add(data_file)
+                text = _pdf_text(
+                    NDTReportService.generate_ndt_report(self.project))
+                flat = ' '.join(text.split())
+                self.assertIn('Tacky floor observed on Floor:200THK RC '
+                              'SLAB:780904 (see pic i).', flat)
+                self.assertIn('PIC I: slab_photo.png', text)
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
+
+    def test_member_type_from_bim_style_element_names(self):
+        # BIM-style names ('M_Footing-Rectangular:900 x 900 x 200mm:803711')
+        # classify to readable member types — the §5.0 group headings and
+        # summary tables must never print raw name fragments like
+        # 'M_FOOTINGS' or 'FLOOR:200THKS'.
+        mt = NDTReportService._member_type
+        self.assertEqual(mt('COL-C24'), 'COLUMN')
+        self.assertEqual(mt('Floor:200THK RC SLAB:781094'), 'SLAB')
+        self.assertEqual(
+            mt('M_Footing-Rectangular:900 x 900 x 200mm:803711'),
+            'FOUNDATION')
+        self.assertEqual(mt('WALL-W2'), 'WALL')
+        self.assertEqual(mt('BEAM-B12'), 'BEAM')
+        self.assertEqual(mt(''), 'UNSPECIFIED')
+
+    def test_element_display_breaks_revit_segments(self):
+        # Revit names are 'Family:Type:Tag' — one segment per line in the
+        # narrow report columns, so names never break mid-token
+        # ('M_Footing-Rectangula / r:900').
+        self.assertEqual(
+            _element_display('M_Footing-Rectangular:900 x 900 x 200mm:803711'),
+            'M_Footing-Rectangular\n900 x 900 x 200mm\n803711')
+        self.assertEqual(
+            _element_display('Floor:200THK RC SLAB:781235'),
+            'Floor\n200THK RC SLAB\n781235')
+        self.assertEqual(_element_display('COL-C24'), 'COL-C24')
+        self.assertEqual(_element_display(''), '-')
+        self.assertEqual(_element_display(None), '-')
+
+    def test_section5_readable_for_bim_element_names(self):
+        # End-to-end: the §5.0 group heading, the summary tables and the
+        # §5.2 notes column read like the reference — member words, not
+        # name fragments, and no provenance stamps.
+        self.make_test(
+            self.project, self.device,
+            structural_element='Floor:200THK RC SLAB:781235',
+            floor='Second Floor',
+            path_length_mm=120.0, pulse_time_us=62.5)
+        self.make_test(
+            self.project, self.device, test_type='surface_quality',
+            structural_element='M_Footing-Rectangular:900 x 900 x 200mm:803486',
+            surface_condition='dsmooth finishing',
+            notes='[MANUAL_FIELD_ENTRY — Station UPV-FLD-2026-004] '
+                  'smooth dense surface')
+        # Multi-point (A1) crack test on another long Revit name — §5.1's
+        # per-point table must fit the same segmented element display.
+        crack = self.make_test(
+            self.project, self.device, test_type='crack_depth',
+            structural_element='M_Footing-Rectangular:900 x 900 x 200mm:803711',
+            crack_path_length_mm=300.0)
+        for label, (tc, t0) in zip('ABC', ((70.0, 62.5), (75.0, 62.5), (80.0, 62.5))):
+            PUNDITReading.objects.create(
+                test=crack, point_label=label, path_length_mm=300.0,
+                transit_time_us=tc, uncracked_transit_time_us=t0)
+        mean_depth = crack.element_mean_crack_depth_mm()
+        crack.crack_depth_mm = mean_depth
+        crack.estimated_crack_depth_mm = mean_depth
+        crack.save()
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        self.assertIn('SECOND FLOOR SLABS OF', flat)
+        # The element renders one Revit segment per line — whole tokens
+        # (this fails if the name breaks mid-word) and no colons in the
+        # table (the §4.1 prose keeps the full name).
+        self.assertIn('M_Footing-Rectangular 900 x 900 x 200mm 803486',
+                      flat)
+        self.assertIn('M_Footing-Rectangular 900 x 900 x 200mm 803711',
+                      flat)
+        # §5.1 renders one row per point with its computed depth and the
+        # element mean.
+        self.assertIn('CRACK DEPTH MEASUREMENTS', flat)
+        self.assertIn('75.7', flat)
+        self.assertIn('98.3', flat)
+        self.assertIn('dsmooth finishing', flat)
+        self.assertIn('smooth dense surface', flat)
+        # Raw fragments and provenance stamps never print.
+        self.assertNotIn('FLOOR:200THKS', flat)
+        self.assertNotIn('M_FOOTINGS', flat)
+        self.assertNotIn('MANUAL_FIELD_ENTRY', flat)
+
+    def test_charts_section_is_registered_in_toc(self):
+        # The reference TOC carries no charts entry (C14's original intent —
+        # a section, not an anonymous page — is met by the numbered
+        # BAR CHART section in the body, which the exact-reference TOC
+        # deliberately omits).
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        data = NDTReportService.generate_ndt_report(self.project)
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        toc_text = reader.pages[1].extract_text() or ''
+        self.assertNotIn('BAR CHART', toc_text)
+        full = _pdf_text(data)
+        self.assertIn('BAR CHART SHOWING SUMMARY OF TEST RESULTS', full)
+
+    def test_rebar_table_only_when_rebar_rows_exist(self):
+        # C12: never claim "not applicable" and then print a table.
+        from apps.digital_eye.models import RebarTest
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn('No Rebar scanning data recorded', text)
+        self.assertNotIn('MAIN BAR (MM)', text)
+
+        RebarTest.objects.create(
+            project=self.project, structural_element='COL-R01',
+            test_location='Ground Floor', main_bar_mm=16.0,
+            links_mm=8.0, spacing_mm='200', cover_depth_mm=25.0)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        self.assertIn('MAIN BAR (MM)', flat)
+        self.assertIn('COVER DEPTH', flat)
 
     # --------------------------------------------------- section 5.0 data
     def test_section5_groups_by_element_with_averages(self):
@@ -1433,27 +1743,60 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                        structural_element="BEAM-B12",
                        path_length_mm=400.0, pulse_time_us=100.0)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('STRUCTURAL ELEMENT: COL-C24', text)
-        self.assertIn('STRUCTURAL ELEMENT: BEAM-B12', text)
-        # 250 mm / 62.5 us = 4.00 km/s -> E.C.S round(27.87) = 28 N/mm2.
-        self.assertIn('4.00', text)
-        self.assertIn('28', text)
-        # Element averages are printed.
-        self.assertIn('AVERAGE PULSE VELOCITY: 4.00 KM/S', text)
+        # Reference 7-column layout: element name once, per-point rows,
+        # average compressive strength + remark columns (header wraps in the
+        # narrow column, so compare on flattened text).
+        flat = ' '.join(text.split())
+        self.assertIn('COL-C24', flat)
+        self.assertIn('BEAM-B12', flat)
+        self.assertIn('AVERAGE COMPRESSIVE STRENGTH (N/mm2)', flat)
+        self.assertIn('REMARK', flat)
+        # 250 mm / 62.5 us = 4.00 km/s -> E.C.S 8.961*4.0 - 7.97 = 27.9.
+        self.assertIn('27.9', text)
+        # Velocities print like the reference (one decimal).
+        self.assertIn('4.0', text)
+        # Both summaries come from the real rows.
+        self.assertIn('SUMMARY OF TEST ANALYSIS', text)
+        self.assertIn('SUMMARY OF TEST RESULTS', text)
 
-    def test_ecs_remark_consistent_with_adapter_grade(self):
-        # Two tests on one element: mean velocity (4.00 + 2.90) / 2 = 3.45
-        # km/s -> 'questionable' by the platform's own adapter.
+    def test_readings_render_as_point_rows(self):
+        # The multi-reading model: one element, three A/B/C test points,
+        # verdict from the element means.
+        from apps.digital_eye.models import PUNDITReading
+        test = self.make_test(self.project, self.device,
+                              structural_element="COL-G01", floor="Ground Floor",
+                              path_length_mm=250.0)
+        for label, transit in (('A', 62.5), ('B', 60.0), ('C', 61.0)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=250.0,
+                transit_time_us=transit)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        # Point labels and their one-decimal values appear in the table.
+        self.assertIn('A', text)
+        self.assertIn('62.5', text)
+        self.assertIn('60.0', text)
+        # Mean velocity (4.0 + 4.167 + 4.098)/3 = 4.088 -> E.C.S 28.7 -> GOOD.
+        self.assertIn('28.7', text)
+        self.assertIn('GOOD', text)
+        # The floor groups the block (reference 'GROUND FLOOR ...' header).
+        self.assertIn('GROUND FLOOR', text)
+
+    def test_ecs_remark_consistent_with_statutory_threshold(self):
+        # GOOD/POOR is decided at the statutory 25 N/mm2 design strength:
+        # 4.0 km/s -> 27.9 N/mm2 (GOOD); 2.9 km/s -> 18.0 N/mm2 (POOR).
         self.make_test(self.project, self.device,
                        structural_element="COL-C24",
                        path_length_mm=250.0, pulse_time_us=62.5)
         self.make_test(self.project, self.device,
-                       structural_element="COL-C24",
+                       structural_element="COL-C25",
                        path_length_mm=290.0, pulse_time_us=100.0)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('AVERAGE PULSE VELOCITY: 3.45 KM/S', text)
-        self.assertIn('QUESTIONABLE', text)
-        self.assertEqual(PUNDITAdapter.grade_quality(3.45), 'questionable')
+        self.assertIn('27.9', text)
+        self.assertIn('18.0', text)
+        self.assertIn('GOOD', text)
+        self.assertIn('POOR', text)
+        self.assertGreater(estimated_compressive_strength(4.0), 25.0)
+        self.assertLess(estimated_compressive_strength(2.9), 25.0)
 
     def test_pending_and_missing_tests_are_honest(self):
         # A test never run through the analyze endpoint still shows its
@@ -1468,7 +1811,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         self.assertIn('have not been run through the platform analysis '
                       'endpoint', text)
-        self.assertIn('4.00', text)          # computed on the fly for pending
+        self.assertIn('4.0', text)           # computed on the fly for pending
         self.assertIn('NOT RECORDED', text)  # element without measurements
 
     def test_crack_depth_subtable(self):
@@ -1482,6 +1825,51 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         self.assertIn('99.5', text)
         flat = ' '.join(text.split())
         self.assertIn('Depth exceeds 25 mm - structural review required', flat)
+
+    def test_multi_point_crack_and_surface_subtables(self):
+        """A1 for crack depth + surface quality: the report renders one row
+        per test point (label / measurements / computed value) exactly like
+        the Section 5.0 velocity tables, with the element verdict (mean
+        depth / observed conditions) alongside."""
+        crack = self.make_test(self.project, self.device,
+                               test_type="crack_depth", structural_element="SLAB-S3",
+                               crack_path_length_mm=300.0)
+        for label, (tc, t0) in zip('ABC', ((70.0, 62.5), (75.0, 62.5), (80.0, 62.5))):
+            PUNDITReading.objects.create(
+                test=crack, point_label=label, path_length_mm=300.0,
+                transit_time_us=tc, uncracked_transit_time_us=t0)
+        # Persist the element verdict the way the serializer does.
+        mean_depth = crack.element_mean_crack_depth_mm()
+        crack.crack_depth_mm = mean_depth
+        crack.estimated_crack_depth_mm = mean_depth
+        crack.save()
+
+        surface = self.make_test(self.project, self.device,
+                                 test_type="surface_quality",
+                                 structural_element="WALL-W2",
+                                 surface_condition="Smooth finished")
+        for label, condition in (('A', 'Smooth finished'),
+                                 ('B', 'Honeycombing at mid-height'),
+                                 ('C', 'Hairline cracks near the support')):
+            PUNDITReading.objects.create(test=surface, point_label=label,
+                                         surface_condition=condition)
+
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        # Per-point crack rows: each label's own t_c / t_0 / depth.
+        self.assertIn('CRACK DEPTH MEASUREMENTS', flat)
+        self.assertIn('POINT', flat)
+        self.assertIn('75.7', flat)   # point A: 150*sqrt(1.12^2-1)
+        self.assertIn('119.8', flat)  # point C: 150*sqrt(1.28^2-1)
+        # The element verdict = the mean of the three depths (98.3) with its
+        # remark, on the middle row.
+        self.assertIn('98.3', flat)
+        self.assertIn('Depth exceeds 25 mm - structural review required', flat)
+        # Per-point surface rows carry each observed condition.
+        self.assertIn('SURFACE QUALITY OBSERVATIONS', flat)
+        self.assertIn('Honeycombing at mid-height', flat)
+        self.assertIn('Hairline cracks near the support', flat)
+        self.assertIn('Smooth finished', flat)
 
     # ------------------------------------------------- layout regression
     def test_wrap_lines_fit_column_and_lose_nothing(self):
@@ -1519,8 +1907,10 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                           'exposed reinforcement at the north face over '
                           'approximately two square metres around mid-height')
         long_reference = 'UPV-FLD-2026-VERY-LONG-STATION-REF-0001'
+        long_element = ('M_Footing-Rectangular:900 x 900 x 200mm:803711')
         self.make_test(
             self.project, self.device, test_reference=long_reference,
+            structural_element=long_element,
             path_length_mm=250.0, pulse_time_us=62.5,
             notes='Measured with 54 kHz transducers — direct mode — per '
                   'operator field sheet')
@@ -1555,10 +1945,13 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
 
         for i, (page, x, y, h, text) in enumerate(runs):
             # Body text may never sit inside the running-header band: the
-            # header's own runs live at y=10..16, the rule is at 17.5 and
-            # the top margin is 24. Anything body-like at 10.5..23 is the
-            # page-break bug come back.
-            if page >= 2 and 10.5 <= y <= 23:
+            # reference header's own runs live at y=1.6..12.8 (MTL text +
+            # serial box) and the top margin is 20.7. Anything body-like at
+            # 12.9..15.5 is the page-break bug come back — but the
+            # reference's appendix drawing-page label legitimately sits at
+            # y=16.9 ('BUILDING A' below the header), so the band stops
+            # short of it.
+            if page >= 2 and 12.9 <= y <= 15.5:
                 self.fail(
                     f'body text inside the header band: {text[:40]!r} at y={y}')
             for page2, x2, y2, h2, text2 in runs[i + 1:]:
@@ -1569,18 +1962,245 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                         and x2 + min(len(text2) * 0.5, 170) > x + 1.0):
                     self.fail(f'overlapping text runs: '
                               f'{text[:30]!r} / {text2[:30]!r}')
-        # Long values are rendered whole — wrapped, never truncated.
+        # Long values are rendered whole — wrapped, never truncated. The
+        # long element name exercises the §5.0 table's narrow column; the
+        # test reference is provenance and deliberately does NOT print in
+        # the results table (it lives in the registry / integrity digest).
         flat = ' '.join(_pdf_text(data).split())
         self.assertIn(' '.join(long_condition.split()), flat)
-        self.assertIn(long_reference, flat.replace(' ', ''))
+        self.assertIn(long_element.replace(' ', ''),
+                      flat.replace(' ', ''))
+        self.assertNotIn(long_reference, flat)
 
     def test_empty_project_report_is_honest(self):
         data = NDTReportService.generate_ndt_report(self.project)
         self.assertTrue(data.startswith(b'%PDF'))
         text = _pdf_text(data)
         self.assertIn('No pulse velocity tests recorded', text)
-        self.assertIn('DATE OF TEST: NOT RECORDED', text)
+        # The reference cover carries a single ordinal date line
+        # ("27TH APRIL, 2026.") — with no recorded tests it falls back to
+        # today, honestly, in that exact format.
+        self.assertRegex(text, r'\d{1,2}(ST|ND|RD|TH) [A-Z]+, \d{4}\.')
         self.assertIn('No photographs recorded for these tests.', text)
+
+    # ------------------------------------------------- BIM site-plan (C6)
+    def test_bim_model_plan_view_replaces_map_placeholder(self):
+        # With an imported BIM model, the map page renders the model's real
+        # plan-view geometry in one of the two reference image frames instead
+        # of the "SITE LOCATION MAP NOT PROVIDED" placeholder (the reference
+        # prints no captions under the frames — the images speak alone).
+        from apps.digital_eye.models import BIMModelGeometry
+        from pypdf import PdfReader
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file='STACKING_AREA_IFC.rvt',
+            element_count=2,
+            elements=[
+                # A 4 m x 3 m slab: two triangles over four corner verts.
+                {'guid': 'g1', 'name': 'Slab-1', 'type': 'IfcSlab',
+                 'verts': [0, 0, 0, 4000, 0, 0, 4000, 3000, 0, 0, 3000, 0],
+                 'faces': [0, 1, 2, 0, 2, 3]},
+                {'guid': 'g2', 'name': 'Col-1', 'type': 'IfcColumn',
+                 'verts': [1000, 1000, 0, 1000, 1200, 0, 1200, 1200, 0,
+                           1200, 1000, 0],
+                 'faces': [0, 1, 2, 0, 2, 3]},
+            ])
+        data = NDTReportService.generate_ndt_report(self.project)
+        self.assertTrue(data.startswith(b'%PDF'))
+        text = _pdf_text(data)
+        self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
+        # The map page carries the running watermark PLUS the plan image
+        # (single source -> one centred frame).
+        reader = PdfReader(io.BytesIO(data))
+        map_pages = [p for p in reader.pages
+                     if 'LOCATION MAP' in (p.extract_text() or '')]
+        self.assertTrue(map_pages, 'map page not found')
+        self.assertGreaterEqual(len(map_pages[0].images), 2,
+                                'map page should carry the watermark and the '
+                                'BIM plan view')
+
+    def test_map_placeholder_when_no_bim_model_or_attachment(self):
+        # No imported model and no attached map photo — the honest
+        # placeholder box stays.
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        data = NDTReportService.generate_ndt_report(self.project)
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED', _pdf_text(data))
+
+    def test_bim_plan_view_honest_for_degenerate_geometry(self):
+        # Geometry whose plan projection collapses to a line has nothing
+        # honest to draw — the placeholder must come back rather than a
+        # zero-width "plan".
+        from apps.digital_eye.models import BIMModelGeometry
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file='flat.ifc', element_count=1,
+            elements=[{'guid': 'g1', 'name': 'Line', 'type': 'IfcBeam',
+                       'verts': [0, 0, 0, 1000, 0, 0, 2000, 0, 0],
+                       'faces': [0, 1, 2]}])
+        buf, caption = NDTReportService._generate_bim_plan_view(self.project)
+        self.assertIsNone(buf)
+        self.assertEqual(caption, '')
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED',
+                      _pdf_text(
+                          NDTReportService.generate_ndt_report(self.project)))
+
+    def test_bim_preview_capture_used_as_site_map(self):
+        # An operator's screenshot of the BIM model 3D preview (project-level
+        # SensorDataFile photo marked 'BIM 3D model view') fills one of the
+        # two reference map frames; the server-rendered plan view fills the
+        # other — the reference prints no captions, so the frames are
+        # verified by their embedded images.
+        from apps.digital_eye.models import BIMModelGeometry, SensorDataFile
+        from pypdf import PdfReader
+        media = tempfile.mkdtemp(prefix="ndt_media_")
+        hermetic = dict(
+            MEDIA_ROOT=media,
+            MEDIA_URL='/media/',
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+        )
+        try:
+            with self.settings(**hermetic):
+                png_path = os.path.join(media, "bim_capture.png")
+                Image.new("RGB", (160, 100), (15, 23, 42)).save(png_path)
+                with open(png_path, "rb") as fh:
+                    data_file = SensorDataFile.objects.create(
+                        project=self.project,
+                        file_type="photo",
+                        file_name="bim_capture.png",
+                        file_size_bytes=os.path.getsize(png_path),
+                        description=(
+                            'BIM 3D model view — captured from the platform '
+                            'model preview'),
+                    )
+                    data_file.file.save("bim_capture.png", DjangoFile(fh),
+                                        save=True)
+                self.make_test(self.project, self.device,
+                               path_length_mm=250.0, pulse_time_us=62.5)
+                BIMModelGeometry.objects.create(
+                    project=self.project, source_file='STACKING_AREA_IFC.rvt',
+                    element_count=1,
+                    elements=[{'guid': 'g1', 'name': 'Slab-1',
+                               'type': 'IfcSlab',
+                               'verts': [0, 0, 0, 4000, 0, 0,
+                                         4000, 3000, 0, 0, 3000, 0],
+                               'faces': [0, 1, 2, 0, 2, 3]}])
+                data = NDTReportService.generate_ndt_report(self.project)
+                text = _pdf_text(data)
+                self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
+                # The map page carries the watermark, the operator's capture
+                # AND the BIM plan view (both frames filled).
+                reader = PdfReader(io.BytesIO(data))
+                map_pages = [p for p in reader.pages
+                             if 'LOCATION MAP' in (p.extract_text() or '')]
+                self.assertTrue(map_pages, 'map page not found')
+                self.assertGreaterEqual(len(map_pages[0].images), 3,
+                                        'map page should carry the watermark, '
+                                        'the BIM capture and the plan view')
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
+
+    # ------------------------------------------- C6: Google Maps link + map
+    def test_recorded_coordinates_print_google_maps_link(self):
+        # Real GNSS coordinates on the project print the exact coordinates
+        # and the Google Maps link on the map page — the address section of
+        # the report can be followed to the site.
+        project = self.make_project(latitude=6.4281, longitude=3.4219)
+        self.make_test(project, self.device)
+        data = NDTReportService.generate_ndt_report(project)
+        text = _pdf_text(data)
+        self.assertIn('6.428100', text)
+        self.assertIn('3.421900', text)
+        self.assertIn('https://www.google.com/maps/search/?api=1&query=6.4281,3.4219',
+                      text)
+
+    def test_no_coordinates_means_no_maps_link(self):
+        # Without recorded coordinates the link line is absent — the location
+        # section never carries a guessed point.
+        data = NDTReportService.generate_ndt_report(self.project)
+        text = _pdf_text(data)
+        self.assertNotIn('google.com/maps', text)
+        self.assertNotIn('Coordinates:', text)
+
+    def test_static_map_used_when_key_and_coordinates_exist(self):
+        # With coordinates + a configured key, the Google static map fills
+        # the first reference map frame (mocked fetch — tests never call the
+        # network). The map page then carries the watermark + the map image.
+        from pypdf import PdfReader
+        png = io.BytesIO()
+        Image.new('RGB', (640, 640), (240, 240, 235)).save(png, format='PNG')
+        png.seek(0)
+        with patch.object(NDTReportService, '_google_static_map',
+                          return_value=png) as fetch:
+            with self.settings(GOOGLE_MAPS_API_KEY='test-key'):
+                project = self.make_project(latitude=6.4281, longitude=3.4219)
+                self.make_test(project, self.device)
+                data = NDTReportService.generate_ndt_report(project)
+        fetch.assert_called_once()
+        text = _pdf_text(data)
+        self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
+        reader = PdfReader(io.BytesIO(data))
+        map_pages = [p for p in reader.pages
+                     if 'LOCATION MAP' in (p.extract_text() or '')]
+        self.assertTrue(map_pages, 'map page not found')
+        self.assertGreaterEqual(len(map_pages[0].images), 2,
+                                'map page should carry the watermark and the '
+                                'Google static map')
+
+    def test_static_map_absent_without_key(self):
+        # No key configured -> the static-map helper itself returns no map
+        # (verified directly — no fetch is possible), and the report falls
+        # through to the honest fallbacks (placeholder, no model here).
+        with self.settings(GOOGLE_MAPS_API_KEY=''):
+            project = self.make_project(latitude=6.4281, longitude=3.4219)
+            self.assertIsNone(
+                NDTReportService._google_static_map(project))
+            self.make_test(project, self.device)
+            data = NDTReportService.generate_ndt_report(project)
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED', _pdf_text(data))
+        # The link line still prints — coordinates alone are enough for it.
+        self.assertIn('https://www.google.com/maps/search/', _pdf_text(data))
+
+    def test_unmarked_project_photo_is_not_treated_as_bim_capture(self):
+        # Only photos explicitly marked 'BIM 3D model view' are used as the
+        # §3.0 map — an ordinary project photo must not hijack the slot.
+        from apps.digital_eye.models import SensorDataFile
+        media = tempfile.mkdtemp(prefix="ndt_media_")
+        hermetic = dict(
+            MEDIA_ROOT=media,
+            MEDIA_URL='/media/',
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+        )
+        try:
+            with self.settings(**hermetic):
+                png_path = os.path.join(media, "site_photo.png")
+                Image.new("RGB", (60, 40), (30, 200, 30)).save(png_path)
+                with open(png_path, "rb") as fh:
+                    data_file = SensorDataFile.objects.create(
+                        project=self.project,
+                        file_type="photo",
+                        file_name="site_photo.png",
+                        file_size_bytes=os.path.getsize(png_path),
+                        description='Progress photo of the site entrance',
+                    )
+                    data_file.file.save("site_photo.png", DjangoFile(fh),
+                                        save=True)
+                self.make_test(self.project, self.device,
+                               path_length_mm=250.0, pulse_time_us=62.5)
+                self.assertIn('SITE LOCATION MAP NOT PROVIDED',
+                              _pdf_text(
+                                  NDTReportService.generate_ndt_report(
+                                      self.project)))
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
 
     # --------------------------------------------------------- appendix
     def test_appendix_embeds_photos_and_honest_when_none(self):
@@ -1612,7 +2232,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                 test.files.add(data_file)
                 text = _pdf_text(
                     NDTReportService.generate_ndt_report(self.project))
-                self.assertIn('Photo 1: column_crack.png', text)
+                self.assertIn('PIC I: column_crack.png', text)
 
                 # Once the photo is detached, the appendix states so honestly.
                 test.files.remove(data_file)
