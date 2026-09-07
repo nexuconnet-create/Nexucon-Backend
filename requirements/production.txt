@@ -3,3 +3,12 @@ gunicorn>=21.2.0
 dj-database-url>=2.1.0
 whitenoise[brotli]>=6.6.0
 openpyxl==3.1.5
+# --- BIM geometry + AI stack (pinned to match the dev venv that works) ---
+numpy==2.5.2
+scipy==1.18.1
+ifcopenshell==0.8.5
+plyfile==1.1.5
+laspy==2.7.0
+openai==3.6.0
+google-generativeai==0.8.6
+channels-redis==4.3.0
