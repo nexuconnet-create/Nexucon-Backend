@@ -46,7 +46,16 @@ CORS_ALLOWED_ORIGINS = [
     "http://187.7.20.123:8000",
     "https://nexucon-backend.onrender.com",
     "https://nexucon-frontend-8x3a.vercel.app",
+    "https://www.nexucon.net",
+    "https://187.7.20.123",
 ]
+_extra_cors = os.getenv("CORS_ALLOWED_ORIGINS", "") or os.getenv("DJANGO_CORS_ALLOWED_ORIGINS", "")
+if _extra_cors:
+    for _orig in _extra_cors.split(","):
+        _orig = _orig.strip()
+        if _orig and _orig not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(_orig)
+
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -60,7 +69,16 @@ CSRF_TRUSTED_ORIGINS = [
     "http://187.7.20.123:8000",
     "https://*.vercel.app",
     "https://nexucon-backend.onrender.com",
+    "https://www.nexucon.net",
+    "https://187.7.20.123",
 ]
+_extra_csrf = os.getenv("CSRF_TRUSTED_ORIGINS", "") or os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "")
+if _extra_csrf:
+    for _orig in _extra_csrf.split(","):
+        _orig = _orig.strip()
+        if _orig and _orig not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(_orig)
+
 
 # Dynamically add any env-defined origins ensuring proper schemes
 for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS"):
@@ -266,6 +284,12 @@ if STORAGE_PROVIDER == 'cloudflare_r2' and CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUD
         },
     }
 MEDIA_URL = '/media/'
+
+# Google Maps Static API key for the NDT report's site location map (C6):
+# a 500 m radius map image around the project's recorded GNSS coordinates.
+# Empty/absent means the report honestly falls back to the operator's map
+# photo / BIM captures — no map is ever fabricated.
+GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Google Cloud Service Account & Translation / Calendar APIs
