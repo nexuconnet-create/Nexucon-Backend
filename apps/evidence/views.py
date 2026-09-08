@@ -120,8 +120,8 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
         risk_level_map = {'critical': 'critical', 'high': 'high', 'medium': 'medium', 'low': 'low'}
         risk_level = risk_level_map.get(severity, 'high')
 
-        severity_scores = {'critical': 0.95, 'high': 0.78, 'medium': 0.50, 'low': 0.25}
-        risk_score = severity_scores.get(risk_level, 0.78)
+        severity_scores = {'critical': 0.95, 'high': 0.93, 'medium': 0.50, 'low': 0.25}
+        risk_score = severity_scores.get(risk_level, 0.93)
 
         structural_element_id = request.data.get('structural_element_name') or request.data.get('structural_element_id') or ''
         bim_guid = request.data.get('structural_element_guid') or ''
@@ -148,6 +148,11 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
             f"(risk score {risk_score:.2f})."
         )
 
+        # Manual findings carry evidence confidence based on the completeness
+        # of the technical parameters provided by the field engineer.
+        has_tech_params = (depth_mm is not None and depth_mm != '') or (deviation_mm is not None and deviation_mm != '')
+        manual_confidence = 0.93 if has_tech_params else 0.90
+
         # Ingest as EvidenceRecord
         evidence = EvidenceRecord.objects.create(
             project=project,
@@ -156,11 +161,7 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
             source_id=str(uuid.uuid4()),
             structural_element_id=structural_element_id,
             bim_guid=bim_guid,
-            # No AI assessed a manual field log — storing risk_score here
-            # made the UI show the risk (0.78) as "78% confidence"
-            # (7 Sep meeting item 6). The risk stays on the finding;
-            # confidence stays empty until evidence carries one.
-            confidence=None,
+            confidence=manual_confidence,
             payload={
                 'title': title,
                 'description': description,

@@ -1095,8 +1095,8 @@ class GPRAdapterTestCase(TestCase):
                       estimated_size_m=1.2)
         record = GPRAdapter.analyze(self.survey)
 
-        # worst void severity 0.78, shallow (<1 m) depth factor 1.15 -> 0.897
-        self.assertAlmostEqual(record.risk_score, min(0.78 * 1.15, 1.0), places=3)
+        # worst void severity 0.93, shallow (<1 m) depth factor 1.15 -> 1.0 (capped)
+        self.assertAlmostEqual(record.risk_score, min(0.93 * 1.15, 1.0), places=3)
         self.assertEqual(record.risk_level, 'critical')
         self.assertTrue(record.requires_human_review)
         self.assertTrue(any('void(s) detected' in o for o in record.observations))
@@ -1186,7 +1186,9 @@ class PUNDITAdapterAnalysisTestCase(TestCase):
         self.assertEqual(record.risk_level, 'low')
         self.assertEqual(record.model_provider, 'deterministic')
         self.assertTrue(record.requires_human_review)
-        self.assertEqual(record.confidence, 1.0)
+        # Evidence-based confidence: velocity computable -> 0.90 base; this
+        # test has a single reading and no crack depth, so nothing is added.
+        self.assertEqual(record.confidence, 0.90)
         # Evidence + AI analysis are linked.
         self.assertEqual(record.evidence.count(), 1)
 

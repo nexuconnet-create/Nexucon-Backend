@@ -45,7 +45,7 @@ PUNDIT_GRADE_RISK = {
     'excellent': ('info', 0.05),
     'good': ('low', 0.20),
     'questionable': ('medium', 0.50),
-    'poor': ('high', 0.78),
+    'poor': ('high', 0.93),
     'very_poor': ('critical', 0.95),
     'pending': (None, None),
 }
@@ -243,7 +243,7 @@ class PUNDITAdapter:
             recommendations=cls._recommendations(grade, crack_depth),
             reasoning_log="\n".join(steps),
             requires_human_review=True,
-            confidence=1.0 if velocity is not None else None,
+            confidence=evidence.confidence if velocity is not None else None,
             model_provider=provider,
             model_version=model_version,
         )
@@ -586,7 +586,7 @@ class PUNDITAdapter:
 GPR_SEVERITY_RISK = {
     'low': 0.20,
     'medium': 0.50,
-    'high': 0.78,
+    'high': 0.93,
     'critical': 0.95,
 }
 
