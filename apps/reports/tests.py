@@ -2568,3 +2568,59 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
             NDTReportService.generate_ndt_report(self.project)).split())
         self.assertNotIn("Floor Plans", flat)
         self.assertNotIn('level "', flat)
+
+    # --------------------------------------- AI analysis in the PDF
+    def _ai_record(self, **kwargs):
+        from apps.evidence.models import AIAnalysisRecord
+        defaults = dict(
+            project=self.project, analysis_type="pundit",
+            observations=[
+                "Ground Floor: COL-G01 shows a mean pulse velocity of "
+                "3913.84 m/s, within the good concrete band.",
+                "The 534 m/s point spread on COL-G01 warrants a retest at "
+                "additional stations per ACI 228.2R.",
+            ],
+            recommendations=[{
+                "recommendation": "Retest COL-G01 at three further stations.",
+                "priority": "Routine",
+            }],
+            model_provider="gemini", model_version="gemini-3.5-flash-lite",
+            confidence=0.93,
+        )
+        defaults.update(kwargs)
+        return AIAnalysisRecord.objects.create(**defaults)
+
+    def test_ai_narrative_is_embedded_as_decision_support(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self._ai_record()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The section exists, after the measurement tables it interprets.
+        self.assertIn("AI-ASSISTED INTERPRETATION", flat)
+        self.assertLess(flat.find("PULSE VELOCITY (M/S)"),
+                        flat.find("AI-ASSISTED INTERPRETATION"))
+        # The narrative itself, verbatim.
+        self.assertIn("3913.84 m/s, within the good concrete band", flat)
+        self.assertIn("warrants a retest", flat)
+        # Provider, model and the evidence-based confidence are disclosed.
+        # The phrase is asserted in two halves — a page break can land inside
+        # it and the extracted text then carries the running footer between
+        # the halves ("evidence-based 12 MTL/NDT/2026 7298 confidence").
+        self.assertIn("synthesised by gemini (gemini-3.5-flash-lite)", flat)
+        self.assertIn("evidence-based", flat)
+        self.assertIn("confidence of 93%", flat)
+        # The sign-off caveat — the professional, not the AI, owns the report.
+        self.assertIn("decision support for the responsible engineer", flat)
+
+    def test_deterministic_only_analysis_prints_no_ai_section(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self._ai_record(model_provider="deterministic",
+                        model_version="BS 1881-203 / ASTM C597 v1",
+                        confidence=None)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)

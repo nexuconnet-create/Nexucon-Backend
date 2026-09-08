@@ -2435,6 +2435,39 @@ class NDTReportService:
             except Exception as e:
                 logger.error('Could not generate summary charts: %s', e)
 
+        # ------------------------------- 5.3 AI-ASSISTED INTERPRETATION
+        # The platform's AI analysis layer (analyze_project) stores its
+        # narrative on the project's latest pundit AIAnalysisRecord — the
+        # report surfaces it verbatim, labelled with its provider and
+        # evidence-based confidence. Deterministic-only records (no LLM
+        # configured/available) add nothing the counts prose does not
+        # already say, so the section is skipped honestly.
+        try:
+            from apps.evidence.models import AIAnalysisRecord
+            ai_record = (AIAnalysisRecord.objects
+                         .filter(project=project, analysis_type='pundit')
+                         .order_by('-created_at').first())
+        except Exception as e:
+            logger.error('Could not load AI analysis record: %s', e)
+            ai_record = None
+        if (ai_record and ai_record.observations
+                and (ai_record.model_provider or 'deterministic')
+                != 'deterministic'):
+            builder.section('5.3', 'AI-ASSISTED INTERPRETATION', sub=True)
+            conf_pct = ('not scored' if ai_record.confidence is None
+                        else f'{round(ai_record.confidence * 100)}%')
+            builder.para(
+                'The platform analysis engine recorded the following '
+                'interpretation of the field measurements, synthesised by '
+                f'{ai_record.model_provider} '
+                f'({ai_record.model_version or "model version not recorded"})'
+                f', with an evidence-based confidence of {conf_pct}. It is '
+                'derived solely from the recorded readings in Section 5.0 '
+                'and serves as decision support for the responsible '
+                'engineer, who reviews and signs off this report.')
+            for obs in ai_record.observations:
+                builder.bullet(str(obs))
+
         # ---------------------------------------------- 6.0 RECOMMENDATIONS
         builder.section('6.0', 'RECOMMENDATION')
         if element_data:
