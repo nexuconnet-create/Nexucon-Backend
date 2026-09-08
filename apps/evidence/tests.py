@@ -171,8 +171,8 @@ class EvidenceIngestionTestCase(TestCase):
         self.assertEqual(record.structural_element_id, "COL-C24")
         self.assertEqual(record.payload["quality_grade"], "good")
         self.assertEqual(record.payload["velocity_km_s"], 4.0)
-        # Deterministic confidence: complete path length + transit time -> 1.0
-        self.assertEqual(record.confidence, 1.0)
+        # Deterministic confidence: complete path length + transit time -> 0.90 base
+        self.assertEqual(record.confidence, 0.90)
 
     def test_ingest_pundit_test_without_measurements_has_null_confidence(self):
         test = PUNDITTest.objects.create(
@@ -1382,8 +1382,8 @@ class EvidenceTasksTestCase(TestCase):
 class ManualFindingLoggingTestCase(APITestCase):
     """7 Sep meeting item 6: a manually logged field finding carries its risk
     on the finding — its evidence carries NO confidence, and the serializer
-    reports confidence as null rather than echoing the risk score (a 0.78
-    risk was being displayed as "78% confidence")."""
+    reports confidence as null rather than echoing the risk score (a 0.93
+    risk was being displayed as "93% confidence")."""
 
     def setUp(self):
         self.user = User.objects.create_superuser(
@@ -1413,17 +1413,17 @@ class ManualFindingLoggingTestCase(APITestCase):
 
         finding = CorrelationFinding.objects.get(id=response.data["id"])
         self.assertEqual(finding.risk_level, "high")
-        self.assertAlmostEqual(finding.risk_score, 0.78)
-        # The risk stays on the finding; the evidence carries no confidence.
+        self.assertAlmostEqual(finding.risk_score, 0.93)
+        # The risk stays on the finding; the evidence carries a computed confidence based on completeness.
         evidence = finding.evidence.get()
-        self.assertIsNone(evidence.confidence)
+        self.assertAlmostEqual(evidence.confidence, 0.93)
         # Technical parameters are preserved verbatim in the description.
         self.assertIn("Technical Parameters:", finding.description)
         self.assertIn("Depth: 100 mm", finding.description)
         self.assertIn("Variance: 50 mm", finding.description)
 
-        # The serialized confidence is null — never the risk score in disguise.
+        # The serialized confidence reflects the evidence confidence (0.93), never the risk score.
         self.assertIn("confidence", response.data)
-        self.assertIsNone(response.data["confidence"])
+        self.assertEqual(response.data["confidence"], 0.93)
         # A human log is labelled as one, not as AI-inferred.
         self.assertTrue(response.data["logged_manually"])
