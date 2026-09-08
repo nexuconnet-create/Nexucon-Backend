@@ -2669,8 +2669,11 @@ class EvidenceConfidenceTestCase(TestCase):
         self.assertEqual(confidence, 0.90)
 
     def test_no_llm_loses_the_model_bonus(self):
+        # Without the provider narrative the same evidence scores 5 lower.
+        # The E.C.S bonus is dropped here because 70+10+10+5 already hits
+        # the 95 cap — the cap would mask the model bonus being absent.
         confidence = PUNDITAdapter._evidence_confidence(
-            [self._summary()], llm_used=False)
+            [self._summary(mean_ecs_n_mm2=None)], llm_used=False)
         self.assertEqual(confidence, 0.90)
 
     def test_ungraded_elements_return_none(self):
