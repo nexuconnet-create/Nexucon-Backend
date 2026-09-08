@@ -1425,3 +1425,5 @@ class ManualFindingLoggingTestCase(APITestCase):
         # The serialized confidence is null — never the risk score in disguise.
         self.assertIn("confidence", response.data)
         self.assertIsNone(response.data["confidence"])
+        # A human log is labelled as one, not as AI-inferred.
+        self.assertTrue(response.data["logged_manually"])

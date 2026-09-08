@@ -62,6 +62,10 @@ class CorrelationFindingSerializer(serializers.ModelSerializer):
     # number the UI may label "confidence". NEVER risk_score: a 0.78 risk
     # was being displayed as "78% confidence" (7 Sep meeting item 6).
     confidence = serializers.SerializerMethodField()
+    # True when a human logged this in the field (its analysis records
+    # model_provider='engineer') — the UI must not badge a human log as
+    # "AI INFERRED".
+    logged_manually = serializers.SerializerMethodField()
     linked_ncr_reference = serializers.CharField(source='linked_ncr.ncr_reference', read_only=True, default=None)
     linked_inspection_reference = serializers.CharField(
         source='linked_inspection.inspection_reference', read_only=True, default=None,
@@ -73,7 +77,7 @@ class CorrelationFindingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'finding_reference', 'project', 'project_name', 'structural_element_id',
             'bim_guid', 'group_key', 'title', 'description', 'risk_level', 'risk_score',
-            'confidence',
+            'confidence', 'logged_manually',
             'evidence_ids', 'evidence_references', 'reasoning', 'status', 'reviewed_by',
             'reviewed_by_name', 'reviewed_at', 'review_notes', 'linked_ncr',
             'linked_ncr_reference', 'linked_inspection', 'linked_inspection_reference',
@@ -90,6 +94,10 @@ class CorrelationFindingSerializer(serializers.ModelSerializer):
         if not values:
             return None
         return round(sum(values) / len(values), 3)
+
+    def get_logged_manually(self, obj):
+        analysis = getattr(obj, 'analysis', None)
+        return bool(analysis and analysis.model_provider == 'engineer')
 
     def get_reviewed_by_name(self, obj):
         if obj.reviewed_by:
