@@ -132,26 +132,47 @@ class TwoFactorSecret(models.Model):
         super().save(*args, **kwargs)
 
 
-class EmailVerificationCode(models.Model):
+class EmailVerificationToken(models.Model):
     """
-    Stores 6-digit email verification codes (OTP) for user registration
-    and email verification.
+    6-digit one-time passcode (OTP) token used to verify email ownership during
+    registration or upon email change.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='verification_codes', null=True, blank=True)
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='verification_tokens',
+        null=True, blank=True
+    )
     email = models.EmailField(db_index=True)
     code = models.CharField(max_length=6)
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)
     is_used = models.BooleanField(default=False)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'accounts_email_verification_code'
+        db_table = 'accounts_email_verification_token'
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Code for {self.email} ({'used' if self.is_used else 'active'})"
+        return f"OTP for {self.email} ({'used' if self.is_used else 'pending'})"
 
-    def is_valid(self):
-        return not self.is_used and timezone.now() <= self.expires_at
+    @property
+    def is_valid(self) -> bool:
+        return (not self.is_used) and (timezone.now() <= self.expires_at) and (self.attempts < 5)
+
+    @classmethod
+    def generate_token(cls, email: str, user=None, duration_minutes: int = 15) -> 'EmailVerificationToken':
+        import random
+        # Invalidate any previously pending unused tokens for this email
+        cls.objects.filter(email__iexact=email, is_used=False).update(is_used=True)
+        # Generate cryptographically secure 6-digit numeric code
+        otp_code = f"{secrets.randbelow(900000) + 100000}"
+        expires_at = timezone.now() + timezone.timedelta(minutes=duration_minutes)
+        token = cls.objects.create(
+            user=user,
+            email=email.strip().lower(),
+            code=otp_code,
+            expires_at=expires_at,
+        )
+        return token
 

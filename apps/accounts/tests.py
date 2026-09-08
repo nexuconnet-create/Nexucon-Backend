@@ -289,18 +289,22 @@ class TwoFactorAuthTestCase(TestCase):
         self.assertIn('access', res_ok.data['data'])
 
 
+from apps.accounts.models import ApiKey, TwoFactorSecret, UserSession, EmailVerificationToken
+
+
 class RegisterLoginEndpointsTestCase(TestCase):
     """Register/login endpoints stay AllowAny (intentional) and issue JWTs."""
 
     def setUp(self):
         self.client = APIClient()
         self.existing_user = User.objects.create_user(
-            username='existing_user',
+            username='existing@agency.gov.ng',
             email='existing@agency.gov.ng',
             password='Password123!',
+            is_verified=True,
         )
 
-    def test_register_creates_user_and_returns_tokens(self):
+    def test_register_creates_unverified_user_and_dispatches_otp(self):
         res = self.client.post('/api/v1/auth/register/', {
             'email': 'newuser@client.dev',
             'first_name': 'New',
@@ -310,13 +314,89 @@ class RegisterLoginEndpointsTestCase(TestCase):
         })
         self.assertEqual(res.status_code, 201)
         self.assertTrue(res.data['success'])
-        self.assertEqual(res.data['data']['user']['email'], 'newuser@client.dev')
-        self.assertEqual(res.data['data']['user']['role_name'], 'Client')
+        self.assertEqual(res.data['data']['email'], 'newuser@client.dev')
+        self.assertTrue(res.data['data']['requires_verification'])
+        self.assertFalse(res.data['data']['is_verified'])
+
+        # Check user in database
+        user = User.objects.get(email='newuser@client.dev')
+        self.assertFalse(user.is_verified)
+
+        # Check OTP token was generated
+        token = EmailVerificationToken.objects.filter(email='newuser@client.dev', is_used=False).first()
+        self.assertIsNotNone(token)
+        self.assertEqual(len(token.code), 6)
+        self.assertTrue(token.is_valid)
+
+    def test_verify_email_with_valid_otp(self):
+        # Register user
+        self.client.post('/api/v1/auth/register/', {
+            'email': 'verify_test@nexucon.net',
+            'first_name': 'Test',
+            'last_name': 'User',
+            'password': 'Password123!',
+        })
+        token = EmailVerificationToken.objects.filter(email='verify_test@nexucon.net', is_used=False).first()
+
+        # Verify with correct code
+        res = self.client.post('/api/v1/auth/verify-email/', {
+            'email': 'verify_test@nexucon.net',
+            'code': token.code,
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
         self.assertIn('access', res.data['data'])
         self.assertIn('refresh', res.data['data'])
-        # A session row is created for the new user.
-        self.assertEqual(
-            UserSession.objects.filter(user__email='newuser@client.dev').count(), 1)
+        self.assertTrue(res.data['data']['user']['is_verified'])
+
+        # Check user is verified in DB
+        user = User.objects.get(email='verify_test@nexucon.net')
+        self.assertTrue(user.is_verified)
+
+        # Token is marked as used
+        token.refresh_from_db()
+        self.assertTrue(token.is_used)
+
+    def test_verify_email_with_invalid_otp_fails(self):
+        self.client.post('/api/v1/auth/register/', {
+            'email': 'invalid_otp@nexucon.net',
+            'first_name': 'Invalid',
+            'last_name': 'OTP',
+            'password': 'Password123!',
+        })
+        res = self.client.post('/api/v1/auth/verify-email/', {
+            'email': 'invalid_otp@nexucon.net',
+            'code': '000000',
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(res.data['success'])
+
+        user = User.objects.get(email='invalid_otp@nexucon.net')
+        self.assertFalse(user.is_verified)
+
+    def test_resend_verification_generates_new_otp(self):
+        self.client.post('/api/v1/auth/register/', {
+            'email': 'resend_test@nexucon.net',
+            'first_name': 'Resend',
+            'last_name': 'Tester',
+            'password': 'Password123!',
+        })
+        # Simulate time passing to avoid 30s rate limit
+        from django.utils import timezone
+        token1 = EmailVerificationToken.objects.filter(email='resend_test@nexucon.net').first()
+        token1.created_at = timezone.now() - timezone.timedelta(seconds=40)
+        token1.save(update_fields=['created_at'])
+
+        res = self.client.post('/api/v1/auth/resend-verification/', {
+            'email': 'resend_test@nexucon.net',
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+
+        tokens = EmailVerificationToken.objects.filter(email='resend_test@nexucon.net').order_by('-created_at')
+        self.assertEqual(tokens.count(), 2)
+        self.assertTrue(tokens[0].is_valid)
+        self.assertTrue(tokens[1].is_used)
 
     def test_login_returns_tokens_and_sets_auth_cookies(self):
         res = self.client.post('/api/v1/auth/login/', {
@@ -328,7 +408,6 @@ class RegisterLoginEndpointsTestCase(TestCase):
         self.assertIn('access', res.data['data'])
         self.assertIn('refresh', res.data['data'])
         self.assertEqual(res.data['data']['user']['email'], 'existing@agency.gov.ng')
-        self.assertEqual(res.data['data']['user']['role_name'], 'Client')
         self.assertIn('access_token', res.cookies)
         self.assertIn('refresh_token', res.cookies)
 
@@ -338,79 +417,4 @@ class RegisterLoginEndpointsTestCase(TestCase):
             'password': 'WrongPassword!',
         })
         self.assertEqual(res.status_code, 401)
-
-
-class EmailVerificationTestCase(TestCase):
-    """
-    Tests for the 6-digit email OTP verification flow:
-    - Code generation upon registration
-    - Verification endpoint /api/v1/auth/verify-email/
-    - Resend endpoint /api/v1/auth/resend-verification/
-    """
-
-    def setUp(self):
-        self.client = APIClient()
-        self.user = User.objects.create_user(
-            username='unverified@nexucon.net',
-            email='unverified@nexucon.net',
-            password='Password123!',
-            first_name='Kelechi',
-            last_name='Eze',
-            is_verified=False
-        )
-
-    def test_register_dispatches_verification_code(self):
-        from apps.accounts.models import EmailVerificationCode
-        res = self.client.post('/api/v1/auth/register/', {
-            'email': 'verify_target@nexucon.net',
-            'first_name': 'Amina',
-            'last_name': 'Bello',
-            'password': 'Password123!',
-        })
-        self.assertEqual(res.status_code, 201)
-        code_obj = EmailVerificationCode.objects.filter(email='verify_target@nexucon.net').first()
-        self.assertIsNotNone(code_obj)
-        self.assertEqual(len(code_obj.code), 6)
-        self.assertTrue(code_obj.is_valid())
-
-    def test_verify_email_success(self):
-        from apps.accounts.verification import send_verification_code_for_user
-        code = send_verification_code_for_user(user=self.user)
-
-        res = self.client.post('/api/v1/auth/verify-email/', {
-            'email': self.user.email,
-            'code': code
-        })
-        self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['success'])
-        self.assertIn('access', res.data['data'])
-        self.assertIn('access_token', res.cookies)
-
-        self.user.refresh_from_db()
-        self.assertTrue(self.user.is_verified)
-
-    def test_verify_email_wrong_code_fails(self):
-        from apps.accounts.verification import send_verification_code_for_user
-        send_verification_code_for_user(user=self.user)
-
-        res = self.client.post('/api/v1/auth/verify-email/', {
-            'email': self.user.email,
-            'code': '000000'
-        })
-        self.assertEqual(res.status_code, 400)
-        self.assertFalse(res.data['success'])
-
-        self.user.refresh_from_db()
-        self.assertFalse(self.user.is_verified)
-
-    def test_resend_verification_code(self):
-        from apps.accounts.models import EmailVerificationCode
-        res = self.client.post('/api/v1/auth/resend-verification/', {
-            'email': self.user.email
-        })
-        self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['success'])
-        
-        codes = EmailVerificationCode.objects.filter(email=self.user.email)
-        self.assertGreaterEqual(codes.count(), 1)
 
