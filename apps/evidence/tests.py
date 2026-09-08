@@ -11,6 +11,7 @@ All fixtures are created inside the test classes (users, projects, source
 records) — no external fixture files.
 """
 import datetime
+from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -1019,6 +1020,25 @@ class HITLReviewAPITestCase(APITestCase):
         self.assertIn("ncr_remedial_draft", response.data)
         self.assertEqual(response.data["finding_reference"], self.finding.finding_reference)
 
+    def test_ai_diagnose_confidence_is_evidence_confidence_not_risk(self):
+        # 7 Sep meeting item 6: the diagnostic JSON used to echo the finding's
+        # risk score as confidence_score, so a 0.78 HIGH risk displayed as
+        # "AI Confidence: 78%". It must carry the evidence confidence.
+        # This finding's risk is 0.72 but its evidence confidence is 0.93.
+        self.finding.evidence.update(confidence=0.93)
+        url = reverse("correlation-finding-ai-diagnose", kwargs={"pk": str(self.finding.id)})
+        response = self.client.post(url, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["confidence_score"], 93)
+        self.assertNotEqual(response.data["confidence_score"],
+                            round(self.finding.risk_score * 100))
+
+        # No evidence confidence recorded -> null, never the risk in disguise.
+        self.finding.evidence.update(confidence=None)
+        response = self.client.post(url, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["confidence_score"])
+
     def test_director_signoff_requires_director_role(self):
         self.client.force_authenticate(user=self.plain_user)
         url = reverse("correlation-finding-director-signoff",
@@ -1427,3 +1447,71 @@ class ManualFindingLoggingTestCase(APITestCase):
         self.assertEqual(response.data["confidence"], 0.93)
         # A human log is labelled as one, not as AI-inferred.
         self.assertTrue(response.data["logged_manually"])
+
+
+# ======================================================================
+# backfill_evidence_confidence management command
+# ======================================================================
+
+class BackfillEvidenceConfidenceTestCase(TestCase):
+    """Rows created before the evidence-based confidence code landed still
+    carry the old risk-as-confidence values (0.78 for HIGH). The backfill
+    command recomputes them; dry run by default."""
+
+    def setUp(self):
+        from django.core.management import call_command
+        self.call_command = call_command
+        self.project = Project.objects.create(name="Backfill Confidence Test")
+
+        # Old-style manual finding evidence: risk 0.78 stored as confidence,
+        # technical parameters in the payload.
+        self.manual_with_params = make_evidence_record(
+            self.project, "other", {"severity": "high", "depth_mm": 100,
+                                    "deviation_mm": 50},
+            confidence=0.78,
+        )
+        self.manual_with_params.source_model = "digital_eye.ManualFinding"
+        self.manual_with_params.save()
+
+        # Old-style severity echo on a generic evidence record.
+        self.generic_high = make_evidence_record(
+            self.project, "gpr", {"severity": "high"}, confidence=0.78,
+        )
+
+        # A confidence value that is already correct must not be touched.
+        self.already_ok = make_evidence_record(
+            self.project, "gpr", {"severity": "high"}, confidence=0.93,
+        )
+
+        # Null confidence (no computable basis) stays null.
+        self.null_conf = make_evidence_record(
+            self.project, "gpr", {"severity": "low"}, confidence=None,
+        )
+
+    def test_dry_run_reports_without_writing(self):
+        out = StringIO()
+        self.call_command("backfill_evidence_confidence", stdout=out)
+        text = out.getvalue()
+        self.assertIn("Dry run", text)
+        self.manual_with_params.refresh_from_db()
+        self.assertAlmostEqual(self.manual_with_params.confidence, 0.78)
+
+    def test_execute_updates_stale_values_only(self):
+        out = StringIO()
+        self.call_command("backfill_evidence_confidence", "--execute", stdout=out)
+        self.manual_with_params.refresh_from_db()
+        self.generic_high.refresh_from_db()
+        self.already_ok.refresh_from_db()
+        self.null_conf.refresh_from_db()
+
+        # Manual finding with tech params -> completeness confidence.
+        self.assertAlmostEqual(self.manual_with_params.confidence, 0.93)
+        # Generic severity echo -> corrected severity mapping.
+        self.assertAlmostEqual(self.generic_high.confidence, 0.93)
+        # Correct value untouched.
+        self.assertAlmostEqual(self.already_ok.confidence, 0.93)
+        # No basis -> stays null, never invented.
+        self.assertIsNone(self.null_conf.confidence)
+
+        # Integrity hash re-computed for the changed rows.
+        self.assertNotEqual(self.generic_high.evidence_hash, "")

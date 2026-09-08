@@ -395,13 +395,19 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
         elif hasattr(finding, 'linked_ncr_reference') and finding.linked_ncr_reference:
             ncr_ref = finding.linked_ncr_reference
 
+        # Evidence confidence (mean of the finding's evidence records), NOT
+        # risk_score — a 0.78 risk must never display as "78% confidence"
+        # (7 Sep meeting item 6). None when no evidence carries a score.
+        evidence_confs = [e.confidence for e in finding.evidence.all()
+                          if e.confidence is not None]
         diagnostic = {
             'finding_id': str(finding.id),
             'finding_reference': finding.finding_reference,
             'structural_element': elem,
             'bim_guid': finding.bim_guid,
             'severity': finding.risk_level.upper(),
-            'confidence_score': round(finding.risk_score * 100) if finding.risk_score is not None else None,
+            'confidence_score': round(sum(evidence_confs) / len(evidence_confs) * 100)
+                                 if evidence_confs else None,
             'status': finding.status,
             'ncr_reference': ncr_ref,
             'acoustic_inversion': {
