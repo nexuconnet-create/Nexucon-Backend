@@ -324,6 +324,12 @@ class PUNDITTest(models.Model):
         max_length=150, blank=True, default='',
         help_text="Weather condition at test time, recorded by the operator on site",
     )
+    concrete_age_days = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Concrete age at test time in days (optional; strength gain "
+                  "past 28 days is minimal, so ages beyond 28 are informative "
+                  "rather than corrective)",
+    )
 
     device_model = models.CharField(max_length=100, default='Proceq Pundit PL-200 UPV', blank=True)
     transducer_frequency_khz = models.PositiveIntegerField(null=True, blank=True, help_text="e.g. 54 kHz")

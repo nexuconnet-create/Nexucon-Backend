@@ -224,6 +224,7 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Enterprise Building Collapse Prevention & Digital Regulatory Agency API',
     'VERSION': '1.0.0',
     'SERVERS': [
+        {'url': 'https://api.nexucon.net', 'description': 'Live Production (VPS)'},
         {'url': 'https://nexucon-backend.onrender.com', 'description': 'Live Production (Render)'},
         {'url': 'http://127.0.0.1:8000', 'description': 'Local Development'},
     ],

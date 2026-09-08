@@ -156,7 +156,11 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
             source_id=str(uuid.uuid4()),
             structural_element_id=structural_element_id,
             bim_guid=bim_guid,
-            confidence=risk_score,
+            # No AI assessed a manual field log — storing risk_score here
+            # made the UI show the risk (0.78) as "78% confidence"
+            # (7 Sep meeting item 6). The risk stays on the finding;
+            # confidence stays empty until evidence carries one.
+            confidence=None,
             payload={
                 'title': title,
                 'description': description,
