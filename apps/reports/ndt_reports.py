@@ -1024,6 +1024,119 @@ class NDTReportService:
         )
         return buf, caption
 
+    @staticmethod
+    def _generate_bim_floor_plans(project, floor_labels):
+        """
+        Per-floor plan views (7 Sep review, item 7): one top-down drawing
+        per tested floor, rendered from the imported model's tessellated
+        geometry and grouped by the element levels recorded in the BIM
+        mappings. Returns a list of (floor_label, png buffer, caption);
+        empty when the model's levels cannot support the split — the
+        caller then keeps the single whole-model plan, honestly. No floor
+        is ever drawn from invented geometry.
+        """
+        from apps.digital_eye.models import (BIMModelGeometry,
+                                             BIMElementMapping)
+        try:
+            geo = BIMModelGeometry.objects.get(project=project)
+        except BIMModelGeometry.DoesNotExist:
+            return []
+        if not geo.elements:
+            return []
+
+        level_by_guid = {}
+        for m in BIMElementMapping.objects.filter(
+                project=project).exclude(bim_guid=''):
+            if (m.level or '').strip():
+                level_by_guid[m.bim_guid] = m.level.strip()
+
+        # Geometry elements grouped by their mapped level name.
+        by_level = {}
+        for el in geo.elements:
+            level = level_by_guid.get(el.get('guid') or '')
+            if level:
+                by_level.setdefault(level, []).append(el)
+        if len(by_level) < 2:
+            return []    # a single-level split adds nothing over the whole plan
+
+        def _norm(s):
+            return ' '.join((s or '').lower().split())
+
+        level_keys = {level: _norm(level) for level in by_level}
+
+        # Match each tested floor label to a recorded level: exact
+        # normalised match first, then a containment match. Unmatched
+        # floors are skipped — their level cannot be identified honestly.
+        wanted = []
+        seen_levels = set()
+        for label in floor_labels:
+            key = _norm(label)
+            if not key or key == 'floor not recorded':
+                continue
+            match = next((lvl for lvl, norm in level_keys.items()
+                          if norm == key), None)
+            if match is None:
+                match = next((lvl for lvl, norm in level_keys.items()
+                              if key in norm or norm in key), None)
+            if match and match not in seen_levels:
+                seen_levels.add(match)
+                wanted.append((label, match))
+        if not wanted:
+            return []
+
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import PolyCollection
+        import io
+
+        source = geo.source_file or 'imported BIM model'
+        plans = []
+        for floor_label, level in wanted:
+            polys = []
+            for el in by_level[level]:
+                verts = el.get('verts') or []
+                faces = el.get('faces') or []
+                pts = [(verts[i], verts[i + 1])
+                       for i in range(0, len(verts) - 2, 3)]
+                for f in range(0, len(faces) - 2, 3):
+                    tri = [pts[faces[f + k]] for k in (0, 1, 2)
+                           if faces[f + k] < len(pts)]
+                    if len(tri) == 3:
+                        polys.append(tri)
+            if not polys:
+                continue
+            xs = [p[0] for tri in polys for p in tri]
+            ys = [p[1] for tri in polys for p in tri]
+            if len(set(xs)) < 2 or len(set(ys)) < 2:
+                continue    # degenerate footprint — skip this level
+            fig, ax = plt.subplots(figsize=(8.2, 6.2))
+            ax.add_collection(PolyCollection(
+                polys, facecolor='#d8dee9', edgecolor='#222222',
+                linewidth=0.12))
+            pad_x = 0.02 * (max(xs) - min(xs)) or 1.0
+            pad_y = 0.02 * (max(ys) - min(ys)) or 1.0
+            ax.set_xlim(min(xs) - pad_x, max(xs) + pad_x)
+            ax.set_ylim(min(ys) - pad_y, max(ys) + pad_y)
+            ax.set_aspect('equal')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.4)
+            ax.set_title(f'FLOOR PLAN — {level.upper()}', fontsize=10)
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
+            plt.close(fig)
+            caption = (
+                f'Floor plan projected from the imported BIM model '
+                f'({source}, level "{level}", '
+                f'{len(by_level[level])} elements) — a plan projection of '
+                'the model geometry, not a construction drawing.'
+            )
+            plans.append((floor_label, buf, caption))
+        return plans
+
     @classmethod
     def _google_static_map(cls, project):
         """A 500 m radius Google Maps static-image around the project's
@@ -1148,6 +1261,50 @@ class NDTReportService:
             pass
         return bool(cls._boxed_image(builder.pdf, buf, x, y, w, h))
 
+    @classmethod
+    def _embed_bim_floor_plans(cls, builder, project, floor_labels):
+        """
+        One appendix page per tested floor (7 Sep review, item 7): each
+        page carries the floor label and that level's plan view. Returns
+        the number of plans embedded; 0 leaves the report exactly as it
+        was (the single whole-model plan stands)."""
+        try:
+            plans = cls._generate_bim_floor_plans(project, floor_labels)
+        except Exception as exc:        # noqa: BLE001 — drawing must never
+            logger.error(               # break the report
+                'BIM floor plan rendering failed: %s', exc)
+            return 0
+        pdf = builder.pdf
+        embedded = 0
+        for floor_label, buf, caption in plans:
+            pdf.add_page()
+            pdf.start_section('FLOOR PLANS', level=1)
+            pdf.set_font('Cambria', '', 12)
+            pdf.set_text_color(*INK)
+            pdf.set_xy(pdf.l_margin, 16.9)
+            pdf.cell(0, 7.5,
+                     _latin1(f'{project.name} — {floor_label.title()}'),
+                     new_x='LMARGIN', new_y='NEXT')
+            # Same top-anchored aspect handling as the whole-model plan:
+            # shrink the slot height to the image's fitted height.
+            w, h = 146.3, 101.6
+            try:
+                from PIL import Image
+                with Image.open(buf) as im:
+                    aspect = im.width / im.height
+                if aspect:
+                    h = min(h, w / aspect)
+            except Exception:   # noqa: BLE001 — fall back to slot as given
+                pass
+            try:
+                buf.seek(0)
+            except Exception:   # noqa: BLE001 — not all sources are seekable
+                pass
+            if cls._boxed_image(pdf, buf, 34.9, 26.8, w, h):
+                embedded += 1
+                builder.para(caption, leading=6.5)
+        return embedded
+
     @staticmethod
     def _velocity(test):
         """Stored velocity when the analysis pipeline ran, else the same
@@ -1241,6 +1398,13 @@ class NDTReportService:
             mean_ecs = estimated_compressive_strength(mean_v)
             remark = ('GOOD' if mean_ecs is not None and mean_ecs >= 25.0
                       else 'POOR' if mean_ecs is not None else 'NOT ASSESSED')
+            # Within-element spread (7 Sep meeting: the client wants the
+            # ±variance between a member's points visible, not silently
+            # averaged). Spread > 2% of the mean flags the remark.
+            spread_km_s = (max(velocities) - min(velocities)
+                           if len(velocities) > 1 else None)
+            spread_pct = (spread_km_s / mean_v * 100
+                          if spread_km_s is not None and mean_v else None)
             out.append({
                 'test': t,
                 'element': t.structural_element or 'UNSPECIFIED',
@@ -1251,13 +1415,26 @@ class NDTReportService:
                 'mean_ecs': mean_ecs,
                 'remark': remark,
                 'n_points': len(rows),
+                'spread_km_s': spread_km_s,
+                'spread_pct': spread_pct,
             })
         return out
 
     @staticmethod
     def _f1(value):
-        """One-decimal figure (reference prints velocities as 4.0 / 3.9)."""
+        """One-decimal figure (E.C.S, transit times)."""
         return '-' if value is None else f'{value:.1f}'
+
+    @staticmethod
+    def _f2(value):
+        """Two-decimal figure — pulse velocities print in m/s (client
+        decision, 7 Sep 2026: 4285.71, decimal points, never commas)."""
+        return '-' if value is None else f'{value:.2f}'
+
+    @staticmethod
+    def _fms(velocity_km_s):
+        """km/s -> m/s display string (4.28571 -> '4285.71')."""
+        return '-' if velocity_km_s is None else f'{velocity_km_s * 1000:.2f}'
 
     @staticmethod
     def _fp(value):
@@ -1625,6 +1802,45 @@ class NDTReportService:
             leading=5.7,
         )
         builder.para(ECS_CALIBRATION_SOURCE, leading=5.7)
+        # ---- Derivation of the reported results (7 Sep 2026 meeting:
+        # every figure must be recomputable by hand). Element means are
+        # the mean of the PER-POINT velocities (BS EN 12504-4 practice),
+        # not the velocity of the mean transit time — stating the method
+        # is what reconciles manual and system arithmetic.
+        builder.para(
+            'Derivation of the reported results: each test point velocity '
+            'is V = L / t; the element pulse velocity is the arithmetic '
+            'mean of its point velocities, V(element) = (V1 + V2 + ... + '
+            'Vn) / n; and the estimated compressive strength follows the '
+            'calibration above, f_cu = 8.961 x V - 7.97, with V expressed '
+            'in km/s. Pulse velocities in the Section 5.0 tables are '
+            'reported in metres per second (m/s); 1 km/s = 1000 m/s.',
+            leading=5.7,
+        )
+        if element_data:
+            e0 = element_data[0]
+            pts = [r for r in e0['rows']
+                   if r['velocity_km_s'] is not None]
+            if pts:
+                parts = [
+                    f"V{r['label']} = {r['path_mm']:g} mm / "
+                    f"{r['transit_us']:.1f} us = "
+                    f"{r['velocity_km_s'] * 1000:.2f} m/s"
+                    for r in pts
+                ]
+                example = (f"Worked example (first element tested, "
+                           f"{e0['element']}): "
+                           + '; '.join(parts) + '.')
+                if e0['mean_v'] is not None:
+                    example += (f" V(element) = mean of {len(pts)} point"
+                                f"{'s' if len(pts) != 1 else ''} = "
+                                f"{e0['mean_v'] * 1000:.2f} m/s "
+                                f"({e0['mean_v']:.3f} km/s).")
+                    if e0['mean_ecs'] is not None:
+                        example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
+                                    f"- 7.97 = {e0['mean_ecs']:.2f} "
+                                    f"N/mm2.")
+                builder.para(example, leading=5.7)
 
         # ---------------------------- 3.1 LOCATION MAP / WEATHER (ref p7)
         # Reference: heading centred bold 14 underlined (no number on the
@@ -1752,6 +1968,19 @@ class NDTReportService:
                        leading=7.5)
         builder.bullet('Concrete stress.', leading=7.5)
         builder.bullet('Effect of reinforcing bars.', leading=7.5)
+        # Concrete maturity (7 Sep review, item 18): stated only when ages
+        # were actually recorded — no age is assumed.
+        ages = sorted({t.concrete_age_days for t in tests
+                       if t.concrete_age_days})
+        if ages:
+            age_clause = (f'{ages[0]} days' if len(ages) == 1
+                          else f'between {ages[0]} and {ages[-1]} days')
+            builder.para(
+                'The age of the concrete at the time of test was recorded as '
+                f'{age_clause}. Strength gain beyond 28 days is minimal, so '
+                'ages within the typical 14-52 day testing window are '
+                'reported for information; no age-based correction is '
+                'applied to the estimated strengths.', leading=7.5)
         builder.para('The scope of the work done is as follows:', leading=7.5)
         scope_items = [
             'Initial visual test was carried out on the building structure '
@@ -1989,13 +2218,56 @@ class NDTReportService:
                 f'deterministic BS 1881-203 relations.'
             )
         builder.para(
+            'Crack depth measurements are analysed first (Section 5.1), '
+            'ahead of the pulse velocity parameter tests, so defects that '
+            'bias velocity readings are known before strengths are '
+            'interpreted.'
+        )
+        builder.para(
             'Element average compressive strength is computed from the '
             'element mean pulse velocity through the Section 3.0 calibration '
             'curve, and members are remarked GOOD or POOR against the '
-            'statutory 25 N/mm2 design strength. Velocities outside the '
+            'statutory 25 N/mm2 design strength. Pulse velocities are '
+            'reported in metres per second (m/s). Velocities outside the '
             'calibrated 2.0 - 5.0 km/s range are reported without an E.C.S '
-            'estimate rather than extrapolated.'
+            'estimate rather than extrapolated. Where an element\'s test '
+            'points disagree by more than 2% of the mean velocity, the '
+            'remark carries the point spread so the variance is visible '
+            'rather than silently averaged.'
         )
+
+        if crack_tests:
+            builder.section('5.1', 'CRACK DEPTH MEASUREMENTS '
+                                   '(TIME-DIFFERENCE METHOD)', sub=True)
+            # Same A/B/C point layout as the Section 5.0 velocity tables:
+            # the element's name once, one row per test point (its t_c/t_0
+            # pair and the computed per-point depth), and the element
+            # verdict (mean depth + remark) on the middle row.
+            for t in crack_tests:
+                rows = t.reading_rows()
+                mid = len(rows) // 2 if len(rows) > 1 else 0
+                mean_depth = cls._crack_depth(t)
+                table_rows = []
+                for i, r in enumerate(rows):
+                    table_rows.append([
+                        _element_display(t.structural_element) if i == 0 else '',
+                        r['label'] or '-',
+                        cls._fmt(r['path_mm'], 1),
+                        cls._fmt(r['transit_us'], 1),
+                        cls._fmt(r['uncracked_us'], 1),
+                        cls._fmt(r['crack_depth_mm'], 1),
+                        (cls._fmt(mean_depth, 1) + '\n' + cls._crack_remark(t))
+                        if i == mid else '',
+                    ])
+                builder.ruled_table(
+                    ['ELEMENT', 'POINT', 'SPACING L (MM)',
+                     'T CRACKED (US)', 'T UNCRACKED (US)',
+                     'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
+                    table_rows,
+                    [42, 12, 16, 20, 21, 20, 34],
+                    ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
+                )
+                builder.ln_gap(2)
 
         if not element_data:
             builder.para('No pulse velocity tests recorded for this project.')
@@ -2048,24 +2320,31 @@ class NDTReportService:
                         # registry / integrity digest, not the results
                         # table.
                         element_cell = _element_display(e['element'])
+                        remark = e['remark']
+                        if (e['spread_pct'] is not None
+                                and e['spread_pct'] > 2.0):
+                            remark += (f"\nPOINT SPREAD "
+                                       f"{e['spread_km_s'] * 1000:.0f} M/S "
+                                       f"(±{e['spread_pct'] / 2:.1f}%)")
                         table_rows = []
                         for i, r in enumerate(rows):
                             table_rows.append([
                                 element_cell if i == 0 else '',
                                 cls._fp(r['path_mm']),
                                 cls._f1(r['transit_us']),
-                                cls._f1(r['velocity_km_s']),
+                                cls._fms(r['velocity_km_s']),
                                 cls._f1(r['ecs_mpa']),
                                 cls._f1(e['mean_ecs']) if i == mid else '',
-                                e['remark'] if i == mid else '',
+                                remark if i == mid else '',
                             ])
                         builder.ruled_table(
                             ['Structural Element', 'PATH LENGTH',
-                             'TRANSIT TIME', 'PULSE VELOCITY', 'E.C.S',
+                             'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
+                             'E.C.S',
                              'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
                              'REMARK'],
                             table_rows,
-                            [42, 18, 20, 22, 13, 29, 21],
+                            [40, 17, 19, 26, 12, 29, 21],
                             ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
                         )
                         builder.ln_gap(2)
@@ -2100,39 +2379,6 @@ class NDTReportService:
                 ['C', 'C', 'C', 'C'],
             )
             builder.ln_gap(4)
-
-        if crack_tests:
-            builder.section('5.1', 'CRACK DEPTH MEASUREMENTS '
-                                   '(TIME-DIFFERENCE METHOD)', sub=True)
-            # Same A/B/C point layout as the Section 5.0 velocity tables:
-            # the element's name once, one row per test point (its t_c/t_0
-            # pair and the computed per-point depth), and the element
-            # verdict (mean depth + remark) on the middle row.
-            for t in crack_tests:
-                rows = t.reading_rows()
-                mid = len(rows) // 2 if len(rows) > 1 else 0
-                mean_depth = cls._crack_depth(t)
-                table_rows = []
-                for i, r in enumerate(rows):
-                    table_rows.append([
-                        _element_display(t.structural_element) if i == 0 else '',
-                        r['label'] or '-',
-                        cls._fmt(r['path_mm'], 1),
-                        cls._fmt(r['transit_us'], 1),
-                        cls._fmt(r['uncracked_us'], 1),
-                        cls._fmt(r['crack_depth_mm'], 1),
-                        (cls._fmt(mean_depth, 1) + '\n' + cls._crack_remark(t))
-                        if i == mid else '',
-                    ])
-                builder.ruled_table(
-                    ['ELEMENT', 'POINT', 'SPACING L (MM)',
-                     'T CRACKED (US)', 'T UNCRACKED (US)',
-                     'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
-                    table_rows,
-                    [42, 12, 16, 20, 21, 20, 34],
-                    ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
-                )
-                builder.ln_gap(2)
 
         if surface_tests:
             builder.section('5.2', 'SURFACE QUALITY OBSERVATIONS', sub=True)
@@ -2370,6 +2616,13 @@ class NDTReportService:
             if not plan_embedded:
                 builder.placeholder_box('STRUCTURAL DRAWINGS NOT PROVIDED',
                                         height=100)
+        # Per-floor plans (7 Sep review, item 7): one plan page per tested
+        # floor when the model's recorded levels support the split. When
+        # they do not, nothing is added — the whole-model plan above and
+        # the per-floor result tables carry the floor information instead.
+        cls._embed_bim_floor_plans(
+            builder, project,
+            sorted({e['floor_label'] for e in element_data}))
         # PHOTOGRAPHS — the reference starts them on a fresh page with no
         # body heading; the TOC entry points at the first photograph page,
         # so the section is registered inside _render_appendix once that

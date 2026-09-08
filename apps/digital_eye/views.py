@@ -390,12 +390,38 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'tests_analysed': len(records),
             'analysis_id': str(project_record.id),
             'risk_level': project_record.risk_level,
+            'confidence': project_record.confidence,
             'observations': project_record.observations,
             'recommendations': project_record.recommendations,
             'reasoning_log': project_record.reasoning_log,
             'model_provider': project_record.model_provider,
             'model_version': project_record.model_version,
         })
+
+    @action(detail=False, methods=['get'], url_path='export_results')
+    def export_results(self, request):
+        """
+        Excel export of the project's PUNDIT results (7 Sep meeting —
+        "{Update Excel}: spreadsheet data consistency matching generated
+        reports"). Values are the SAME blocks the report's Section 5.0
+        tables print (shared _element_data), so the sheet and the PDF can
+        never disagree. Velocities in m/s. Query: ?project=<id> (required).
+        """
+        from django.http import HttpResponse
+        from .excel_export import build_results_response_bytes
+
+        project = scoped_projects(request.user).filter(
+            pk=request.query_params.get('project')).first()
+        if not project:
+            return Response({'detail': 'A "project" id is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        response = HttpResponse(
+            build_results_response_bytes(project),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = (
+            'attachment; filename='
+            f'"nexucon_pundit_results_{project.name[:40].replace(" ", "_")}.xlsx"')
+        return response
 
     @action(detail=False, methods=['get'], url_path='import_template')
     def import_template(self, request):

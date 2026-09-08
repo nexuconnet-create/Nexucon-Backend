@@ -2595,3 +2595,151 @@ class TrimbleTasksTestCase(TestCase):
         self.assertEqual(summary['connections'], 1)
         self.assertEqual(summary['models'], 0)
         self.assertIn('HTTP 401 token expired', summary['errors'])
+
+
+# ======================================================================
+# 7 Sep 2026 review meeting (meeting #2) — free-text floors, concrete
+# maturity, evidence-based confidence and the Excel results export.
+# ======================================================================
+
+class ReviewMeeting2PunditFieldsTestCase(DigitalEyeAPITestBase):
+    """Items 5 + 18: the floor field accepts any operator wording
+    ("Mezzanine Floor"), and concrete age at test time is an optional
+    recorded field — never defaulted, never fabricated."""
+
+    def test_free_text_floor_and_concrete_age_accepted(self):
+        response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-MEZ-01',
+            'floor': 'Mezzanine Floor',
+            'concrete_age_days': 21,
+            'path_length_mm': 120.0,
+            'pulse_time_us': 30.0,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['floor'], 'Mezzanine Floor')
+        self.assertEqual(response.data['concrete_age_days'], 21)
+
+    def test_concrete_age_is_optional_not_defaulted(self):
+        response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'floor': 'Ground Floor',
+            'path_length_mm': 120.0,
+            'pulse_time_us': 30.0,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data['concrete_age_days'])
+
+
+class EvidenceConfidenceTestCase(TestCase):
+    """Item 6: the analysis confidence is evidence-based — a 0-1 fraction
+    (the AIAnalysisRecord scale) built from points-per-element, spread,
+    calibration validity and LLM success. Good field data reaches the 0.95
+    cap; thin data scores honestly lower; nothing graded returns None."""
+
+    @staticmethod
+    def _summary(**overrides):
+        summary = dict(
+            element='COL-A', floor='Ground Floor', grid_location='Grid D-7',
+            test_type='pulse_velocity', concrete_age_days=None,
+            n_points=3, point_velocities_m_s=[4000.0, 4020.0, 4010.0],
+            mean_velocity_m_s=4010.0, point_spread_pct=0.5,
+            mean_ecs_n_mm2=27.1, grade='good', crack_depth_mm=None)
+        summary.update(overrides)
+        return summary
+
+    def test_full_evidence_reaches_the_cap(self):
+        confidence = PUNDITAdapter._evidence_confidence(
+            [self._summary()], llm_used=True)
+        self.assertEqual(confidence, 0.95)
+
+    def test_thin_evidence_scores_lower(self):
+        confidence = PUNDITAdapter._evidence_confidence(
+            [self._summary(n_points=1, point_velocities_m_s=[4000.0],
+                           point_spread_pct=None, mean_ecs_n_mm2=None)],
+            llm_used=False)
+        self.assertEqual(confidence, 0.70)
+
+    def test_high_spread_loses_the_consistency_bonus(self):
+        # 3+ points and an E.C.S, but the points disagree by > 2%.
+        confidence = PUNDITAdapter._evidence_confidence(
+            [self._summary(point_spread_pct=4.8)], llm_used=True)
+        self.assertEqual(confidence, 0.90)
+
+    def test_no_llm_loses_the_model_bonus(self):
+        confidence = PUNDITAdapter._evidence_confidence(
+            [self._summary()], llm_used=False)
+        self.assertEqual(confidence, 0.90)
+
+    def test_ungraded_elements_return_none(self):
+        self.assertIsNone(PUNDITAdapter._evidence_confidence(
+            [self._summary(grade='pending')], llm_used=True))
+
+
+class PunditResultsExportTestCase(DigitalEyeAPITestBase):
+    """Item 3 ({Update Excel}): the exported workbook's cells equal the
+    report's Section 5.0 values — both come from the shared
+    ``_element_data`` verdict blocks, with velocities in m/s."""
+
+    def setUp(self):
+        super().setUp()
+        self.device = FieldDevice.objects.create(
+            device_reference='DE-EXP01', device_type='pundit',
+            name='Pundit PL-200', model='PL-200', manufacturer='Proceq',
+            device_id='SN-EXP01', status='online',
+            assigned_project=self.project)
+
+    def _seed_readings(self):
+        # The client's averaging case: 120 mm at 30 / 29 / 33.3 us.
+        test = PUNDITTest.objects.create(
+            project=self.project, device=self.device,
+            test_type='pulse_velocity', structural_element='COL-C24',
+            floor='Ground Floor', path_length_mm=120.0)
+        for label, transit in (('A', 30.0), ('B', 29.0), ('C', 33.3)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=120.0,
+                transit_time_us=transit)
+        return test
+
+    def test_export_requires_a_scoped_project(self):
+        response = self.client.get(reverse('pundit-test-export-results'))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_export_cells_match_report_element_data(self):
+        test = self._seed_readings()
+        response = self.client.get(reverse('pundit-test-export-results'),
+                                   {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('spreadsheetml', response['Content-Type'])
+        self.assertIn('nexucon_pundit_results_',
+                      response['Content-Disposition'])
+
+        import io
+        from openpyxl import load_workbook
+        sheet = load_workbook(io.BytesIO(response.content))['RESULTS']
+        # Title (1) + subtitle (2) + header row (4) — data starts at row 5.
+        headers = [cell.value for cell in sheet[4]]
+        self.assertIn('PULSE VELOCITY (M/S)', headers)
+        self.assertIn('AVERAGE COMPRESSIVE STRENGTH (MPA)', headers)
+
+        from apps.reports.ndt_reports import NDTReportService
+        element = NDTReportService._element_data([test])[0]
+        self.assertEqual(len(element['rows']), 3)
+        for i, r in enumerate(element['rows']):
+            row = sheet[5 + i]
+            self.assertEqual(row[2].value, r['label'])
+            self.assertEqual(row[3].value, r['path_mm'])
+            self.assertEqual(row[4].value, r['transit_us'])
+            self.assertEqual(row[5].value,
+                             round(r['velocity_km_s'] * 1000, 2))
+        # Averaging regression (item 11): per-point velocities in m/s and
+        # the element verdict as the MEAN of point velocities.
+        self.assertEqual(sheet[5][5].value, 4000.0)
+        self.assertEqual(sheet[6][5].value, 4137.93)
+        self.assertEqual(sheet[7][5].value, 3603.6)
+        self.assertAlmostEqual(element['mean_v'] * 1000, 3913.84, places=1)
+        # The spread of these points exceeds 2% — disclosed, not hidden.
+        self.assertGreater(element['spread_pct'], 2.0)
+        self.assertIn('POINT SPREAD', sheet[5][8].value)
