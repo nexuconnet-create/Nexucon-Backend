@@ -1377,3 +1377,51 @@ class EvidenceTasksTestCase(TestCase):
         self.assertEqual(notification.type, "warning")
         self.assertIn("COL-T01", notification.title)
         self.assertIn("persistent issue", notification.message)
+
+
+class ManualFindingLoggingTestCase(APITestCase):
+    """7 Sep meeting item 6: a manually logged field finding carries its risk
+    on the finding — its evidence carries NO confidence, and the serializer
+    reports confidence as null rather than echoing the risk score (a 0.78
+    risk was being displayed as "78% confidence")."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username="field_logger@nexucon.com",
+            email="field_logger@nexucon.com",
+            password="Password123!",
+            first_name="Sunkanmi",
+            last_name="Olowonishaye",
+        )
+        self.project = Project.objects.create(name="Ikoyi Manual Log Test")
+        self.client.force_authenticate(user=self.user)
+        self.list_url = reverse("correlation-finding-list")
+
+    def test_manual_finding_stores_risk_but_no_evidence_confidence(self):
+        response = self.client.post(self.list_url, {
+            "project": str(self.project.id),
+            "structural_element_name": "Floor:200THK RC SLAB",
+            "structural_element_guid": "232RR9q4f7eQ9Jps1smHAy",
+            "title": "rebar spacing",
+            "description": "include scan reference",
+            "taxonomy": "REBAR_SPACING_DEFICIENCY",
+            "severity": "HIGH",
+            "depth_mm": 100,
+            "deviation_mm": 50,
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        finding = CorrelationFinding.objects.get(id=response.data["id"])
+        self.assertEqual(finding.risk_level, "high")
+        self.assertAlmostEqual(finding.risk_score, 0.78)
+        # The risk stays on the finding; the evidence carries no confidence.
+        evidence = finding.evidence.get()
+        self.assertIsNone(evidence.confidence)
+        # Technical parameters are preserved verbatim in the description.
+        self.assertIn("Technical Parameters:", finding.description)
+        self.assertIn("Depth: 100 mm", finding.description)
+        self.assertIn("Variance: 50 mm", finding.description)
+
+        # The serialized confidence is null — never the risk score in disguise.
+        self.assertIn("confidence", response.data)
+        self.assertIsNone(response.data["confidence"])
