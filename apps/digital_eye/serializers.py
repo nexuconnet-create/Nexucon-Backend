@@ -196,7 +196,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'project_id_str', 'structural_element_id_str', 'structural_element_name',
             'structural_element_guid', 'device_model',
             'test_type', 'test_type_display', 'structural_element', 'floor',
-            'weather_condition', 'readings',
+            'weather_condition', 'concrete_age_days', 'readings',
             'transducer_frequency_khz', 'transducer_type', 'transducer_type_display',
             'test_location',
             'path_length_mm', 'pulse_time_us', 'transit_time_us',

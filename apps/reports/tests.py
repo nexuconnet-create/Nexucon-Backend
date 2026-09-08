@@ -2393,3 +2393,234 @@ class ArchivedReportTests(_HermeticMediaMixin, NDTReportFixtureMixin, APITestCas
                       kwargs={"report_id": uuid.uuid4()})
         self.assertEqual(self.client.get(url).status_code,
                          status.HTTP_404_NOT_FOUND)
+
+
+class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
+    """7 Sep 2026 review meeting (meeting #2) regressions: m/s table cells
+    with decimal points (never commas), the averaging method stated with a
+    worked example, point-spread disclosure, crack-depth-first analysis
+    order, concrete maturity notes and per-floor BIM plan pages."""
+
+    def setUp(self):
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+
+    def _multi_point_test(self, **kwargs):
+        """The client's averaging case: 120 mm at 30 / 29 / 33.3 us."""
+        from apps.digital_eye.models import PUNDITReading
+        defaults = dict(structural_element="COL-G01", floor="Ground Floor",
+                        path_length_mm=120.0)
+        defaults.update(kwargs)
+        test = self.make_test(self.project, self.device, **defaults)
+        for label, transit in (("A", 30.0), ("B", 29.0), ("C", 33.3)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=120.0,
+                transit_time_us=transit)
+        return test
+
+    # --------------------------------------------- m/s display standard
+    def test_velocity_tables_print_ms_two_decimals_no_commas(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn("PULSE VELOCITY (M/S)", text)
+        # 250 mm / 62.5 us = 4000.00 m/s — two decimals, never a comma.
+        self.assertIn("4000.00", text)
+        self.assertNotIn("4,000", text)
+
+    # -------------------------------------- averaging method + example
+    def test_averaging_is_mean_of_point_velocities_with_worked_example(self):
+        self._multi_point_test()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # Per-point velocities: 120/30, 120/29, 120/33.3 us.
+        self.assertIn("4000.00", flat)
+        self.assertIn("4137.93", flat)
+        self.assertIn("3603.60", flat)
+        # Element verdict = MEAN of the point velocities = 3913.84 m/s
+        # (not the velocity of the mean transit time — that is the manual
+        # vs system arithmetic the client asked to reconcile).
+        self.assertIn("3913.84", flat)
+        # f_cu = 8.961 x 3.914 - 7.97 = 27.10 N/mm2, shown to 2 decimals.
+        self.assertIn("27.10", flat)
+        # The method statement and the worked example are both printed.
+        self.assertIn("V(element) = (V1 + V2 + ... + Vn) / n", flat)
+        self.assertIn("Worked example", flat)
+
+    def test_point_spread_disclosed_when_points_disagree(self):
+        self._multi_point_test()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # max-min = 534 m/s (13.6% of the mean) — flagged, not averaged away.
+        self.assertIn("POINT SPREAD 534 M/S", flat)
+
+    # ------------------------------------- crack depth before velocity
+    def test_crack_depth_analysis_precedes_velocity_tables(self):
+        from apps.digital_eye.models import PUNDITReading
+        crack = self.make_test(self.project, self.device,
+                               test_type="crack_depth",
+                               structural_element="SLAB-S3",
+                               floor="Ground Floor",
+                               crack_path_length_mm=300.0)
+        for label, (tc, t0) in zip("ABC", ((70.0, 62.5), (75.0, 62.5),
+                                           (80.0, 62.5))):
+            PUNDITReading.objects.create(
+                test=crack, point_label=label, path_length_mm=300.0,
+                transit_time_us=tc, uncracked_transit_time_us=t0)
+        mean_depth = crack.element_mean_crack_depth_mm()
+        crack.crack_depth_mm = mean_depth
+        crack.estimated_crack_depth_mm = mean_depth
+        crack.save()
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        crack_pos = flat.find("CRACK DEPTH MEASUREMENTS")
+        velocity_pos = flat.find("PULSE VELOCITY (M/S)")
+        self.assertGreater(crack_pos, 0)
+        self.assertGreater(velocity_pos, 0)
+        self.assertLess(crack_pos, velocity_pos)
+
+    # ------------------------------------------- concrete maturity note
+    def test_concrete_age_note_only_when_recorded(self):
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       concrete_age_days=28)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("recorded as 28 days", flat)
+        self.assertIn("Strength gain beyond 28 days is minimal", flat)
+
+        # A second project without recorded ages prints no maturity note.
+        bare = self.make_project(name="No Age Recorded Project")
+        self.make_test(bare, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        bare_flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(bare)).split())
+        self.assertNotIn("age of the concrete at the time of test",
+                         bare_flat)
+
+    # ------------------------------------------------ per-floor plans
+    @staticmethod
+    def _quad(x, y, z, w=2.0, d=3.0):
+        return ([x, y, z, x + w, y, z, x + w, y + d, z, x, y + d, z],
+                [0, 1, 2, 0, 2, 3])
+
+    def _import_two_level_model(self):
+        from apps.digital_eye.models import (BIMElementMapping,
+                                             BIMModelGeometry)
+        v0, f0 = self._quad(0.0, 0.0, 0.0)
+        v1, f1 = self._quad(0.0, 0.0, 3.6)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file="levels.ifc", element_count=2,
+            elements=[
+                {"guid": "G-SLAB-G", "name": "Ground slab",
+                 "type": "IfcSlab", "verts": v0, "faces": f0},
+                {"guid": "G-SLAB-1", "name": "First floor slab",
+                 "type": "IfcSlab", "verts": v1, "faces": f1},
+            ])
+        for guid, level in (("G-SLAB-G", "Ground Floor"),
+                            ("G-SLAB-1", "First Floor")):
+            BIMElementMapping.objects.create(
+                project=self.project, bim_guid=guid, element_id=guid,
+                element_name=f"{level} slab", element_type="IfcSlab",
+                level=level, source="ifc_upload")
+
+    def test_per_floor_plan_pages_render_per_tested_floor(self):
+        self._import_two_level_model()
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-101", floor="First Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The appendix TOC registers the per-floor pages (title case, like
+        # the reference's lettered appendix entries).
+        self.assertIn("Floor Plans", flat)
+        # One labelled page per tested floor, captioned with the level the
+        # elements were grouped by.
+        self.assertIn('level "Ground Floor"', flat)
+        self.assertIn('level "First Floor"', flat)
+
+    def test_no_floor_plan_pages_without_level_mappings(self):
+        # Geometry whose elements carry no recorded levels cannot be split
+        # honestly — the whole-model plan stands and no floor pages appear.
+        from apps.digital_eye.models import BIMModelGeometry
+        v0, f0 = self._quad(0.0, 0.0, 0.0)
+        v1, f1 = self._quad(0.0, 0.0, 3.6)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file="no-levels.ifc",
+            element_count=2,
+            elements=[
+                {"guid": "X1", "name": "A", "type": "IfcSlab",
+                 "verts": v0, "faces": f0},
+                {"guid": "X2", "name": "B", "type": "IfcSlab",
+                 "verts": v1, "faces": f1},
+            ])
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn("Floor Plans", flat)
+        self.assertNotIn('level "', flat)
+
+    # --------------------------------------- AI analysis in the PDF
+    def _ai_record(self, **kwargs):
+        from apps.evidence.models import AIAnalysisRecord
+        defaults = dict(
+            project=self.project, analysis_type="pundit",
+            observations=[
+                "Ground Floor: COL-G01 shows a mean pulse velocity of "
+                "3913.84 m/s, within the good concrete band.",
+                "The 534 m/s point spread on COL-G01 warrants a retest at "
+                "additional stations per ACI 228.2R.",
+            ],
+            recommendations=[{
+                "recommendation": "Retest COL-G01 at three further stations.",
+                "priority": "Routine",
+            }],
+            model_provider="gemini", model_version="gemini-3.5-flash-lite",
+            confidence=0.93,
+        )
+        defaults.update(kwargs)
+        return AIAnalysisRecord.objects.create(**defaults)
+
+    def test_ai_narrative_is_embedded_as_decision_support(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self._ai_record()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The section exists, after the measurement tables it interprets.
+        self.assertIn("AI-ASSISTED INTERPRETATION", flat)
+        self.assertLess(flat.find("PULSE VELOCITY (M/S)"),
+                        flat.find("AI-ASSISTED INTERPRETATION"))
+        # The narrative itself, verbatim.
+        self.assertIn("3913.84 m/s, within the good concrete band", flat)
+        self.assertIn("warrants a retest", flat)
+        # Provider, model and the evidence-based confidence are disclosed.
+        # The phrase is asserted in two halves — a page break can land inside
+        # it and the extracted text then carries the running footer between
+        # the halves ("evidence-based 12 MTL/NDT/2026 7298 confidence").
+        self.assertIn("synthesised by gemini (gemini-3.5-flash-lite)", flat)
+        self.assertIn("evidence-based", flat)
+        self.assertIn("confidence of 93%", flat)
+        # The sign-off caveat — the professional, not the AI, owns the report.
+        self.assertIn("decision support for the responsible engineer", flat)
+
+    def test_deterministic_only_analysis_prints_no_ai_section(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self._ai_record(model_provider="deterministic",
+                        model_version="BS 1881-203 / ASTM C597 v1",
+                        confidence=None)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)
