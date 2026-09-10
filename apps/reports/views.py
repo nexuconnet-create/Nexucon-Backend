@@ -386,3 +386,248 @@ class ReportTemplateViewSet(viewsets.ModelViewSet):
     @extend_schema(summary="List available report templates", tags=["Reports"])
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Report CMS (8 Sep 2026 review meeting, item H7; 4 Sep register C4/C5):
+# password-protected editable template sections for the statutory NDT
+# report, plus a Word (.docx) export of the same content.
+# ---------------------------------------------------------------------------
+from django.contrib.auth.hashers import check_password, make_password
+
+from common.permissions import IsDirector as IsCMSDirector
+
+from .models import ReportCMSPassword, ReportSectionOverride
+from .report_cms import CMS_SECTIONS, get_cms_text
+
+
+def _cms_gate(request):
+    """
+    Director role + CMS password check for section edits. Returns a DRF
+    Response when the request must be rejected, else None.
+    """
+    credential = ReportCMSPassword.objects.first()
+    if credential is None:
+        return Response(
+            {'detail': 'No report-CMS password has been set yet. A Director '
+                       'must set one via POST /api/v1/reports/cms/password/ '
+                       'before template sections can be edited.'},
+            status=status.HTTP_403_FORBIDDEN)
+    try:
+        body = request.data or {}
+    except Exception:  # noqa: BLE001 — bodyless DELETE
+        body = {}
+    supplied = (body.get('cms_password')
+                or request.query_params.get('cms_password')
+                or '')
+    if not supplied or not check_password(str(supplied),
+                                          credential.password_hash):
+        return Response({'detail': 'Incorrect report-CMS password.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def _scoped_project_or_none(user, project_id):
+    """Resolve a project id string inside the user's scope. Anything that is
+    not a valid UUID for a project in scope returns None (404 upstream) —
+    never a 500 from an unparseable id."""
+    if not project_id:
+        return None
+    try:
+        import uuid as _uuid
+        pk = _uuid.UUID(str(project_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    from apps.projects.models import Project
+    return scoped_projects(user).filter(pk=pk).first()
+
+
+class ReportCMSSectionsView(APIView):
+    """
+    GET /api/v1/reports/cms/sections/?project=<uuid>
+    Every editable template section with its effective body and where that
+    body comes from (project override / platform override / default).
+    Read access is authenticated-only — the password only guards edits.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        project = _scoped_project_or_none(
+            request.user, request.query_params.get('project'))
+        if request.query_params.get('project') and project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        sections = []
+        for key, meta in CMS_SECTIONS.items():
+            body, source = get_cms_text(project, key)
+            sections.append({
+                'key': key,
+                'label': meta['label'],
+                'kind': meta['kind'],
+                'help': meta['help'],
+                'default': meta['default'],
+                'body': body,
+                'source': source,
+            })
+        return Response({
+            'project': str(project.id) if project else None,
+            'password_set': ReportCMSPassword.objects.exists(),
+            'sections': sections,
+        })
+
+
+class ReportCMSSectionView(APIView):
+    """
+    PUT    /api/v1/reports/cms/sections/<key>/   {body, project?, cms_password}
+    DELETE /api/v1/reports/cms/sections/<key>/?project=<uuid>
+    Save or revert one template section. Directors only, and only with the
+    CMS password. An override with ``project`` applies to that project
+    alone; without it the override applies platform-wide. Every change is
+    audit-logged.
+    """
+    permission_classes = [IsCMSDirector]
+
+    def _section(self, key):
+        if key not in CMS_SECTIONS:
+            return Response(
+                {'detail': f'Unknown report section {key!r}. Valid keys: '
+                           f'{", ".join(CMS_SECTIONS)}.'},
+                status=status.HTTP_404_NOT_FOUND)
+        return None
+
+    def _project(self, request):
+        """Resolve the optional target project from the request."""
+        try:
+            body = request.data or {}
+        except Exception:  # noqa: BLE001 — bodyless DELETE
+            body = {}
+        project_id = body.get('project') or request.query_params.get('project')
+        if not project_id:
+            return None, None
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return None, Response(
+                {'detail': 'Project not found in your scope.'},
+                status=status.HTTP_404_NOT_FOUND)
+        return project, None
+
+    def put(self, request, key):
+        rejected = self._section(key)
+        if rejected:
+            return rejected
+        rejected = _cms_gate(request)
+        if rejected:
+            return rejected
+        body = (request.data or {}).get('body')
+        if body is None or not str(body).strip():
+            return Response({'detail': 'body is required (use DELETE to '
+                                       'revert to the default text).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        project, rejected = self._project(request)
+        if rejected:
+            return rejected
+        override, _created = ReportSectionOverride.objects.update_or_create(
+            project=project, section_key=key,
+            defaults={'body': str(body), 'updated_by': request.user})
+        from apps.evidence.review import record_audit
+        record_audit(
+            request.user, 'report_cms_section_saved', 'ReportSectionOverride',
+            override.id,
+            new_state={'section_key': key,
+                       'project': str(project.id) if project else None,
+                       'body_length': len(override.body)},
+            metadata={'section_key': key, 'scope': 'project' if project
+                      else 'platform'})
+        _, source = get_cms_text(project, key)
+        return Response({'key': key, 'source': source, 'body': override.body})
+
+    def delete(self, request, key):
+        rejected = self._section(key)
+        if rejected:
+            return rejected
+        rejected = _cms_gate(request)
+        if rejected:
+            return rejected
+        project, rejected = self._project(request)
+        if rejected:
+            return rejected
+        deleted, _ = ReportSectionOverride.objects.filter(
+            project=project, section_key=key).delete()
+        from apps.evidence.review import record_audit
+        record_audit(
+            request.user, 'report_cms_section_reverted',
+            'ReportSectionOverride', key,
+            new_state={'section_key': key,
+                       'project': str(project.id) if project else None},
+            metadata={'section_key': key, 'scope': 'project' if project
+                      else 'platform'})
+        body, source = get_cms_text(project, key)
+        return Response({'key': key, 'source': source, 'body': body,
+                         'reverted': bool(deleted)})
+
+
+class ReportCMSPasswordView(APIView):
+    """
+    POST /api/v1/reports/cms/password/   {new_password, current_password?}
+    Set (or change) the password guarding report-CMS edits. Directors only.
+    Changing an existing password requires the current one.
+    """
+    permission_classes = [IsCMSDirector]
+
+    def post(self, request):
+        new_password = (request.data or {}).get('new_password')
+        if not new_password or len(str(new_password)) < 8:
+            return Response({'detail': 'new_password is required and must be '
+                                       'at least 8 characters.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        credential = ReportCMSPassword.objects.first()
+        if credential is not None:
+            current = (request.data or {}).get('current_password', '')
+            if not current or not check_password(str(current),
+                                                 credential.password_hash):
+                return Response(
+                    {'detail': 'A report-CMS password already exists; the '
+                               'current password is required to change it.'},
+                    status=status.HTTP_403_FORBIDDEN)
+            credential.password_hash = make_password(str(new_password))
+            credential.set_by = request.user
+            credential.save()
+        else:
+            credential = ReportCMSPassword.objects.create(
+                password_hash=make_password(str(new_password)),
+                set_by=request.user)
+        from apps.evidence.review import record_audit
+        record_audit(request.user, 'report_cms_password_set',
+                     'ReportCMSPassword', credential.id)
+        return Response({'detail': 'Report-CMS password saved.'})
+
+
+class NDTWordExportView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-report-word/
+    The statutory NDT report as an editable Word document (.docx) — the
+    same sections, the same CMS overrides and the same server-computed
+    figures as the PDF, built with python-docx.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from .word_export import NDTWordExporter
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            docx_bytes = NDTWordExporter.export_docx(project, request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('NDT Word export failed')
+            return Response({'detail': f'Word export failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        response = HttpResponse(
+            docx_bytes,
+            content_type=('application/vnd.openxmlformats-officedocument'
+                          '.wordprocessingml.document'))
+        response['Content-Disposition'] = \
+            f'attachment; filename="ndt_report_{project_id}.docx"'
+        return response

@@ -23,6 +23,7 @@ from datetime import datetime
 from fpdf import FPDF
 
 from .ai_reports import _latin1
+from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
 
 logger = logging.getLogger(__name__)
 
@@ -1498,6 +1499,66 @@ class NDTReportService:
             })
         return out
 
+    @classmethod
+    def _worked_example(cls, project, element_data, active_curve=None):
+        """
+        The hand-recomputable arithmetic for the first element tested
+        (7 Sep meeting: every figure must be recomputable by hand). Shared
+        by the PDF renderer and the Word export so the two can never show
+        different working. Returns None when no element carries a velocity.
+        """
+        if not element_data:
+            return None
+        if active_curve is None:
+            from apps.digital_eye.strength_curves import resolve_active_curve
+            try:
+                active_curve = resolve_active_curve(project)
+            except Exception:  # noqa: BLE001 — example must never kill export
+                active_curve = None
+        e0 = element_data[0]
+        pts = [r for r in e0['rows']
+               if r['velocity_km_s'] is not None]
+        if not pts:
+            return None
+        parts = [
+            f"V{r['label']} = {r['path_mm']:g} mm / "
+            f"{r['transit_us']:.1f} us = "
+            f"{r['velocity_km_s'] * 1000:.2f} m/s"
+            for r in pts
+        ]
+        example = (f"Worked example (first element tested, "
+                   f"{e0['element']}): "
+                   + '; '.join(parts) + '.')
+        if e0['mean_v'] is not None:
+            example += (f" V(element) = mean of {len(pts)} point"
+                        f"{'s' if len(pts) != 1 else ''} = "
+                        f"{e0['mean_v'] * 1000:.2f} m/s "
+                        f"({e0['mean_v']:.3f} km/s).")
+            if e0['mean_ecs'] is not None:
+                if (active_curve is not None
+                        and active_curve.project_id
+                        and active_curve.curve_type == 'linear'):
+                    # Project calibration: substitute its real
+                    # parameters (V in m/s).
+                    p = active_curve.formula_params or {}
+                    sign = '-' if p.get('c', 0) < 0 else '+'
+                    example += (f" f_cu = {p.get('m', 0):g} x "
+                                f"{e0['mean_v'] * 1000:.2f} {sign} "
+                                f"{abs(p.get('c', 0)):g} = "
+                                f"{e0['mean_ecs']:.2f} N/mm2 "
+                                "(V in m/s).")
+                elif (active_curve is not None
+                      and active_curve.project_id):
+                    example += (f" f_cu from the project calibration "
+                                f"above at V = "
+                                f"{e0['mean_v'] * 1000:.2f} m/s = "
+                                f"{e0['mean_ecs']:.2f} N/mm2.")
+                else:
+                    example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
+                                f"- 7.97 = {e0['mean_ecs']:.2f} "
+                                f"N/mm2.")
+        return example
+
     @staticmethod
     def _f1(value):
         """One-decimal figure (E.C.S, transit times)."""
@@ -1779,15 +1840,11 @@ class NDTReportService:
         # executive summary keeps its own page and body numbering
         # (Introduction = page 1) starts deterministically.
         builder.section('1.0', 'INTRODUCTION')
-        builder.para(
-            'Non-Destructive Test (NDT), as the name implies, means that the '
-            'material under test is not damaged during test. Direct '
-            'measurement of the strength of concrete involves destructive '
-            'stresses and cannot be used for determining the quality of '
-            'already cast concrete. It is for this reason that direct methods '
-            'are not employed in determining the strength of in-situ '
-            'concrete. As a result, indirect method was used.'
-        )
+        # Report CMS (8 Sep meeting H7): editable template sections resolve
+        # through report_cms.get_cms_text — project override > platform
+        # override > the registry default (verbatim the old hardcoded text).
+        for para in cms_paragraphs(get_cms_text(project, 'introduction')[0]):
+            builder.para(para)
         site_line = ', '.join(
             p for p in (project.site_address, project.lga, project.state) if p
         ) or 'site address not recorded'
@@ -1818,29 +1875,14 @@ class NDTReportService:
         # ------------------------------------------------------ 2.0 PURPOSE
         builder.section('2.0', 'PURPOSE OF INVESTIGATION')
         builder.para('The purpose of the investigation is to:')
-        builder.numbered([
-            'Determine the present status of the structures from the outcome '
-            'of the visual and Non-Destructive test of the tested structures '
-            'to ascertain their state with respect to BS EN 12504-4:2021, '
-            'ASTM C597-09.',
-            'Determine the ongoing concrete strength of the structure with '
-            'respect to BS 8110: Part 1 1997.',
-            'Provide engineering advice based on the visual and '
-            'Non-Destructive test conducted.',
-            "To comply with government's statutory requirements.",
-        ])
+        builder.numbered(cms_list_items(
+            get_cms_text(project, 'purpose_items')[0]))
 
         # -------------------------------------------------- 3.0 LITERATURE
         builder.section('3.0', 'LITERATURE REVIEW')
-        builder.para(
-            'Ultrasonic Pulse Velocity (UPV) testing is a non-destructive '
-            'testing technique used for assessing the quality, uniformity, and '
-            'internal condition of hardened concrete. The method operates by '
-            'transmitting high-frequency ultrasonic waves through concrete and '
-            'measuring the travel time between transmitting and receiving '
-            'transducers.',
-            leading=5.7,
-        )
+        for para in cms_paragraphs(get_cms_text(project,
+                                                'literature_review')[0]):
+            builder.para(para, leading=5.7)
         builder.para('The pulse velocity is calculated using the relationship:',
                      leading=5.7)
         builder.centered_formula('UPV = L / t')
@@ -1911,49 +1953,9 @@ class NDTReportService:
             'are reported in metres per second (m/s); 1 km/s = 1000 m/s.',
             leading=5.7,
         )
-        if element_data:
-            e0 = element_data[0]
-            pts = [r for r in e0['rows']
-                   if r['velocity_km_s'] is not None]
-            if pts:
-                parts = [
-                    f"V{r['label']} = {r['path_mm']:g} mm / "
-                    f"{r['transit_us']:.1f} us = "
-                    f"{r['velocity_km_s'] * 1000:.2f} m/s"
-                    for r in pts
-                ]
-                example = (f"Worked example (first element tested, "
-                           f"{e0['element']}): "
-                           + '; '.join(parts) + '.')
-                if e0['mean_v'] is not None:
-                    example += (f" V(element) = mean of {len(pts)} point"
-                                f"{'s' if len(pts) != 1 else ''} = "
-                                f"{e0['mean_v'] * 1000:.2f} m/s "
-                                f"({e0['mean_v']:.3f} km/s).")
-                    if e0['mean_ecs'] is not None:
-                        if (active_curve is not None
-                                and active_curve.project_id
-                                and active_curve.curve_type == 'linear'):
-                            # Project calibration: substitute its real
-                            # parameters (V in m/s).
-                            p = active_curve.formula_params or {}
-                            sign = '-' if p.get('c', 0) < 0 else '+'
-                            example += (f" f_cu = {p.get('m', 0):g} x "
-                                        f"{e0['mean_v'] * 1000:.2f} {sign} "
-                                        f"{abs(p.get('c', 0)):g} = "
-                                        f"{e0['mean_ecs']:.2f} N/mm2 "
-                                        "(V in m/s).")
-                        elif (active_curve is not None
-                              and active_curve.project_id):
-                            example += (f" f_cu from the project calibration "
-                                        f"above at V = "
-                                        f"{e0['mean_v'] * 1000:.2f} m/s = "
-                                        f"{e0['mean_ecs']:.2f} N/mm2.")
-                        else:
-                            example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
-                                        f"- 7.97 = {e0['mean_ecs']:.2f} "
-                                        f"N/mm2.")
-                builder.para(example, leading=5.7)
+        example = cls._worked_example(project, element_data, active_curve)
+        if example:
+            builder.para(example, leading=5.7)
 
         # ---------------------------- 3.1 LOCATION MAP / WEATHER (ref p7)
         # Reference: heading centred bold 14 underlined (no number on the
@@ -2178,10 +2180,9 @@ class NDTReportService:
 
         # -------------------------------------------------- 4.1 VISUAL TEST
         builder.section('4.1', 'VISUAL TEST', sub=True)
-        builder.para(
-            'From the visual inspection conducted on the structure the '
-            'following observations were noted and recorded as at the time of '
-            'test;', leading=7.5)
+        for para in cms_paragraphs(get_cms_text(project,
+                                                'visual_preamble')[0]):
+            builder.para(para, leading=7.5)
         if visual_notes:
             builder.lettered(visual_notes)
             builder.para(
@@ -2216,34 +2217,9 @@ class NDTReportService:
             leading=7.5,
         )
         builder.inner_heading('CONCRETE', centered=False, underline=False)
-        builder.para(
-            'Pulse velocity measurements made on concrete structures are '
-            'used for quality control purposes. In comparison with mechanical '
-            'tests on control samples such as cubes or cylinders, pulse '
-            'velocity measurements have the advantage that they relate '
-            'directly to the concrete in the structure rather than to '
-            'samples, which may not be always truly representative of the '
-            'concrete in situ.',
-            leading=7.5,
-        )
-        builder.para(
-            'A pulse of longitudinal vibrations is produced by an '
-            'electro-acoustical transducer, which is held in contact with one '
-            'surface of the concrete under test. When the pulse generated is '
-            'transmitted into the concrete from the transducer using a '
-            'certified coupling gel material, it undergoes multiple '
-            'reflections at the boundaries of the different material phases '
-            'within the concrete. A complex system of stress waves develops, '
-            'which includes both longitudinal and shear waves, and propagates '
-            'through the concrete. The first waves to reach the receiving '
-            'transducer are the longitudinal waves, which are converted into '
-            'an electrical signal by a second transducer. Electronic timing '
-            'circuits enable the transit time (T) of the pulse to be '
-            'measured. This test is conducted for assessing the quality and '
-            'integrity of concrete by passing ultrasound waves through the '
-            'specimen under test.',
-            leading=7.5,
-        )
+        for para in cms_paragraphs(get_cms_text(project,
+                                                'methodology_concrete')[0]):
+            builder.para(para, leading=7.5)
         builder.para('The Pundit test equipment can also determine the '
                      'following:', leading=7.5)
         builder.bullet('The homogeneity and uniformity of the concrete.',
@@ -2605,12 +2581,13 @@ class NDTReportService:
                    if poor_members else '')
                 + '.'
             )
+            # CMS override replaces the editable lead-in; the computed
+            # findings sentence and the professional-advice sentence stay
+            # server-computed regardless.
+            lead_in = get_cms_text(project, 'recommendation_preamble')[0]
             builder.para(
-                'Based on the purpose of investigation, the outcome of the '
-                'Visual and Non-Destructive Test carried out on the building '
-                'which shows the present state of the building as described '
-                'in the visual test and depicted in the bar charts, '
-                + strength_sentence
+                lead_in.rstrip()
+                + ' ' + strength_sentence
                 + ' It is advised that '
                 + (project.client_name.upper() if project.client_name
                    else 'the client')
@@ -2655,11 +2632,9 @@ class NDTReportService:
         if element_data:
             total = len(element_data)
             good_pct = round(len(good_members) * 100 / total, 1)
-            builder.para(
-                'The visual and structural integrity test was conducted in '
-                'accordance with BS 1881: Part 201: 1986, BS EN 12504-4:2004, '
-                'BS EN 12504-4:2021.'
-            )
+            for para in cms_paragraphs(get_cms_text(project,
+                                                    'conclusion_preamble')[0]):
+                builder.para(para)
             conclusion_items = [
                 'The Non-Destructive Test analysis as shown in the summary '
                 'of test result (Section 5.0) shows the percentage of '

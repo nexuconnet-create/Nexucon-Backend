@@ -168,6 +168,18 @@ class DigitalEyeAuthenticationTestCase(APITestCase):
 # ======================================================================
 
 class PUNDITAPITestCase(DigitalEyeAPITestBase):
+    def setUp(self):
+        super().setUp()
+        # Hermetic suite: the analyze + correction endpoints must never reach
+        # a live AI provider from tests — unpatched calls here exhausted the
+        # Gemini free-tier daily quota and stalled the suite in 60 s retry
+        # sleeps (10 Sep 2026). _llm_observations -> None is exactly the
+        # provider-unavailable path; deterministic grading is what is tested.
+        patcher = patch.object(
+            PUNDITAdapter, '_llm_observations', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _post_test(self, payload):
         return self.client.post(reverse('pundit-test-list'), payload, format='json')
 
@@ -789,7 +801,9 @@ class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
             structural_element='SLAB-S1', test_location='Grid A-1',
             path_length_mm=250.0, pulse_time_us=62.5,  # 4.0 km/s -> good
         )
-        PUNDITAdapter.analyze(good)
+        # use_llm=False: these tests exercise registry search/filtering, not
+        # the narrative layer — keeps the suite hermetic (no live AI calls).
+        PUNDITAdapter.analyze(good, use_llm=False)
         PUNDITTest.objects.create(
             project=self.project, test_type='crack_depth',
             structural_element='BEAM-B2', test_location='Grid B-2',
@@ -802,7 +816,7 @@ class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
         )
         poor.path_length_mm = 250.0
         poor.pulse_time_us = 125.0  # 2.0 km/s -> poor
-        PUNDITAdapter.analyze(poor)
+        PUNDITAdapter.analyze(poor, use_llm=False)
 
     def test_search_matches_test_reference_substring(self):
         ref = PUNDITTest.objects.filter(structural_element='COL-C24').first().test_reference

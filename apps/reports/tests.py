@@ -2690,3 +2690,277 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
         self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)
+
+
+# ======================================================================
+# Report CMS + Word export (8 Sep 2026 review meeting, item H7; 4 Sep
+# register C4/C5): password-protected editable template sections and the
+# .docx edition of the statutory NDT report.
+# ======================================================================
+
+from django.contrib.auth.hashers import check_password
+
+from apps.reports.models import ReportCMSPassword, ReportSectionOverride
+
+
+class ReportCMSBase(NDTReportFixtureMixin, APITestCase):
+    """Superuser Director + plain non-Director + a real PUNDIT test."""
+
+    def setUp(self):
+        self.director = User.objects.create_superuser(
+            username="cms_director@nexucon.com",
+            email="cms_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="cms_viewer@nexucon.com",
+            email="cms_viewer@nexucon.com", password="Password123!")
+        self._as(self.director)
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _set_password(self, new="CmsSecretPass-9", current=None):
+        payload = {"new_password": new}
+        if current is not None:
+            payload["current_password"] = current
+        return self.client.post(reverse("report-cms-password"), payload,
+                                format="json")
+
+    def _save_section(self, key, body, project=None, password="CmsSecretPass-9"):
+        payload = {"body": body, "cms_password": password}
+        if project is not None:
+            payload["project"] = str(project.id)
+        return self.client.put(reverse("report-cms-section", kwargs={"key": key}),
+                               payload, format="json")
+
+    def _sections(self, project=None):
+        url = reverse("report-cms-sections")
+        if project is not None:
+            # Accept a Project row or a raw id string — never str(Project),
+            # which is the display name.
+            pid = project.id if hasattr(project, "id") else project
+            url += f"?project={pid}"
+        return self.client.get(url)
+
+
+class ReportCMSPasswordTests(ReportCMSBase):
+
+    def test_only_directors_can_set_the_password(self):
+        self._as(self.viewer)
+        response = self._set_password()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ReportCMSPassword.objects.exists())
+
+    def test_password_minimum_length_enforced(self):
+        response = self._set_password(new="short")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(ReportCMSPassword.objects.exists())
+
+    def test_set_then_change_password(self):
+        self.assertEqual(self._set_password().status_code, 200)
+        self.assertTrue(ReportCMSPassword.objects.exists())
+        # The stored value is a hash, never the plaintext.
+        credential = ReportCMSPassword.objects.first()
+        self.assertNotEqual(credential.password_hash, "CmsSecretPass-9")
+        self.assertTrue(check_password("CmsSecretPass-9",
+                                       credential.password_hash))
+        # Changing requires the current password.
+        response = self._set_password(new="NewSecretPass-11", current="wrong")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self._set_password(new="NewSecretPass-11",
+                                      current="CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(check_password("NewSecretPass-11",
+                                       ReportCMSPassword.objects.first()
+                                       .password_hash))
+
+
+class ReportCMSSectionTests(ReportCMSBase):
+
+    def test_sections_list_shows_every_registry_section_default(self):
+        from apps.reports.report_cms import CMS_SECTIONS
+        response = self._sections()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sections = {s["key"]: s for s in response.data["sections"]}
+        self.assertEqual(set(sections), set(CMS_SECTIONS))
+        self.assertTrue(all(s["source"] == "default"
+                            for s in sections.values()))
+        self.assertFalse(response.data["password_set"])
+
+    def test_sections_list_scoped_project_404_for_unknown(self):
+        response = self._sections(project=uuid.uuid4())
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_edit_blocked_before_any_password_is_set(self):
+        response = self._save_section("introduction", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("No report-CMS password", response.data["detail"])
+
+    def test_edit_blocked_for_non_director_even_with_password(self):
+        self._set_password()
+        self._as(self.viewer)
+        response = self._save_section("introduction", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_edit_blocked_with_wrong_password(self):
+        self._set_password()
+        response = self._save_section("introduction", "Override body.",
+                                      password="wrong-password")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unknown_section_key_rejected(self):
+        self._set_password()
+        response = self._save_section("no_such_section", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_uuid_project_value_is_a_404_not_a_500(self):
+        # A client sending a project name (or any non-UUID) must get a clean
+        # 404, never an unhandled UUID-parse 500.
+        self._set_password()
+        response = self.client.put(
+            reverse("report-cms-section", kwargs={"key": "introduction"}),
+            {"body": "Override body.", "cms_password": "CmsSecretPass-9",
+             "project": "Marina NDT Test Project (not a uuid)"},
+            format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        response = self._sections(project="not-a-uuid")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_empty_body_rejected(self):
+        self._set_password()
+        response = self._save_section("introduction", "   ")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_project_override_beats_platform_override_beats_default(self):
+        self._set_password()
+        # Platform-wide override first.
+        response = self._save_section(
+            "introduction", "PLATFORM OVERRIDE TEXT 7Q4", project=None)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "platform_override")
+        # A project override wins for its project.
+        response = self._save_section(
+            "introduction", "PROJECT OVERRIDE TEXT 9Z6", project=self.project)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "project_override")
+        # Resolution through the list endpoint mirrors it.
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction"]["body"],
+                         "PROJECT OVERRIDE TEXT 9Z6")
+        self.assertEqual(sections["introduction"]["source"],
+                         "project_override")
+        # Without the project query the platform override shows.
+        sections = {s["key"]: s
+                    for s in self._sections().data["sections"]}
+        self.assertEqual(sections["introduction"]["body"],
+                         "PLATFORM OVERRIDE TEXT 7Q4")
+        # Reverting the project override falls back to the platform one.
+        response = self.client.delete(
+            reverse("report-cms-section", kwargs={"key": "introduction"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "platform_override")
+        # Reverting the platform override falls back to the default.
+        response = self.client.delete(
+            reverse("report-cms-section", kwargs={"key": "introduction"})
+            + "?cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "default")
+        self.assertEqual(
+            ReportSectionOverride.objects.count(), 0)
+
+    def test_override_changes_are_audit_logged(self):
+        from apps.audit.models import AuditEvent
+        self._set_password()
+        self._save_section("purpose_items",
+                           "First custom purpose.\nSecond custom purpose.")
+        self.assertTrue(
+            AuditEvent.objects.filter(
+                action="report_cms_section_saved",
+                resource_type="ReportSectionOverride").exists())
+
+    def test_override_reaches_the_generated_pdf(self):
+        self._set_password()
+        self._save_section(
+            "introduction",
+            "CMS INTRODUCTION SENTENCE XQ77 for the statutory dossier.",
+            project=self.project)
+        self._save_section(
+            "purpose_items",
+            "Custom CMS purpose item one.\nCustom CMS purpose item two.",
+            project=self.project)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("CMS INTRODUCTION SENTENCE XQ77", flat)
+        self.assertIn("Custom CMS purpose item one.", flat)
+        self.assertIn("Custom CMS purpose item two.", flat)
+        # The replaced default wording is gone.
+        self.assertNotIn("As a result, indirect method was used.", flat)
+        self.assertNotIn("To comply with government", flat)
+
+
+class NDTWordExportTests(ReportCMSBase):
+
+    def _full_docx_text(self, data):
+        from docx import Document as DocxDocument
+        document = DocxDocument(io.BytesIO(data))
+        parts = [p.text for p in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                parts.extend(cell.text for cell in row.cells)
+        return "\n".join(parts)
+
+    def test_word_export_streams_docx_with_real_values(self):
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            "wordprocessingml.document", response["Content-Type"])
+        self.assertIn("ndt_report_", response["Content-Disposition"])
+        # A .docx is a zip archive.
+        self.assertTrue(response.content.startswith(b"PK"))
+        text = self._full_docx_text(response.content)
+        # Real project data, not placeholders: 250 mm / 62.5 us = 4000.00
+        # m/s -> f_cu = 8.961*4.0 - 7.97 = 27.9 N/mm2 (GOOD at 25 N/mm2).
+        self.assertIn("Marina NDT Test Project", text)
+        self.assertIn("4000.00", text)
+        self.assertIn("27.9", text)
+        self.assertIn("GOOD", text)
+        self.assertIn("UPV = L / t", text)
+        # The editable-copy disclosure is present.
+        self.assertIn("editable working copy", text)
+
+    def test_word_export_respects_cms_overrides(self):
+        self._set_password()
+        self._save_section(
+            "introduction", "WORD CMS SENTENCE WD42 override.",
+            project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = self._full_docx_text(response.content)
+        self.assertIn("WORD CMS SENTENCE WD42 override.", text)
+        self.assertNotIn("As a result, indirect method was used.", text)
+
+    def test_word_export_out_of_scope_project_404(self):
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_word_export_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)

@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 import uuid
 from apps.scans.models import ScanSession
 
@@ -119,3 +120,63 @@ class ArchivedReport(models.Model):
 
     def __str__(self):
         return f"{self.report_reference} [{self.report_kind}] ({self.project_id})"
+
+
+class ReportSectionOverride(models.Model):
+    """
+    Report CMS (8 Sep meeting H7 / 4 Sep C4): an editable override for
+    one boilerplate prose section of the NDT report. ``project`` NULL
+    means the override applies platform-wide (every project without
+    its own override); a project FK scopes it to that project alone.
+    Valid keys live in ``apps.reports.report_cms.CMS_SECTIONS`` — the
+    registry, not this table, holds the defaults.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
+                                null=True, blank=True,
+                                related_name='report_section_overrides')
+    section_key = models.CharField(max_length=60)
+    body = models.TextField()
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL,
+                                   null=True, blank=True,
+                                   related_name='report_section_overrides')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['section_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['section_key'],
+                condition=Q(project__isnull=True),
+                name='uniq_platform_report_section_override'),
+            models.UniqueConstraint(
+                fields=['project', 'section_key'],
+                name='uniq_project_report_section_override'),
+        ]
+
+    def __str__(self):
+        scope = f'project {self.project_id}' if self.project_id else 'platform'
+        return f'{self.section_key} ({scope})'
+
+
+class ReportCMSPassword(models.Model):
+    """
+    Singleton credential guarding report-CMS edits (the password
+    protection the 8 Sep client review asked for). Only the hash is
+    stored — Django's make_password/check_password, same scheme as
+    user passwords. One row at most; the first row set wins until it
+    is changed through the API.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    password_hash = models.CharField(max_length=128)
+    set_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                               on_delete=models.SET_NULL,
+                               null=True, blank=True,
+                               related_name='report_cms_passwords')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return 'Report CMS password'
