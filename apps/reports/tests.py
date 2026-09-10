@@ -54,9 +54,14 @@ class ReportIntegrationTests(APITestCase):
         )
 
     @patch("apps.storage.cloudinary_service.CloudinaryService.upload_file")
+    @patch("apps.common.ai_service.AIService.generate_recommendations")
     @patch("apps.reports.tasks.generate_report_task.delay")
-    def test_generate_report(self, mock_delay, mock_pdf):
+    def test_generate_report(self, mock_delay, mock_ai, mock_pdf):
         mock_pdf.return_value = "https://res.cloudinary.com/demo/image/upload/v1/mock.pdf"
+        # Hermetic (like every sibling test): no live provider call — the
+        # real API once 429'd here on exhausted quota and failed the suite.
+        mock_ai.return_value = {"recommendations": ["Monitor the crack."],
+                                "text_confidence": 0.9}
         """
         POST to generate_report should synchronously build the QA/QC report and
         return 201 with the full report payload.  The async Celery task is mocked
@@ -1372,6 +1377,67 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         values = [estimated_compressive_strength(v)
                   for v in (2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)]
         self.assertEqual(values, sorted(values))
+
+    def test_report_discloses_project_calibration_curve(self):
+        # 8 Sep 2026 meeting (Nexucon Link): with a project curve active,
+        # Section 3.0 discloses THAT curve — formula, calibration points,
+        # validity — and the worked example substitutes its real
+        # parameters; without one, the documented laboratory default.
+        from apps.digital_eye.models import (ProjectCurveSetting,
+                                             StrengthCurve)
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('8.961', flat)  # the laboratory default curve
+
+        curve = StrengthCurve.objects.create(
+            name='Marina trial-mix calibration', curve_type='linear',
+            project=self.project, standard='Project cube tests, Aug 2026',
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
+            data_points=[{'v': 3000.0, 'f': 6.0}, {'v': 4000.0, 'f': 18.0}])
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('project-specific calibration curve', flat)
+        self.assertIn('f_cu = 0.012 x V - 30', flat)
+        self.assertIn('2 real calibration pair', flat)
+        self.assertIn('Project cube tests, Aug 2026', flat)
+        # The worked example substitutes the project curve's parameters:
+        # 250 mm / 62.5 us = 4000 m/s -> f_cu = 0.012*4000 - 30 = 18 N/mm2.
+        self.assertIn('f_cu = 0.012 x 4000.00 - 30 = 18.00', flat)
+        # And the Section 5.0 verdict itself follows the project curve.
+        self.assertIn('18.0', flat)
+
+    def test_report_element_verdicts_follow_the_project_curve(self):
+        # The Section 5.0 average compressive strength — and the archive's
+        # pass/fail basis — flow through the project's active curve, not a
+        # fixed formula (8 Sep meeting: f_cu is the reason for the link).
+        from apps.digital_eye.models import (ProjectCurveSetting,
+                                             StrengthCurve)
+        test = self.make_test(self.project, self.device,
+                              path_length_mm=250.0, pulse_time_us=62.5)
+        for label, transit in (('A', 62.5), ('B', 62.5), ('C', 62.5)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=250.0,
+                transit_time_us=transit)
+        curve = StrengthCurve.objects.create(
+            name='Marina strict calibration', curve_type='linear',
+            project=self.project,
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0)
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # 4000 m/s -> 0.012*4000 - 30 = 18.0 N/mm2 (the fixed curve would
+        # have said 27.9); 18 < 25 so the remark is POOR.
+        self.assertIn('18.0', flat)
+        element = NDTReportService._element_data([test])[0]
+        self.assertAlmostEqual(element['mean_ecs'], 18.0, places=2)
+        self.assertEqual(element['remark'], 'POOR')
 
     # ----------------------------------------------------- report number
     def test_report_number_deterministic_and_well_formed(self):

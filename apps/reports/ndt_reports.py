@@ -97,12 +97,80 @@ def estimated_compressive_strength(velocity_km_s):
     E.C.S (N/mm2) from pulse velocity via the fixed calibration curve.
     Returns None when the velocity is missing or outside the calibrated
     2.0 - 5.0 km/s range (values are never extrapolated).
+
+    Historical note: this fixed path is now only the built-in fallback of
+    the Nexucon Link module (apps/digital_eye/strength_curves.py) — every
+    platform E.C.S flows through apply_active_curve(), which resolves the
+    project's active calibration curve and falls back to maths identical
+    to this function.
     """
     if velocity_km_s is None:
         return None
     if not (ECS_VALID_MIN_KM_S <= velocity_km_s <= ECS_VALID_MAX_KM_S):
         return None
     return ECS_SLOPE * velocity_km_s + ECS_INTERCEPT
+
+
+def ecs_report_disclosure(project):
+    """
+    (calibration_paragraph, derivation_sentence) for Section 3.0 — the
+    project-specific Nexucon Link calibration when one is active, else the
+    documented laboratory default text. The formula printed here is the
+    formula actually applied to every Section 5.0 figure.
+    """
+    from apps.digital_eye.strength_curves import (
+        curve_snapshot, formula_display, resolve_active_curve)
+
+    default_derivation = (
+        'f_cu = 8.961 x V - 7.97, with V expressed in km/s')
+    try:
+        curve = resolve_active_curve(project)
+    except Exception:
+        curve = None
+    if curve is None or not curve.project_id:
+        # No project-specific curve: the laboratory default disclosure.
+        return ECS_CALIBRATION_SOURCE, default_derivation
+
+    snap = curve_snapshot(curve)
+    formula = snap.get('formula') or formula_display(
+        curve.curve_type, curve.formula_params or {})
+    parts = [
+        "Estimated compressive strength (E.C.S) values in this report are "
+        "derived from the project-specific calibration curve "
+        f"established for this project under the Nexucon Link procedure: "
+        f"{formula} (f_cu in N/mm2, V the pulse velocity in m/s"
+        + (", R the rebound number)" if curve.curve_type == 'sonreb' else ")")
+        + ".",
+    ]
+    if curve.standard:
+        parts.append(f"Reference: {curve.standard}.")
+    n_points = len(curve.data_points or [])
+    if n_points:
+        parts.append(
+            f"The curve was fitted from {n_points} real calibration pair(s) "
+            "(cube/core tests against field pulse velocity measurements).")
+    if curve.r2_score is not None:
+        parts.append(f"Coefficient of determination R² = {curve.r2_score:.4f}.")
+    if curve.standard_error is not None:
+        parts.append(
+            f"Standard error of estimate = {curve.standard_error:.2f} N/mm2.")
+    if curve.valid_range_min_ms is not None and curve.valid_range_max_ms is not None:
+        parts.append(
+            "The curve is valid over the calibrated velocity range "
+            f"{curve.valid_range_min_ms:.0f} - {curve.valid_range_max_ms:.0f} m/s; "
+            "velocities outside that range are reported without an E.C.S "
+            "estimate rather than extrapolated.")
+    source = (curve.provenance or {}).get('source')
+    if source:
+        parts.append(f"Source: {source}.")
+    parts.append(
+        "BS 1881-203:1999 notes that no unique velocity-strength relationship "
+        "exists for all concretes; the curve above is the project-specific "
+        "calibration applied to every result in Section 5.0.")
+    derivation = (
+        f"the project-specific calibration above, {formula}, with V "
+        "expressed in m/s")
+    return ' '.join(parts), derivation
 
 
 def _wrap_lines(pdf, text, width):
@@ -1395,7 +1463,17 @@ class NDTReportService:
             velocities = [r['velocity_km_s'] for r in rows
                           if r['velocity_km_s'] is not None]
             mean_v = (sum(velocities) / len(velocities)) if velocities else None
-            mean_ecs = estimated_compressive_strength(mean_v)
+            # Nexucon Link (8 Sep meeting): the E.C.S flows through the
+            # project's active calibration curve — never a single fixed
+            # formula. Same path the platform computes every E.C.S with.
+            from apps.digital_eye.strength_curves import apply_active_curve
+            if mean_v is None:
+                mean_ecs = None
+            else:
+                mean_ecs, _curve_snapshot = apply_active_curve(
+                    t.project, mean_v,
+                    rebound_number=t.rebound_number,
+                    temperature_c=t.surface_temperature_c)
             remark = ('GOOD' if mean_ecs is not None and mean_ecs >= 25.0
                       else 'POOR' if mean_ecs is not None else 'NOT ASSESSED')
             # Within-element spread (7 Sep meeting: the client wants the
@@ -1491,8 +1569,9 @@ class NDTReportService:
             return existing
 
         # Same strength basis as the report itself: a test is
-        # strength-assessed when its velocity lies inside the E.C.S
-        # calibration range; passing means fcu >= 25 MPa.
+        # strength-assessed when the project's active calibration curve
+        # yields an E.C.S for its velocity; passing means fcu >= 25 MPa.
+        from apps.digital_eye.strength_curves import apply_active_curve
         assessed = 0
         passed = 0
         for t in tests:
@@ -1501,9 +1580,15 @@ class NDTReportService:
                 from apps.digital_eye.adapters import PUNDITAdapter
                 velocity = PUNDITAdapter.compute_velocity_km_s(
                     t.path_length_mm, t.pulse_time_us)
-            if velocity is not None and 2.0 <= velocity <= 5.0:
+            if velocity is None:
+                continue
+            strength, _snapshot = apply_active_curve(
+                t.project, velocity,
+                rebound_number=t.rebound_number,
+                temperature_c=t.surface_temperature_c)
+            if strength is not None:
                 assessed += 1
-                if estimated_compressive_strength(velocity) >= 25.0:
+                if strength >= 25.0:
                     passed += 1
         if assessed == 0:
             compliance = 'NOT_ASSESSED'
@@ -1801,7 +1886,17 @@ class NDTReportService:
             'used in the structure.',
             leading=5.7,
         )
-        builder.para(ECS_CALIBRATION_SOURCE, leading=5.7)
+        # ---- Calibration disclosure (Nexucon Link, 8 Sep meeting): the
+        # formula printed here is the formula actually applied to every
+        # Section 5.0 figure — the project's active calibration curve when
+        # one is set, else the documented laboratory default.
+        from apps.digital_eye.strength_curves import resolve_active_curve
+        try:
+            active_curve = resolve_active_curve(project)
+        except Exception:  # noqa: BLE001 — disclosure must never kill the report
+            active_curve = None
+        ecs_disclosure, ecs_derivation = ecs_report_disclosure(project)
+        builder.para(ecs_disclosure, leading=5.7)
         # ---- Derivation of the reported results (7 Sep 2026 meeting:
         # every figure must be recomputable by hand). Element means are
         # the mean of the PER-POINT velocities (BS EN 12504-4 practice),
@@ -1811,10 +1906,9 @@ class NDTReportService:
             'Derivation of the reported results: each test point velocity '
             'is V = L / t; the element pulse velocity is the arithmetic '
             'mean of its point velocities, V(element) = (V1 + V2 + ... + '
-            'Vn) / n; and the estimated compressive strength follows the '
-            'calibration above, f_cu = 8.961 x V - 7.97, with V expressed '
-            'in km/s. Pulse velocities in the Section 5.0 tables are '
-            'reported in metres per second (m/s); 1 km/s = 1000 m/s.',
+            f'Vn) / n; and the estimated compressive strength follows '
+            f'{ecs_derivation}. Pulse velocities in the Section 5.0 tables '
+            'are reported in metres per second (m/s); 1 km/s = 1000 m/s.',
             leading=5.7,
         )
         if element_data:
@@ -1837,9 +1931,28 @@ class NDTReportService:
                                 f"{e0['mean_v'] * 1000:.2f} m/s "
                                 f"({e0['mean_v']:.3f} km/s).")
                     if e0['mean_ecs'] is not None:
-                        example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
-                                    f"- 7.97 = {e0['mean_ecs']:.2f} "
-                                    f"N/mm2.")
+                        if (active_curve is not None
+                                and active_curve.project_id
+                                and active_curve.curve_type == 'linear'):
+                            # Project calibration: substitute its real
+                            # parameters (V in m/s).
+                            p = active_curve.formula_params or {}
+                            sign = '-' if p.get('c', 0) < 0 else '+'
+                            example += (f" f_cu = {p.get('m', 0):g} x "
+                                        f"{e0['mean_v'] * 1000:.2f} {sign} "
+                                        f"{abs(p.get('c', 0)):g} = "
+                                        f"{e0['mean_ecs']:.2f} N/mm2 "
+                                        "(V in m/s).")
+                        elif (active_curve is not None
+                              and active_curve.project_id):
+                            example += (f" f_cu from the project calibration "
+                                        f"above at V = "
+                                        f"{e0['mean_v'] * 1000:.2f} m/s = "
+                                        f"{e0['mean_ecs']:.2f} N/mm2.")
+                        else:
+                            example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
+                                        f"- 7.97 = {e0['mean_ecs']:.2f} "
+                                        f"N/mm2.")
                 builder.para(example, leading=5.7)
 
         # ---------------------------- 3.1 LOCATION MAP / WEATHER (ref p7)
@@ -2141,8 +2254,20 @@ class NDTReportService:
                        'requirements.', leading=7.5)
         builder.bullet('The quality of one element of concrete in relation to '
                        'another.', leading=7.5)
+        # Conversion statement mirrors the curve actually applied (Section
+        # 3.0 carries the full disclosure).
+        if active_curve is not None and active_curve.project_id:
+            from apps.digital_eye.strength_curves import formula_display
+            ecs_conversion_line = (
+                formula_display(active_curve.curve_type,
+                                active_curve.formula_params or {})
+                + ' (f_cu in N/mm2, V in m/s'
+                + (', R the rebound number)'
+                   if active_curve.curve_type == 'sonreb' else ')'))
+        else:
+            ecs_conversion_line = ECS_FORMULA_LINE
         builder.para('Estimated compressive strength conversion: '
-                     + ECS_FORMULA_LINE
+                     + ecs_conversion_line
                      + '. The full calibration statement is given in '
                        'Section 3.0.', leading=7.5)
 

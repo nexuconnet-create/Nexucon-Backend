@@ -353,6 +353,10 @@ class PUNDITTest(models.Model):
 
     surface_temperature_c = models.FloatField(null=True, blank=True)
     surface_condition = models.CharField(max_length=150, blank=True, default='')
+    rebound_number = models.FloatField(
+        null=True, blank=True,
+        help_text="Rebound hammer reading for this element (shared by its points "
+                  "unless a reading carries its own; required only for SonReb curves)")
 
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
@@ -363,6 +367,10 @@ class PUNDITTest(models.Model):
     quality_grade = models.CharField(max_length=50, choices=QUALITY_GRADES, default='pending')
     concrete_quality_rating = models.CharField(max_length=50, default='EXCELLENT', blank=True)
     estimated_compressive_strength_mpa = models.FloatField(null=True, blank=True)
+    strength_curve_snapshot = models.JSONField(
+        null=True, blank=True,
+        help_text="Provenance of the curve that produced the element-mean E.C.S: "
+                  "curve id/name/type/formula/valid range (Nexucon Link)")
     crack_depth_mm = models.FloatField(null=True, blank=True, help_text="Computed crack depth")
     estimated_crack_depth_mm = models.FloatField(null=True, blank=True)
     waveform_samples = models.JSONField(default=list, blank=True)
@@ -413,7 +421,7 @@ class PUNDITTest(models.Model):
                 for r in readings
             ]
         from apps.digital_eye.adapters import PUNDITAdapter
-        from apps.reports.ndt_reports import estimated_compressive_strength
+        from apps.digital_eye.strength_curves import apply_active_curve
         row = {'label': 'A', 'path_mm': None, 'transit_us': None,
                'velocity_km_s': None, 'ecs_mpa': None, 'uncracked_us': None,
                'crack_depth_mm': None, 'surface_condition': None}
@@ -433,11 +441,15 @@ class PUNDITTest(models.Model):
             if velocity is None:
                 velocity = PUNDITAdapter.compute_velocity_km_s(
                     self.path_length_mm, self.pulse_time_us)
+            ecs, _snapshot = apply_active_curve(
+                self.project, velocity,
+                rebound_number=self.rebound_number,
+                temperature_c=self.surface_temperature_c)
             row.update({
                 'path_mm': self.path_length_mm,
                 'transit_us': self.pulse_time_us,
                 'velocity_km_s': velocity,
-                'ecs_mpa': estimated_compressive_strength(velocity) if velocity is not None else None,
+                'ecs_mpa': ecs if velocity is not None else None,
             })
         return [row]
 
@@ -526,13 +538,20 @@ class PUNDITReading(models.Model):
     velocity_km_s = models.FloatField(null=True, blank=True,
                                       help_text="Computed v = L/t (read-only; never operator-entered)")
     ecs_mpa = models.FloatField(null=True, blank=True,
-                                help_text="Computed E.C.S from the platform calibration curve (read-only)")
+                                help_text="Computed E.C.S from the project's active calibration curve (read-only)")
+    strength_curve_snapshot = models.JSONField(
+        null=True, blank=True,
+        help_text="Provenance of the curve that produced this point's E.C.S (Nexucon Link)")
     crack_depth_mm = models.FloatField(
         null=True, blank=True,
         help_text="Computed time-difference crack depth at this point (read-only)")
     surface_condition = models.CharField(
         max_length=150, blank=True, default='',
         help_text="Surface-quality method only: the condition observed at this point")
+    rebound_number = models.FloatField(
+        null=True, blank=True,
+        help_text="Rebound hammer reading at this point (required only when the "
+                  "project's active curve is a SonReb combination curve)")
     notes = models.CharField(max_length=255, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -551,9 +570,12 @@ class PUNDITReading(models.Model):
         """Deterministic per-point derivations — never a guessed number.
         v = L / t (mm/us == km/s) for pulse-velocity points;
         d = L/2·√((t_c/t_0)²−1) for crack-depth points. Each output is only
-        set when its inputs exist and are valid."""
+        set when its inputs exist and are valid. The E.C.S flows through the
+        project's active Nexucon Link curve (8 Sep meeting: project-specific
+        calibration), and the curve provenance is snapshotted onto the
+        reading so every stored strength names the formula that made it."""
         from apps.digital_eye.adapters import PUNDITAdapter
-        from apps.reports.ndt_reports import estimated_compressive_strength
+        from apps.digital_eye.strength_curves import apply_active_curve
         is_crack_point = (self.transit_time_us is not None
                           and self.uncracked_transit_time_us is not None)
         if not is_crack_point \
@@ -563,10 +585,19 @@ class PUNDITReading(models.Model):
             # CRACKED-path time — L/t_c is not a valid velocity, so none is
             # computed for them.)
             self.velocity_km_s = self.path_length_mm / self.transit_time_us
-            self.ecs_mpa = estimated_compressive_strength(self.velocity_km_s)
         else:
             self.velocity_km_s = None
-            self.ecs_mpa = None
+        test = self.test
+        # SonReb combination curves need a rebound number: this point's own
+        # reading, else the element-level reading on the test.
+        rebound = self.rebound_number
+        if rebound is None and test is not None:
+            rebound = test.rebound_number
+        self.ecs_mpa, self.strength_curve_snapshot = apply_active_curve(
+            test.project if test is not None and test.project_id else None,
+            self.velocity_km_s,
+            rebound_number=rebound,
+            temperature_c=test.surface_temperature_c if test is not None else None)
         self.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
             self.path_length_mm, self.transit_time_us,
             self.uncracked_transit_time_us)
@@ -575,6 +606,122 @@ class PUNDITReading(models.Model):
         self.compute()
         super().save(*args, **kwargs)
 
+
+# ======================================================================
+# Nexucon Link — compressive-strength (f_cu) conversion curves
+# (8 Sep 2026 review meeting "Neural Link" + client Nexucon Link spec)
+# ======================================================================
+
+class StrengthCurve(models.Model):
+    """
+    A UPV-to-compressive-strength conversion curve. Every f_cu the platform
+    reports is produced by exactly one of these (or the documented built-in
+    fallback) — the active curve for the project, resolved by
+    apps.digital_eye.strength_curves.resolve_active_curve.
+
+    Formula parameters are in the m/s velocity domain (the client's
+    specification and calibration CSVs are m/s); the apply() entry point
+    converts the platform's canonical km/s once.
+
+    Nothing here is ever fabricated: curves come from real calibration data
+    (regression over UPV / rebound / cube-test pairs) or from the
+    laboratory's documented fixed curve, and strengths are only produced
+    inside each curve's calibrated range.
+    """
+    CURVE_TYPE_CHOICES = [
+        ('linear', 'Linear: f = m*V + c'),
+        ('polynomial', 'Polynomial (deg 2): f = c0 + c1*V + c2*V^2'),
+        ('exponential', 'Exponential: f = a*exp(b*V) + c'),
+        ('sonreb', 'SonReb (UPV + rebound): f = a*V^b*R^c'),
+        ('lookup', 'Lookup table (piecewise-linear interpolation)'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    curve_type = models.CharField(max_length=20, choices=CURVE_TYPE_CHOICES)
+    standard = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text="Reference standard, e.g. 'BS 1881-203:1999', 'ACI 228.2R-2018'")
+    # Null project = platform-wide curve; set = project-specific calibration.
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
+                                null=True, blank=True,
+                                related_name='strength_curves')
+    velocity_unit = models.CharField(max_length=20, default='m/s')
+    strength_unit = models.CharField(max_length=20, default='MPa')
+    formula_params = models.JSONField(
+        default=dict,
+        help_text="Curve parameters in the m/s velocity domain, e.g. "
+                  "{'m': 0.008961, 'c': -7.97} / {'a':..., 'b':..., 'c':...} / "
+                  "{'coeffs': [c0, c1, c2]} / {'points': [{'v', 'f'}, ...]}")
+    data_points = models.JSONField(
+        default=list, blank=True,
+        help_text="The real calibration pairs the curve was fitted from: "
+                  "[{'v' (m/s), 'f' (MPa), 'r' (rebound, optional)}, ...]")
+    valid_range_min_ms = models.FloatField(
+        null=True, blank=True, help_text="Calibrated range lower bound (m/s)")
+    valid_range_max_ms = models.FloatField(
+        null=True, blank=True, help_text="Calibrated range upper bound (m/s)")
+    r2_score = models.FloatField(
+        null=True, blank=True, help_text="Coefficient of determination (regression-derived curves)")
+    standard_error = models.FloatField(null=True, blank=True)
+    aic = models.FloatField(null=True, blank=True)
+    is_default = models.BooleanField(
+        default=False,
+        help_text="Exactly one platform-wide fallback curve should carry this")
+    provenance = models.JSONField(
+        default=dict, blank=True,
+        help_text="How the curve was established: source, reference, operator")
+    version = models.PositiveIntegerField(default=1)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='strength_curves_created')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', 'name']
+
+    def __str__(self):
+        scope = f" — {self.project.name}" if self.project_id else ' (platform)'
+        return f"{self.name}{scope} [{self.curve_type}]"
+
+    def apply(self, velocity_km_s, rebound_number=None):
+        """f_cu (MPa) for a velocity (km/s) — None outside the calibrated
+        range or when the curve's inputs are missing. Never extrapolates."""
+        from . import strength_curves
+        return strength_curves.apply_curve_params(
+            self.curve_type, self.formula_params, velocity_km_s,
+            rebound_number=rebound_number,
+            valid_range_ms=(None if self.valid_range_min_ms is None
+                            or self.valid_range_max_ms is None
+                            else [self.valid_range_min_ms, self.valid_range_max_ms]))
+
+    def snapshot(self, temperature_c=None):
+        """Formula provenance stored on every reading/test it produces."""
+        from . import strength_curves
+        return strength_curves.curve_snapshot(self, temperature_c=temperature_c)
+
+
+class ProjectCurveSetting(models.Model):
+    """
+    The Neural Link calibration setting for a project: which conversion
+    curve its strength computations use. Set BEFORE data injection (8 Sep
+    meeting: calibration is the first step of the PUNDIT workflow); when
+    unset, the project falls back to the platform default curve.
+    """
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE,
+                                   related_name='curve_setting')
+    active_curve = models.ForeignKey(StrengthCurve, on_delete=models.SET_NULL,
+                                     null=True, blank=True,
+                                     related_name='active_for_projects')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='curve_settings_updated')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        curve = self.active_curve.name if self.active_curve_id else '(platform default)'
+        return f"{self.project.name}: {curve}"
 
 
 # ======================================================================
