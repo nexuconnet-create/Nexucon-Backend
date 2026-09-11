@@ -32,7 +32,7 @@ from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
     BIMElementMapping, BIMModelGeometry, FieldDevice, GPRAnomaly, GPRSurvey,
     GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITReading,
-    PUNDITTest, SensorDataFile, TrimbleConnection, TrimbleProject,
+    PUNDITTest, RebarTest, SensorDataFile, TrimbleConnection, TrimbleProject,
 )
 
 User = get_user_model()
@@ -168,6 +168,18 @@ class DigitalEyeAuthenticationTestCase(APITestCase):
 # ======================================================================
 
 class PUNDITAPITestCase(DigitalEyeAPITestBase):
+    def setUp(self):
+        super().setUp()
+        # Hermetic suite: the analyze + correction endpoints must never reach
+        # a live AI provider from tests — unpatched calls here exhausted the
+        # Gemini free-tier daily quota and stalled the suite in 60 s retry
+        # sleeps (10 Sep 2026). _llm_observations -> None is exactly the
+        # provider-unavailable path; deterministic grading is what is tested.
+        patcher = patch.object(
+            PUNDITAdapter, '_llm_observations', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _post_test(self, payload):
         return self.client.post(reverse('pundit-test-list'), payload, format='json')
 
@@ -530,8 +542,8 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
 
     def _workbook(self, rows, name='readings.xlsx'):
         """rows: list of dicts keyed by template header (None => blank).
-        The template ships with sample rows — delete them so each test writes
-        exactly its own rows."""
+        The READINGS sheet ships empty (the EXAMPLE sheet is never
+        imported), so each test writes exactly its own rows."""
         import io
         from .excel_import import TEMPLATE_COLUMNS, build_template_bytes
         workbook = build_template_bytes()
@@ -552,7 +564,7 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
             {'project': str(self.project.id), 'file': file},
             format='multipart')
 
-    def test_template_downloads_with_headers_and_sample_rows(self):
+    def test_template_downloads_with_empty_readings_and_example_sheet(self):
         import io
         from openpyxl import load_workbook
         from .excel_import import TEMPLATE_COLUMNS
@@ -566,21 +578,28 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         sheet = workbook['READINGS']
         headers = [c.value for c in sheet[1] if c.value is not None]
         self.assertEqual(headers, TEMPLATE_COLUMNS)
-        # The template ships pre-filled with clearly-labelled sample rows so
-        # it can be uploaded as-is to try the flow.
-        self.assertGreater(sheet.max_row, 1)
-        sample_note = sheet.cell(row=2, column=TEMPLATE_COLUMNS.index('NOTES') + 1).value
-        self.assertIn('SAMPLE ROW', str(sample_note))
-        elements = {sheet.cell(row=r, column=1).value
-                    for r in range(2, sheet.max_row + 1)}
+        # The READINGS sheet ships EMPTY — it is the only sheet imported, so
+        # example data can never enter the registry.
+        self.assertEqual(sheet.max_row, 1)
+        # The EXAMPLE sheet carries the filled format illustration.
+        self.assertIn('EXAMPLE', workbook.sheetnames)
+        example = workbook['EXAMPLE']
+        self.assertEqual([c.value for c in example[1] if c.value is not None],
+                         TEMPLATE_COLUMNS)
+        self.assertGreater(example.max_row, 1)
+        sample_note = example.cell(row=2, column=TEMPLATE_COLUMNS.index('NOTES') + 1).value
+        self.assertIn('EXAMPLE ONLY', str(sample_note))
+        elements = {example.cell(row=r, column=1).value
+                    for r in range(2, example.max_row + 1)}
         self.assertIn('COL-A1', elements)      # pulse velocity
         self.assertIn('BEAM-B2', elements)     # crack depth
         self.assertIn('WALL-W1', elements)     # surface quality
         self.assertIn('HOW TO FILL', workbook.sheetnames)
 
-    def test_uploaded_template_imports_its_sample_rows(self):
-        # The as-downloaded template must import cleanly: the sample rows are
-        # valid operator-shaped readings and exercise the full flow end to end.
+    def test_uploaded_template_is_rejected_until_readings_are_typed(self):
+        # The as-downloaded template must NOT import: its READINGS sheet is
+        # empty and the EXAMPLE sheet is never read, so fabricated example
+        # readings can never reach the registry.
         import io
         from .excel_import import build_template_bytes
         buffer = io.BytesIO()
@@ -592,13 +611,9 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         response = self.client.post(
             reverse('pundit-test-import-readings'),
             {'project': str(self.project.id), 'file': upload}, format='multipart')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data['tests_created'], 3)
-        self.assertEqual(response.data['points_imported'], 7)
-        self.assertEqual(PUNDITTest.objects.count(), 3)
-        # The sample element names match no BIM element of the project, so the
-        # result must say so honestly instead of implying a model link.
-        self.assertTrue(all(t['bim_linked'] is False for t in response.data['tests']))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(any('READINGS' in e['message'] for e in response.data['errors']))
+        self.assertEqual(PUNDITTest.objects.count(), 0)
 
     def test_import_creates_tests_with_computed_means(self):
         rows = [
@@ -718,9 +733,9 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         # The created-test listing says it linked.
         self.assertTrue(response.data['tests'][0]['bim_linked'])
 
-    def test_template_scopes_sample_rows_to_project_bim_elements(self):
+    def test_template_scopes_example_rows_to_project_bim_elements(self):
         # ?project= resolves REAL element names from the imported model so the
-        # untouched template's sample rows link to actual members on upload.
+        # EXAMPLE sheet's illustration rows point at actual members.
         BIMElementMapping.objects.create(
             project=self.project, bim_guid='wallguid0000000000000000',
             element_name='Basic Wall:Exterior', element_id='wall-1', element_type='IfcWall')
@@ -738,12 +753,15 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         import io
         from openpyxl import load_workbook
         workbook = load_workbook(io.BytesIO(response.content))
-        elements = {workbook['READINGS'].cell(row=r, column=1).value
-                    for r in range(2, 8)}
+        example = workbook['EXAMPLE']
+        elements = {example.cell(row=r, column=1).value
+                    for r in range(2, 9)}
         self.assertIn('M_Concrete-Rectangular Beam:225 x 600mm:801629', elements)
         self.assertIn('Floor:200THK RC SLAB:780904', elements)
 
-        # And uploading that template as-is now creates linked tests.
+        # Uploading that template as-is creates nothing: the READINGS sheet is
+        # empty and the EXAMPLE sheet is never imported, so example data
+        # cannot reach the registry.
         buffer = io.BytesIO()
         workbook.save(buffer)
         buffer.seek(0)
@@ -753,12 +771,8 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         response = self.client.post(
             reverse('pundit-test-import-readings'),
             {'project': str(self.project.id), 'file': upload}, format='multipart')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        linked = [t['bim_linked'] for t in response.data['tests']]
-        self.assertTrue(all(linked), response.data['tests'])
-        guids = set(PUNDITTest.objects.filter(project=self.project)
-                    .values_list('structural_element_guid', flat=True))
-        self.assertIn('slabguid0000000000000000', guids)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertEqual(PUNDITTest.objects.filter(project=self.project).count(), 0)
 
     def test_import_rejects_project_outside_scope(self):
         other = User.objects.create_user(
@@ -789,7 +803,9 @@ class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
             structural_element='SLAB-S1', test_location='Grid A-1',
             path_length_mm=250.0, pulse_time_us=62.5,  # 4.0 km/s -> good
         )
-        PUNDITAdapter.analyze(good)
+        # use_llm=False: these tests exercise registry search/filtering, not
+        # the narrative layer — keeps the suite hermetic (no live AI calls).
+        PUNDITAdapter.analyze(good, use_llm=False)
         PUNDITTest.objects.create(
             project=self.project, test_type='crack_depth',
             structural_element='BEAM-B2', test_location='Grid B-2',
@@ -802,7 +818,7 @@ class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
         )
         poor.path_length_mm = 250.0
         poor.pulse_time_us = 125.0  # 2.0 km/s -> poor
-        PUNDITAdapter.analyze(poor)
+        PUNDITAdapter.analyze(poor, use_llm=False)
 
     def test_search_matches_test_reference_substring(self):
         ref = PUNDITTest.objects.filter(structural_element='COL-C24').first().test_reference
@@ -1714,6 +1730,23 @@ class BIMMappingAndLiveStreamTestCase(DigitalEyeAPITestBase):
         self.assertEqual(len(listing.data), 1)
         self.assertEqual(listing.data[0]['element_id'], 'COL-C24')
 
+    def test_bim_element_list_filters_by_project(self):
+        # Regression (8 Sep 2026): filterset_fields was silently ignored —
+        # no DRF filter backend was configured — so ?project= returned every
+        # element the user could see, leaking other projects' rows into this
+        # project's element dropdown.
+        other_project = Project.objects.create(name='Other Project')
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='GUID-1', element_id='COL-C24')
+        BIMElementMapping.objects.create(
+            project=other_project, bim_guid='GUID-2', element_id='SLB-S01')
+
+        listing = self.client.get(reverse('bim-element-list'),
+                                  {'project': str(self.project.id)})
+        self.assertEqual(listing.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listing.data), 1)
+        self.assertEqual(listing.data[0]['element_id'], 'COL-C24')
+
     def test_bim_element_mapping_requires_project(self):
         response = self.client.post(reverse('bim-element-list'), {
             'bim_guid': '3rNg7Ib9P5$wfO4JiGtdVn', 'element_id': 'COL-C24',
@@ -2599,6 +2632,30 @@ class TrimbleTasksTestCase(TestCase):
         self.assertIn('HTTP 401 token expired', summary['errors'])
 
 
+class HonestModelDefaultsTestCase(DigitalEyeAPITestBase):
+    """Model defaults must never fabricate records (no-dummy-data mandate,
+    10 Sep 2026): a connection that has never synced and a rebar scan with
+    no element entered start blank — nothing is invented for rows that have
+    no real data yet."""
+
+    def test_trimble_connection_starts_with_no_fabricated_sync_state(self):
+        connection = TrimbleConnection.objects.create(name='Unsynced link')
+        self.assertEqual(connection.trimble_project_id, '')
+        self.assertEqual(connection.trimble_project_name, '')
+        self.assertEqual(connection.project_name, '')
+        self.assertEqual(connection.region, '')
+        self.assertIsNone(connection.last_sync_at)
+        self.assertEqual(connection.synced_models_count, 0)
+        self.assertEqual(connection.synced_elements_count, 0)
+        self.assertEqual(connection.bcf_topics_count, 0)
+        self.assertFalse(connection.webhook_active)
+
+    def test_rebar_test_starts_with_no_assumed_element_or_location(self):
+        scan = RebarTest.objects.create(project=self.project)
+        self.assertEqual(scan.structural_element, '')
+        self.assertEqual(scan.test_location, '')
+
+
 # ======================================================================
 # 7 Sep 2026 review meeting (meeting #2) — free-text floors, concrete
 # maturity, evidence-based confidence and the Excel results export.
@@ -2748,3 +2805,443 @@ class PunditResultsExportTestCase(DigitalEyeAPITestBase):
         # The spread of these points exceeds 2% — disclosed, not hidden.
         self.assertGreater(element['spread_pct'], 2.0)
         self.assertIn('POINT SPREAD', sheet[5][8].value)
+
+
+# ======================================================================
+# Nexucon Link (8 Sep meeting) — calibration curves, regression engine,
+# temperature correction and the API surface.
+# ======================================================================
+
+class NexuconLinkEngineTestCase(TestCase):
+    """The curve engine: application maths per type, honest range guards,
+    ACI 228.2R temperature correction and the seeded default curve."""
+
+    def test_default_curve_seeded_exactly_once(self):
+        from .models import StrengthCurve
+        defaults = StrengthCurve.objects.filter(is_default=True)
+        self.assertEqual(defaults.count(), 1)
+        curve = defaults.get()
+        self.assertEqual(curve.curve_type, 'linear')
+        self.assertEqual(curve.formula_params['m'], 0.008961)
+        self.assertEqual(curve.formula_params['c'], -7.97)
+        self.assertEqual([curve.valid_range_min_ms, curve.valid_range_max_ms],
+                         [2000.0, 5000.0])
+
+    def test_default_curve_matches_legacy_fixed_formula(self):
+        """The seeded curve is mathematically identical to the fixed linear
+        f_cu = 8.961*V(km/s) - 7.97 every prior result used."""
+        from .strength_curves import apply_curve_params
+        for v_km_s in (2.0, 3.0, 4.0, 4.28571, 5.0):
+            self.assertAlmostEqual(
+                apply_curve_params('linear', {'m': 0.008961, 'c': -7.97}, v_km_s,
+                                   valid_range_ms=[2000.0, 5000.0]),
+                8.961 * v_km_s - 7.97, places=9)
+
+    def test_each_curve_type_applies_correctly(self):
+        import math
+
+        from .strength_curves import apply_curve_params
+        # Linear: f = 0.01*V - 20 -> 4000 m/s gives 20 MPa.
+        self.assertAlmostEqual(
+            apply_curve_params('linear', {'m': 0.01, 'c': -20.0}, 4.0), 20.0)
+        # Polynomial (ascending coeffs): c0 + c1*V + c2*V^2.
+        self.assertAlmostEqual(
+            apply_curve_params('polynomial', {'coeffs': [1.0, 0.001, 1e-6]}, 4.0),
+            1.0 + 4.0 + 16.0)
+        # Exponential: a*exp(b*V) + c.
+        self.assertAlmostEqual(
+            apply_curve_params('exponential', {'a': 2.0, 'b': 0.0005, 'c': 1.0}, 4.0),
+            2.0 * math.exp(2.0) + 1.0)
+        # SonReb: a * V^b * R^c — needs a rebound number.
+        self.assertAlmostEqual(
+            apply_curve_params('sonreb', {'a': 0.5, 'b': 1.2, 'c': 0.4}, 4.0,
+                               rebound_number=36.0),
+            0.5 * (4000.0 ** 1.2) * (36.0 ** 0.4))
+        # Lookup: piecewise-linear between (3000, 15) and (4000, 25).
+        self.assertAlmostEqual(
+            apply_curve_params('lookup', {'points': [
+                {'v': 3000.0, 'f': 15.0}, {'v': 4000.0, 'f': 25.0}]}, 3.5),
+            20.0)
+
+    def test_out_of_range_and_missing_inputs_never_invent_a_strength(self):
+        from .strength_curves import apply_curve_params
+        # Below the valid range.
+        self.assertIsNone(apply_curve_params(
+            'linear', {'m': 0.01, 'c': -20.0}, 1.5,
+            valid_range_ms=[2000.0, 5000.0]))
+        # Above the valid range.
+        self.assertIsNone(apply_curve_params(
+            'linear', {'m': 0.01, 'c': -20.0}, 5.5,
+            valid_range_ms=[2000.0, 5000.0]))
+        # SonReb without a rebound number.
+        self.assertIsNone(apply_curve_params(
+            'sonreb', {'a': 0.5, 'b': 1.2, 'c': 0.4}, 4.0))
+        # Lookup outside the table's span: no extrapolation, ever.
+        self.assertIsNone(apply_curve_params(
+            'lookup', {'points': [{'v': 3000.0, 'f': 15.0},
+                                  {'v': 4000.0, 'f': 25.0}]}, 4.5))
+        self.assertIsNone(apply_curve_params(
+            'lookup', {'points': [{'v': 3000.0, 'f': 15.0},
+                                  {'v': 4000.0, 'f': 25.0}]}, 2.5))
+        # Missing velocity.
+        self.assertIsNone(apply_curve_params(
+            'linear', {'m': 0.01, 'c': -20.0}, None))
+
+    def test_temperature_correction_band(self):
+        from .strength_curves import (
+            temperature_correction_applied, temperature_corrected_velocity_km_s)
+        # Inside 5-30 degC: no correction.
+        for t in (5.0, 20.0, 30.0):
+            self.assertFalse(temperature_correction_applied(t))
+            self.assertEqual(temperature_corrected_velocity_km_s(4.0, t), 4.0)
+        # 2 degC: V * (1 + 0.002*(2-20)) = 4.0 * 0.964 = 3.856 km/s.
+        self.assertTrue(temperature_correction_applied(2.0))
+        self.assertAlmostEqual(
+            temperature_corrected_velocity_km_s(4.0, 2.0), 3.856)
+        # 35 degC: 4.0 * (1 + 0.002*15) = 4.12 km/s.
+        self.assertTrue(temperature_correction_applied(35.0))
+        self.assertAlmostEqual(
+            temperature_corrected_velocity_km_s(4.0, 35.0), 4.12)
+        # No temperature recorded: no correction, no crash.
+        self.assertFalse(temperature_correction_applied(None))
+        self.assertEqual(temperature_corrected_velocity_km_s(4.0, None), 4.0)
+
+    def test_apply_active_curve_fallback_chain_and_snapshot(self):
+        from .models import ProjectCurveSetting, StrengthCurve
+        from .strength_curves import apply_active_curve, resolve_active_curve
+        project = Project.objects.create(
+            name='Nexucon Link Fallback Site', project_type='Commercial',
+            status='ACTIVE')
+        # No project setting: resolves to the seeded platform default.
+        curve = resolve_active_curve(project)
+        self.assertIsNotNone(curve)
+        self.assertTrue(curve.is_default)
+        strength, snapshot = apply_active_curve(project, 4.0)
+        self.assertAlmostEqual(strength, 8.961 * 4.0 - 7.97)
+        self.assertEqual(snapshot['curve_id'], str(curve.id))
+        self.assertIn('formula', snapshot)
+        # A project setting overrides the platform default.
+        project_curve = StrengthCurve.objects.create(
+            name='Lekki project calibration', curve_type='linear',
+            project=project, formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0)
+        ProjectCurveSetting.objects.create(
+            project=project, active_curve=project_curve)
+        self.assertEqual(resolve_active_curve(project).id, project_curve.id)
+        strength, snapshot = apply_active_curve(project, 4.0)
+        self.assertAlmostEqual(strength, 0.012 * 4000.0 - 30.0)
+        self.assertEqual(snapshot['curve_id'], str(project_curve.id))
+        # The correction is disclosed in the snapshot, never silent.
+        _, snapshot = apply_active_curve(project, 4.0, temperature_c=2.0)
+        self.assertTrue(snapshot['temperature_correction_applied'])
+        strength, _ = apply_active_curve(project, 4.0, temperature_c=2.0)
+        self.assertAlmostEqual(strength, 0.012 * 3856.0 - 30.0)
+
+    def test_validate_curve_params_rejects_broken_parameter_sets(self):
+        from .strength_curves import validate_curve_params
+        with self.assertRaises(ValueError):
+            validate_curve_params('linear', {'m': 0.01})           # missing c
+        with self.assertRaises(ValueError):
+            validate_curve_params('linear', {'m': 'fast', 'c': 1})  # non-numeric
+        with self.assertRaises(ValueError):
+            validate_curve_params('polynomial', {'coeffs': [1.0, 2.0]})  # < 3 coeffs
+        with self.assertRaises(ValueError):
+            validate_curve_params('lookup', {'points': [
+                {'v': 3000.0, 'f': 15.0}, {'v': 3000.0, 'f': 18.0}]})  # duplicate v
+        with self.assertRaises(ValueError):
+            validate_curve_params('lookup', {'points': [{'v': 3000.0}]})  # no f
+        with self.assertRaises(ValueError):
+            validate_curve_params('gaussian', {'a': 1.0})           # unknown type
+        # Well-formed sets pass silently.
+        validate_curve_params('linear', {'m': 0.008961, 'c': -7.97})
+        validate_curve_params('sonreb', {'a': 0.5, 'b': 1.2, 'c': 0.4})
+
+    def test_regression_recovers_exact_linear_relationship(self):
+        from .strength_curves import run_regression
+        points = [{'v': float(v), 'f': 0.01 * v - 20.0}
+                  for v in range(3000, 4600, 100)]
+        result = run_regression(points)
+        self.assertEqual(result['n_points'], 16)
+        linear = result['results']['linear']
+        self.assertAlmostEqual(linear['formula_params']['m'], 0.01, places=9)
+        self.assertAlmostEqual(linear['formula_params']['c'], -20.0, places=6)
+        self.assertAlmostEqual(linear['r2_score'], 1.0, places=9)
+        # Every fittable type present or explained.
+        self.assertIn('polynomial', result['results'])
+        self.assertTrue(result['best_fit_type'])
+
+    def test_regression_sonreb_requires_rebound_on_every_point(self):
+        from .strength_curves import run_regression
+        points = [{'v': 3000.0 + i * 100.0, 'f': 20.0 + i}
+                  for i in range(10)]
+        result = run_regression(points)
+        self.assertIsNone(result['results']['sonreb'])
+        self.assertIn('rebound', result['fit_errors']['sonreb'])
+        # With rebound values the log-linear fit recovers an exact SonReb
+        # relationship: points generated from f = a * V^b * R^c.
+        a, b, c = 0.5, 1.2, 0.4
+        points = []
+        for i in range(10):
+            v = 3000.0 + i * 100.0
+            r = 30.0 + v / 1000.0
+            points.append({'v': v, 'r': r, 'f': a * (v ** b) * (r ** c)})
+        result = run_regression(points)
+        sonreb = result['results']['sonreb']
+        self.assertIsNotNone(sonreb)
+        self.assertAlmostEqual(sonreb['r2_score'], 1.0, places=6)
+        fitted = sonreb['formula_params']
+        self.assertAlmostEqual(fitted['a'], a, places=4)
+        self.assertAlmostEqual(fitted['b'], b, places=5)
+        self.assertAlmostEqual(fitted['c'], c, places=5)
+        self.assertIn('R', sonreb['formula'])
+
+    def test_regression_advisory_below_nine_points(self):
+        from .strength_curves import run_regression
+        result = run_regression([{'v': 3000.0, 'f': 15.0},
+                                 {'v': 4000.0, 'f': 25.0}])
+        self.assertIn('9-15 points', result['advisory'])
+        # 9+ real points: no advisory.
+        result = run_regression([{'v': 3000.0 + i * 50.0, 'f': 15.0 + i * 0.5}
+                                 for i in range(9)])
+        self.assertIsNone(result['advisory'])
+
+
+class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
+    """The Nexucon Link API: curve CRUD (Director-only), activation,
+    calibration preview (nothing persisted) and the live measurement
+    preview that flows through the project's active curve."""
+
+    def _curve_url(self, name='strength-curve-list'):
+        return reverse(name)
+
+    def test_list_includes_the_seeded_default_curve(self):
+        response = self.client.get(self._curve_url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows = response.data['results'] if isinstance(response.data, dict) \
+            else response.data
+        names = [row['name'] for row in rows]
+        self.assertIn('Platform default (laboratory linear)', names)
+
+    def test_curve_create_validates_params_and_stores_provenance(self):
+        response = self.client.post(self._curve_url(), {
+            'name': 'Lekki trial-mix calibration',
+            'curve_type': 'linear',
+            'standard': 'Project-specific (cube tests, Sep 2026)',
+            'project': str(self.project.id),
+            'formula_params': {'m': 0.012, 'c': -30.0},
+            'valid_range_min_ms': 2500.0,
+            'valid_range_max_ms': 4800.0,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        self.assertEqual(response.data['version'], 1)
+        self.assertFalse(response.data['is_default'])
+        self.assertIn('f_cu', response.data['formula_display'])
+        # Broken parameter set rejected before persistence.
+        response = self.client.post(self._curve_url(), {
+            'name': 'Broken', 'curve_type': 'linear',
+            'formula_params': {'m': 0.01},
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('formula_params', response.data['errors'])
+
+    def test_activate_and_the_readings_flow_through_the_curve(self):
+        curve_response = self.client.post(self._curve_url(), {
+            'name': 'Lekki active calibration', 'curve_type': 'linear',
+            'project': str(self.project.id),
+            'formula_params': {'m': 0.012, 'c': -30.0},
+            'valid_range_min_ms': 2000.0, 'valid_range_max_ms': 5000.0,
+        }, format='json')
+        curve_id = curve_response.data['id']
+        response = self.client.post(
+            reverse('strength-curve-activate', args=[curve_id]),
+            {'project': str(self.project.id)}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['curve_snapshot']['name'],
+                         'Lekki active calibration')
+
+        # A recorded reading now uses the project's curve, with the formula
+        # snapshot stored on the readings and the element mean.
+        test_response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-NL-01', 'floor': 'Ground Floor',
+            'path_length_mm': 120.0,
+            'readings': [{'transit_time_us': 30.0},
+                         {'transit_time_us': 30.0}],
+        }, format='json')
+        self.assertEqual(test_response.status_code, status.HTTP_201_CREATED,
+                         msg=str(test_response.data))
+        # 120 mm / 30 us = 4000 m/s at both points -> f_cu = 0.012*4000 - 30
+        # = 18 MPa (the legacy fixed curve would have said 27.87).
+        self.assertAlmostEqual(
+            test_response.data['estimated_compressive_strength_mpa'], 18.0,
+            places=2)
+        self.assertEqual(
+            test_response.data['strength_curve_snapshot']['curve_id'],
+            str(curve_id))
+        self.assertEqual(
+            test_response.data['strength_curve_snapshot']['curve_type'],
+            'linear')
+        # The per-point readings carry the same curve provenance.
+        for reading in test_response.data['readings']:
+            self.assertAlmostEqual(reading['ecs_mpa'], 18.0, places=2)
+            self.assertEqual(reading['strength_curve_snapshot']['curve_id'],
+                             str(curve_id))
+
+        # active-curve reports the project setting as the source.
+        response = self.client.get(
+            reverse('strength-curve-active-curve') + f'?project={self.project.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['source'], 'project_setting')
+        self.assertEqual(response.data['curve']['id'], str(curve_id))
+
+    def test_active_curve_endpoint_reports_platform_default(self):
+        response = self.client.get(
+            reverse('strength-curve-active-curve')
+            + f'?project={self.project.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['source'], 'platform_default')
+        self.assertIn('formula', response.data['curve_snapshot'])
+
+    def test_calibrate_returns_fits_without_persisting(self):
+        from .models import StrengthCurve
+        points = [{'v': float(3000 + i * 100), 'f': 0.01 * (3000 + i * 100) - 20.0}
+                  for i in range(10)]
+        response = self.client.post(
+            reverse('strength-curve-calibrate'),
+            {'data_points': points}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['n_points'], 10)
+        self.assertAlmostEqual(
+            response.data['results']['linear']['formula_params']['m'],
+            0.01, places=9)
+        self.assertAlmostEqual(
+            response.data['results']['linear']['r2_score'], 1.0, places=9)
+        self.assertIsNone(response.data['advisory'])
+        # Nothing was persisted by the calibration call.
+        self.assertFalse(StrengthCurve.objects.filter(
+            name__contains='calibrat').exists())
+        # Too few points is a 400, not a crash.
+        response = self.client.post(
+            reverse('strength-curve-calibrate'),
+            {'data_points': [{'v': 3000.0, 'f': 15.0}]}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_upload_csv_parses_calibration_pairs(self):
+        import io
+        csv_body = ('v,f,r\n'
+                    '3000,15.2,30\n'
+                    '3200,18.1,32\n'
+                    '3400,21.4,34\n')
+        upload = SimpleUploadedFile(
+            'calibration.csv', csv_body.encode('utf-8'),
+            content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['data_points'], [
+            {'v': 3000.0, 'f': 15.2, 'r': 30.0},
+            {'v': 3200.0, 'f': 18.1, 'r': 32.0},
+            {'v': 3400.0, 'f': 21.4, 'r': 34.0},
+        ])
+        # Alternative column names (velocity / strength) parse too, and a
+        # file without a rebound column yields pairs with no 'r' key.
+        csv_body = ('velocity,strength\n'
+                    '3000,15.2\n'
+                    '3200,18.1\n')
+        upload = SimpleUploadedFile(
+            'calibration.csv', csv_body.encode('utf-8'),
+            content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['data_points']), 2)
+        self.assertFalse('r' in response.data['data_points'][0])
+
+    def test_upload_csv_rejects_thin_or_missing_files(self):
+        # No file at all.
+        response = self.client.post(reverse('strength-curve-upload-csv'),
+                                    {}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Fewer than 2 valid rows.
+        upload = SimpleUploadedFile(
+            'thin.csv', b'v,f\n3000,15.2\n', content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_preview_computes_the_full_chain(self):
+        url = reverse('strength-curve-preview')
+        # 120 mm / 30 us = 4000 m/s -> default curve: 0.008961*4000 - 7.97.
+        response = self.client.post(url, {
+            'project': str(self.project.id),
+            'path_length_mm': 120.0, 'transit_time_us': 30.0,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['velocity_m_s'], 4000.0)
+        self.assertFalse(response.data['temperature_correction_applied'])
+        self.assertAlmostEqual(response.data['f_cu_mpa'],
+                               0.008961 * 4000.0 - 7.97, places=2)
+        self.assertEqual(response.data['status'], 'ok')
+        self.assertIn('curve_snapshot', response.data)
+
+        # Cold concrete: the corrected velocity feeds the curve, disclosed.
+        response = self.client.post(url, {
+            'project': str(self.project.id),
+            'path_length_mm': 120.0, 'transit_time_us': 30.0,
+            'temperature_c': 2.0,
+        }, format='json')
+        self.assertTrue(response.data['temperature_correction_applied'])
+        self.assertEqual(response.data['corrected_velocity_m_s'], 3856.0)
+        self.assertAlmostEqual(response.data['f_cu_mpa'],
+                               0.008961 * 3856.0 - 7.97, places=2)
+
+        # Outside the default curve's valid range: no invented strength.
+        response = self.client.post(url, {
+            'project': str(self.project.id),
+            'path_length_mm': 120.0, 'transit_time_us': 120.0,  # 1000 m/s
+        }, format='json')
+        self.assertEqual(response.data['f_cu_mpa'], None)
+        self.assertEqual(response.data['status'], 'below_valid_range')
+
+        # Missing measurements is a 400.
+        response = self.client.post(url, {'project': str(self.project.id)},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_writes_require_director_role(self):
+        # The base superuser passes; a plain staff user is refused writes
+        # but may read the curve list.
+        staff = User.objects.create_user(
+            username='nl_field@nexucon.com', email='nl_field@nexucon.com',
+            password='Password123!')
+        refresh = RefreshToken.for_user(staff)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+        response = self.client.get(self._curve_url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response = self.client.post(self._curve_url(), {
+            'name': 'Not mine to create', 'curve_type': 'linear',
+            'formula_params': {'m': 0.01, 'c': -20.0},
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_default_curve_cannot_be_edited_or_deleted(self):
+        from .models import StrengthCurve
+        default = StrengthCurve.objects.get(is_default=True)
+        response = self.client.patch(
+            reverse('strength-curve-detail', args=[default.id]),
+            {'formula_params': {'m': 0.02, 'c': -40.0}}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.delete(
+            reverse('strength-curve-detail', args=[default.id]))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(StrengthCurve.objects.filter(pk=default.id).exists())

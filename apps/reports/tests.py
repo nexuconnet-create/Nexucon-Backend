@@ -54,9 +54,14 @@ class ReportIntegrationTests(APITestCase):
         )
 
     @patch("apps.storage.cloudinary_service.CloudinaryService.upload_file")
+    @patch("apps.common.ai_service.AIService.generate_recommendations")
     @patch("apps.reports.tasks.generate_report_task.delay")
-    def test_generate_report(self, mock_delay, mock_pdf):
+    def test_generate_report(self, mock_delay, mock_ai, mock_pdf):
         mock_pdf.return_value = "https://res.cloudinary.com/demo/image/upload/v1/mock.pdf"
+        # Hermetic (like every sibling test): no live provider call — the
+        # real API once 429'd here on exhausted quota and failed the suite.
+        mock_ai.return_value = {"recommendations": ["Monitor the crack."],
+                                "text_confidence": 0.9}
         """
         POST to generate_report should synchronously build the QA/QC report and
         return 201 with the full report payload.  The async Celery task is mocked
@@ -1373,6 +1378,67 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                   for v in (2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)]
         self.assertEqual(values, sorted(values))
 
+    def test_report_discloses_project_calibration_curve(self):
+        # 8 Sep 2026 meeting (Nexucon Link): with a project curve active,
+        # Section 3.0 discloses THAT curve — formula, calibration points,
+        # validity — and the worked example substitutes its real
+        # parameters; without one, the documented laboratory default.
+        from apps.digital_eye.models import (ProjectCurveSetting,
+                                             StrengthCurve)
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('8.961', flat)  # the laboratory default curve
+
+        curve = StrengthCurve.objects.create(
+            name='Marina trial-mix calibration', curve_type='linear',
+            project=self.project, standard='Project cube tests, Aug 2026',
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
+            data_points=[{'v': 3000.0, 'f': 6.0}, {'v': 4000.0, 'f': 18.0}])
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('project-specific calibration curve', flat)
+        self.assertIn('f_cu = 0.012 x V - 30', flat)
+        self.assertIn('2 real calibration pair', flat)
+        self.assertIn('Project cube tests, Aug 2026', flat)
+        # The worked example substitutes the project curve's parameters:
+        # 250 mm / 62.5 us = 4000 m/s -> f_cu = 0.012*4000 - 30 = 18 N/mm2.
+        self.assertIn('f_cu = 0.012 x 4000.00 - 30 = 18.00', flat)
+        # And the Section 5.0 verdict itself follows the project curve.
+        self.assertIn('18.0', flat)
+
+    def test_report_element_verdicts_follow_the_project_curve(self):
+        # The Section 5.0 average compressive strength — and the archive's
+        # pass/fail basis — flow through the project's active curve, not a
+        # fixed formula (8 Sep meeting: f_cu is the reason for the link).
+        from apps.digital_eye.models import (ProjectCurveSetting,
+                                             StrengthCurve)
+        test = self.make_test(self.project, self.device,
+                              path_length_mm=250.0, pulse_time_us=62.5)
+        for label, transit in (('A', 62.5), ('B', 62.5), ('C', 62.5)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=250.0,
+                transit_time_us=transit)
+        curve = StrengthCurve.objects.create(
+            name='Marina strict calibration', curve_type='linear',
+            project=self.project,
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0)
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # 4000 m/s -> 0.012*4000 - 30 = 18.0 N/mm2 (the fixed curve would
+        # have said 27.9); 18 < 25 so the remark is POOR.
+        self.assertIn('18.0', flat)
+        element = NDTReportService._element_data([test])[0]
+        self.assertAlmostEqual(element['mean_ecs'], 18.0, places=2)
+        self.assertEqual(element['remark'], 'POOR')
+
     # ----------------------------------------------------- report number
     def test_report_number_deterministic_and_well_formed(self):
         self.make_test(self.project, self.device,
@@ -1722,7 +1788,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         self.make_test(self.project, self.device,
                        path_length_mm=250.0, pulse_time_us=62.5)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('No Rebar scanning data recorded', text)
+        self.assertIn('Rebar scanning: Not Applicable', text)
         self.assertNotIn('MAIN BAR (MM)', text)
 
         RebarTest.objects.create(
@@ -2624,3 +2690,900 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
         self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)
+
+
+# ======================================================================
+# Report CMS + Word export (8 Sep 2026 review meeting, item H7; 4 Sep
+# register C4/C5): password-protected editable template sections and the
+# .docx edition of the statutory NDT report.
+# ======================================================================
+
+from django.contrib.auth.hashers import check_password
+
+from apps.reports.models import ReportCMSPassword, ReportSectionOverride
+
+
+class ReportCMSBase(NDTReportFixtureMixin, APITestCase):
+    """Superuser Director + plain non-Director + a real PUNDIT test."""
+
+    def setUp(self):
+        self.director = User.objects.create_superuser(
+            username="cms_director@nexucon.com",
+            email="cms_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="cms_viewer@nexucon.com",
+            email="cms_viewer@nexucon.com", password="Password123!")
+        self._as(self.director)
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _set_password(self, new="CmsSecretPass-9", current=None):
+        payload = {"new_password": new}
+        if current is not None:
+            payload["current_password"] = current
+        return self.client.post(reverse("report-cms-password"), payload,
+                                format="json")
+
+    def _save_section(self, key, body, project=None, password="CmsSecretPass-9"):
+        payload = {"body": body, "cms_password": password}
+        if project is not None:
+            payload["project"] = str(project.id)
+        return self.client.put(reverse("report-cms-section", kwargs={"key": key}),
+                               payload, format="json")
+
+    def _sections(self, project=None):
+        url = reverse("report-cms-sections")
+        if project is not None:
+            # Accept a Project row or a raw id string — never str(Project),
+            # which is the display name.
+            pid = project.id if hasattr(project, "id") else project
+            url += f"?project={pid}"
+        return self.client.get(url)
+
+
+class ReportCMSPasswordTests(ReportCMSBase):
+
+    def test_only_directors_can_set_the_password(self):
+        self._as(self.viewer)
+        response = self._set_password()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ReportCMSPassword.objects.exists())
+
+    def test_password_minimum_length_enforced(self):
+        response = self._set_password(new="short")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(ReportCMSPassword.objects.exists())
+
+    def test_set_then_change_password(self):
+        self.assertEqual(self._set_password().status_code, 200)
+        self.assertTrue(ReportCMSPassword.objects.exists())
+        # The stored value is a hash, never the plaintext.
+        credential = ReportCMSPassword.objects.first()
+        self.assertNotEqual(credential.password_hash, "CmsSecretPass-9")
+        self.assertTrue(check_password("CmsSecretPass-9",
+                                       credential.password_hash))
+        # Changing requires the current password.
+        response = self._set_password(new="NewSecretPass-11", current="wrong")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self._set_password(new="NewSecretPass-11",
+                                      current="CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(check_password("NewSecretPass-11",
+                                       ReportCMSPassword.objects.first()
+                                       .password_hash))
+
+
+class ReportCMSSectionTests(ReportCMSBase):
+
+    def test_sections_list_shows_every_registry_section_default(self):
+        from apps.reports.report_cms import CMS_SECTIONS
+        response = self._sections()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sections = {s["key"]: s for s in response.data["sections"]}
+        self.assertEqual(set(sections), set(CMS_SECTIONS))
+        # Static sections show their registry default; generated-content
+        # sections have no body without a project to compute from, so they
+        # resolve to the honest 'unavailable' lock instead.
+        static = {k for k, m in CMS_SECTIONS.items() if not m.get("computed")}
+        self.assertTrue(all(sections[k]["source"] == "default"
+                            for k in static))
+        self.assertTrue(all(sections[k]["source"] == "unavailable"
+                            for k in set(CMS_SECTIONS) - static))
+        self.assertFalse(response.data["password_set"])
+
+    def test_sections_list_scoped_project_404_for_unknown(self):
+        response = self._sections(project=uuid.uuid4())
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_edit_blocked_before_any_password_is_set(self):
+        response = self._save_section("introduction", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("No report-CMS password", response.data["detail"])
+
+    def test_edit_blocked_for_non_director_even_with_password(self):
+        self._set_password()
+        self._as(self.viewer)
+        response = self._save_section("introduction", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_edit_blocked_with_wrong_password(self):
+        self._set_password()
+        response = self._save_section("introduction", "Override body.",
+                                      password="wrong-password")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unknown_section_key_rejected(self):
+        self._set_password()
+        response = self._save_section("no_such_section", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_uuid_project_value_is_a_404_not_a_500(self):
+        # A client sending a project name (or any non-UUID) must get a clean
+        # 404, never an unhandled UUID-parse 500.
+        self._set_password()
+        response = self.client.put(
+            reverse("report-cms-section", kwargs={"key": "introduction"}),
+            {"body": "Override body.", "cms_password": "CmsSecretPass-9",
+             "project": "Marina NDT Test Project (not a uuid)"},
+            format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        response = self._sections(project="not-a-uuid")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_empty_body_rejected(self):
+        self._set_password()
+        response = self._save_section("introduction", "   ")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_project_override_beats_platform_override_beats_default(self):
+        self._set_password()
+        # Platform-wide override first.
+        response = self._save_section(
+            "introduction", "PLATFORM OVERRIDE TEXT 7Q4", project=None)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "platform_override")
+        # A project override wins for its project.
+        response = self._save_section(
+            "introduction", "PROJECT OVERRIDE TEXT 9Z6", project=self.project)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "project_override")
+        # Resolution through the list endpoint mirrors it.
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction"]["body"],
+                         "PROJECT OVERRIDE TEXT 9Z6")
+        self.assertEqual(sections["introduction"]["source"],
+                         "project_override")
+        # Without the project query the platform override shows.
+        sections = {s["key"]: s
+                    for s in self._sections().data["sections"]}
+        self.assertEqual(sections["introduction"]["body"],
+                         "PLATFORM OVERRIDE TEXT 7Q4")
+        # Reverting the project override falls back to the platform one.
+        response = self.client.delete(
+            reverse("report-cms-section", kwargs={"key": "introduction"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "platform_override")
+        # Reverting the platform override falls back to the default.
+        response = self.client.delete(
+            reverse("report-cms-section", kwargs={"key": "introduction"})
+            + "?cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "default")
+        self.assertEqual(
+            ReportSectionOverride.objects.count(), 0)
+
+    def test_override_changes_are_audit_logged(self):
+        from apps.audit.models import AuditEvent
+        self._set_password()
+        self._save_section("purpose_items",
+                           "First custom purpose.\nSecond custom purpose.")
+        self.assertTrue(
+            AuditEvent.objects.filter(
+                action="report_cms_section_saved",
+                resource_type="ReportSectionOverride").exists())
+
+    def test_override_reaches_the_generated_pdf(self):
+        self._set_password()
+        self._save_section(
+            "introduction",
+            "CMS INTRODUCTION SENTENCE XQ77 for the statutory dossier.",
+            project=self.project)
+        self._save_section(
+            "purpose_items",
+            "Custom CMS purpose item one.\nCustom CMS purpose item two.",
+            project=self.project)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("CMS INTRODUCTION SENTENCE XQ77", flat)
+        self.assertIn("Custom CMS purpose item one.", flat)
+        self.assertIn("Custom CMS purpose item two.", flat)
+        # The replaced default wording is gone.
+        self.assertNotIn("As a result, indirect method was used.", flat)
+        self.assertNotIn("To comply with government", flat)
+
+
+class ReportCMSComputedSectionTests(ReportCMSBase):
+    """
+    Generated-content sections (11 Sep client request): the wording the
+    report computes from the project's recorded data arrives pre-filled in
+    the CMS, is editable per project, and stays honestly locked when no
+    recorded data backs it.
+    """
+
+    def test_sections_list_without_project_shows_computed_keys_unavailable(self):
+        from apps.reports.report_cms import CMS_SECTIONS
+        response = self._sections()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sections = {s["key"]: s for s in response.data["sections"]}
+        computed_keys = {k for k, m in CMS_SECTIONS.items()
+                         if m.get("computed")}
+        self.assertEqual(
+            computed_keys,
+            {"executive_summary", "introduction_project",
+             "visual_observations", "methodology_equipment",
+             "rebar_statement", "findings_statement",
+             "conclusion_items"})
+        for key in computed_keys:
+            self.assertTrue(sections[key]["computed"])
+            self.assertTrue(sections[key]["requires_project"])
+            # Without a project there is no computed body — honest lock,
+            # never a fabricated one.
+            self.assertEqual(sections[key]["source"], "unavailable")
+            self.assertIsNone(sections[key]["body"])
+            self.assertIsNone(sections[key]["default"])
+        # Static sections still resolve to their defaults.
+        self.assertEqual(sections["introduction"]["source"], "default")
+        self.assertIn("Non-Destructive Test (NDT), as the name implies",
+                      sections["introduction"]["body"])
+
+    def test_sections_list_scoped_to_project_pre_fills_generated_wording(self):
+        from apps.digital_eye.models import RebarTest
+        RebarTest.objects.create(
+            project=self.project, structural_element="COL-R01",
+            test_location="Ground Floor", main_bar_mm=16.0,
+            links_mm=8.0, spacing_mm="200", cover_depth_mm=25.0)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C25", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       notes="Hairline crack observed at the beam-column "
+                             "junction")
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        # The exact wording the report will print, pre-filled.
+        for key in ("executive_summary", "introduction_project",
+                    "visual_observations", "methodology_equipment",
+                    "rebar_statement", "findings_statement",
+                    "conclusion_items"):
+            self.assertEqual(sections[key]["source"], "computed",
+                             f"{key} should resolve to its computed body")
+            self.assertTrue(sections[key]["body"])
+        self.assertIn("Marina NDT Test Project",
+                      sections["executive_summary"]["body"])
+        self.assertIn("Hairline crack observed",
+                      sections["visual_observations"]["body"])
+        self.assertIn("Profoscope",
+                      sections["methodology_equipment"]["body"])
+        self.assertIn("cover depth of the reinforcement",
+                      sections["rebar_statement"]["body"])
+        # setUp's COL-C24 test plus this COL-C25 test => 2 members, both
+        # good (both 4.0 km/s -> 27.9 N/mm2 >= 25).
+        self.assertIn("2 of the 2 structural members tested",
+                      sections["executive_summary"]["body"])
+
+    def test_sections_without_backing_data_stay_unavailable(self):
+        # No visual observation notes and no rebar survey were recorded —
+        # those sections must show no editable body, honestly.
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["visual_observations"]["source"],
+                         "unavailable")
+        self.assertIsNone(sections["visual_observations"]["body"])
+        self.assertEqual(sections["rebar_statement"]["source"],
+                         "unavailable")
+        self.assertIsNone(sections["rebar_statement"]["body"])
+        # Sections whose data exists remain computed.
+        self.assertEqual(sections["executive_summary"]["source"],
+                         "computed")
+
+    def test_computed_section_save_requires_a_project(self):
+        self._set_password()
+        response = self._save_section(
+            "executive_summary", "Reworded executive summary.",
+            project=None)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("project-specific", response.data["detail"])
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                section_key="executive_summary").exists())
+
+    def test_computed_section_save_refused_without_backing_data(self):
+        self._set_password()
+        # A fresh project with no recorded data at all.
+        empty = self.make_project(name="Empty NDT Project")
+        response = self._save_section(
+            "executive_summary", "Invented summary text.", project=empty)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("No recorded data backs this section",
+                      response.data["detail"])
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                section_key="executive_summary").exists())
+
+    def test_computed_section_project_override_reaches_pdf_and_reverts(self):
+        self._set_password()
+        response = self._save_section(
+            "executive_summary",
+            "COMPUTED OVERRIDE SUMMARY KQ31 — reworded before generating.",
+            project=self.project)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "project_override")
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("COMPUTED OVERRIDE SUMMARY KQ31", flat)
+        # The computed wording it replaced is gone.
+        self.assertNotIn("In situ Integrity Test (Non-Destructive)",
+                         flat)
+        # Reverting returns the computed wording, not null.
+        response = self.client.delete(
+            reverse("report-cms-section",
+                    kwargs={"key": "executive_summary"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "computed")
+        self.assertIn("In situ Integrity Test",
+                      response.data["body"])
+        self.assertIn("Marina NDT Test Project", response.data["body"])
+
+    def test_computed_section_delete_requires_a_project(self):
+        self._set_password()
+        response = self.client.delete(
+            reverse("report-cms-section",
+                    kwargs={"key": "executive_summary"})
+            + "?cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("project-specific", response.data["detail"])
+
+    def test_computed_section_override_isolates_projects(self):
+        self._set_password()
+        other = self.make_project(name="Second NDT Project")
+        self._save_section(
+            "introduction_project",
+            "ISOLATED INTRO PJ61 — project two only.",
+            project=other)
+        sections = {s["key"]: s
+                    for s in self._sections(project=other)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction_project"]["body"],
+                         "ISOLATED INTRO PJ61 — project two only.")
+        # The first project is untouched — its computed wording stands.
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction_project"]["source"],
+                         "computed")
+        self.assertIn("Mandatory Non-Destructive Test",
+                      sections["introduction_project"]["body"])
+        # No platform-wide row was created for a computed section.
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                project__isnull=True,
+                section_key="introduction_project").exists())
+
+    def test_computed_section_override_reaches_word_export(self):
+        self._set_password()
+        # The backing observation must exist BEFORE the override is saved —
+        # the PUT refuses to edit a section with no recorded data behind it.
+        self.make_test(self.project, self.device,
+                       structural_element="COL-V01",
+                       notes="Crack at column base")
+        self._save_section(
+            "visual_observations", "OBSERVED ITEM WR88 in the Word copy.",
+            project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = NDTWordExportTests._full_docx_text(self, response.content)
+        self.assertIn("OBSERVED ITEM WR88 in the Word copy.", text)
+
+
+class NDTWordExportTests(ReportCMSBase):
+
+    def _full_docx_text(self, data):
+        from docx import Document as DocxDocument
+        document = DocxDocument(io.BytesIO(data))
+        parts = [p.text for p in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                parts.extend(cell.text for cell in row.cells)
+        return "\n".join(parts)
+
+    def test_word_export_streams_docx_with_real_values(self):
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            "wordprocessingml.document", response["Content-Type"])
+        self.assertIn("ndt_report_", response["Content-Disposition"])
+        # A .docx is a zip archive.
+        self.assertTrue(response.content.startswith(b"PK"))
+        text = self._full_docx_text(response.content)
+        # Real project data, not placeholders: 250 mm / 62.5 us = 4000.00
+        # m/s -> f_cu = 8.961*4.0 - 7.97 = 27.9 N/mm2 (GOOD at 25 N/mm2).
+        self.assertIn("Marina NDT Test Project", text)
+        self.assertIn("4000.00", text)
+        self.assertIn("27.9", text)
+        self.assertIn("GOOD", text)
+        self.assertIn("UPV = L / t", text)
+        # The editable-copy disclosure is present.
+        self.assertIn("editable working copy", text)
+
+    def test_word_export_respects_cms_overrides(self):
+        self._set_password()
+        self._save_section(
+            "introduction", "WORD CMS SENTENCE WD42 override.",
+            project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = self._full_docx_text(response.content)
+        self.assertIn("WORD CMS SENTENCE WD42 override.", text)
+        self.assertNotIn("As a result, indirect method was used.", text)
+
+    def test_word_export_out_of_scope_project_404(self):
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_word_export_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+# ===========================================================================
+# REFINED EXECUTIVE SUMMARY (11 Sep 2026) — honest AI confidence metrics,
+# cover QR + public verification, preview-before-generate, per-project
+# branding, interactive-map data, Lagos State cover line, rebar wording.
+# ===========================================================================
+import json  # noqa: E402
+
+from django.core.files.uploadedfile import SimpleUploadedFile  # noqa: E402
+
+
+class ConfidenceMetricsUnitTests(TestCase):
+    """Pure-function tests for apps.digital_eye.confidence_metrics."""
+
+    def test_ci_from_curve_standard_error(self):
+        from apps.digital_eye.confidence_metrics import (
+            strength_confidence_interval, Z_95)
+        ci = strength_confidence_interval(27.8, 1.5)
+        self.assertAlmostEqual(ci[0], 27.8 - Z_95 * 1.5, places=9)
+        self.assertAlmostEqual(ci[1], 27.8 + Z_95 * 1.5, places=9)
+        # Missing inputs never produce an interval.
+        self.assertIsNone(strength_confidence_interval(None, 1.5))
+        self.assertIsNone(strength_confidence_interval(27.8, None))
+
+    def test_probability_below_design(self):
+        from apps.digital_eye.confidence_metrics import (
+            probability_below_design)
+        # Estimate far above 25 -> tiny probability.
+        self.assertLess(probability_below_design(35.0, 1.0), 0.001)
+        # Estimate far below 25 -> near-certain.
+        self.assertGreater(probability_below_design(10.0, 1.0), 0.999)
+        # Estimate exactly at the design strength -> 50%.
+        self.assertAlmostEqual(probability_below_design(25.0, 1.0), 0.5,
+                               places=3)
+        # No SE -> no fabricated probability.
+        self.assertIsNone(probability_below_design(25.0, None))
+
+    def test_data_quality_buckets(self):
+        from apps.digital_eye.confidence_metrics import data_quality_score
+        self.assertEqual(data_quality_score(3, 1.0)[0], 'HIGH')
+        self.assertEqual(data_quality_score(2, 3.0)[0], 'MEDIUM')
+        self.assertEqual(data_quality_score(2, 40.0)[0], 'LOW')
+        self.assertEqual(data_quality_score(1, None)[0], 'LOW')
+        label, reason = data_quality_score(0, None)
+        self.assertIsNone(label)
+        self.assertIn('no recorded test points', reason)
+
+    def test_cross_element_outliers(self):
+        from apps.digital_eye.confidence_metrics import cross_element_outliers
+        summaries = [
+            {'element': 'COL-A', 'floor': 'GF', 'mean_velocity_m_s': 3900.0},
+            {'element': 'COL-B', 'floor': 'GF', 'mean_velocity_m_s': 3950.0},
+            {'element': 'COL-C', 'floor': 'GF', 'mean_velocity_m_s': 3920.0},
+            {'element': 'COL-D', 'floor': 'GF', 'mean_velocity_m_s': 700.0},
+        ]
+        outliers = cross_element_outliers(summaries)
+        self.assertEqual(len(outliers), 1)
+        flag = list(outliers.values())[0]
+        self.assertEqual(flag['element'], 'COL-D')
+        self.assertEqual(flag['peer_median_m_s'], 3920.0)
+        self.assertLess(flag['deviation_pct'], -80.0)
+        # A consistent set has no outliers.
+        consistent = [dict(s, mean_velocity_m_s=3900.0 + i * 10)
+                      for i, s in enumerate(summaries)]
+        self.assertEqual(cross_element_outliers(consistent), {})
+
+    def test_reasoning_trace_cites_the_data(self):
+        from apps.digital_eye.confidence_metrics import reasoning_trace
+        summary = {
+            'element': 'COL-C24',
+            'point_velocities_m_s': [3986.0, 4026.0, 3960.0],
+            'mean_velocity_m_s': 3990.7,
+            'mean_ecs_n_mm2': 27.8,
+        }
+        trace = reasoning_trace(
+            summary, se_mpa=1.5,
+            ci=(24.9, 30.7), p_below=0.162,
+            quality=('HIGH', '3 points, spread 1.7%'))
+        joined = ' '.join(trace)
+        self.assertIn('3986', joined)      # the recorded point velocities
+        self.assertIn('3991', joined)      # the mean velocity, cited
+        self.assertIn('27.8', joined)      # the strength estimate
+        self.assertIn('24.9', joined)      # the interval lower bound
+        self.assertIn('30.7', joined)      # the interval upper bound
+        self.assertIn('16.2%', joined)     # the probability below design
+        self.assertIn('HIGH', joined)      # the quality verdict
+        # Missing SE is disclosed honestly, never invented.
+        trace = reasoning_trace(summary)
+        self.assertTrue(any('No confidence interval available' in t
+                            for t in trace))
+
+    def test_curve_standard_error_none_without_regression(self):
+        from apps.digital_eye.confidence_metrics import (
+            curve_standard_error_mpa)
+        # No regression-fitted curve seeded -> the laboratory default
+        # carries no standard error -> honestly None.
+        self.assertIsNone(curve_standard_error_mpa(None))
+
+
+class AIConfidenceMetricsIntegrationTests(NDTReportFixtureMixin, TestCase):
+    """analyze_project stores the per-element confidence metrics."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        t = self.make_test(self.project, self.device,
+                           structural_element="COL-C24", floor="Ground Floor",
+                           path_length_mm=200.0, pulse_time_us=50.0,
+                           latitude=6.4281, longitude=3.4219)
+        # Three consistent readings -> ~4.0 km/s, spread under 1%.
+        for label, tt in (('A', 50.0), ('B', 50.2), ('C', 49.8)):
+            PUNDITReading.objects.create(
+                test=t, point_label=label, path_length_mm=200.0,
+                transit_time_us=tt)
+
+    def test_analyze_project_stores_confidence_metrics(self):
+        from apps.digital_eye.adapters import PUNDITAdapter
+        record = PUNDITAdapter.analyze_project(self.project)
+        metrics = record.correlations
+        self.assertEqual(len(metrics), 1)
+        m = metrics[0]
+        for key in ('confidence_interval_n_mm2', 'probability_below_design',
+                    'data_quality', 'cross_element_outlier',
+                    'reasoning_trace'):
+            self.assertIn(key, m)
+        # Without a regression-fitted curve there is honestly no interval.
+        self.assertIsNone(m['confidence_interval_n_mm2'])
+        self.assertIsNone(m['probability_below_design'])
+        # But the quality score and reasoning trace come from real data.
+        self.assertEqual(m['data_quality']['label'], 'HIGH')
+        self.assertTrue(any('4000' in step for step in m['reasoning_trace']))
+
+
+class ReportQrAndCoverTests(NDTReportFixtureMixin, TestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+
+    def test_cover_qr_png_renders(self):
+        from apps.reports.ndt_reports import _cover_qr_png
+        buf = _cover_qr_png('https://nexucon.net/verify/report/?ref=X&digest=Y')
+        self.assertIsNotNone(buf)
+        self.assertGreater(len(buf.getvalue()), 100)
+
+    def test_verification_url_uses_frontend_setting(self):
+        from apps.reports.ndt_reports import report_verification_url
+        with override_settings(FRONTEND_URL='https://nexucon.net/'):
+            url = report_verification_url('0481 / MTL/NDT/2026', 'abc123')
+        self.assertTrue(url.startswith('https://nexucon.net/verify/report/'))
+        self.assertIn('digest=abc123', url)
+
+    def test_cover_lagos_state_own_line(self):
+        # LAGOS STATE prints on its own clear line of the cover (page 1),
+        # from the recorded state — not sharing the site-address line.
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        pages = _pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split('\n')
+        cover = ' '.join(pages[0].split())
+        self.assertIn('LAGOS STATE', cover)
+        self.assertIn('12 MARINA ROAD, LAGOS ISLAND, LAGOS ISLAND', cover)
+
+    def test_rebar_not_applicable_wording(self):
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn('Rebar Assessment: Not Applicable', text)
+
+
+class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                                APITestCase):
+    """Public verification of archived dossiers (the cover QR target)."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        pdf = NDTReportService.generate_ndt_report(self.project)
+        self.archive = NDTReportService.archive_ndt_report(
+            self.project, None, pdf)
+        self.client.credentials()  # deliberately public — no auth at all
+
+    def test_verify_with_valid_ref_and_digest(self):
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['verified'])
+        self.assertEqual(response.data['report_reference'],
+                         self.archive.report_reference)
+        self.assertEqual(response.data['sha256_checksum'],
+                         self.archive.sha256_checksum)
+        self.assertEqual(response.data['test_count'], 1)
+        self.assertEqual(response.data['assessed_count'], 1)
+
+    def test_verify_rejects_tampered_digest(self):
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': self.archive.report_reference,
+             'digest': 'f' * 64})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data['verified'])
+
+    def test_verify_requires_both_params(self):
+        response = self.client.get(reverse('report-verify'),
+                                   {'ref': self.archive.report_reference})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_verify_discloses_no_project_data(self):
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key})
+        raw = json.dumps(response.data, default=str)
+        self.assertNotIn('Marina', raw)          # project name
+        self.assertNotIn('Lagos Island', raw)    # site address / LGA
+
+
+class NDTReportPreviewTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                            APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_superuser(
+            username="previewer@nexucon.com",
+            email="previewer@nexucon.com", password="Password123!")
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+
+    def test_preview_streams_pdf_without_archiving(self):
+        before = ArchivedReport.objects.count()
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('PREVIEW', response['Content-Disposition'])
+        self.assertTrue(response.content.startswith(b'%PDF'))
+        self.assertEqual(ArchivedReport.objects.count(), before)
+
+    def test_preview_matches_generated_report(self):
+        # Same service, same content: the preview is exactly the document
+        # the generate endpoint will produce (same digest basis).
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = ' '.join(_pdf_text(response.content).split())
+        self.assertIn('PULSE VELOCITY', text)
+        self.assertIn('COL-C24', text)
+        self.assertIn('REPORT INTEGRITY', text)
+
+    def test_preview_out_of_scope_404(self):
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_preview_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                          APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.director = User.objects.create_superuser(
+            username="branding_director@nexucon.com",
+            email="branding_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="branding_viewer@nexucon.com",
+            email="branding_viewer@nexucon.com", password="Password123!")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        # A real generated PNG — no fabricated file bytes on disk.
+        img = Image.new('RGBA', (40, 40), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        self.png = SimpleUploadedFile('logo.png', buf.getvalue(),
+                                      content_type='image/png')
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def test_get_unconfigured_branding(self):
+        self._as(self.director)
+        response = self.client.get(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {'branding_configured': False})
+
+    def test_branding_requires_director(self):
+        self._as(self.viewer)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_branding_roundtrip_and_removal(self):
+        self._as(self.director)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png, 'logo_position': 'top-right',
+             'logo_size': 'medium', 'watermark_opacity_pct': 60},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['branding_configured'])
+        self.assertEqual(response.data['logo_position'], 'top-right')
+        self.assertEqual(response.data['watermark_opacity_pct'], 60)
+        # GET reflects it.
+        response = self.client.get(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertTrue(response.data['branding_configured'])
+        self.assertIsNotNone(response.data['logo_url'])
+        # DELETE removes it entirely.
+        response = self.client.delete(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.data, {'branding_configured': False})
+        response = self.client.get(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.data, {'branding_configured': False})
+
+    def test_branding_rejects_bad_values(self):
+        self._as(self.director)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo_position': 'diagonal', 'watermark_opacity_pct': 150},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_branded_report_renders(self):
+        from apps.reports.models import ReportBranding
+        self._as(self.director)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        # The render picks the branding up and still produces a valid PDF.
+        data = NDTReportService.generate_ndt_report(self.project)
+        self.assertTrue(data.startswith(b'%PDF'))
+        row = ReportBranding.objects.get(project=self.project)
+        self.assertTrue(row.logo)
+
+
+class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_superuser(
+            username="mapper@nexucon.com",
+            email="mapper@nexucon.com", password="Password123!")
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+
+    def test_map_returns_only_geolocated_tests(self):
+        self.make_test(self.project, self.device, structural_element="COL-A",
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       latitude=6.4281, longitude=3.4219)
+        self.make_test(self.project, self.device, structural_element="COL-B",
+                       path_length_mm=250.0, pulse_time_us=62.5)  # no coords
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        features = response.data['test_points']['features']
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0]['geometry']['coordinates'],
+                         [3.4219, 6.4281])
+        # The located test carries its real facts + a legend band.
+        self.assertEqual(features[0]['properties']['element'], 'COL-A')
+        self.assertIn('strength_n_mm2', features[0]['properties'])
+        self.assertIn(features[0]['properties']['band'],
+                      ('good', 'poor', 'unassessed', 'no_velocity'))
+        # The legend explains the bands.
+        self.assertIn('legend', response.data)
+        self.assertIn('good', response.data['legend'])
+
+    def test_map_without_any_geolocated_tests_is_honest(self):
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['test_points']['features'], [])
+        # No fabricated project centre either.
+        self.assertIsNone(response.data['project_center'])
+
+    def test_map_out_of_scope_404(self):
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

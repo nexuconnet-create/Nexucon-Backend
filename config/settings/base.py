@@ -213,6 +213,13 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    # Without a filter backend, every `filterset_fields = [...]` declaration
+    # in the viewsets is SILENTLY IGNORED — ?project=... etc. returned every
+    # row the user could see, leaking elements across projects (e.g.
+    # /digital-eye/bim-elements/?project=X returning other projects' rows).
+    'DEFAULT_FILTER_BACKENDS': (
+        'django_filters.rest_framework.DjangoFilterBackend',
+    ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'common.exceptions.handler.custom_exception_handler',
 }

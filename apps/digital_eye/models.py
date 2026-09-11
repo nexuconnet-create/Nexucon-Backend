@@ -331,7 +331,9 @@ class PUNDITTest(models.Model):
                   "rather than corrective)",
     )
 
-    device_model = models.CharField(max_length=100, default='Proceq Pundit PL-200 UPV', blank=True)
+    # No assumed instrument: the device is whatever was actually used
+    # (blank until recorded / linked via the FieldDevice relation).
+    device_model = models.CharField(max_length=100, default='', blank=True)
     transducer_frequency_khz = models.PositiveIntegerField(null=True, blank=True, help_text="e.g. 54 kHz")
     transducer_type = models.CharField(
         max_length=50, choices=TRANSDUCER_TYPES, blank=True, default='DIRECT',
@@ -353,6 +355,10 @@ class PUNDITTest(models.Model):
 
     surface_temperature_c = models.FloatField(null=True, blank=True)
     surface_condition = models.CharField(max_length=150, blank=True, default='')
+    rebound_number = models.FloatField(
+        null=True, blank=True,
+        help_text="Rebound hammer reading for this element (shared by its points "
+                  "unless a reading carries its own; required only for SonReb curves)")
 
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
@@ -361,18 +367,27 @@ class PUNDITTest(models.Model):
     velocity_km_s = models.FloatField(null=True, blank=True, help_text="Computed pulse velocity in km/s")
     pulse_velocity_ms = models.FloatField(null=True, blank=True, help_text="Computed pulse velocity in m/s")
     quality_grade = models.CharField(max_length=50, choices=QUALITY_GRADES, default='pending')
-    concrete_quality_rating = models.CharField(max_length=50, default='EXCELLENT', blank=True)
+    # Honest default: no quality is claimed until the engine has graded the
+    # element from real measurements (never a pre-filled 'EXCELLENT').
+    concrete_quality_rating = models.CharField(max_length=50, default='', blank=True)
     estimated_compressive_strength_mpa = models.FloatField(null=True, blank=True)
+    strength_curve_snapshot = models.JSONField(
+        null=True, blank=True,
+        help_text="Provenance of the curve that produced the element-mean E.C.S: "
+                  "curve id/name/type/formula/valid range (Nexucon Link)")
     crack_depth_mm = models.FloatField(null=True, blank=True, help_text="Computed crack depth")
     estimated_crack_depth_mm = models.FloatField(null=True, blank=True)
     waveform_samples = models.JSONField(default=list, blank=True)
 
     operator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='pundit_tests_operated')
-    operator_name = models.CharField(max_length=255, blank=True, default='Engr. F. Balogun (NDE Specialist)')
+    # No fabricated operator attribution: blank until the real operator's
+    # name is recorded with the station (was a hard-coded engineer's name).
+    operator_name = models.CharField(max_length=255, blank=True, default='')
     tested_at = models.DateTimeField(null=True, blank=True)
     test_date = models.DateField(default=timezone.localdate, null=True, blank=True)
-    status = models.CharField(max_length=50, default='VERIFIED', blank=True)
+    # A station is not 'VERIFIED' until someone actually verified it.
+    status = models.CharField(max_length=50, default='RECORDED', blank=True)
     notes = models.TextField(blank=True, null=True, default='')
 
     files = models.ManyToManyField(SensorDataFile, blank=True, related_name='pundit_tests')
@@ -413,7 +428,7 @@ class PUNDITTest(models.Model):
                 for r in readings
             ]
         from apps.digital_eye.adapters import PUNDITAdapter
-        from apps.reports.ndt_reports import estimated_compressive_strength
+        from apps.digital_eye.strength_curves import apply_active_curve
         row = {'label': 'A', 'path_mm': None, 'transit_us': None,
                'velocity_km_s': None, 'ecs_mpa': None, 'uncracked_us': None,
                'crack_depth_mm': None, 'surface_condition': None}
@@ -433,11 +448,15 @@ class PUNDITTest(models.Model):
             if velocity is None:
                 velocity = PUNDITAdapter.compute_velocity_km_s(
                     self.path_length_mm, self.pulse_time_us)
+            ecs, _snapshot = apply_active_curve(
+                self.project, velocity,
+                rebound_number=self.rebound_number,
+                temperature_c=self.surface_temperature_c)
             row.update({
                 'path_mm': self.path_length_mm,
                 'transit_us': self.pulse_time_us,
                 'velocity_km_s': velocity,
-                'ecs_mpa': estimated_compressive_strength(velocity) if velocity is not None else None,
+                'ecs_mpa': ecs if velocity is not None else None,
             })
         return [row]
 
@@ -526,13 +545,20 @@ class PUNDITReading(models.Model):
     velocity_km_s = models.FloatField(null=True, blank=True,
                                       help_text="Computed v = L/t (read-only; never operator-entered)")
     ecs_mpa = models.FloatField(null=True, blank=True,
-                                help_text="Computed E.C.S from the platform calibration curve (read-only)")
+                                help_text="Computed E.C.S from the project's active calibration curve (read-only)")
+    strength_curve_snapshot = models.JSONField(
+        null=True, blank=True,
+        help_text="Provenance of the curve that produced this point's E.C.S (Nexucon Link)")
     crack_depth_mm = models.FloatField(
         null=True, blank=True,
         help_text="Computed time-difference crack depth at this point (read-only)")
     surface_condition = models.CharField(
         max_length=150, blank=True, default='',
         help_text="Surface-quality method only: the condition observed at this point")
+    rebound_number = models.FloatField(
+        null=True, blank=True,
+        help_text="Rebound hammer reading at this point (required only when the "
+                  "project's active curve is a SonReb combination curve)")
     notes = models.CharField(max_length=255, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -551,9 +577,12 @@ class PUNDITReading(models.Model):
         """Deterministic per-point derivations — never a guessed number.
         v = L / t (mm/us == km/s) for pulse-velocity points;
         d = L/2·√((t_c/t_0)²−1) for crack-depth points. Each output is only
-        set when its inputs exist and are valid."""
+        set when its inputs exist and are valid. The E.C.S flows through the
+        project's active Nexucon Link curve (8 Sep meeting: project-specific
+        calibration), and the curve provenance is snapshotted onto the
+        reading so every stored strength names the formula that made it."""
         from apps.digital_eye.adapters import PUNDITAdapter
-        from apps.reports.ndt_reports import estimated_compressive_strength
+        from apps.digital_eye.strength_curves import apply_active_curve
         is_crack_point = (self.transit_time_us is not None
                           and self.uncracked_transit_time_us is not None)
         if not is_crack_point \
@@ -563,10 +592,19 @@ class PUNDITReading(models.Model):
             # CRACKED-path time — L/t_c is not a valid velocity, so none is
             # computed for them.)
             self.velocity_km_s = self.path_length_mm / self.transit_time_us
-            self.ecs_mpa = estimated_compressive_strength(self.velocity_km_s)
         else:
             self.velocity_km_s = None
-            self.ecs_mpa = None
+        test = self.test
+        # SonReb combination curves need a rebound number: this point's own
+        # reading, else the element-level reading on the test.
+        rebound = self.rebound_number
+        if rebound is None and test is not None:
+            rebound = test.rebound_number
+        self.ecs_mpa, self.strength_curve_snapshot = apply_active_curve(
+            test.project if test is not None and test.project_id else None,
+            self.velocity_km_s,
+            rebound_number=rebound,
+            temperature_c=test.surface_temperature_c if test is not None else None)
         self.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
             self.path_length_mm, self.transit_time_us,
             self.uncracked_transit_time_us)
@@ -575,6 +613,122 @@ class PUNDITReading(models.Model):
         self.compute()
         super().save(*args, **kwargs)
 
+
+# ======================================================================
+# Nexucon Link — compressive-strength (f_cu) conversion curves
+# (8 Sep 2026 review meeting "Neural Link" + client Nexucon Link spec)
+# ======================================================================
+
+class StrengthCurve(models.Model):
+    """
+    A UPV-to-compressive-strength conversion curve. Every f_cu the platform
+    reports is produced by exactly one of these (or the documented built-in
+    fallback) — the active curve for the project, resolved by
+    apps.digital_eye.strength_curves.resolve_active_curve.
+
+    Formula parameters are in the m/s velocity domain (the client's
+    specification and calibration CSVs are m/s); the apply() entry point
+    converts the platform's canonical km/s once.
+
+    Nothing here is ever fabricated: curves come from real calibration data
+    (regression over UPV / rebound / cube-test pairs) or from the
+    laboratory's documented fixed curve, and strengths are only produced
+    inside each curve's calibrated range.
+    """
+    CURVE_TYPE_CHOICES = [
+        ('linear', 'Linear: f = m*V + c'),
+        ('polynomial', 'Polynomial (deg 2): f = c0 + c1*V + c2*V^2'),
+        ('exponential', 'Exponential: f = a*exp(b*V) + c'),
+        ('sonreb', 'SonReb (UPV + rebound): f = a*V^b*R^c'),
+        ('lookup', 'Lookup table (piecewise-linear interpolation)'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    curve_type = models.CharField(max_length=20, choices=CURVE_TYPE_CHOICES)
+    standard = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text="Reference standard, e.g. 'BS 1881-203:1999', 'ACI 228.2R-2018'")
+    # Null project = platform-wide curve; set = project-specific calibration.
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
+                                null=True, blank=True,
+                                related_name='strength_curves')
+    velocity_unit = models.CharField(max_length=20, default='m/s')
+    strength_unit = models.CharField(max_length=20, default='MPa')
+    formula_params = models.JSONField(
+        default=dict,
+        help_text="Curve parameters in the m/s velocity domain, e.g. "
+                  "{'m': 0.008961, 'c': -7.97} / {'a':..., 'b':..., 'c':...} / "
+                  "{'coeffs': [c0, c1, c2]} / {'points': [{'v', 'f'}, ...]}")
+    data_points = models.JSONField(
+        default=list, blank=True,
+        help_text="The real calibration pairs the curve was fitted from: "
+                  "[{'v' (m/s), 'f' (MPa), 'r' (rebound, optional)}, ...]")
+    valid_range_min_ms = models.FloatField(
+        null=True, blank=True, help_text="Calibrated range lower bound (m/s)")
+    valid_range_max_ms = models.FloatField(
+        null=True, blank=True, help_text="Calibrated range upper bound (m/s)")
+    r2_score = models.FloatField(
+        null=True, blank=True, help_text="Coefficient of determination (regression-derived curves)")
+    standard_error = models.FloatField(null=True, blank=True)
+    aic = models.FloatField(null=True, blank=True)
+    is_default = models.BooleanField(
+        default=False,
+        help_text="Exactly one platform-wide fallback curve should carry this")
+    provenance = models.JSONField(
+        default=dict, blank=True,
+        help_text="How the curve was established: source, reference, operator")
+    version = models.PositiveIntegerField(default=1)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='strength_curves_created')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', 'name']
+
+    def __str__(self):
+        scope = f" — {self.project.name}" if self.project_id else ' (platform)'
+        return f"{self.name}{scope} [{self.curve_type}]"
+
+    def apply(self, velocity_km_s, rebound_number=None):
+        """f_cu (MPa) for a velocity (km/s) — None outside the calibrated
+        range or when the curve's inputs are missing. Never extrapolates."""
+        from . import strength_curves
+        return strength_curves.apply_curve_params(
+            self.curve_type, self.formula_params, velocity_km_s,
+            rebound_number=rebound_number,
+            valid_range_ms=(None if self.valid_range_min_ms is None
+                            or self.valid_range_max_ms is None
+                            else [self.valid_range_min_ms, self.valid_range_max_ms]))
+
+    def snapshot(self, temperature_c=None):
+        """Formula provenance stored on every reading/test it produces."""
+        from . import strength_curves
+        return strength_curves.curve_snapshot(self, temperature_c=temperature_c)
+
+
+class ProjectCurveSetting(models.Model):
+    """
+    The Neural Link calibration setting for a project: which conversion
+    curve its strength computations use. Set BEFORE data injection (8 Sep
+    meeting: calibration is the first step of the PUNDIT workflow); when
+    unset, the project falls back to the platform default curve.
+    """
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE,
+                                   related_name='curve_setting')
+    active_curve = models.ForeignKey(StrengthCurve, on_delete=models.SET_NULL,
+                                     null=True, blank=True,
+                                     related_name='active_for_projects')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='curve_settings_updated')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        curve = self.active_curve.name if self.active_curve_id else '(platform default)'
+        return f"{self.project.name}: {curve}"
 
 
 # ======================================================================
@@ -591,8 +745,10 @@ class RebarTest(models.Model):
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='rebar_tests')
     device = models.ForeignKey('FieldDevice', on_delete=models.SET_NULL, null=True, blank=True, related_name='rebar_tests')
     
-    structural_element = models.CharField(max_length=200, blank=True, default='Column')
-    test_location = models.CharField(max_length=200, blank=True, default='Ground Floor')
+    # No assumed element or location: both are field records — blank until
+    # the operator enters what was actually scanned.
+    structural_element = models.CharField(max_length=200, blank=True, default='')
+    test_location = models.CharField(max_length=200, blank=True, default='')
     
     main_bar_mm = models.FloatField(null=True, blank=True, help_text="Estimated main bar diameter in mm")
     links_mm = models.FloatField(null=True, blank=True, help_text="Estimated link/stirrup diameter in mm")
@@ -603,7 +759,8 @@ class RebarTest(models.Model):
     recorded_at = models.DateTimeField(default=timezone.now)
 
     def __str__(self):
-        return f"{self.test_reference} - {self.structural_element} ({self.test_location})"
+        where = ' / '.join(filter(None, (self.structural_element, self.test_location)))
+        return f"{self.test_reference} - {where or 'element not recorded'}"
 
 
 # ======================================================================
@@ -761,18 +918,20 @@ class TrimbleConnection(models.Model):
     last_health_status = models.CharField(max_length=30, blank=True, default='')
     last_error = models.TextField(blank=True, default='')
 
-    # CDE Sync attributes from origin/main
+    # CDE Sync attributes. All of these describe REAL synchronisation state —
+    # they start blank/zero/unset until an actual sync reports them; nothing
+    # is fabricated for a connection that has never synced.
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='trimble_connections', null=True, blank=True)
     project_id_str = models.CharField(max_length=100, blank=True, null=True)
-    project_name = models.CharField(max_length=255, default='Project', blank=True)
-    trimble_project_id = models.CharField(max_length=100, default='TC-PRJ-99201', blank=True)
-    trimble_project_name = models.CharField(max_length=255, default='CDE Model Sync', blank=True)
-    region = models.CharField(max_length=50, default='EU-West', blank=True)
-    last_sync_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
-    synced_models_count = models.IntegerField(default=12)
-    synced_elements_count = models.IntegerField(default=1420)
-    bcf_topics_count = models.IntegerField(default=4)
-    webhook_active = models.BooleanField(default=True)
+    project_name = models.CharField(max_length=255, default='', blank=True)
+    trimble_project_id = models.CharField(max_length=100, default='', blank=True)
+    trimble_project_name = models.CharField(max_length=255, default='', blank=True)
+    region = models.CharField(max_length=50, default='', blank=True)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    synced_models_count = models.IntegerField(default=0)
+    synced_elements_count = models.IntegerField(default=0)
+    bcf_topics_count = models.IntegerField(default=0)
+    webhook_active = models.BooleanField(default=False)
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='trimble_connections')
@@ -945,12 +1104,14 @@ class BIMStructuralElement(models.Model):
     elevation_level_m = models.FloatField(null=True, blank=True)
     coordinates_3d = models.JSONField(default=dict, blank=True)
     bounding_box = models.JSONField(default=dict, blank=True)
-    designed_concrete_grade = models.CharField(max_length=50, default='C35/45')
+    designed_concrete_grade = models.CharField(max_length=50, blank=True, default='')
     concrete_grade_specified = models.CharField(max_length=50, blank=True, null=True)
-    designed_rebar_spacing_mm = models.IntegerField(default=150)
-    designed_cover_depth_mm = models.IntegerField(default=40)
-    gpr_clearance_status = models.CharField(max_length=50, default='VERIFIED')
-    pundit_clearance_status = models.CharField(max_length=50, default='VERIFIED')
+    designed_rebar_spacing_mm = models.IntegerField(null=True, blank=True)
+    designed_cover_depth_mm = models.IntegerField(null=True, blank=True)
+    # Clearances are not pre-granted: an element starts 'PENDING' until a
+    # real scan clears it (previously defaulted to 'VERIFIED').
+    gpr_clearance_status = models.CharField(max_length=50, blank=True, default='PENDING')
+    pundit_clearance_status = models.CharField(max_length=50, blank=True, default='PENDING')
     ai_anomaly_count = models.IntegerField(default=0)
     open_findings_count = models.IntegerField(default=0)
     last_inspected_at = models.DateTimeField(null=True, blank=True)
@@ -971,27 +1132,30 @@ class GPRScan(models.Model):
     structural_element_id_str = models.CharField(max_length=100, blank=True, null=True)
     structural_element_name = models.CharField(max_length=255, blank=True, null=True)
     structural_element_guid = models.CharField(max_length=100, blank=True, null=True)
-    grid_axis = models.CharField(max_length=100, default='Grid 4-C to 4-D')
-    antenna_frequency = models.CharField(max_length=50, default='2.0_GHZ')
-    device_name = models.CharField(max_length=255, default='Proceq GS8000 Subsurface GPR')
-    operator_name = models.CharField(max_length=255, default='Engr. K. Adeyemi (Lead Geophysicist)')
+    grid_axis = models.CharField(max_length=100, blank=True, default='')
+    antenna_frequency = models.CharField(max_length=50, blank=True, default='')
+    device_name = models.CharField(max_length=255, blank=True, default='')
+    # No fabricated operator attribution — blank until recorded.
+    operator_name = models.CharField(max_length=255, blank=True, default='')
     survey_date = models.DateField(default=timezone.localdate)
-    transect_length_m = models.FloatField(default=12.5)
-    max_penetration_depth_m = models.FloatField(default=0.8)
-    measured_rebar_spacing_mm = models.IntegerField(default=150)
-    specified_rebar_spacing_mm = models.IntegerField(default=150)
-    measured_cover_depth_mm = models.IntegerField(default=45)
+    transect_length_m = models.FloatField(null=True, blank=True)
+    max_penetration_depth_m = models.FloatField(null=True, blank=True)
+    measured_rebar_spacing_mm = models.IntegerField(null=True, blank=True)
+    specified_rebar_spacing_mm = models.IntegerField(null=True, blank=True)
+    measured_cover_depth_mm = models.IntegerField(null=True, blank=True)
     rebar_deficiency_detected = models.BooleanField(default=False)
     void_detected = models.BooleanField(default=False)
     delamination_detected = models.BooleanField(default=False)
     utility_strike_hazard = models.BooleanField(default=False)
-    dielectric_constant = models.FloatField(default=6.2)
-    dielectric_permittivity = models.FloatField(default=6.2)
-    radargram_image_url = models.TextField(default='https://res.cloudinary.com/depeqzb6z/image/upload/v1779868806/Make_it_look_like_an_202605192308_1_rdayse.png')
+    dielectric_constant = models.FloatField(null=True, blank=True)
+    dielectric_permittivity = models.FloatField(null=True, blank=True)
+    # Radargram imagery is uploaded evidence — never a hard-coded stock image.
+    radargram_image_url = models.TextField(blank=True, null=True)
     c_scan_heatmap_url = models.TextField(blank=True, null=True)
     raw_data_file_url = models.TextField(blank=True, null=True)
-    file_size = models.CharField(max_length=50, default='14.2 MB')
-    status = models.CharField(max_length=50, default='VERIFIED')
+    file_size = models.CharField(max_length=50, blank=True, default='')
+    # A scan is not 'VERIFIED' until someone actually verified it.
+    status = models.CharField(max_length=50, blank=True, default='RECORDED')
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1010,11 +1174,13 @@ class DigitalEyeFinding(models.Model):
     structural_element_guid = models.CharField(max_length=100, blank=True, null=True)
     gpr_scan_id = models.CharField(max_length=100, blank=True, null=True)
     pundit_test_id = models.CharField(max_length=100, blank=True, null=True)
-    taxonomy = models.CharField(max_length=100, default='REBAR_SPACING_DEFICIENCY')
+    taxonomy = models.CharField(max_length=100, blank=True, default='')
     title = models.CharField(max_length=255)
     description = models.TextField()
-    severity = models.CharField(max_length=50, default='HIGH')
-    confidence_score = models.FloatField(default=92.0)
+    # Honest defaults: severity must be chosen by whoever raises the finding,
+    # and a confidence score is only present when a real analysis produced it.
+    severity = models.CharField(max_length=50, blank=True, default='MEDIUM')
+    confidence_score = models.FloatField(null=True, blank=True)
     depth_mm = models.FloatField(null=True, blank=True)
     deviation_mm = models.FloatField(null=True, blank=True)
     gps_coordinates = models.JSONField(default=dict, blank=True)
@@ -1038,16 +1204,19 @@ class AIAnalysisRecord(models.Model):
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='digital_eye_ai_analyses', null=True, blank=True)
     project_id_str = models.CharField(max_length=100, blank=True, null=True)
     project_name = models.CharField(max_length=255, blank=True, null=True)
-    scan_reference = models.CharField(max_length=100, default='SCAN-AI-01')
-    model_version = models.CharField(max_length=100, default='Nexucon Structural-Vision v3.2 + GPR-Inversion')
-    analysis_type = models.CharField(max_length=50, default='MULTI_MODAL_FUSION')
+    scan_reference = models.CharField(max_length=100, blank=True, default='')
+    model_version = models.CharField(max_length=100, blank=True, default='')
+    analysis_type = models.CharField(max_length=50, blank=True, default='')
     analyzed_at = models.DateTimeField(default=timezone.now)
-    confidence_score = models.FloatField(default=96.4)
-    overall_health_score = models.FloatField(default=94.0)
-    total_elements_scanned = models.IntegerField(default=48)
-    anomalies_detected = models.IntegerField(default=2)
-    critical_defects_count = models.IntegerField(default=0)
-    compliance_check_passed = models.BooleanField(default=True)
+    # No pre-filled AI verdicts: every metric below is null until a real
+    # analysis computes it (previously defaulted to 96.4% confidence, a
+    # 94.0 health score, 48 elements scanned and 2 anomalies detected).
+    confidence_score = models.FloatField(null=True, blank=True)
+    overall_health_score = models.FloatField(null=True, blank=True)
+    total_elements_scanned = models.IntegerField(null=True, blank=True)
+    anomalies_detected = models.IntegerField(null=True, blank=True)
+    critical_defects_count = models.IntegerField(null=True, blank=True)
+    compliance_check_passed = models.BooleanField(null=True, blank=True)
     findings = models.JSONField(default=list, blank=True)
     thermal_metrics = models.JSONField(default=dict, blank=True)
     deviation_summary = models.JSONField(default=dict, blank=True)
@@ -1063,15 +1232,15 @@ class ProcessingQueueJob(models.Model):
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='processing_jobs', null=True, blank=True)
     project_id_str = models.CharField(max_length=100, blank=True, null=True)
     project_name = models.CharField(max_length=255, blank=True, null=True)
-    device_id = models.CharField(max_length=100, default='TER-S1-008')
-    source_type = models.CharField(max_length=50, default='GPR_RADAR_GS8000')
-    stage = models.CharField(max_length=50, default='COMPLETED')
-    progress_percentage = models.IntegerField(default=100)
-    node_type = models.CharField(max_length=50, default='CLOUD_GPU_CLUSTER')
+    device_id = models.CharField(max_length=100, blank=True, default='')
+    source_type = models.CharField(max_length=50, blank=True, default='')
+    stage = models.CharField(max_length=50, blank=True, default='QUEUED')
+    progress_percentage = models.IntegerField(default=0)
+    node_type = models.CharField(max_length=50, blank=True, default='')
     started_at = models.DateTimeField(default=timezone.now)
     completed_at = models.DateTimeField(null=True, blank=True)
-    file_count = models.IntegerField(default=12)
-    total_bytes = models.CharField(max_length=50, default='1.4 GB')
+    file_count = models.IntegerField(null=True, blank=True)
+    total_bytes = models.CharField(max_length=50, blank=True, default='')
     error_message = models.TextField(blank=True, null=True)
     logs = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1089,13 +1258,15 @@ class EvidenceSpatialPoint(models.Model):
     name = models.CharField(max_length=255)
     title = models.CharField(max_length=255, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
-    layer_type = models.CharField(max_length=50, default='GNSS_RTK_BEACON')
-    lat = models.FloatField(default=6.4281)
-    lng = models.FloatField(default=3.4219)
-    elevation_m = models.FloatField(default=4.2)
-    accuracy_mm = models.FloatField(default=1.8)
-    deviation_mm = models.FloatField(default=0.0)
-    severity = models.CharField(max_length=50, default='NORMAL')
+    layer_type = models.CharField(max_length=50, blank=True, default='')
+    # No pre-seeded Lagos coordinates: a spatial point with no recorded
+    # position is not a real survey point. lat/lng stay null until measured.
+    lat = models.FloatField(null=True, blank=True)
+    lng = models.FloatField(null=True, blank=True)
+    elevation_m = models.FloatField(null=True, blank=True)
+    accuracy_mm = models.FloatField(null=True, blank=True)
+    deviation_mm = models.FloatField(null=True, blank=True)
+    severity = models.CharField(max_length=50, blank=True, default='')
     structural_element_name = models.CharField(max_length=255, blank=True, null=True)
     timestamp = models.DateTimeField(default=timezone.now)
 
@@ -1107,13 +1278,13 @@ class DeviceReportRecord(models.Model):
     id = models.CharField(max_length=100, primary_key=True, default=uuid.uuid4)
     report_reference = models.CharField(max_length=100, unique=True)
     title = models.CharField(max_length=255)
-    device_type = models.CharField(max_length=50, default='PUNDIT')
+    device_type = models.CharField(max_length=50, blank=True, default='')
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='device_reports', null=True, blank=True)
     project_id_str = models.CharField(max_length=100, blank=True, null=True)
-    project_name = models.CharField(max_length=255, default='Project')
+    project_name = models.CharField(max_length=255, blank=True, default='')
     element_id = models.CharField(max_length=100, blank=True, null=True)
     element_name = models.CharField(max_length=255, blank=True, null=True)
-    report_type = models.CharField(max_length=100, default='Ultrasonic Pulse Velocity (UPV) QA/QC Report')
+    report_type = models.CharField(max_length=100, blank=True, default='')
     standards_cited = models.JSONField(default=list, blank=True)
     # Honest defaults: a report is not compliant until something assessed it,
     # and no engineer has certified it until a real name is recorded. These

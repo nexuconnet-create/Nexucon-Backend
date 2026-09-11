@@ -132,6 +132,47 @@ class Project(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ---- Cold storage (8 Sep 2026 meeting: projects inactive for 3-6
+    # months move to cold storage). A cold project keeps EVERY record —
+    # statutory data is never deleted or hidden from a direct lookup; it
+    # is only excluded from the default hot browsing lists until restored.
+    cold_storage = models.BooleanField(
+        default=False, db_index=True,
+        help_text='Project moved to cold storage after a prolonged period '
+                  'without activity (all records remain intact and directly '
+                  'accessible)')
+    cold_stored_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the project was moved to cold storage')
+
+    def last_activity_at(self):
+        """The most recent real activity on this project: its own update
+        time or the newest record captured against it (tests, surveys,
+        findings, analyses). Used by the cold-storage policy — never
+        guessed."""
+        from django.utils import timezone
+        candidates = [self.updated_at, self.created_at]
+        # Each tuple: (related_name, timestamp_field).
+        for rel, ts in (
+            ('pundit_tests', 'updated_at'),
+            ('gpr_surveys', 'updated_at'),
+            ('gnss_surveys', 'updated_at'),
+            ('digital_eye_findings', 'created_at'),
+            ('digital_eye_ai_analyses', 'analyzed_at'),
+            ('milestones', 'created_at'),
+            ('project_documents', 'uploaded_at'),
+        ):
+            try:
+                latest = getattr(self, rel).order_by(f'-{ts}').values_list(
+                    ts, flat=True).first()
+            except AttributeError:
+                # Related model lacks that accessor — skip, never crash.
+                continue
+            if latest is not None:
+                candidates.append(latest)
+        real = [c for c in candidates if c is not None]
+        return max(real) if real else timezone.now()
+
     def __str__(self):
         return f"{self.name} ({self.reference_number})"
 

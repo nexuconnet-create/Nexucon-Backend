@@ -194,7 +194,8 @@ def parse_readings_workbook(file_obj):
         return [], errors
     if not parsed_rows:
         return [], [{'row': 0, 'message': 'No reading rows were found below the header — '
-                                          'the READINGS sheet has no data.'}]
+                                          'type your readings into the READINGS sheet (the '
+                                          'EXAMPLE sheet is never imported).'}]
 
     # ---- per-type measurement completeness (row-level, before grouping) ----
     for row in parsed_rows:
@@ -292,14 +293,17 @@ def parse_readings_workbook(file_obj):
 
 
 def build_template_bytes(sample_elements=None):
-    """The downloadable .xlsx template: a READINGS sheet pre-filled with
-    clearly-labelled sample rows (so the download can be uploaded as-is to try
-    the import flow), plus a HOW TO FILL sheet with the column instructions.
+    """The downloadable .xlsx template. The READINGS sheet ships EMPTY
+    (headers only) — it is the only sheet the importer reads, so example
+    data can never enter the registry. A separate EXAMPLE sheet shows
+    filled rows for all three test types (clearly labelled as a format
+    illustration, never imported), plus a HOW TO FILL sheet with the
+    column instructions.
 
     ``sample_elements`` — optional ``(pulse_name, crack_name, surface_name)``
     of REAL elements from the project's imported BIM model. When given, the
-    sample rows reference those names so the try-the-flow import comes out
-    linked to the model; the fallback names are generic and stay unlinked."""
+    EXAMPLE rows reference those names so the illustrations point at actual
+    members; the fallback names are generic."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = 'READINGS'
@@ -312,12 +316,12 @@ def build_template_bytes(sample_elements=None):
     sheet.freeze_panes = 'A2'
 
     pulse_name, crack_name, surface_name = sample_elements or ('COL-A1', 'BEAM-B2', 'WALL-W1')
-    sample_rows = [
-        # Sample data — upload as-is to try the flow, then delete these rows
-        # and type real readings. Pulse velocity: consecutive rows -> ONE test.
+    example_rows = [
+        # Format illustration only — this sheet is never imported. Pulse
+        # velocity: consecutive rows -> ONE test with points A, B, C.
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'A', 120, 30.1, None, None,
          25, 'Direct', 'Grid B/4', 'Sunny',
-         'SAMPLE ROW — replace with real readings'],
+         'EXAMPLE ONLY — copy the shape into READINGS, not the numbers'],
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'B', 120, 29.8, None, None,
          25, 'Direct', 'Grid B/4', 'Sunny', None],
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'C', 120, 30.3, None, None,
@@ -333,10 +337,21 @@ def build_template_bytes(sample_elements=None):
         [surface_name, 'Ground Floor', 'Surface Quality', 'B', None, None, None,
          'Minor voids near base', None, None, 'East elevation', 'Sunny', None],
     ]
-    for row_number, row in enumerate(sample_rows, start=2):
+
+    example = workbook.create_sheet('EXAMPLE')
+    for col, header in enumerate(TEMPLATE_COLUMNS, start=1):
+        cell = example.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        example.column_dimensions[get_column_letter(col)].width = COLUMN_WIDTHS[header]
+    for row_number, row in enumerate(example_rows, start=2):
         for col, value in enumerate(row, start=1):
             if value is not None:
-                sheet.cell(row=row_number, column=col, value=value)
+                example.cell(row=row_number, column=col, value=value)
+    example.cell(
+        row=len(example_rows) + 3, column=1,
+        value='EXAMPLE ONLY — this sheet is never imported. Only the READINGS '
+              'sheet is read, so these rows can never reach the registry. '
+              'Type your real readings into READINGS.')
 
     instructions = workbook.create_sheet('HOW TO FILL')
     lines = [
@@ -346,9 +361,10 @@ def build_template_bytes(sample_elements=None):
         ('Collection page (Batch Import tab) against the project — every value is', False),
         ('calculated by the platform; nothing is computed in the sheet.', False),
         ('', False),
-        ('The READINGS sheet ships with SAMPLE ROWS so you can try the import', False),
-        ('straight away — upload the file as-is once to see the flow, then DELETE', False),
-        ('the sample rows and type your real readings before a genuine import.', False),
+        ('The EXAMPLE sheet shows filled rows for all three test types — it is a', False),
+        ('format illustration ONLY and is NEVER imported. Copy its shape into', False),
+        ('the READINGS sheet, never its numbers: only READINGS is read, so', False),
+        ('example data cannot reach the registry.', False),
         ('', False),
         ('STRUCTURAL ELEMENT — the element being tested (reference the target element', False),
         ('   from the project\'s BIM model, e.g. Column C-102 or Floor:200THK RC SLAB).', False),

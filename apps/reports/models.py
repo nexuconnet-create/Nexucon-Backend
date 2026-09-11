@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 import uuid
 from apps.scans.models import ScanSession
 
@@ -119,3 +120,115 @@ class ArchivedReport(models.Model):
 
     def __str__(self):
         return f"{self.report_reference} [{self.report_kind}] ({self.project_id})"
+
+
+class ReportSectionOverride(models.Model):
+    """
+    Report CMS (8 Sep meeting H7 / 4 Sep C4): an editable override for
+    one boilerplate prose section of the NDT report. ``project`` NULL
+    means the override applies platform-wide (every project without
+    its own override); a project FK scopes it to that project alone.
+    Valid keys live in ``apps.reports.report_cms.CMS_SECTIONS`` — the
+    registry, not this table, holds the defaults.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
+                                null=True, blank=True,
+                                related_name='report_section_overrides')
+    section_key = models.CharField(max_length=60)
+    body = models.TextField()
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL,
+                                   null=True, blank=True,
+                                   related_name='report_section_overrides')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['section_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['section_key'],
+                condition=Q(project__isnull=True),
+                name='uniq_platform_report_section_override'),
+            models.UniqueConstraint(
+                fields=['project', 'section_key'],
+                name='uniq_project_report_section_override'),
+        ]
+
+    def __str__(self):
+        scope = f'project {self.project_id}' if self.project_id else 'platform'
+        return f'{self.section_key} ({scope})'
+
+
+class ReportCMSPassword(models.Model):
+    """
+    Singleton credential guarding report-CMS edits (the password
+    protection the 8 Sep client review asked for). Only the hash is
+    stored — Django's make_password/check_password, same scheme as
+    user passwords. One row at most; the first row set wins until it
+    is changed through the API.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    password_hash = models.CharField(max_length=128)
+    set_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                               on_delete=models.SET_NULL,
+                               null=True, blank=True,
+                               related_name='report_cms_passwords')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return 'Report CMS password'
+
+
+class ReportBranding(models.Model):
+    """
+    Optional logo / watermark branding for a project's statutory NDT
+    report (REFINED EXECUTIVE SUMMARY §2.3). Only real uploaded images —
+    nothing is seeded. One row per project at most; no row means the
+    report renders with the platform's standard laboratory layout
+    (the Lagos State coat of arms and the LSMTL watermark), exactly as
+    the reference template requires.
+    """
+    LOGO_POSITIONS = [
+        ('top-left', 'Top left'),
+        ('top-right', 'Top right'),
+        ('bottom-left', 'Bottom left'),
+        ('bottom-right', 'Bottom right'),
+    ]
+    SIZES = [('small', 'Small'), ('medium', 'Medium'), ('large', 'Large')]
+    SIZE_WIDTHS_MM = {'small': 20.0, 'medium': 30.0, 'large': 42.0}
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE,
+                                   related_name='report_branding')
+    logo = models.FileField(
+        upload_to='reports/branding/%Y/%m/', blank=True, default='',
+        help_text='Client/consultant logo stamped on the report (PNG with '
+                  'transparency recommended)')
+    logo_position = models.CharField(max_length=20, choices=LOGO_POSITIONS,
+                                     default='top-right')
+    logo_size = models.CharField(max_length=20, choices=SIZES,
+                                 default='medium')
+    watermark = models.FileField(
+        upload_to='reports/branding/%Y/%m/', blank=True, default='',
+        help_text='Optional additional watermark image centred behind the '
+                  'page body at the chosen opacity')
+    watermark_opacity_pct = models.PositiveIntegerField(
+        default=50,
+        help_text='Watermark opacity 0-100 (applied at render time)')
+    watermark_position = models.CharField(max_length=20,
+                                          choices=[('center', 'Centre'),
+                                                   ('top-left', 'Top left'),
+                                                   ('top-right', 'Top right')],
+                                          default='center')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL,
+                                   null=True, blank=True,
+                                   related_name='report_branding_edits')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Report branding — {self.project_id}'

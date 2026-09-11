@@ -4,8 +4,11 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ArchivedReportDownloadView, ArchivedReportListView,
     DownloadReportView, GenerateReportView, InspectionReportView,
-    NCRReportView, NDTReportView, ProjectIntelligenceReportView,
-    QualityReportListView, ReportTemplateViewSet,
+    NCRReportView, NDTReportPreviewView, NDTReportView, NDTWordExportView,
+    ProjectIntelligenceReportView, QualityReportListView,
+    ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
+    ReportCMSSectionsView, ReportMapView, ReportTemplateViewSet,
+    ReportVerifyView,
 )
 
 router = DefaultRouter()
@@ -21,6 +24,8 @@ urlpatterns = router.urls + [
          ProjectIntelligenceReportView.as_view(), name='project-intelligence-report'),
     path('reports/projects/<uuid:project_id>/ndt-report/',
          NDTReportView.as_view(), name='project-ndt-report'),
+    path('reports/projects/<uuid:project_id>/ndt-report-word/',
+         NDTWordExportView.as_view(), name='project-ndt-report-word'),
     path('reports/projects/<uuid:project_id>/archived-reports/',
          ArchivedReportListView.as_view(), name='project-archived-reports'),
     path('reports/archived-reports/<uuid:report_id>/download/',
@@ -29,4 +34,25 @@ urlpatterns = router.urls + [
          InspectionReportView.as_view(), name='inspection-report'),
     path('reports/ncrs/<uuid:ncr_id>/report/',
          NCRReportView.as_view(), name='ncr-report'),
+    # Report CMS (8 Sep meeting H7): password-protected editable template
+    # sections + Word export. The app's URLs mount at the API root, so the
+    # 'reports/' prefix keeps every reports endpoint under
+    # /api/v1/reports/.
+    path('reports/cms/sections/', ReportCMSSectionsView.as_view(),
+         name='report-cms-sections'),
+    path('reports/cms/sections/<str:key>/', ReportCMSSectionView.as_view(),
+         name='report-cms-section'),
+    path('reports/cms/password/', ReportCMSPasswordView.as_view(),
+         name='report-cms-password'),
+    # REFINED EXECUTIVE SUMMARY (11 Sep 2026): public verification of an
+    # archived dossier (the cover QR resolves here), preview-before-generate,
+    # per-project logo/watermark branding, and interactive-map data.
+    path('reports/verify/', ReportVerifyView.as_view(),
+         name='report-verify'),
+    path('reports/projects/<uuid:project_id>/ndt-report-preview/',
+         NDTReportPreviewView.as_view(), name='project-ndt-report-preview'),
+    path('reports/projects/<uuid:project_id>/branding/',
+         ReportBrandingView.as_view(), name='project-report-branding'),
+    path('reports/projects/<uuid:project_id>/map/',
+         ReportMapView.as_view(), name='project-report-map'),
 ]

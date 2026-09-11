@@ -19,3 +19,6 @@ media/
 test video.png
 
 staticfiles/
+
+# Client meeting documents (shared privately - never commit to the public repo)
+*.docx

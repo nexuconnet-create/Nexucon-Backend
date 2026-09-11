@@ -8,8 +8,8 @@ from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, DeviceReportRecord,
     DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan,
     GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream,
-    PUNDITReading, PUNDITTest, ProcessingQueueJob, SensorDataFile,
-    TrimbleConnection, TrimbleProject,
+    ProjectCurveSetting, PUNDITReading, PUNDITTest, ProcessingQueueJob,
+    SensorDataFile, StrengthCurve, TrimbleConnection, TrimbleProject,
 )
 
 
@@ -133,9 +133,11 @@ class PUNDITReadingSerializer(serializers.ModelSerializer):
         model = PUNDITReading
         fields = ['id', 'point_label', 'path_length_mm', 'transit_time_us',
                   'uncracked_transit_time_us', 'surface_condition',
-                  'velocity_km_s', 'ecs_mpa', 'crack_depth_mm',
+                  'rebound_number', 'velocity_km_s', 'ecs_mpa',
+                  'strength_curve_snapshot', 'crack_depth_mm',
                   'notes', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'velocity_km_s', 'ecs_mpa', 'crack_depth_mm',
+        read_only_fields = ['id', 'velocity_km_s', 'ecs_mpa',
+                            'strength_curve_snapshot', 'crack_depth_mm',
                             'created_at', 'updated_at']
         extra_kwargs = {
             # Which measurement a point carries depends on the parent test's
@@ -151,6 +153,11 @@ class PUNDITReadingSerializer(serializers.ModelSerializer):
     def validate_uncracked_transit_time_us(self, value):
         if value is not None and value <= 0:
             raise serializers.ValidationError('Uncracked transit time is a field measurement — it must be a positive value.')
+        return value
+
+    def validate_rebound_number(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('Rebound number must be positive when provided.')
         return value
 
     def validate_path_length_mm(self, value):
@@ -177,15 +184,20 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     def get_estimated_compressive_strength_mpa(self, obj):
         """
-        Estimated compressive strength (E.C.S) from pulse velocity, using the
-        documented calibration curve that the official NDT report renders
-        (apps.reports.ndt_reports) — single source of truth. Multi-reading
-        tests carry the element-mean E.C.S persisted at write time.
+        Estimated compressive strength (E.C.S) from pulse velocity through
+        the project's active Nexucon Link curve (strength_curves module —
+        the single f_cu path). Multi-reading tests carry the element-mean
+        E.C.S persisted at write time; legacy rows without one are computed
+        on read through the same active-curve path.
         """
         if obj.estimated_compressive_strength_mpa is not None:
             return obj.estimated_compressive_strength_mpa
-        from apps.reports.ndt_reports import estimated_compressive_strength
-        return estimated_compressive_strength(obj.velocity_km_s)
+        from apps.digital_eye.strength_curves import apply_active_curve
+        strength, _snapshot = apply_active_curve(
+            obj.project, obj.velocity_km_s,
+            rebound_number=obj.rebound_number,
+            temperature_c=obj.surface_temperature_c)
+        return strength
 
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
 
@@ -201,16 +213,18 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'test_location',
             'path_length_mm', 'pulse_time_us', 'transit_time_us',
             'crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us',
-            'surface_temperature_c', 'surface_condition', 'latitude', 'longitude',
+            'surface_temperature_c', 'surface_condition', 'rebound_number',
+            'latitude', 'longitude',
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
+            'strength_curve_snapshot',
             'crack_depth_mm', 'estimated_crack_depth_mm', 'waveform_samples',
             'operator', 'operator_name', 'tested_at', 'test_date', 'status', 'notes',
             'file_ids', 'files', 'created_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'test_reference', 'velocity_km_s', 'quality_grade',
-                            'crack_depth_mm', 'operator', 'created_by',
-                            'created_at', 'updated_at']
+                            'strength_curve_snapshot', 'crack_depth_mm', 'operator',
+                            'created_by', 'created_at', 'updated_at']
 
     # ------------------------------------------------------- multi-reading
     @staticmethod
@@ -250,7 +264,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         and mean E.C.S; for crack depth the element-mean crack depth. The
         operator never enters any of these — they are computed."""
         from apps.digital_eye.adapters import PUNDITAdapter
-        from apps.reports.ndt_reports import estimated_compressive_strength
+        from apps.digital_eye.strength_curves import apply_active_curve
         test.readings.all().delete()
         PUNDITReading.objects.bulk_create(
             [PUNDITReading(test=test, **data) for data in readings_data]
@@ -259,12 +273,20 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         for reading in test.readings.all():
             reading.compute()
             reading.save(update_fields=['velocity_km_s', 'ecs_mpa',
-                                        'crack_depth_mm', 'updated_at'])
+                                        'strength_curve_snapshot', 'crack_depth_mm',
+                                        'updated_at'])
         mean_v = test.element_mean_velocity_km_s()
         test.velocity_km_s = mean_v
         test.pulse_velocity_ms = round(mean_v * 1000.0, 1) if mean_v is not None else None
-        test.estimated_compressive_strength_mpa = (
-            estimated_compressive_strength(mean_v) if mean_v is not None else None)
+        # The element verdict's E.C.S flows through the project's active
+        # Nexucon Link curve, with the curve provenance snapshotted (8 Sep
+        # meeting — f_cu is the reason the Neural Link exists).
+        mean_ecs, curve_snap = apply_active_curve(
+            test.project, mean_v,
+            rebound_number=test.rebound_number,
+            temperature_c=test.surface_temperature_c)
+        test.estimated_compressive_strength_mpa = mean_ecs
+        test.strength_curve_snapshot = curve_snap
         test.quality_grade = PUNDITAdapter.grade_quality(mean_v)
         if test.test_type == 'crack_depth':
             mean_d = test.element_mean_crack_depth_mm()
@@ -550,3 +572,74 @@ class DeviceReportRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = DeviceReportRecord
         fields = '__all__'
+
+
+class StrengthCurveSerializer(serializers.ModelSerializer):
+    """
+    Nexucon Link calibration curve (8 Sep meeting). Formula parameters are
+    stored in the m/s velocity domain; the engine converts once on apply.
+    """
+    project = ScopedProjectField(required=False, allow_null=True)
+    curve_type_display = serializers.CharField(
+        source='get_curve_type_display', read_only=True)
+    formula_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StrengthCurve
+        fields = [
+            'id', 'name', 'curve_type', 'curve_type_display', 'standard',
+            'project', 'velocity_unit', 'strength_unit', 'formula_params',
+            'formula_display', 'data_points', 'valid_range_min_ms',
+            'valid_range_max_ms', 'r2_score', 'standard_error', 'aic',
+            'is_default', 'provenance', 'version', 'created_by',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'velocity_unit', 'strength_unit',
+                            'r2_score', 'standard_error', 'aic', 'version',
+                            'created_by', 'created_at', 'updated_at']
+
+    def get_formula_display(self, obj):
+        from .strength_curves import formula_display
+        try:
+            return formula_display(obj.curve_type, obj.formula_params or {})
+        except Exception:
+            return None
+
+    def validate_curve_type(self, value):
+        from .strength_curves import CURVE_TYPES
+        if value not in CURVE_TYPES:
+            raise serializers.ValidationError(
+                f"Unknown curve type. Must be one of: {', '.join(CURVE_TYPES)}.")
+        return value
+
+    def validate(self, attrs):
+        curve_type = attrs.get('curve_type') or (
+            self.instance.curve_type if self.instance else None)
+        params = attrs.get('formula_params') or (
+            self.instance.formula_params if self.instance else None)
+        if not params:
+            raise serializers.ValidationError(
+                {'formula_params': 'Curve parameters are required.'})
+        # The engine is the single validator of every parameter set: it
+        # rejects the wrong keys per type before anything is persisted.
+        from .strength_curves import validate_curve_params
+        try:
+            validate_curve_params(curve_type, params)
+        except ValueError as exc:
+            raise serializers.ValidationError({'formula_params': str(exc)})
+
+        # A curve may only be marked default by the platform (Directors
+        # approve one fallback); anything else stays a project curve.
+        if attrs.get('is_default'):
+            attrs['is_default'] = False
+        return attrs
+
+
+class ProjectCurveSettingSerializer(serializers.ModelSerializer):
+    active_curve = StrengthCurveSerializer(read_only=True)
+    project = ScopedProjectField()
+
+    class Meta:
+        model = ProjectCurveSetting
+        fields = ['id', 'project', 'active_curve', 'updated_by', 'updated_at']
+        read_only_fields = ['id', 'updated_by', 'updated_at']

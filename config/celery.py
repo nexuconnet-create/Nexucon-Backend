@@ -42,4 +42,10 @@ app.conf.beat_schedule = {
         'task': 'evidence.detect_recurring_anomalies',
         'schedule': crontab(minute=0, hour=6),  # daily 06:00 UTC
     },
+    # Cold storage (8 Sep 2026 meeting): projects inactive for 6 months
+    # drop out of the hot browse lists — records are never deleted.
+    'projects-cold-store-inactive': {
+        'task': 'projects.cold_store_inactive_projects',
+        'schedule': crontab(minute=17, hour=3, day_of_month=1),  # monthly
+    },
 }

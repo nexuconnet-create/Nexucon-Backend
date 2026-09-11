@@ -28,7 +28,8 @@ from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMModelGeometry, BIMStructuralElement, DeviceReportRecord,
     DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan,
     GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream,
-    PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile, TrimbleConnection,
+    ProjectCurveSetting, PUNDITTest, PunditTest, ProcessingQueueJob,
+    SensorDataFile, StrengthCurve, TrimbleConnection,
     TrimbleProject,
 )
 from .serializers import (
@@ -38,7 +39,7 @@ from .serializers import (
     GnssBenchmarkSerializer, GnssBoundaryPointSerializer, GnssSurveySerializer,
     LiveStreamSerializer, PUNDITTestSerializer, PunditTestSerializer,
     ProcessingQueueJobSerializer, SensorDataFileSerializer,
-    TrimbleConnectionSerializer, TrimbleProjectSerializer,
+    StrengthCurveSerializer, TrimbleConnectionSerializer, TrimbleProjectSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -425,11 +426,12 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='import_template')
     def import_template(self, request):
-        """The .xlsx template for the batch upload (A2), pre-filled with
-        clearly-labelled sample rows. Optional ``?project=<id>`` scopes the
-        samples to that project's imported BIM model: the sample element names
-        become REAL element names from the model, so a try-the-flow upload of
-        the untouched template comes out linked to actual members."""
+        """The .xlsx template for the batch upload (A2): an EMPTY READINGS
+        sheet (the only sheet the importer reads, so example data can never
+        enter the registry) plus an EXAMPLE sheet of filled rows for all
+        three test types. Optional ``?project=<id>`` points the EXAMPLE rows
+        at that project's imported BIM members so the illustrations
+        reference REAL element names from the model."""
         from django.http import HttpResponse
         from .excel_import import build_template_response_bytes
 
@@ -1189,10 +1191,13 @@ class PunditTestViewSet(viewsets.ReadOnlyModelViewSet):
         qs = _scoped_legacy_queryset(super().get_queryset(), self.request.user)
         project = self.request.query_params.get('project') or self.request.query_params.get('project_id')
         element_id = self.request.query_params.get('element_id') or self.request.query_params.get('structural_element_id')
+        element_name = self.request.query_params.get('element_name')
         if project:
             qs = qs.filter(Q(project__id=project) | Q(project_id_str=project) | Q(project_name__icontains=project))
         if element_id:
             qs = qs.filter(Q(structural_element_id_str=element_id) | Q(structural_element__icontains=element_id))
+        if element_name:
+            qs = qs.filter(structural_element__icontains=element_name)
         return qs
 
     def list(self, request, *args, **kwargs):
@@ -1359,6 +1364,275 @@ class DeviceReportViewSet(viewsets.ModelViewSet):
             data=serializer.data,
             status_code=status.HTTP_201_CREATED
         )
+
+
+# ======================================================================
+# Nexucon Link — calibration curves (8 Sep 2026 review meeting)
+# ======================================================================
+
+class StrengthCurveViewSet(viewsets.ModelViewSet):
+    """
+    Nexucon Link calibration curves: the project-specific relationship
+    between pulse velocity (m/s), optional rebound number and compressive
+    strength (f_cu, MPa). The project's active curve replaces the fixed
+    linear f_cu formula in every strength computation.
+
+    Reads are authenticated and scope-limited (platform default curve plus
+    the caller's scoped projects' curves); create/update/delete and curve
+    activation are Director-only, audited actions.
+    """
+    serializer_class = StrengthCurveSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [SearchFilter]
+    search_fields = ['name', 'standard']
+
+    WRITE_ACTIONS = ('create', 'update', 'partial_update', 'destroy',
+                     'activate')
+
+    def get_permissions(self):
+        if self.action in self.WRITE_ACTIONS:
+            return [IsDirector()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        qs = StrengthCurve.objects.filter(
+            Q(project__isnull=True)
+            | Q(project__in=scoped_projects(self.request.user))
+        ).select_related('project', 'created_by')
+        params = self.request.query_params
+        project = params.get('project')
+        if project:
+            allowed = scoped_projects(self.request.user).filter(pk=project)
+            # ?project= narrows to that project's curves + the platform
+            # default (which remains selectable as its active curve).
+            qs = qs.filter(Q(project__in=allowed) | Q(project__isnull=True))
+        curve_type = params.get('curve_type')
+        if curve_type:
+            qs = qs.filter(curve_type=curve_type)
+        return qs
+
+    def perform_create(self, serializer):
+        curve = serializer.save(created_by=self.request.user)
+        _record_audit(self.request.user, 'digital_eye.strength_curve.create',
+                      'StrengthCurve', curve.id,
+                      {'name': curve.name, 'curve_type': curve.curve_type,
+                       'project': str(curve.project_id) if curve.project_id else None})
+
+    def perform_update(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+        if serializer.instance.is_default:
+            raise PermissionDenied(
+                'The platform default curve cannot be edited — it is the '
+                'documented laboratory calibration every project falls back '
+                'to. Create a new project curve instead.')
+        curve = serializer.save(version=serializer.instance.version + 1)
+        _record_audit(self.request.user, 'digital_eye.strength_curve.update',
+                      'StrengthCurve', curve.id,
+                      {'name': curve.name, 'version': curve.version})
+
+    def perform_destroy(self, instance):
+        from rest_framework.exceptions import PermissionDenied
+        if instance.is_default:
+            raise PermissionDenied(
+                'The platform default curve cannot be deleted.')
+        _record_audit(self.request.user, 'digital_eye.strength_curve.delete',
+                      'StrengthCurve', instance.id,
+                      {'name': instance.name, 'curve_type': instance.curve_type})
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def activate(self, request, pk=None):
+        """
+        Set a curve as a project's active calibration. Body: {"project": id}.
+        Every later E.C.S computation on that project flows through this
+        curve (readings already recorded keep the snapshot of the curve that
+        produced them — provenance is immutable per record).
+        """
+        curve = self.get_object()
+        project = scoped_projects(request.user).filter(
+            pk=request.data.get('project')).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+        setting.active_curve = curve
+        setting.updated_by = request.user
+        setting.save(update_fields=['active_curve', 'updated_by', 'updated_at'])
+        _record_audit(request.user, 'digital_eye.strength_curve.activate',
+                      'Project', project.id,
+                      {'curve': curve.name, 'curve_id': str(curve.id),
+                       'curve_type': curve.curve_type})
+        return Response({
+            'project': str(project.id),
+            'active_curve': curve.name,
+            'curve_snapshot': curve.snapshot(),
+        })
+
+    @action(detail=False, methods=['get', 'post'], url_path='active-curve')
+    def active_curve(self, request):
+        """
+        The curve a project's strength computations currently flow through
+        (project setting -> platform default -> built-in fallback), with its
+        snapshot. Query/body: project id (required).
+        """
+        project_id = (request.query_params.get('project')
+                      or request.data.get('project'))
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from .strength_curves import builtin_curve_snapshot, resolve_active_curve
+        curve = resolve_active_curve(project)
+        return Response({
+            'project': str(project.id),
+            'source': ('project_setting' if curve is not None and curve.project_id
+                       else ('platform_default' if curve is not None
+                             else 'builtin_fallback')),
+            'curve': StrengthCurveSerializer(curve).data if curve else None,
+            'curve_snapshot': curve.snapshot() if curve is not None
+            else builtin_curve_snapshot(),
+        })
+
+    @action(detail=False, methods=['post'])
+    def calibrate(self, request):
+        """
+        Run the regression engine over REAL calibration pairs (core/cube
+        tests vs field UPV). Body: {"data_points": [{"v": m/s, "f": MPa,
+        "r": rebound (optional)}, ...]}. Nothing is persisted — the response
+        carries every fittable curve type with its parameters, R2, standard
+        error and AIC so the Director can create a StrengthCurve from the
+        best fit.
+        """
+        points = request.data.get('data_points')
+        if not isinstance(points, list) or len(points) < 2:
+            return Response(
+                {'detail': 'data_points must be a list of at least 2 '
+                           "calibration pairs: [{'v': <m/s>, 'f': <MPa>}, ...]."},
+                status=status.HTTP_400_BAD_REQUEST)
+        from .strength_curves import run_regression
+        return Response(run_regression(points))
+
+    @action(detail=False, methods=['post'], url_path='upload-csv')
+    def upload_csv(self, request):
+        """
+        Parse calibration points from an uploaded CSV (Nexucon Link spec).
+        Format: v (m/s), f (MPa), [r (rebound number)].
+        """
+        import csv
+        uploaded = request.FILES.get('file')
+        if not uploaded:
+            return Response({'detail': 'A "file" upload is required (.csv).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            content = uploaded.read().decode('utf-8').splitlines()
+            reader = csv.DictReader(content)
+            data_points = []
+            for row in reader:
+                # normalize keys
+                row_lower = {k.strip().lower(): v for k, v in row.items() if k}
+                try:
+                    v = float(row_lower.get('v') or row_lower.get('velocity') or 0)
+                    f = float(row_lower.get('f') or row_lower.get('strength') or 0)
+                    if not v or not f:
+                        continue
+                    pt = {'v': v, 'f': f}
+                    r_raw = row_lower.get('r') or row_lower.get('rebound')
+                    if r_raw:
+                        pt['r'] = float(r_raw)
+                    data_points.append(pt)
+                except ValueError:
+                    continue
+            if len(data_points) < 2:
+                return Response(
+                    {'detail': 'The CSV must contain at least 2 valid rows with v (m/s) and f (MPa).'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            return Response({'data_points': data_points})
+        except Exception as e:
+            return Response({'detail': f'Error parsing CSV: {str(e)}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'])
+    def preview(self, request):
+        """
+        What the active curve yields for a single measurement BEFORE it is
+        recorded. Body: {"project": id, "path_length_mm": n,
+        "transit_time_us": n, "temperature_c": optional, "rebound_number":
+        optional}. Returns the measured velocity (m/s), the temperature-
+        corrected velocity where the ACI 228.2R band applies, the f_cu, and
+        the curve snapshot (formula + provenance) behind it.
+        """
+        data = request.data
+        try:
+            path_length_mm = float(data.get('path_length_mm'))
+            transit_time_us = float(data.get('transit_time_us'))
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'Numeric path_length_mm and transit_time_us are required.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if path_length_mm <= 0 or transit_time_us <= 0:
+            return Response(
+                {'detail': 'path_length_mm and transit_time_us must be positive.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        temperature_c = None
+        if data.get('temperature_c') is not None:
+            try:
+                temperature_c = float(data.get('temperature_c'))
+            except (TypeError, ValueError):
+                return Response({'detail': 'temperature_c must be a number.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        rebound_number = None
+        if data.get('rebound_number') is not None:
+            try:
+                rebound_number = float(data.get('rebound_number'))
+            except (TypeError, ValueError):
+                return Response({'detail': 'rebound_number must be a number.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        project = None
+        if data.get('project'):
+            project = scoped_projects(request.user).filter(
+                pk=data.get('project')).first()
+            if not project:
+                return Response({'detail': 'Project not found in your scope.'},
+                                status=status.HTTP_404_NOT_FOUND)
+
+        from .strength_curves import (apply_active_curve,
+                                      temperature_correction_applied,
+                                      temperature_corrected_velocity_km_s)
+        velocity_km_s = path_length_mm / transit_time_us  # mm/us == km/s
+        corrected_km_s = temperature_corrected_velocity_km_s(
+            velocity_km_s, temperature_c)
+        # apply_active_curve applies the temperature correction itself —
+        # pass the RAW velocity so it is never corrected twice.
+        strength, snapshot = apply_active_curve(
+            project, velocity_km_s,
+            rebound_number=rebound_number, temperature_c=temperature_c)
+
+        v_ms = corrected_km_s * 1000.0
+        range_ms = (snapshot or {}).get('valid_range_ms')
+        if strength is not None:
+            strength_status = 'ok'
+        elif snapshot and snapshot.get('curve_type') == 'sonreb' \
+                and rebound_number is None:
+            strength_status = 'rebound_number_required'
+        elif range_ms and v_ms < range_ms[0]:
+            strength_status = 'below_valid_range'
+        elif range_ms and v_ms > range_ms[1]:
+            strength_status = 'above_valid_range'
+        else:
+            strength_status = 'not_computable'
+        return Response({
+            'project': str(project.id) if project else None,
+            'path_length_mm': path_length_mm,
+            'transit_time_us': transit_time_us,
+            'velocity_m_s': round(velocity_km_s * 1000.0, 2),
+            'temperature_correction_applied':
+                temperature_correction_applied(temperature_c),
+            'corrected_velocity_m_s': round(v_ms, 2),
+            'f_cu_mpa': None if strength is None else round(strength, 2),
+            'status': strength_status,
+            'curve_snapshot': snapshot,
+        })
 
 
 # NOTE: four endpoints were removed from this module because every value they

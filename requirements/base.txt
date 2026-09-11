@@ -13,6 +13,8 @@ django-storages>=1.14.2
 boto3>=1.34.0
 fpdf2>=2.7.0
 matplotlib>=3.7.0
+# Cover verification QR code (REFINED EXECUTIVE SUMMARY, PART B item 2)
+qrcode[pil]>=8.0
 cloudinary>=1.36.0
 google-auth>=2.23
 google-api-python-client>=2.100

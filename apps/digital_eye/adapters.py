@@ -51,11 +51,16 @@ PUNDIT_GRADE_RISK = {
 }
 
 
-def _ecs_of(velocity_km_s):
-    """E.C.S (N/mm2) through the report's disclosed calibration curve —
-    the single source of truth lives in apps.reports.ndt_reports."""
-    from apps.reports.ndt_reports import estimated_compressive_strength
-    return estimated_compressive_strength(velocity_km_s)
+def _ecs_of(velocity_km_s, project=None, rebound_number=None, temperature_c=None):
+    """E.C.S (N/mm2) through the project's active Nexucon Link curve — the
+    single f_cu path (apps.digital_eye.strength_curves). Without a project
+    (or curve) it resolves to the platform default / built-in fixed curve,
+    which is the documented laboratory calibration the report discloses."""
+    from apps.digital_eye.strength_curves import apply_active_curve
+    strength, _snapshot = apply_active_curve(
+        project, velocity_km_s,
+        rebound_number=rebound_number, temperature_c=temperature_c)
+    return strength
 
 
 class PUNDITAdapter:
@@ -148,7 +153,9 @@ class PUNDITAdapter:
                 )
             velocity = (sum(velocities) / len(velocities)) if velocities else None
             if velocity is not None:
-                mean_ecs = _ecs_of(velocity)
+                mean_ecs = _ecs_of(velocity, project=test.project,
+                                   rebound_number=test.rebound_number,
+                                   temperature_c=test.surface_temperature_c)
                 steps.append(
                     f"Element mean pulse velocity = {velocity:.3f} km/s"
                     + (f" (E.C.S of mean = {mean_ecs:.1f} N/mm2)." if mean_ecs is not None
@@ -282,7 +289,17 @@ class PUNDITAdapter:
             ],
             'element_mean_velocity_m_s': None if velocity is None else round(velocity * 1000, 2),
             'element_mean_ecs_n_mm2': None if velocity is None else (
-                None if _ecs_of(velocity) is None else round(_ecs_of(velocity), 1)),
+                None if _ecs_of(velocity, project=test.project,
+                                rebound_number=test.rebound_number,
+                                temperature_c=test.surface_temperature_c) is None
+                else round(_ecs_of(velocity, project=test.project,
+                                   rebound_number=test.rebound_number,
+                                   temperature_c=test.surface_temperature_c), 1)),
+            'field_notes': test.notes or None,
+            'attachments': [
+                {'name': f.file_name, 'description': f.description or None}
+                for f in test.files.all()[:8]
+            ] or None,
             'bs_1881_203_quality_grade': grade,
             'crack_depth_mm': None if crack_depth is None else round(crack_depth, 1),
         }
@@ -314,8 +331,10 @@ class PUNDITAdapter:
                 "Based ONLY on the following real field measurements, write 2-4 concise "
                 "engineering observations about this structural element's concrete "
                 "condition (velocity bands, point-to-point variation, strength estimate, "
-                "any crack indication). Do not invent facts, numbers, or events that are "
-                "not present in the data. Return JSON: "
+                "any crack indication). Where field_notes, weather_condition or "
+                "attachment descriptions are present, weigh them as contributing "
+                "evidence in your observations. Do not invent facts, numbers, or "
+                "events that are not present in the data. Return JSON: "
                 '{"observations": ["..."]}\n\n'
                 f"Measured data: {fact_pack}"
             )
@@ -381,6 +400,10 @@ class PUNDITAdapter:
                     / velocity * 100, 1)
             crack_depth = (test.element_mean_crack_depth_mm()
                            if test.readings.exists() else test.crack_depth_mm)
+            mean_ecs = _ecs_of(velocity, project=project,
+                               rebound_number=test.rebound_number,
+                               temperature_c=test.surface_temperature_c) \
+                if velocity is not None else None
             element_summaries.append({
                 'element': test.structural_element or None,
                 'floor': test.floor or None,
@@ -393,12 +416,19 @@ class PUNDITAdapter:
                 'mean_velocity_m_s': None if velocity is None
                 else round(velocity * 1000, 2),
                 'point_spread_pct': spread_pct,
-                'mean_ecs_n_mm2': None if velocity is None
-                else (None if _ecs_of(velocity) is None
-                      else round(_ecs_of(velocity), 1)),
+                'mean_ecs_n_mm2': None if mean_ecs is None else round(mean_ecs, 1),
                 'grade': grade,
                 'crack_depth_mm': None if crack_depth is None
                 else round(crack_depth, 1),
+                # 8 Sep meeting: the AI must weigh the field context —
+                # operator notes, weather at test time and attached photos —
+                # not just the figures.
+                'field_notes': test.notes or None,
+                'weather_condition': test.weather_condition or None,
+                'attachments': [
+                    {'name': f.file_name, 'description': f.description or None}
+                    for f in test.files.all()[:8]
+                ] or None,
             })
 
         graded = [s['grade'] for s in element_summaries if s['grade'] != 'pending']
@@ -437,6 +467,12 @@ class PUNDITAdapter:
             'velocity_units': 'm/s',
             'counts': {'graded': len(graded), 'good_or_better': good, 'below_good': poor},
         }
+        # 8 Sep meeting: weather recorded on any element is surfaced at
+        # project level so the model can discuss its impact on the dataset.
+        weather = sorted({test.weather_condition for test in tests
+                          if test.weather_condition})
+        if weather:
+            fact_pack['weather_conditions'] = weather
 
         observations = deterministic_observations
         provider, model_version = 'deterministic', 'BS 1881-203 / ASTM C597 v1'
@@ -451,11 +487,20 @@ class PUNDITAdapter:
                 "before strength is interpreted; (2) then analyse the pulse "
                 "velocity results floor-by-floor and element-by-element, "
                 "referencing each element's grid location where given; "
-                "(3) for each weak or variable element state the technical "
-                "impact, a solution, and a recommendation; (4) cite the "
-                "relevant codes where applicable (BS 1881-203, BS EN 12504-4, "
-                "ASTM C597, ACI 228.2R). Do not invent facts, numbers, or "
-                "events that are not present in the data. Return JSON: "
+                "(3) analyse the dataset COLLECTIVELY: group elements that "
+                "show similar behaviour (same floor, same member type, or "
+                "similar velocities/grades) and give ONE collective judgment "
+                "per group rather than repeating near-identical verdicts "
+                "element by element; (4) where field_notes, weather_condition "
+                "or attachment descriptions are present, weigh them as "
+                "contributing evidence — e.g. surface moisture or hot weather "
+                "can depress or inflate pulse velocities, and operator notes "
+                "may explain an outlier; (5) for each weak or variable "
+                "element or group state the technical impact, a solution, and "
+                "a recommendation; (6) cite the relevant codes where "
+                "applicable (BS 1881-203, BS EN 12504-4, ASTM C597, "
+                "ACI 228.2R). Do not invent facts, numbers, or events that "
+                "are not present in the data. Return JSON: "
                 '{"observations": ["..."]}\n\n'
                 f"Measured data: {fact_pack}"
             )
@@ -479,7 +524,7 @@ class PUNDITAdapter:
             risk_level=worst[0],
             risk_score=worst[1] or None,
             observations=observations,
-            correlations=[],
+            correlations=cls._confidence_metrics(project, element_summaries),
             recommendations=cls._project_recommendations(element_summaries),
             reasoning_log="\n".join(steps),
             requires_human_review=True,
@@ -489,6 +534,49 @@ class PUNDITAdapter:
             model_version=model_version,
         )
         return record
+
+    # -------------------------------------------- confidence metrics (11 Sep
+    # 2026, REFINED EXECUTIVE SUMMARY PART B §2.2): per-element confidence
+    # intervals, probability below the design strength, cross-element
+    # outlier validation, data-quality scores and a data-cited reasoning
+    # trace — all computed from the recorded readings, never invented.
+    @staticmethod
+    def _confidence_metrics(project, element_summaries):
+        from . import confidence_metrics as cm
+
+        se = cm.curve_standard_error_mpa(project)
+        outliers = cm.cross_element_outliers(element_summaries)
+        metrics = []
+        for s in element_summaries:
+            if s['mean_ecs_n_mm2'] is None:
+                continue        # no strength estimate: nothing to interval
+            ci = cm.strength_confidence_interval(s['mean_ecs_n_mm2'], se)
+            p_below = (cm.probability_below_design(s['mean_ecs_n_mm2'], se)
+                       if ci is not None else None)
+            quality = cm.data_quality_score(s['n_points'],
+                                            s['point_spread_pct'])
+            outlier = outliers.get(id(s))
+            metrics.append({
+                'element': s['element'],
+                'floor': s['floor'],
+                'grid_location': s['grid_location'],
+                'mean_velocity_m_s': s['mean_velocity_m_s'],
+                'mean_ecs_n_mm2': s['mean_ecs_n_mm2'],
+                'grade': s['grade'],
+                'confidence_interval_n_mm2': (
+                    None if ci is None
+                    else [round(ci[0], 1), round(ci[1], 1)]),
+                'probability_below_design': p_below,
+                'cross_element_outlier': outlier,
+                'data_quality': (
+                    None if quality is None
+                    else {'label': quality[0], 'reason': quality[1]}),
+                'reasoning_trace': cm.reasoning_trace(
+                    s, se_mpa=se, ci=ci, p_below=p_below,
+                    outlier=outlier, quality=quality),
+            })
+        return metrics
+
 
     # ---------------------------------------------- evidence-based confidence
     @staticmethod
