@@ -3730,8 +3730,11 @@ class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         finally:
             logo_field.storage, wm_field.storage = originals
         self.assertTrue(data.startswith(b'%PDF'))
-        # Logo + watermark both embedded despite .path raising.
-        self.assertEqual(_pdf_image_count(data), plain_images + 2)
+        # Logo + uploaded watermark both embedded despite .path raising, and
+        # the uploaded watermark REPLACES the default laboratory watermark
+        # (which would otherwise draw on top at the same position and hide
+        # it): +1 logo, +1 uploaded watermark, −1 default = net +1.
+        self.assertEqual(_pdf_image_count(data), plain_images + 1)
 
 
 class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):

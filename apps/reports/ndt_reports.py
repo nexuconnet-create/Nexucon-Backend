@@ -331,12 +331,12 @@ class MTLReportPDF(FPDF):
         # Physical page where the appendix (roman numbering) begins.
         self.roman_from_page = None
         # Optional project branding (REFINED EXECUTIVE SUMMARY §2.3):
-        # (logo bytes, position, width_mm) stamped on the cover, and an
-        # additional watermark (bytes, opacity 0-1) behind the body pages.
-        # None/empty = the standard laboratory layout, unchanged. The images
-        # are held as in-memory buffers read through the FieldFile API so
-        # remote storages (R2/S3, where ``.path`` raises NotImplementedError)
-        # render identically to local disk.
+        # (logo bytes, position, width_mm) stamped on the cover, and a
+        # watermark (bytes, opacity 0-1) that REPLACES the laboratory
+        # watermark on every page. None/empty = the standard laboratory
+        # layout, unchanged. The images are held as in-memory buffers read
+        # through the FieldFile API so remote storages (R2/S3, where
+        # ``.path`` raises NotImplementedError) render identically to disk.
         self.branding_logo = None      # (BytesIO, 'top-left'|..., width_mm)
         self.branding_watermark = None  # (BytesIO, opacity_pct 0-100)
         # Reference fonts (bundled in apps/reports/fonts).
@@ -353,9 +353,10 @@ class MTLReportPDF(FPDF):
         self.set_auto_page_break(auto=True, margin=22)
 
     def _apply_branding_watermark(self):
-        """Project watermark behind the body (below the laboratory
-        watermark, before any text). Rendering order in header() puts this
-        first so body content stays on top."""
+        """Project watermark in the laboratory watermark's position (the
+        default is skipped whenever one is configured — see header()).
+        Rendering order in header() puts this first so body content stays
+        on top."""
         if not self.branding_watermark:
             return
         buf, opacity_pct = self.branding_watermark
@@ -373,10 +374,14 @@ class MTLReportPDF(FPDF):
         # serial box in the top-right corner — on every page, cover included.
         serial, _, lab_ref = self.running_header.partition(' / ')
         self._apply_branding_watermark()
-        try:
-            self.image(WATERMARK_IMAGE, x=43.4, y=76.2, w=120.4)
-        except Exception as exc:               # noqa: BLE001 — never break a
-            logger.error('watermark embed failed: %s', exc)   # report render
+        # Reference: laboratory watermark centred on the page. A project's
+        # uploaded watermark REPLACES it (drawing both would stack the
+        # default on top at the same position and hide the upload).
+        if not self.branding_watermark:
+            try:
+                self.image(WATERMARK_IMAGE, x=43.4, y=76.2, w=120.4)
+            except Exception as exc:               # noqa: BLE001 — never break a
+                logger.error('watermark embed failed: %s', exc)   # report render
         self.set_text_color(*INK)
         self.set_font('Times', 'B', 16)
         self.set_xy(self.l_margin, 3.6)
