@@ -15,6 +15,7 @@ strength (E.C.S) is derived from a single fixed calibration curve that is
 disclosed in full in Section 3.0 of the rendered report.
 """
 import hashlib
+import io
 import logging
 import os
 import re
@@ -330,11 +331,14 @@ class MTLReportPDF(FPDF):
         # Physical page where the appendix (roman numbering) begins.
         self.roman_from_page = None
         # Optional project branding (REFINED EXECUTIVE SUMMARY §2.3):
-        # (logo_path, position, width_mm) stamped on the cover, and an
-        # additional watermark (path, opacity 0-1) behind the body pages.
-        # None/empty = the standard laboratory layout, unchanged.
-        self.branding_logo = None      # (path, 'top-left'|..., width_mm)
-        self.branding_watermark = None  # (path, opacity_pct 0-100)
+        # (logo bytes, position, width_mm) stamped on the cover, and an
+        # additional watermark (bytes, opacity 0-1) behind the body pages.
+        # None/empty = the standard laboratory layout, unchanged. The images
+        # are held as in-memory buffers read through the FieldFile API so
+        # remote storages (R2/S3, where ``.path`` raises NotImplementedError)
+        # render identically to local disk.
+        self.branding_logo = None      # (BytesIO, 'top-left'|..., width_mm)
+        self.branding_watermark = None  # (BytesIO, opacity_pct 0-100)
         # Reference fonts (bundled in apps/reports/fonts).
         for family, styles in (
             ('Cambria', (('', 'Cambria.ttf'), ('B', 'Cambria-Bold.ttf'),
@@ -354,11 +358,12 @@ class MTLReportPDF(FPDF):
         first so body content stays on top."""
         if not self.branding_watermark:
             return
-        path, opacity_pct = self.branding_watermark
+        buf, opacity_pct = self.branding_watermark
         try:
             with self.local_context(fill_opacity=opacity_pct / 100.0,
                                     stroke_opacity=opacity_pct / 100.0):
-                self.image(path, x=43.4, y=76.2, w=120.4)
+                buf.seek(0)  # reusable across pages: every header() re-reads
+                self.image(buf, x=43.4, y=76.2, w=120.4)
         except Exception as exc:               # noqa: BLE001 — never break a
             logger.error('branding watermark embed failed: %s', exc)
 
@@ -501,19 +506,21 @@ class NDTReportBuilder:
         # stamped in the chosen corner at the chosen size. The statutory
         # laboratory layout (coat of arms, title block) is unchanged.
         if pdf.branding_logo:
-            logo_path, position, width_mm = pdf.branding_logo
+            logo, position, width_mm = pdf.branding_logo
             page_w, page_h = pdf.w, pdf.h
             # Corner coordinates with a 10mm inset; aspect ratio kept.
             try:
                 from PIL import Image as PILImage
-                with PILImage.open(logo_path) as im:
+                logo.seek(0)
+                with PILImage.open(logo) as im:
                     aspect = im.height / im.width
                 height_mm = width_mm * aspect
                 x = (page_w - width_mm - 10.0 if 'right' in position
                      else 10.0)
                 y = (page_h - height_mm - 10.0 if 'bottom' in position
                      else 10.0)
-                pdf.image(logo_path, x=x, y=y, w=width_mm, h=height_mm)
+                logo.seek(0)
+                pdf.image(logo, x=x, y=y, w=width_mm, h=height_mm)
             except Exception as exc:            # noqa: BLE001 — never break
                 logger.error('branding logo embed failed: %s', exc)
 
@@ -1037,6 +1044,20 @@ class NDTReportService:
         years = [t.tested_at.year for t in tests if t.tested_at]
         year = min(years) if years else datetime.now().year
         return f'{serial:04d} / MTL/NDT/{year}', year
+
+    @classmethod
+    def _effective_report_number(cls, project, tests):
+        """
+        The report reference the emitters actually print: the deterministic
+        serial unless a saved project CMS override replaces it (11 Sep 2026
+        client request — the reference is editable in the CMS). Both the PDF
+        and the archive must resolve through this, or the archived
+        reference and the printed/QR-digested one would diverge.
+        """
+        report_no, year = cls._report_number(project, tests)
+        ref, _src = get_cms_text(project, 'report_reference',
+                                 computed={'report_reference': report_no})
+        return ((ref or report_no).strip(), year)
 
     @staticmethod
     def _content_hash(parts):
@@ -1672,6 +1693,13 @@ class NDTReportService:
                          same_day, date_min, date_max):
         bodies = {}
 
+        # -- report reference (11 Sep client request): the deterministic
+        # serial, editable per project through the CMS. Every render site
+        # (cover serial box, running header, archive record, QR verify
+        # digest) resolves through this body, so the CMS pre-fill, the PDF
+        # and the Word export can never disagree.
+        bodies['report_reference'] = cls._report_number(project, tests)[0]
+
         # -- executive summary (needs test results: it states them)
         if element_data:
             storeys = cls._storey_count(floors_present, bim_levels)
@@ -1953,7 +1981,10 @@ class NDTReportService:
 
         tests = list(PUNDITTest.objects.filter(project=project)
                      .prefetch_related('readings'))
-        report_no, _ = cls._report_number(project, tests)
+        # The effective reference (CMS override honoured) — the archived
+        # reference and content_key must match what the report printed and
+        # what the cover QR digests, never the un-overridden serial.
+        report_no, _ = cls._effective_report_number(project, tests)
         # Exactly the parts the report's own integrity section hashes, so
         # "archived once" and "digest printed in the PDF" always agree.
         content_key = cls._statutory_digest(project, tests, report_no)
@@ -2032,25 +2063,38 @@ class NDTReportService:
             .order_by('recorded_at')
         )
 
-        report_no, year = cls._report_number(project, tests)
+        report_no, year = cls._effective_report_number(project, tests)
         serial = report_no.split(' / ')[0]
         builder = NDTReportBuilder(report_no)
 
         # ---- Project branding (REFINED EXECUTIVE SUMMARY §2.3): the
         # project's uploaded logo/watermark, when configured. Storage
         # failures degrade to the standard layout — never a failed report.
+        # The images are read through the FieldFile API (``.read()``), which
+        # works on every storage backend — ``.path`` raises
+        # NotImplementedError on remote storages (R2/S3) and the branding
+        # silently never rendered there.
         try:
             branding = getattr(project, 'report_branding', None)
             if branding is not None:
                 if branding.logo:
-                    builder.pdf.branding_logo = (
-                        branding.logo.path, branding.logo_position,
-                        type(branding).SIZE_WIDTHS_MM.get(
-                            branding.logo_size, 30.0))
+                    branding.logo.open('rb')
+                    try:
+                        builder.pdf.branding_logo = (
+                            io.BytesIO(branding.logo.read()),
+                            branding.logo_position,
+                            type(branding).SIZE_WIDTHS_MM.get(
+                                branding.logo_size, 30.0))
+                    finally:
+                        branding.logo.close()
                 if branding.watermark:
-                    builder.pdf.branding_watermark = (
-                        branding.watermark.path,
-                        branding.watermark_opacity_pct)
+                    branding.watermark.open('rb')
+                    try:
+                        builder.pdf.branding_watermark = (
+                            io.BytesIO(branding.watermark.read()),
+                            branding.watermark_opacity_pct)
+                    finally:
+                        branding.watermark.close()
         except Exception as exc:  # noqa: BLE001 — branding is cosmetic
             logger.error('report branding could not be applied: %s', exc)
 

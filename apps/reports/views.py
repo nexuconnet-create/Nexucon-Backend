@@ -560,6 +560,22 @@ class ReportCMSSectionView(APIView):
             return Response({'detail': 'body is required (use DELETE to '
                                        'revert to the default text).'},
                             status=status.HTTP_400_BAD_REQUEST)
+        # A line-kind section is a single-line reference whose two parts
+        # print in different places (serial box / header text) — the shape
+        # is part of the statutory layout, so it is validated, not assumed.
+        if CMS_SECTIONS[key]['kind'] == 'line':
+            candidate = str(body).strip()
+            if '\n' in candidate or '\r' in candidate:
+                return Response(
+                    {'detail': 'The report reference must be a single line.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            if ' / ' not in candidate:
+                return Response(
+                    {'detail': 'The report reference must keep the shape '
+                               '"SERIAL / MTL/NDT/YEAR" — the part before '
+                               '" / " prints inside the blue serial box on '
+                               'every page.'},
+                    status=status.HTTP_400_BAD_REQUEST)
         project, rejected = self._project(request)
         if rejected:
             return rejected

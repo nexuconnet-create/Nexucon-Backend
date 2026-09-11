@@ -97,7 +97,7 @@ class NDTWordExporter:
         good_members = [e for e in element_data if e['remark'] == 'GOOD']
         poor_members = [e for e in element_data if e['remark'] == 'POOR']
         visual_notes = S._visual_observations(tests)
-        report_no, _year = S._report_number(project, tests)
+        report_no, _year = S._effective_report_number(project, tests)
         tested = [t.tested_at for t in tests if t.tested_at]
         date_max = max(tested).date() if tested else datetime.now().date()
 

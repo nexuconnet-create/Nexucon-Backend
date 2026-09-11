@@ -1312,6 +1312,30 @@ def _pdf_text(data):
                      for p in PdfReader(io.BytesIO(data)).pages)
 
 
+def _pdf_image_count(pdf_bytes):
+    """
+    Distinct image XObjects referenced by the PDF's pages — the branding
+    logo and watermark each add one, so tests can assert the images really
+    made it in (the branding render degrades silently on failure by
+    design). Distinct objects, not raw marker bytes: an alpha image also
+    carries an /SMask stream that would double-count.
+    """
+    from pypdf import PdfReader
+    names = set()
+    for page in PdfReader(io.BytesIO(pdf_bytes)).pages:
+        res = page.get('/Resources')
+        if not res:
+            continue
+        xo = res.get('/XObject')
+        if not xo:
+            continue
+        for name, obj in xo.items():
+            o = obj.get_object()
+            if o.get('/Subtype') == '/Image':
+                names.add((name, o.get('/Width'), o.get('/Height')))
+    return len(names)
+
+
 class NDTReportFixtureMixin:
     """Real ORM rows for the MTL-style NDT report tests."""
 
@@ -2930,7 +2954,7 @@ class ReportCMSComputedSectionTests(ReportCMSBase):
                          if m.get("computed")}
         self.assertEqual(
             computed_keys,
-            {"executive_summary", "introduction_project",
+            {"report_reference", "executive_summary", "introduction_project",
              "visual_observations", "methodology_equipment",
              "rebar_statement", "findings_statement",
              "conclusion_items"})
@@ -3101,6 +3125,103 @@ class ReportCMSComputedSectionTests(ReportCMSBase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         text = NDTWordExportTests._full_docx_text(self, response.content)
         self.assertIn("OBSERVED ITEM WR88 in the Word copy.", text)
+
+
+class ReportCMSReferenceSectionTests(ReportCMSBase):
+    """
+    The report reference (11 Sep client request): the deterministic
+    "NNNN / MTL/NDT/YYYY" serial is a generated-content section — pre-filled
+    with the number the report will print, editable per project to match the
+    laboratory's official numbering, honoured by the PDF, the archive and
+    the Word export alike.
+    """
+
+    def test_reference_pre_filled_with_deterministic_serial(self):
+        from apps.digital_eye.models import PUNDITTest
+        tests = list(PUNDITTest.objects.filter(project=self.project))
+        expected = NDTReportService._report_number(self.project, tests)[0]
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        ref = sections["report_reference"]
+        self.assertEqual(ref["source"], "computed")
+        self.assertEqual(ref["kind"], "line")
+        self.assertEqual(ref["body"], expected)
+        self.assertRegex(ref["body"], r"^\d{4} / MTL/NDT/\d{4}$")
+        # Per-project like every generated-content section: no body without
+        # a project selection.
+        sections = {s["key"]: s for s in self._sections().data["sections"]}
+        self.assertEqual(sections["report_reference"]["source"],
+                         "unavailable")
+        self.assertIsNone(sections["report_reference"]["body"])
+
+    def test_reference_override_reaches_pdf_and_archive(self):
+        from apps.digital_eye.models import PUNDITTest
+        from apps.reports.models import ArchivedReport
+        self._set_password()
+        response = self._save_section(
+            "report_reference", "0420 / MTL/NDT/2027", project=self.project)
+        self.assertEqual(response.status_code, 200, msg=str(response.data))
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The overridden serial and laboratory reference both print, and
+        # the deterministic number no longer does.
+        self.assertIn("0420", flat)
+        self.assertIn("MTL/NDT/2027", flat)
+        self.assertNotIn("MTL/NDT/2026", flat)
+        # The archive records the same effective reference and digests it.
+        pdf = NDTReportService.generate_ndt_report(self.project)
+        archived = NDTReportService.archive_ndt_report(
+            self.project, self.director, pdf)
+        self.assertEqual(archived.report_reference, "0420 / MTL/NDT/2027")
+        tests = list(PUNDITTest.objects.filter(project=self.project))
+        self.assertEqual(
+            archived.content_key,
+            NDTReportService._statutory_digest(
+                self.project, tests, "0420 / MTL/NDT/2027"))
+
+    def test_reference_revert_returns_computed_serial(self):
+        from apps.digital_eye.models import PUNDITTest
+        self._set_password()
+        self._save_section("report_reference", "0420 / MTL/NDT/2027",
+                           project=self.project)
+        response = self.client.delete(
+            reverse("report-cms-section",
+                    kwargs={"key": "report_reference"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "computed")
+        tests = list(PUNDITTest.objects.filter(project=self.project))
+        self.assertEqual(response.data["body"],
+                         NDTReportService._report_number(self.project,
+                                                         tests)[0])
+
+    def test_reference_rejects_wrong_shape(self):
+        self._set_password()
+        response = self._save_section(
+            "report_reference", "0420", project=self.project)
+        self.assertEqual(response.status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertIn("SERIAL / MTL/NDT/YEAR", response.data["detail"])
+        response = self._save_section(
+            "report_reference", "0420 /\nMTL/NDT/2027", project=self.project)
+        self.assertEqual(response.status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertIn("single line", response.data["detail"])
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                section_key="report_reference").exists())
+
+    def test_reference_override_reaches_word_export(self):
+        self._set_password()
+        self._save_section("report_reference", "0420 / MTL/NDT/2027",
+                           project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = NDTWordExportTests._full_docx_text(self, response.content)
+        self.assertIn("0420 / MTL/NDT/2027", text)
 
 
 class NDTWordExportTests(ReportCMSBase):
@@ -3520,19 +3641,97 @@ class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_branded_report_renders(self):
+        from apps.projects.models import Project
         from apps.reports.models import ReportBranding
         self._as(self.director)
+        # Baseline: the unbranded report's embedded-image count.
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
         response = self.client.patch(
             reverse('project-report-branding',
                     kwargs={'project_id': self.project.id}),
             {'logo': self.png}, format='multipart')
         self.assertEqual(response.status_code, status.HTTP_200_OK,
                          msg=str(response.data))
-        # The render picks the branding up and still produces a valid PDF.
-        data = NDTReportService.generate_ndt_report(self.project)
+        # A fresh project instance — the reverse one-to-one caches its
+        # miss on the model object, and self.project already resolved
+        # report_branding as absent while rendering the plain baseline.
+        fresh = Project.objects.get(pk=self.project.pk)
+        # The render picks the branding up and still produces a valid PDF —
+        # with the logo genuinely embedded (one more image XObject).
+        data = NDTReportService.generate_ndt_report(fresh)
         self.assertTrue(data.startswith(b'%PDF'))
+        self.assertEqual(_pdf_image_count(data), plain_images + 1)
         row = ReportBranding.objects.get(project=self.project)
         self.assertTrue(row.logo)
+
+    def test_branded_report_renders_from_remote_storage(self):
+        """
+        Regression (11 Sep 2026): the render used ``logo.path``, which raises
+        NotImplementedError on remote storages (R2/S3) — the branding saved
+        fine but silently never appeared in the PDF. The render now reads
+        bytes through the FieldFile API, so a storage without local paths
+        produces the identical branded output.
+        """
+        from apps.projects.models import Project
+        from apps.reports.models import ReportBranding
+
+        class _NoPathStorage:
+            """Remote-backend stand-in: reads by name delegate to the real
+            storage, while ``path()`` raises like S3Boto3Storage. (A plain
+            FileSystemStorage subclass would not do — its own ``_open``
+            routes through ``path()``, so reads would break too.)"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def path(self, name):
+                raise NotImplementedError(
+                    "This backend doesn't support absolute paths.")
+
+            def open(self, name, mode="rb"):
+                return self._inner.open(name, mode)
+
+            def __getattr__(self, name):
+                inner = self.__dict__.get("_inner")
+                if inner is None:
+                    raise AttributeError(name)
+                return getattr(inner, name)
+
+        self._as(self.director)
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        # A second, distinct PNG — fpdf2 dedupes identical image bytes into
+        # one XObject, so logo and watermark must differ to count as two.
+        img2 = Image.new('RGBA', (30, 30), (200, 30, 30, 128))
+        buf2 = io.BytesIO()
+        img2.save(buf2, format='PNG')
+        buf2.seek(0)
+        watermark = SimpleUploadedFile('wm.png', buf2.getvalue(),
+                                       content_type='image/png')
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png, 'watermark': watermark}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        row = ReportBranding.objects.get(project=self.project)
+        # Swap both branded fields to the path-less backend. A fresh
+        # project instance too — the reverse one-to-one caches its miss
+        # on the model object (see test_branded_report_renders).
+        logo_field = row._meta.get_field('logo')
+        wm_field = row._meta.get_field('watermark')
+        originals = (logo_field.storage, wm_field.storage)
+        logo_field.storage = _NoPathStorage(originals[0])
+        wm_field.storage = _NoPathStorage(originals[1])
+        try:
+            fresh = Project.objects.get(pk=self.project.pk)
+            data = NDTReportService.generate_ndt_report(fresh)
+        finally:
+            logo_field.storage, wm_field.storage = originals
+        self.assertTrue(data.startswith(b'%PDF'))
+        # Logo + watermark both embedded despite .path raising.
+        self.assertEqual(_pdf_image_count(data), plain_images + 2)
 
 
 class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
@@ -3581,6 +3780,20 @@ class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
         self.assertEqual(response.data['test_points']['features'], [])
         # No fabricated project centre either.
         self.assertIsNone(response.data['project_center'])
+
+    def test_map_reports_recorded_project_location(self):
+        # The coordinates captured at project creation are real recorded
+        # data — the map centres on them even when no test carries GPS.
+        located = self.make_project(name="Located NDT Project",
+                                    latitude=6.5244, longitude=3.3792)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': located.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['project_center'],
+                         [3.3792, 6.5244])
+        # GeoJSON order: [longitude, latitude].
+        self.assertEqual(response.data['test_points']['features'], [])
 
     def test_map_out_of_scope_404(self):
         response = self.client.get(

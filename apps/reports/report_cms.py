@@ -114,6 +114,22 @@ CONCLUSION_PREAMBLE_DEFAULT = (
 # results, which the platform never does. These sections are per-project
 # only (no platform-wide override: the text is data-derived).
 # ---------------------------------------------------------------------------
+# The report reference (11 Sep 2026 client request) is the one non-prose
+# generated-content section: its computed body is the deterministic serial
+# "NNNN / MTL/NDT/YYYY" the report prints on every page. It is data-derived
+# (project UUID + live test count), per-project only, and — unlike the
+# prose sections — always has a computed body, so it is editable whenever a
+# project is selected: renumbering to the laboratory's official series is
+# a correction of recorded metadata, never an invention of results.
+# ---------------------------------------------------------------------------
+REPORT_REFERENCE_HELP = (
+    'The reference printed on every page of the report — generated from the '
+    'project as "SERIAL / MTL/NDT/YEAR". The part before " / " prints inside '
+    'the blue serial box in the top-right corner; the rest prints beside it. '
+    'Edit only to match the laboratory\'s official report numbering — one '
+    'line, keep the "SERIAL / MTL/NDT/YEAR" shape.'
+)
+
 EXECUTIVE_SUMMARY_HELP = (
     'Generated from the project profile and the test outcome. **double '
     'asterisks** render as bold. Blank lines start new paragraphs. The '
@@ -159,6 +175,13 @@ CONCLUSION_ITEMS_HELP = (
 )
 
 CMS_SECTIONS = {
+    'report_reference': {
+        'label': 'Report reference — serial / MTL/NDT / year',
+        'kind': 'line',
+        'default': None,
+        'computed': True,
+        'help': REPORT_REFERENCE_HELP,
+    },
     'introduction': {
         'label': 'Introduction — opening paragraph (Section 1.0)',
         'kind': 'paragraphs',
