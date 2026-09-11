@@ -219,7 +219,7 @@ class AIReportService:
         builder.kv('Project name', project.name)
         builder.kv('Project ID', project.id)
         builder.kv('Status', getattr(project, 'status', '-'))
-        builder.kv('Location', getattr(project, 'location', None) or '-')
+        builder.kv('Location', getattr(project, 'site_address', None) or getattr(project, 'state', None) or '-')
         builder.kv('Client', getattr(project, 'client_name', None) or '-')
 
         builder.section('2. AI Risk Assessment')

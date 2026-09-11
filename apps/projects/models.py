@@ -75,9 +75,6 @@ class Project(models.Model):
     plot_number = models.CharField(max_length=100, blank=True, null=True)
     block_number = models.CharField(max_length=100, blank=True, null=True)
     land_title_reference = models.CharField(max_length=255, blank=True, null=True)
-    # Project Geospatial & Boundary Definition (JSONField for universal zero-dependency compatibility)
-    location = models.JSONField(null=True, blank=True, help_text="GNSS Point location")
-    boundary = models.JSONField(null=True, blank=True, help_text="Site boundaries")
 
     # 5. Regulatory Information
     permit_number = models.CharField(max_length=100, blank=True, null=True)
