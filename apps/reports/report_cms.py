@@ -12,10 +12,14 @@ CMS editor can never show different text for the same section.
 Computed content is deliberately NOT editable: formulas, the
 calibration disclosure, result tables, worked examples and every
 figure stay server-computed (the platform's no-fabrication rule).
-Only the prose blocks the client asked to be able to reword are
-exposed here. The recommendation lead-in is the one split section:
-its editable default ends mid-sentence because the computed findings
-sentence and the professional-advice sentence are appended after it.
+Only the prose blocks are exposed here — the static boilerplate with
+registry defaults, plus (11 Sep 2026) the generated-content sections
+whose default body is the wording computed from the project's own
+recorded data, so the operator can review and reword everything the
+report will print before generating. The recommendation lead-in is the
+one split section: its editable default ends mid-sentence because the
+computed findings sentence and the professional-advice sentence are
+appended after it.
 """
 
 INTRODUCTION_DEFAULT = (
@@ -98,6 +102,62 @@ CONCLUSION_PREAMBLE_DEFAULT = (
 # this order. ``kind`` tells the editor how to parse the body:
 #   'paragraphs' — blank lines separate paragraphs
 #   'list'       — each non-empty line is one numbered/bulleted item
+# ---------------------------------------------------------------------------
+# Generated-content sections (11 Sep 2026 client request): the wording the
+# report COMPUTES from the project's recorded data — the executive summary,
+# the project paragraphs of the introduction, the visual observations, the
+# equipment methodology, the rebar statement, the findings statement and the
+# conclusion items. Their default body is NOT a static string: it is produced
+# per project by NDTReportService.computed_section_bodies(). A key whose
+# body is None has no recorded data behind it (e.g. no test results yet) and
+# the CMS refuses edits for it — an override there could only invent
+# results, which the platform never does. These sections are per-project
+# only (no platform-wide override: the text is data-derived).
+# ---------------------------------------------------------------------------
+EXECUTIVE_SUMMARY_HELP = (
+    'Generated from the project profile and the test outcome. **double '
+    'asterisks** render as bold. Blank lines start new paragraphs. The '
+    'result tables, charts and every figure stay server-computed.'
+)
+
+INTRODUCTION_PROJECT_HELP = (
+    'The paragraphs naming the project, its client, its location and the '
+    'structural drawing policy — generated from project records. **double '
+    'asterisks** render as bold. Blank lines start new paragraphs.'
+)
+
+VISUAL_OBSERVATIONS_HELP = (
+    'The lettered observations of Section 4.1, generated from the recorded '
+    'test notes. One observation per line; each prints lettered a, b, c ... '
+    'Only editable when observations have been recorded.'
+)
+
+METHODOLOGY_EQUIPMENT_HELP = (
+    'The PUNDIT/Profoscope paragraphs opening Section 4.2, generated to '
+    'match the tests actually recorded. Blank lines start new paragraphs. '
+    'The capability list and the calibration conversion statement stay '
+    'server-computed.'
+)
+
+REBAR_STATEMENT_HELP = (
+    'The Section 4.3 wording, generated from the rebar survey records. '
+    'When no rebar survey was recorded the section stays fixed at the '
+    'honest "Not Applicable" statement and cannot be edited.'
+)
+
+FINDINGS_STATEMENT_HELP = (
+    'The computed findings sentence of Section 6.0 — how many members were '
+    'good / below the statutory 25 N/mm2 — followed by the advice to engage '
+    'a structural engineer. The editable lead-in precedes it. Only editable '
+    'when test results exist.'
+)
+
+CONCLUSION_ITEMS_HELP = (
+    'The numbered conclusion items of Section 7.0, generated with the '
+    'computed percentages. One item per line. Only editable when test '
+    'results exist.'
+)
+
 CMS_SECTIONS = {
     'introduction': {
         'label': 'Introduction — opening paragraph (Section 1.0)',
@@ -156,18 +216,71 @@ CMS_SECTIONS = {
         'help': 'Precedes the numbered conclusion items, whose '
                 'percentages are computed from the test results.',
     },
+    # ---- generated-content sections (computed defaults, per-project) ----
+    'executive_summary': {
+        'label': 'Executive Summary — generated content',
+        'kind': 'paragraphs',
+        'default': None,
+        'computed': True,
+        'help': EXECUTIVE_SUMMARY_HELP,
+    },
+    'introduction_project': {
+        'label': 'Introduction — generated project paragraphs (Section 1.0)',
+        'kind': 'paragraphs',
+        'default': None,
+        'computed': True,
+        'help': INTRODUCTION_PROJECT_HELP,
+    },
+    'visual_observations': {
+        'label': 'Visual test — generated observations (Section 4.1)',
+        'kind': 'list',
+        'default': None,
+        'computed': True,
+        'help': VISUAL_OBSERVATIONS_HELP,
+    },
+    'methodology_equipment': {
+        'label': 'Methodology — generated equipment paragraphs (Section 4.2)',
+        'kind': 'paragraphs',
+        'default': None,
+        'computed': True,
+        'help': METHODOLOGY_EQUIPMENT_HELP,
+    },
+    'rebar_statement': {
+        'label': 'Rebar assessment — generated statement (Section 4.3)',
+        'kind': 'paragraphs',
+        'default': None,
+        'computed': True,
+        'help': REBAR_STATEMENT_HELP,
+    },
+    'findings_statement': {
+        'label': 'Recommendation — generated findings (Section 6.0)',
+        'kind': 'paragraphs',
+        'default': None,
+        'computed': True,
+        'help': FINDINGS_STATEMENT_HELP,
+    },
+    'conclusion_items': {
+        'label': 'Conclusion — generated items (Section 7.0)',
+        'kind': 'list',
+        'default': None,
+        'computed': True,
+        'help': CONCLUSION_ITEMS_HELP,
+    },
 }
 
 CMS_SECTION_KEYS = tuple(CMS_SECTIONS.keys())
 
 
-def get_cms_text(project, key):
+def get_cms_text(project, key, computed=None):
     """
     Resolve the effective body for a CMS section.
 
-    Precedence: project override > platform-wide override > registry
-    default. Returns ``(text, source)`` with source one of
-    ``'project_override' | 'platform_override' | 'default'``.
+    Precedence: project override > platform-wide override > the computed
+    generated body (generated-content sections, when ``computed`` supplies
+    one) > the registry default. Returns ``(text, source)`` with source one
+    of ``'project_override' | 'platform_override' | 'computed' | 'default'``.
+    A generated-content section with no computed body resolves to
+    ``(None, 'unavailable')`` — the caller keeps its honest fixed rendering.
     """
     if key not in CMS_SECTIONS:
         raise KeyError(f'Unknown report CMS section: {key!r}')
@@ -177,10 +290,16 @@ def get_cms_text(project, key):
                .filter(project=project, section_key=key).first())
         if row is not None:
             return row.body, 'project_override'
-    row = (ReportSectionOverride.objects
-           .filter(project__isnull=True, section_key=key).first())
-    if row is not None:
-        return row.body, 'platform_override'
+    if not CMS_SECTIONS[key].get('computed'):
+        row = (ReportSectionOverride.objects
+               .filter(project__isnull=True, section_key=key).first())
+        if row is not None:
+            return row.body, 'platform_override'
+    if CMS_SECTIONS[key].get('computed'):
+        body = (computed or {}).get(key)
+        if body is not None:
+            return body, 'computed'
+        return None, 'unavailable'
     return CMS_SECTIONS[key]['default'], 'default'
 
 

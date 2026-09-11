@@ -36,6 +36,48 @@ FONTS_DIR = os.path.join(MODULE_DIR, 'fonts')
 WATERMARK_IMAGE = os.path.join(ASSETS_DIR, 'lsmtl_watermark.png')
 COVER_LOGO_IMAGE = os.path.join(ASSETS_DIR, 'lagos_state_coat_of_arms.png')
 
+
+def _cover_qr_png(url):
+    """Render a verification QR code for the report cover into a PNG
+    BytesIO the fpdf2 image() call can embed. Returns None when the qrcode
+    library is unavailable — the cover renders without the QR rather than
+    failing the whole statutory report."""
+    import io
+    try:
+        import qrcode
+        import qrcode.image.pil
+    except ImportError:
+        logger.warning('qrcode library unavailable — cover QR skipped')
+        return None
+    try:
+        qr = qrcode.QRCode(
+            version=None, error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6, border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=qrcode.image.pil.PilImage)
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return buf
+    except Exception as exc:               # noqa: BLE001 — never break the
+        logger.error('QR generation failed: %s', exc)   # report render
+        return None
+
+
+def report_verification_url(report_reference, content_digest):
+    """Public URL a cover QR resolves to: the platform's report
+    verification page for one archived dossier (reference + content
+    digest). FRONTEND_URL is the configured public origin."""
+    from urllib.parse import quote
+    from django.conf import settings
+    base = getattr(settings, 'FRONTEND_URL', '').rstrip('/')
+    if not base:
+        return None
+    return (f'{base}/verify/report/'
+            f'?ref={quote(report_reference or "")}'
+            f'&digest={quote(content_digest or "")}')
+
 # Reference header serial/reference box: light blue fill, darker blue border.
 SERIAL_BOX_FILL = (91, 155, 213)
 SERIAL_BOX_BORDER = (46, 117, 182)
@@ -287,6 +329,12 @@ class MTLReportPDF(FPDF):
         self.body_page_offset = None
         # Physical page where the appendix (roman numbering) begins.
         self.roman_from_page = None
+        # Optional project branding (REFINED EXECUTIVE SUMMARY §2.3):
+        # (logo_path, position, width_mm) stamped on the cover, and an
+        # additional watermark (path, opacity 0-1) behind the body pages.
+        # None/empty = the standard laboratory layout, unchanged.
+        self.branding_logo = None      # (path, 'top-left'|..., width_mm)
+        self.branding_watermark = None  # (path, opacity_pct 0-100)
         # Reference fonts (bundled in apps/reports/fonts).
         for family, styles in (
             ('Cambria', (('', 'Cambria.ttf'), ('B', 'Cambria-Bold.ttf'),
@@ -300,11 +348,26 @@ class MTLReportPDF(FPDF):
         self.set_margins(25.4, 20.7, 25.4)   # reference: 72pt sides, 20.7mm top
         self.set_auto_page_break(auto=True, margin=22)
 
+    def _apply_branding_watermark(self):
+        """Project watermark behind the body (below the laboratory
+        watermark, before any text). Rendering order in header() puts this
+        first so body content stays on top."""
+        if not self.branding_watermark:
+            return
+        path, opacity_pct = self.branding_watermark
+        try:
+            with self.local_context(fill_opacity=opacity_pct / 100.0,
+                                    stroke_opacity=opacity_pct / 100.0):
+                self.image(path, x=43.4, y=76.2, w=120.4)
+        except Exception as exc:               # noqa: BLE001 — never break a
+            logger.error('branding watermark embed failed: %s', exc)
+
     def header(self):
         # Reference: laboratory watermark centred on the page, 'MTL/NDT/<year>'
         # Times-Bold 16 top-right (right edge 195.5mm), and a filled blue
         # serial box in the top-right corner — on every page, cover included.
         serial, _, lab_ref = self.running_header.partition(' / ')
+        self._apply_branding_watermark()
         try:
             self.image(WATERMARK_IMAGE, x=43.4, y=76.2, w=120.4)
         except Exception as exc:               # noqa: BLE001 — never break a
@@ -360,13 +423,16 @@ class NDTReportBuilder:
         self.running_header = running_header
 
     # ------------------------------------------------------------ cover
-    def cover(self, serial, project_name, site_line, client_name, date_line):
+    def cover(self, serial, project_name, site_line, client_name, date_line,
+              verify_url=None):
         """Reference cover, absolutely positioned at the measured y's: title
         block from 20.6mm (18pt, 7.8mm leading), BY 59.3, laboratory 82.6 /
         90.2, ON 113.7, site lines from 129.3, FOR 152.4, client 28pt from
         173.1 (12.1mm leading), address from 196.7, date line at 256.1; the
         Lagos State coat of arms sits top-left. Site/client/address are
-        upper-cased like the reference."""
+        upper-cased like the reference. When a verification URL is given a
+        QR code is drawn bottom-right of the date line — it resolves to the
+        platform's public report-verification page for this dossier."""
         pdf = self.pdf
         pdf.add_page()
         # The cover is absolutely positioned at the reference's measured
@@ -430,6 +496,38 @@ class NDTReportBuilder:
 
         pdf.set_xy(pdf.l_margin, 256.1)
         pdf.cell(0, 10, _latin1(date_line), align='C')
+
+        # ---- Project branding logo (REFINED EXECUTIVE SUMMARY §2.3):
+        # stamped in the chosen corner at the chosen size. The statutory
+        # laboratory layout (coat of arms, title block) is unchanged.
+        if pdf.branding_logo:
+            logo_path, position, width_mm = pdf.branding_logo
+            page_w, page_h = pdf.w, pdf.h
+            # Corner coordinates with a 10mm inset; aspect ratio kept.
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(logo_path) as im:
+                    aspect = im.height / im.width
+                height_mm = width_mm * aspect
+                x = (page_w - width_mm - 10.0 if 'right' in position
+                     else 10.0)
+                y = (page_h - height_mm - 10.0 if 'bottom' in position
+                     else 10.0)
+                pdf.image(logo_path, x=x, y=y, w=width_mm, h=height_mm)
+            except Exception as exc:            # noqa: BLE001 — never break
+                logger.error('branding logo embed failed: %s', exc)
+
+        # ---- Verification QR (11 Sep 2026, PART B missing item 2): the
+        # code resolves to the public verification page for this dossier —
+        # its reference and content digest — so a recipient can confirm the
+        # report matches the archived original without platform access.
+        if verify_url:
+            qr_png = _cover_qr_png(verify_url)
+            if qr_png is not None:
+                try:
+                    pdf.image(qr_png, x=170.0, y=250.0, w=24)
+                except Exception as exc:        # noqa: BLE001 — never break
+                    logger.error('cover QR embed failed: %s', exc)
         pdf.set_auto_page_break(auto=True, margin=22)
 
     # ------------------------------------------------------- TOC placeholder
@@ -1559,6 +1657,242 @@ class NDTReportService:
                                 f"N/mm2.")
         return example
 
+    # ---------------------------------------------------------------
+    # Generated-content CMS bodies (11 Sep 2026 client request): the
+    # computed wording of the report, pre-filled into the CMS so the
+    # operator can review and reword everything before generating. A key
+    # maps to None when the project lacks the recorded data that section
+    # states — the CMS then refuses edits rather than let an override
+    # invent results (no-fabrication rule).
+    # ---------------------------------------------------------------
+    @classmethod
+    def _computed_bodies(cls, project, *, tests, rebar_tests, element_data,
+                         good_members, poor_members, visual_notes,
+                         floors_present, bim_levels, has_drawings, tested,
+                         same_day, date_min, date_max):
+        bodies = {}
+
+        # -- executive summary (needs test results: it states them)
+        if element_data:
+            storeys = cls._storey_count(floors_present, bim_levels)
+            building = (f'an existing {storeys}-floor building' if storeys
+                        else 'an existing building')
+            proj = _latin1(project.name or 'unnamed project').replace('*', '')
+            client = _latin1(project.client_name or '').replace('*', '')
+            site = _latin1(', '.join(
+                p for p in (project.site_address, project.lga, project.state)
+                if p)).replace('*', '')
+            prose_dates = (_prose_date(date_max) if same_day
+                           else f'{_prose_date(date_min)} and '
+                                f'{_prose_date(date_max)}')
+            para1 = (
+                'In situ Integrity Test (Non-Destructive) of compressive '
+                f'strength of structural members of {building} '
+                f'("**{proj}**")'
+                + (f' belonging to **{client}**' if client else '')
+                + (f', at **{site}**' if site else '')
+                + '.'
+            )
+            para2 = (
+                'The Non-Destructive Integrity Test was carried out '
+                + (f'on **{prose_dates}**' if tested
+                   else 'on dates not recorded')
+                + ' with the intention to determine the residual compressive '
+                  'strength of concrete component of the structural members '
+                  'considered to be critical to stability, robustness and '
+                  'general safety of the entire structure in its present '
+                  'state.'
+            )
+            if visual_notes:
+                visual_sentence = (
+                    'The visual inspection revealed structural defects as '
+                    'recorded in Section 4.1 of this report')
+            else:
+                visual_sentence = (
+                    'The visual inspection did not record any structural '
+                    'defects')
+            analysis_sentence = (
+                'and the Non-Destructive test analysis shows that '
+                f'{len(good_members)} of the {len(element_data)} structural '
+                'members tested were good in strength (average compressive '
+                'strength at or above the assumed 25 N/mm2)'
+                + (f', while {len(poor_members)} member(s) fell below it and '
+                   'require technical advice.' if poor_members
+                   else ' at the time of test.'))
+            if has_drawings:
+                arrangement_sentence = (
+                    'The general structural arrangement of the building was '
+                    'referenced from the structural information available on '
+                    'the platform (reproduced in the Appendix of this report).')
+            else:
+                arrangement_sentence = (
+                    'The general structural arrangement of the buildings '
+                    'could not be completely ascertained; as no structural '
+                    'drawing was provided.')
+            para3 = ' '.join([visual_sentence, analysis_sentence,
+                              arrangement_sentence])
+            para4 = (
+                'In view of the above, it is advised that a qualified '
+                'structural engineer should be engaged to proffer solution '
+                'to the defects observed, give technical advice on the poor '
+                'structural members tested and further analyse the '
+                'structural arrangement to guarantee the stability, '
+                'integrity and the serviceability of the structure.'
+            )
+            bodies['executive_summary'] = '\n\n'.join(
+                [para1, para2, para3, para4])
+
+        # -- introduction, computed project paragraphs (always available)
+        site_line = ', '.join(
+            p for p in (project.site_address, project.lga, project.state)
+            if p) or 'site address not recorded'
+        intro_1 = (
+            'In compliance with the Mandatory Non-Destructive Test '
+            'requirement of the Lagos State Government, a Non-Destructive '
+            'compressive strength test (Structural Integrity Test) was '
+            f'conducted on the project "{project.name or "-"}"'
+            + (f' for {project.client_name}' if project.client_name else '')
+            + f' located at {site_line}. The map showing the exact location '
+              'of the site is on the Location Map page of this report.'
+        )
+        if has_drawings:
+            intro_2 = (
+                'The drawings of the building available on the platform are '
+                'reproduced in the Appendix of this report. Structural '
+                'drawing was not provided to the platform; therefore, '
+                '**assumed strength of 25N/mm2** was used for the analysis '
+                'of the structural elements.')
+        else:
+            intro_2 = (
+                'No structural drawing was provided on the platform for this '
+                'project. Therefore, **assumed strength of 25N/mm2** was '
+                'used for the analysis of the structural elements.')
+        bodies['introduction_project'] = '\n\n'.join([intro_1, intro_2])
+
+        # -- visual observations (field data; only editable when recorded)
+        if visual_notes:
+            bodies['visual_observations'] = '\n'.join(visual_notes)
+
+        # -- methodology equipment paragraphs (always available)
+        method_1 = (
+            'This test is determined by using the Portable Ultrasonic '
+            'Non-Destructive Digital Indicating Tester (PUNDIT)'
+            + (' and Profoscope' if rebar_tests else '')
+            + '. Non-Destructive, as the name implies, means that the '
+              'materials being tested are not damaged during the test.'
+        )
+        method_2 = (
+            'In the Non-Destructive Test, some properties of concrete'
+            + ('and Rebar (the reinforcing steel used as rod in concrete to '
+               'give additional strength)' if rebar_tests else '')
+            + ' were measured. These were used to estimate the strength of '
+              'the concrete, its elastic behavior and durability, hence '
+              'determining the integrity of the structural member.'
+        )
+        bodies['methodology_equipment'] = '\n\n'.join([method_1, method_2])
+
+        # -- rebar statement (only editable when a survey was recorded; the
+        #    honest "Not Applicable" wording stays fixed otherwise)
+        if rebar_tests:
+            bodies['rebar_statement'] = (
+                'During the testing, Profoscope was used to check the cover '
+                'depth of the reinforcement (concrete cover), locate the '
+                'Rebar\'s exact position within the structural member and '
+                'the estimated diameter of the Rebar.'
+            )
+
+        # -- findings statement (needs results: it states them)
+        if element_data:
+            strength_sentence = (
+                f'the test analysis revealed that {len(good_members)} of the '
+                f'{len(element_data)} structural members tested in the '
+                f'building were good in strength at the time of test'
+                + (f', while {len(poor_members)} fell below the statutory '
+                   f'25 N/mm2 strength and require technical advice'
+                   if poor_members else '')
+                + '.'
+            )
+            advice_sentence = (
+                'It is advised that '
+                + (project.client_name.upper() if project.client_name
+                   else 'the client')
+                + ' engage a qualified structural engineer and other '
+                  'relevant professionals in the built environment to '
+                  'proffer solution to the defects observed, technical '
+                  'advice on the poor structural members tested and further '
+                  'analyse the structural arrangement to guarantee the '
+                  'stability, integrity and the serviceability of the '
+                  'building.'
+            )
+            bodies['findings_statement'] = (strength_sentence + ' '
+                                            + advice_sentence)
+
+        # -- conclusion items (needs results: they state percentages)
+        if element_data:
+            total = len(element_data)
+            good_pct = round(len(good_members) * 100 / total, 1)
+            bodies['conclusion_items'] = '\n'.join([
+                'The Non-Destructive Test analysis as shown in the summary '
+                'of test result (Section 5.0) shows the percentage of '
+                f'strength for the structural elements tested in the '
+                f'building: {len(good_members)} of {total} elements '
+                f'({good_pct}%) attained the assumed 25 N/mm2 strength at '
+                'the time of test'
+                + (f', while {len(poor_members)} '
+                   f'element{"s" if len(poor_members) != 1 else ""} '
+                   f'({round(len(poor_members) * 100 / total, 1)}%) fell '
+                   'below it.' if poor_members else '.'),
+                'However, it is imperative to state clearly that '
+                'non-adherence to the recommendation excludes the testing '
+                'laboratory of any responsibility.',
+            ])
+
+        return bodies
+
+    @classmethod
+    def computed_section_bodies(cls, project):
+        """
+        The generated-content CMS bodies for a project, gathered from the
+        recorded data — the same queries and the same wording the report
+        renders, so the CMS pre-fills with exactly what Generate will
+        print. Used by the CMS API view and the Word export.
+        """
+        from apps.digital_eye.models import PUNDITTest, RebarTest
+        from apps.digital_eye.models import BIMElementMapping
+        tests = list(
+            PUNDITTest.objects
+            .filter(project=project)
+            .select_related('device', 'operator')
+            .prefetch_related('files', 'readings')
+            .order_by('structural_element', 'tested_at')
+        )
+        rebar_tests = list(
+            RebarTest.objects.filter(project=project).order_by('recorded_at')
+        )
+        pulse_tests = [t for t in tests if t.test_type == 'pulse_velocity']
+        element_data = cls._element_data(pulse_tests)
+        visual_notes = cls._visual_observations(tests)
+        floors_present = sorted({e['floor_label'] for e in element_data})
+        bim_levels = sorted(set(
+            BIMElementMapping.objects.filter(project=project)
+            .exclude(level='').values_list('level', flat=True)))
+        has_drawings = BIMElementMapping.objects.filter(
+            project=project).exists()
+        tested = [t.tested_at for t in tests if t.tested_at]
+        same_day = bool(tested) and min(tested).date() == max(tested).date()
+        if tested:
+            date_min, date_max = min(tested).date(), max(tested).date()
+        else:
+            date_min = date_max = datetime.now().date()
+        return cls._computed_bodies(
+            project, tests=tests, rebar_tests=rebar_tests,
+            element_data=element_data,
+            good_members=[e for e in element_data if e['remark'] == 'GOOD'],
+            poor_members=[e for e in element_data if e['remark'] == 'POOR'],
+            visual_notes=visual_notes, floors_present=floors_present,
+            bim_levels=bim_levels, has_drawings=has_drawings, tested=tested,
+            same_day=same_day, date_min=date_min, date_max=date_max)
+
     @staticmethod
     def _f1(value):
         """One-decimal figure (E.C.S, transit times)."""
@@ -1702,9 +2036,30 @@ class NDTReportService:
         serial = report_no.split(' / ')[0]
         builder = NDTReportBuilder(report_no)
 
+        # ---- Project branding (REFINED EXECUTIVE SUMMARY §2.3): the
+        # project's uploaded logo/watermark, when configured. Storage
+        # failures degrade to the standard layout — never a failed report.
+        try:
+            branding = getattr(project, 'report_branding', None)
+            if branding is not None:
+                if branding.logo:
+                    builder.pdf.branding_logo = (
+                        branding.logo.path, branding.logo_position,
+                        type(branding).SIZE_WIDTHS_MM.get(
+                            branding.logo_size, 30.0))
+                if branding.watermark:
+                    builder.pdf.branding_watermark = (
+                        branding.watermark.path,
+                        branding.watermark_opacity_pct)
+        except Exception as exc:  # noqa: BLE001 — branding is cosmetic
+            logger.error('report branding could not be applied: %s', exc)
+
         # ------------------------------------------------------------ cover
-        site_parts = [p for p in (project.site_address, project.lga,
-                                  project.state) if p]
+        # Client address block: street + LGA, then LAGOS STATE on its own
+        # clear line (11 Sep client note — the state never shares a line
+        # with the address). Only the parts that are recorded appear.
+        site_parts = [p for p in (project.site_address, project.lga)
+                      if p]
         tested = [t.tested_at for t in tests if t.tested_at]
         same_day = bool(tested) and min(tested).date() == max(tested).date()
         if tested:
@@ -1713,7 +2068,18 @@ class NDTReportService:
             date_min = date_max = datetime.now().date()
         builder.cover(serial, project.name,
                       ', '.join(site_parts), project.client_name,
-                      _cover_date(date_max))
+                      _cover_date(date_max),
+                      verify_url=report_verification_url(
+                          report_no,
+                          cls._statutory_digest(project, tests, report_no)))
+        # LAGOS STATE on its own clear line below the site address (the
+        # laboratory's jurisdiction; recorded state honoured when present).
+        builder.pdf.set_font('Times', 'B', 18)
+        builder.pdf.set_auto_page_break(False)
+        builder.pdf.set_xy(builder.pdf.l_margin, 267.0)
+        builder.pdf.cell(0, 7.8, _latin1(
+            (project.state or 'LAGOS STATE').upper()), align='C')
+        builder.pdf.set_auto_page_break(auto=True, margin=22)
 
         # ------------------------------------------------------------- TOC
         builder.toc_page()
@@ -1754,86 +2120,108 @@ class NDTReportService:
         has_drawings = BIMElementMapping.objects.filter(
             project=project).exists()
 
+        # Generated-content CMS bodies (11 Sep client request): the computed
+        # wording below resolves through get_cms_text so a saved project
+        # override rewords the printed report; the bodies are the exact
+        # wording computed from the recorded data.
+        cms = cls._computed_bodies(
+            project, tests=tests, rebar_tests=rebar_tests,
+            element_data=element_data, good_members=good_members,
+            poor_members=poor_members, visual_notes=visual_notes,
+            floors_present=floors_present, bim_levels=bim_levels,
+            has_drawings=has_drawings, tested=tested, same_day=same_day,
+            date_min=date_min, date_max=date_max)
+
         # ------------------------------- EXECUTIVE SUMMARY (p3, un-TOC'd, C1)
         # toc_page() left the cursor on this fresh page via the TOC
         # placeholder's own page break — no add_page() here (that was the
         # stray blank page).
         builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
-        proj = _latin1(project.name or 'unnamed project').replace('*', '')
-        client = _latin1(project.client_name or '').replace('*', '')
-        site = _latin1(', '.join(
-            p for p in (project.site_address, project.lga, project.state)
-            if p)).replace('*', '')
-        prose_dates = (_prose_date(date_max) if same_day
-                       else f'{_prose_date(date_min)} and '
-                            f'{_prose_date(date_max)}')
-        # Reference p3 paragraph 1 opens with the building profile ("an
-        # existing 2-floor building (A, B &C) belonging to …, at …") — the
-        # storey count comes only from recorded levels/floors; when nothing
-        # is recorded the profile stays unquantified rather than guessed.
-        storeys = cls._storey_count(floors_present, bim_levels)
-        building = (f'an existing {storeys}-floor building' if storeys
-                    else 'an existing building')
-        builder.para(
-            'In situ Integrity Test (Non-Destructive) of compressive '
-            f'strength of structural members of {building} '
-            f'("**{proj}**")'
-            + (f' belonging to **{client}**' if client else '')
-            + (f', at **{site}**' if site else '')
-            + '.',
-            markdown=True)
-        builder.para(
-            'The Non-Destructive Integrity Test was carried out '
-            + (f'on **{prose_dates}**' if tested else 'on dates not recorded')
-            + ' with the intention to determine the residual compressive '
-              'strength of concrete component of the structural members '
-              'considered to be critical to stability, robustness and general '
-              'safety of the entire structure in its present state.',
-            markdown=True)
-        # Reference p3 paragraph 3 is ONE paragraph: visual findings + the
-        # Non-Destructive analysis outcome + the structural-arrangement /
-        # drawing-availability statement.
-        if visual_notes:
-            visual_sentence = (
-                'The visual inspection revealed structural defects as '
-                'recorded in Section 4.1 of this report')
+        exec_body, _src = get_cms_text(project, 'executive_summary',
+                                       computed=cms)
+        if exec_body is not None:
+            # Generated-content CMS section: a project override rewords it;
+            # the computed body is the exact wording from the recorded data.
+            for para in cms_paragraphs(exec_body):
+                builder.para(para, markdown=True)
         else:
-            visual_sentence = (
-                'The visual inspection did not record any structural '
-                'defects')
-        if element_data:
-            analysis_sentence = (
-                'and the Non-Destructive test analysis shows that '
-                f'{len(good_members)} of the {len(element_data)} structural '
-                'members tested were good in strength (average compressive '
-                'strength at or above the assumed 25 N/mm2)'
-                + (f', while {len(poor_members)} member(s) fell below it and '
-                   'require technical advice.' if poor_members
-                   else ' at the time of test.'))
-        else:
-            analysis_sentence = (
-                'and no ultrasonic pulse velocity results are available '
-                'for this project.')
-        if has_drawings:
-            arrangement_sentence = (
-                'The general structural arrangement of the building was '
-                'referenced from the structural information available on '
-                'the platform (reproduced in the Appendix of this report).')
-        else:
-            arrangement_sentence = (
-                'The general structural arrangement of the buildings could '
-                'not be completely ascertained; as no structural drawing '
-                'was provided.')
-        builder.para(' '.join(
-            [visual_sentence, analysis_sentence, arrangement_sentence]))
-        builder.para(
-            'In view of the above, it is advised that a qualified structural '
-            'engineer should be engaged to proffer solution to the defects '
-            'observed, give technical advice on the poor structural members '
-            'tested and further analyse the structural arrangement to '
-            'guarantee the stability, integrity and the serviceability of the '
-            'structure.'
-        )
+            # No data behind this section yet and no override: the honest
+            # unquantified rendering stays (never an invented summary).
+            proj = _latin1(project.name or 'unnamed project').replace('*', '')
+            client = _latin1(project.client_name or '').replace('*', '')
+            site = _latin1(', '.join(
+                p for p in (project.site_address, project.lga, project.state)
+                if p)).replace('*', '')
+            prose_dates = (_prose_date(date_max) if same_day
+                           else f'{_prose_date(date_min)} and '
+                                f'{_prose_date(date_max)}')
+            # Reference p3 paragraph 1 opens with the building profile ("an
+            # existing 2-floor building (A, B &C) belonging to …, at …") — the
+            # storey count comes only from recorded levels/floors; when nothing
+            # is recorded the profile stays unquantified rather than guessed.
+            storeys = cls._storey_count(floors_present, bim_levels)
+            building = (f'an existing {storeys}-floor building' if storeys
+                        else 'an existing building')
+            builder.para(
+                'In situ Integrity Test (Non-Destructive) of compressive '
+                f'strength of structural members of {building} '
+                f'("**{proj}**")'
+                + (f' belonging to **{client}**' if client else '')
+                + (f', at **{site}**' if site else '')
+                + '.',
+                markdown=True)
+            builder.para(
+                'The Non-Destructive Integrity Test was carried out '
+                + (f'on **{prose_dates}**' if tested else 'on dates not recorded')
+                + ' with the intention to determine the residual compressive '
+                  'strength of concrete component of the structural members '
+                  'considered to be critical to stability, robustness and general '
+                  'safety of the entire structure in its present state.',
+                markdown=True)
+            # Reference p3 paragraph 3 is ONE paragraph: visual findings + the
+            # Non-Destructive analysis outcome + the structural-arrangement /
+            # drawing-availability statement.
+            if visual_notes:
+                visual_sentence = (
+                    'The visual inspection revealed structural defects as '
+                    'recorded in Section 4.1 of this report')
+            else:
+                visual_sentence = (
+                    'The visual inspection did not record any structural '
+                    'defects')
+            if element_data:
+                analysis_sentence = (
+                    'and the Non-Destructive test analysis shows that '
+                    f'{len(good_members)} of the {len(element_data)} structural '
+                    'members tested were good in strength (average compressive '
+                    'strength at or above the assumed 25 N/mm2)'
+                    + (f', while {len(poor_members)} member(s) fell below it and '
+                       'require technical advice.' if poor_members
+                       else ' at the time of test.'))
+            else:
+                analysis_sentence = (
+                    'and no ultrasonic pulse velocity results are available '
+                    'for this project.')
+            if has_drawings:
+                arrangement_sentence = (
+                    'The general structural arrangement of the building was '
+                    'referenced from the structural information available on '
+                    'the platform (reproduced in the Appendix of this report).')
+            else:
+                arrangement_sentence = (
+                    'The general structural arrangement of the buildings could '
+                    'not be completely ascertained; as no structural drawing '
+                    'was provided.')
+            builder.para(' '.join(
+                [visual_sentence, analysis_sentence, arrangement_sentence]))
+            builder.para(
+                'In view of the above, it is advised that a qualified structural '
+                'engineer should be engaged to proffer solution to the defects '
+                'observed, give technical advice on the poor structural members '
+                'tested and further analyse the structural arrangement to '
+                'guarantee the stability, integrity and the serviceability of the '
+                'structure.'
+            )
 
         # ------------------------------------------------------ 1.0 INTRO
         # section() always starts a main section on a fresh page, so the
@@ -1845,32 +2233,12 @@ class NDTReportService:
         # override > the registry default (verbatim the old hardcoded text).
         for para in cms_paragraphs(get_cms_text(project, 'introduction')[0]):
             builder.para(para)
-        site_line = ', '.join(
-            p for p in (project.site_address, project.lga, project.state) if p
-        ) or 'site address not recorded'
-        builder.para(
-            'In compliance with the Mandatory Non-Destructive Test '
-            'requirement of the Lagos State Government, a Non-Destructive '
-            'compressive strength test (Structural Integrity Test) was '
-            f'conducted on the project "{project.name or "-"}"'
-            + (f' for {project.client_name}' if project.client_name else '')
-            + f' located at {site_line}. The map showing the exact location '
-              'of the site is on the Location Map page of this report.'
-        )
-        if has_drawings:
-            builder.para(
-                'The drawings of the building available on the platform are '
-                'reproduced in the Appendix of this report. Structural '
-                'drawing was not provided to the platform; therefore, '
-                '**assumed strength of 25N/mm2** was used for the analysis '
-                'of the structural elements.',
-                markdown=True)
-        else:
-            builder.para(
-                'No structural drawing was provided on the platform for this '
-                'project. Therefore, **assumed strength of 25N/mm2** was '
-                'used for the analysis of the structural elements.',
-                markdown=True)
+        # Computed project paragraphs — generated-content CMS section
+        # (11 Sep): a project override rewords them.
+        intro_body, _src = get_cms_text(project, 'introduction_project',
+                                        computed=cms)
+        for para in cms_paragraphs(intro_body):
+            builder.para(para, markdown=True)
 
         # ------------------------------------------------------ 2.0 PURPOSE
         builder.section('2.0', 'PURPOSE OF INVESTIGATION')
@@ -2183,14 +2551,18 @@ class NDTReportService:
         for para in cms_paragraphs(get_cms_text(project,
                                                 'visual_preamble')[0]):
             builder.para(para, leading=7.5)
-        if visual_notes:
-            builder.lettered(visual_notes)
+        # Generated-content CMS section (11 Sep): the lettered observations
+        # pre-fill from the recorded notes; a project override rewords them.
+        visual_body, visual_src = get_cms_text(project, 'visual_observations',
+                                               computed=cms)
+        if visual_body is not None:
+            builder.lettered(cms_list_items(visual_body))
             builder.para(
                 'Following the aforementioned, a Non-Destructive Test was '
                 'conducted. The photographs in the appendix of this report '
                 'show the physical state of the structure as at test time.',
                 leading=7.5)
-        else:
+        elif visual_src == 'unavailable':
             builder.para('No visual/surface condition observations recorded.',
                          leading=7.5)
 
@@ -2199,23 +2571,12 @@ class NDTReportService:
         builder.inner_heading('NON-DESTRUCTIVE CONCRETE STRENGTH'
                               + (' AND REBAR DETERMINATION.' if rebar_tests
                                  else ' DETERMINATION.'))
-        builder.para(
-            'This test is determined by using the Portable Ultrasonic '
-            'Non-Destructive Digital Indicating Tester (PUNDIT)'
-            + (' and Profoscope' if rebar_tests else '')
-            + '. Non-Destructive, as the name implies, means that the '
-              'materials being tested are not damaged during the test.',
-            leading=7.5,
-        )
-        builder.para(
-            'In the Non-Destructive Test, some properties of concrete'
-            + (' and Rebar (the reinforcing steel used as rod in concrete to '
-               'give additional strength)' if rebar_tests else '')
-            + ' were measured. These were used to estimate the strength of '
-              'the concrete, its elastic behavior and durability, hence '
-              'determining the integrity of the structural member.',
-            leading=7.5,
-        )
+        # Generated-content CMS section (11 Sep): the equipment paragraphs
+        # pre-fill from the tests actually recorded.
+        method_body, _src = get_cms_text(project, 'methodology_equipment',
+                                         computed=cms)
+        for para in cms_paragraphs(method_body):
+            builder.para(para, leading=7.5)
         builder.inner_heading('CONCRETE', centered=False, underline=False)
         for para in cms_paragraphs(get_cms_text(project,
                                                 'methodology_concrete')[0]):
@@ -2249,19 +2610,19 @@ class NDTReportService:
 
         # ------------------------------------------------------- 4.3 REBAR
         builder.section('4.3', 'REINFORCING BAR (REBAR) ASSESSMENT', sub=True)
-        if rebar_tests:
-            builder.para(
-                'During the testing, Profoscope was used to check the cover '
-                'depth of the reinforcement (concrete cover), locate the '
-                'Rebar\'s exact position within the structural member and '
-                'the estimated diameter of the Rebar.',
-                leading=7.5,
-            )
+        # Generated-content CMS section (11 Sep): the rebar statement
+        # pre-fills from the recorded survey; without a survey the honest
+        # "Not Applicable" wording stays fixed (no override can invent one).
+        rebar_body, rebar_src = get_cms_text(project, 'rebar_statement',
+                                             computed=cms)
+        if rebar_body is not None:
+            builder.para(rebar_body, leading=7.5)
         else:
             builder.para(
-                'No rebar assessment was recorded during this investigation; '
-                'the reported results are limited to the ultrasonic and '
-                'visual indications of Sections 4.1 and 5.0.',
+                'Rebar Assessment: Not Applicable. No rebar survey was '
+                'recorded during this investigation; the reported results '
+                'are limited to the ultrasonic and visual indications of '
+                'Sections 4.1 and 5.0.',
                 leading=7.5,
             )
 
@@ -2295,7 +2656,7 @@ class NDTReportService:
                 ['C', 'L', 'C', 'C', 'C', 'C'],
             )
         else:
-            builder.para('No Rebar scanning data recorded for this project.',
+            builder.para('Rebar scanning: Not Applicable for this project.',
                          leading=7.5)
         builder.para('NOTE: This assessment does not cover for the '
                      'construction reinforcement design.', leading=7.5)
@@ -2568,36 +2929,64 @@ class NDTReportService:
                 'engineer, who reviews and signs off this report.')
             for obs in ai_record.observations:
                 builder.bullet(str(obs))
+            # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
+            # intervals, probability below design strength, cross-element
+            # outlier checks, data quality and the reasoning trace — computed
+            # from the recorded data by the analysis engine and stored on the
+            # record. Rendered verbatim; nothing here is editable prose.
+            for m in (ai_record.correlations or []):
+                if not isinstance(m, dict) or 'mean_ecs_n_mm2' not in m:
+                    continue
+                element = m.get('element') or 'element'
+                floor = f" ({m['floor']})" if m.get('floor') else ''
+                builder.inner_heading(
+                    f"{_element_display(element).upper()}{floor}")
+                rows = [
+                    ('Mean pulse velocity',
+                     '-' if m.get('mean_velocity_m_s') is None
+                     else f"{m['mean_velocity_m_s']:.0f} m/s"),
+                    ('Estimated compressive strength',
+                     f"{m['mean_ecs_n_mm2']:.1f} N/mm2"),
+                ]
+                ci = m.get('confidence_interval_n_mm2')
+                rows.append(('95% confidence interval',
+                             f"{ci[0]:.1f} - {ci[1]:.1f} N/mm2"
+                             if ci else
+                             'Not available — the active calibration curve '
+                             'carries no regression standard error'))
+                p_below = m.get('probability_below_design')
+                rows.append(('Probability of strength below the 25 N/mm2 '
+                             'design strength',
+                             f"{p_below * 100:.1f}%"
+                             if p_below is not None else 'Not computable'))
+                dq = m.get('data_quality')
+                rows.append(('Data quality',
+                             f"{dq['label']} — {dq['reason']}"
+                             if dq else 'Not scored'))
+                outlier = m.get('cross_element_outlier')
+                rows.append(('Cross-element check',
+                             (f"OUTLIER — deviates {outlier['deviation_pct']:+.1f}% "
+                              f"from the {outlier['peer_median_m_s']:.0f} m/s "
+                              f"median of its {outlier['group']}")
+                             if outlier else
+                             'Consistent with its peer group'))
+                builder.kv_table(rows)
+                builder.inner_heading('AI REASONING TRACE')
+                for i, step in enumerate(m.get('reasoning_trace') or [], 1):
+                    builder.para(f'{i}. {step}', leading=7.5)
 
         # ---------------------------------------------- 6.0 RECOMMENDATIONS
         builder.section('6.0', 'RECOMMENDATION')
         if element_data:
-            strength_sentence = (
-                f'the test analysis revealed that {len(good_members)} of the '
-                f'{len(element_data)} structural members tested in the '
-                f'building were good in strength at the time of test'
-                + (f', while {len(poor_members)} fell below the statutory '
-                   f'25 N/mm2 strength and require technical advice'
-                   if poor_members else '')
-                + '.'
-            )
-            # CMS override replaces the editable lead-in; the computed
-            # findings sentence and the professional-advice sentence stay
-            # server-computed regardless.
+            # CMS override replaces the editable lead-in; the findings
+            # statement is itself a generated-content CMS section (11 Sep)
+            # whose computed default is the wording from the recorded data.
             lead_in = get_cms_text(project, 'recommendation_preamble')[0]
+            findings_body, _src = get_cms_text(project, 'findings_statement',
+                                               computed=cms)
             builder.para(
                 lead_in.rstrip()
-                + ' ' + strength_sentence
-                + ' It is advised that '
-                + (project.client_name.upper() if project.client_name
-                   else 'the client')
-                + ' engage a qualified structural engineer and other '
-                  'relevant professionals in the built environment to '
-                  'proffer solution to the defects observed, technical '
-                  'advice on the poor structural members tested and further '
-                  'analyse the structural arrangement to guarantee the '
-                  'stability, integrity and the serviceability of the '
-                  'building.'
+                + ' ' + findings_body
             )
         else:
             builder.para('No pulse velocity results are available for this '
@@ -2630,28 +3019,17 @@ class NDTReportService:
         # -------------------------------------------------- 7.0 CONCLUSION
         builder.section('7.0', 'CONCLUSION')
         if element_data:
-            total = len(element_data)
-            good_pct = round(len(good_members) * 100 / total, 1)
             for para in cms_paragraphs(get_cms_text(project,
                                                     'conclusion_preamble')[0]):
                 builder.para(para)
-            conclusion_items = [
-                'The Non-Destructive Test analysis as shown in the summary '
-                'of test result (Section 5.0) shows the percentage of '
-                f'strength for the structural elements tested in the '
-                f'building: {len(good_members)} of {total} elements '
-                f'({good_pct}%) attained the assumed 25 N/mm2 strength at '
-                'the time of test'
-                + (f', while {len(poor_members)} '
-                   f'element{"s" if len(poor_members) != 1 else ""} '
-                   f'({round(len(poor_members) * 100 / total, 1)}%) fell '
-                   'below it.' if poor_members else '.'),
-                'However, it is imperative to state clearly that '
-                'non-adherence to the recommendation excludes the testing '
-                'laboratory of any responsibility.',
-            ]
+            # Generated-content CMS section (11 Sep): the numbered conclusion
+            # items pre-fill with the computed percentages; a project
+            # override rewords them.
+            conclusion_body, _src = get_cms_text(project, 'conclusion_items',
+                                                 computed=cms)
             # Reference §7.0: text 12.7mm across, 7.5mm leading.
-            builder.numbered(conclusion_items, text_indent=12.7, leading=7.5)
+            builder.numbered(cms_list_items(conclusion_body),
+                             text_indent=12.7, leading=7.5)
             builder.ln_gap(3)
             builder.note_block(
                 'The test assumed 25 N/mm2 as the strength of the '

@@ -4,10 +4,11 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ArchivedReportDownloadView, ArchivedReportListView,
     DownloadReportView, GenerateReportView, InspectionReportView,
-    NCRReportView, NDTReportView, NDTWordExportView,
+    NCRReportView, NDTReportPreviewView, NDTReportView, NDTWordExportView,
     ProjectIntelligenceReportView, QualityReportListView,
-    ReportCMSPasswordView, ReportCMSSectionView, ReportCMSSectionsView,
-    ReportTemplateViewSet,
+    ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
+    ReportCMSSectionsView, ReportMapView, ReportTemplateViewSet,
+    ReportVerifyView,
 )
 
 router = DefaultRouter()
@@ -43,4 +44,15 @@ urlpatterns = router.urls + [
          name='report-cms-section'),
     path('reports/cms/password/', ReportCMSPasswordView.as_view(),
          name='report-cms-password'),
+    # REFINED EXECUTIVE SUMMARY (11 Sep 2026): public verification of an
+    # archived dossier (the cover QR resolves here), preview-before-generate,
+    # per-project logo/watermark branding, and interactive-map data.
+    path('reports/verify/', ReportVerifyView.as_view(),
+         name='report-verify'),
+    path('reports/projects/<uuid:project_id>/ndt-report-preview/',
+         NDTReportPreviewView.as_view(), name='project-ndt-report-preview'),
+    path('reports/projects/<uuid:project_id>/branding/',
+         ReportBrandingView.as_view(), name='project-report-branding'),
+    path('reports/projects/<uuid:project_id>/map/',
+         ReportMapView.as_view(), name='project-report-map'),
 ]

@@ -42,7 +42,7 @@ class BIMModel(models.Model):
     name = models.CharField(max_length=255)
     discipline = models.CharField(max_length=50, choices=DISCIPLINE_CHOICES, default='Architecture')
     format = models.CharField(max_length=50, default='IFC4')
-    
+
     file_url = models.CharField(max_length=500, blank=True, null=True, default='https://assets.nexucon.com/bim/sample_model.ifc')
     file_size = models.CharField(max_length=50, default='345 MB')
     current_version = models.CharField(max_length=50, default='v1.0')
@@ -80,7 +80,7 @@ class BIMModelVersion(models.Model):
     version_label = models.CharField(max_length=50, default='v1.0')
     commit_hash = models.CharField(max_length=50, default='a8f93bc2')
     changes_summary = models.TextField(blank=True, null=True)
-    
+
     author_name = models.CharField(max_length=255, default='Lead Architect')
     author_role = models.CharField(max_length=255, default='BIM Coordinator')
     

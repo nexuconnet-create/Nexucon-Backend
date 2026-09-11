@@ -180,3 +180,55 @@ class ReportCMSPassword(models.Model):
 
     def __str__(self):
         return 'Report CMS password'
+
+
+class ReportBranding(models.Model):
+    """
+    Optional logo / watermark branding for a project's statutory NDT
+    report (REFINED EXECUTIVE SUMMARY §2.3). Only real uploaded images —
+    nothing is seeded. One row per project at most; no row means the
+    report renders with the platform's standard laboratory layout
+    (the Lagos State coat of arms and the LSMTL watermark), exactly as
+    the reference template requires.
+    """
+    LOGO_POSITIONS = [
+        ('top-left', 'Top left'),
+        ('top-right', 'Top right'),
+        ('bottom-left', 'Bottom left'),
+        ('bottom-right', 'Bottom right'),
+    ]
+    SIZES = [('small', 'Small'), ('medium', 'Medium'), ('large', 'Large')]
+    SIZE_WIDTHS_MM = {'small': 20.0, 'medium': 30.0, 'large': 42.0}
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE,
+                                   related_name='report_branding')
+    logo = models.FileField(
+        upload_to='reports/branding/%Y/%m/', blank=True, default='',
+        help_text='Client/consultant logo stamped on the report (PNG with '
+                  'transparency recommended)')
+    logo_position = models.CharField(max_length=20, choices=LOGO_POSITIONS,
+                                     default='top-right')
+    logo_size = models.CharField(max_length=20, choices=SIZES,
+                                 default='medium')
+    watermark = models.FileField(
+        upload_to='reports/branding/%Y/%m/', blank=True, default='',
+        help_text='Optional additional watermark image centred behind the '
+                  'page body at the chosen opacity')
+    watermark_opacity_pct = models.PositiveIntegerField(
+        default=50,
+        help_text='Watermark opacity 0-100 (applied at render time)')
+    watermark_position = models.CharField(max_length=20,
+                                          choices=[('center', 'Centre'),
+                                                   ('top-left', 'Top left'),
+                                                   ('top-right', 'Top right')],
+                                          default='center')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL,
+                                   null=True, blank=True,
+                                   related_name='report_branding_edits')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Report branding — {self.project_id}'

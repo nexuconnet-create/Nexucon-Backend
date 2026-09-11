@@ -524,7 +524,7 @@ class PUNDITAdapter:
             risk_level=worst[0],
             risk_score=worst[1] or None,
             observations=observations,
-            correlations=[],
+            correlations=cls._confidence_metrics(project, element_summaries),
             recommendations=cls._project_recommendations(element_summaries),
             reasoning_log="\n".join(steps),
             requires_human_review=True,
@@ -534,6 +534,49 @@ class PUNDITAdapter:
             model_version=model_version,
         )
         return record
+
+    # -------------------------------------------- confidence metrics (11 Sep
+    # 2026, REFINED EXECUTIVE SUMMARY PART B §2.2): per-element confidence
+    # intervals, probability below the design strength, cross-element
+    # outlier validation, data-quality scores and a data-cited reasoning
+    # trace — all computed from the recorded readings, never invented.
+    @staticmethod
+    def _confidence_metrics(project, element_summaries):
+        from . import confidence_metrics as cm
+
+        se = cm.curve_standard_error_mpa(project)
+        outliers = cm.cross_element_outliers(element_summaries)
+        metrics = []
+        for s in element_summaries:
+            if s['mean_ecs_n_mm2'] is None:
+                continue        # no strength estimate: nothing to interval
+            ci = cm.strength_confidence_interval(s['mean_ecs_n_mm2'], se)
+            p_below = (cm.probability_below_design(s['mean_ecs_n_mm2'], se)
+                       if ci is not None else None)
+            quality = cm.data_quality_score(s['n_points'],
+                                            s['point_spread_pct'])
+            outlier = outliers.get(id(s))
+            metrics.append({
+                'element': s['element'],
+                'floor': s['floor'],
+                'grid_location': s['grid_location'],
+                'mean_velocity_m_s': s['mean_velocity_m_s'],
+                'mean_ecs_n_mm2': s['mean_ecs_n_mm2'],
+                'grade': s['grade'],
+                'confidence_interval_n_mm2': (
+                    None if ci is None
+                    else [round(ci[0], 1), round(ci[1], 1)]),
+                'probability_below_design': p_below,
+                'cross_element_outlier': outlier,
+                'data_quality': (
+                    None if quality is None
+                    else {'label': quality[0], 'reason': quality[1]}),
+                'reasoning_trace': cm.reasoning_trace(
+                    s, se_mpa=se, ci=ci, p_below=p_below,
+                    outlier=outlier, quality=quality),
+            })
+        return metrics
+
 
     # ---------------------------------------------- evidence-based confidence
     @staticmethod

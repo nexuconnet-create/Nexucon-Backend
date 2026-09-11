@@ -446,8 +446,13 @@ class ReportCMSSectionsView(APIView):
     """
     GET /api/v1/reports/cms/sections/?project=<uuid>
     Every editable template section with its effective body and where that
-    body comes from (project override / platform override / default).
-    Read access is authenticated-only — the password only guards edits.
+    body comes from (project override / platform override / computed /
+    default). Read access is authenticated-only — the password only guards
+    edits. With a project selected, the generated-content sections carry
+    the exact wording computed from that project's recorded data (a
+    ``requires_project`` section without a project shows no body; a
+    ``requires_data`` section with no data behind it is honestly marked
+    and cannot be edited).
     """
     permission_classes = [IsAuthenticated]
 
@@ -457,9 +462,17 @@ class ReportCMSSectionsView(APIView):
         if request.query_params.get('project') and project is None:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        computed = {}
+        if project is not None:
+            from .ndt_reports import NDTReportService
+            try:
+                computed = NDTReportService.computed_section_bodies(project)
+            except Exception:  # noqa: BLE001 — CMS listing must not 500
+                logger.exception('computed CMS bodies failed')
+                computed = {}
         sections = []
         for key, meta in CMS_SECTIONS.items():
-            body, source = get_cms_text(project, key)
+            body, source = get_cms_text(project, key, computed=computed)
             sections.append({
                 'key': key,
                 'label': meta['label'],
@@ -468,6 +481,16 @@ class ReportCMSSectionsView(APIView):
                 'default': meta['default'],
                 'body': body,
                 'source': source,
+                'computed': bool(meta.get('computed')),
+                # Generated-content sections are per-project: they have no
+                # body at all without a project selected.
+                'requires_project': bool(meta.get('computed')),
+                # Sections whose wording states recorded results: no data
+                # behind them means nothing to reword — never an invention.
+                'requires_data': bool(meta.get('computed'))
+                and key in ('executive_summary', 'visual_observations',
+                            'rebar_statement', 'findings_statement',
+                            'conclusion_items'),
             })
         return Response({
             'project': str(project.id) if project else None,
@@ -518,6 +541,20 @@ class ReportCMSSectionView(APIView):
         rejected = _cms_gate(request)
         if rejected:
             return rejected
+        # Generated-content sections are per-project: their body is the
+        # wording computed from one project's recorded data.
+        if CMS_SECTIONS[key].get('computed'):
+            try:
+                body_json = request.data or {}
+            except Exception:  # noqa: BLE001
+                body_json = {}
+            if not (body_json.get('project')
+                    or request.query_params.get('project')):
+                return Response(
+                    {'detail': 'This generated-content section is '
+                               'project-specific. Select a project to edit '
+                               'its wording.'},
+                    status=status.HTTP_400_BAD_REQUEST)
         body = (request.data or {}).get('body')
         if body is None or not str(body).strip():
             return Response({'detail': 'body is required (use DELETE to '
@@ -526,6 +563,19 @@ class ReportCMSSectionView(APIView):
         project, rejected = self._project(request)
         if rejected:
             return rejected
+        # A generated-content section with no computed body has no recorded
+        # data behind it — an override there could only invent results.
+        if CMS_SECTIONS[key].get('computed') and project is not None:
+            from .ndt_reports import NDTReportService
+            if key not in NDTReportService.computed_section_bodies(project):
+                return Response(
+                    {'detail': 'No recorded data backs this section yet '
+                               '(no test results, observations or rebar '
+                               'survey recorded for the project). Its '
+                               'wording stays fixed at the honest "not '
+                               'recorded" statement — it cannot be edited '
+                               'until the underlying data exists.'},
+                    status=status.HTTP_409_CONFLICT)
         override, _created = ReportSectionOverride.objects.update_or_create(
             project=project, section_key=key,
             defaults={'body': str(body), 'updated_by': request.user})
@@ -548,9 +598,22 @@ class ReportCMSSectionView(APIView):
         rejected = _cms_gate(request)
         if rejected:
             return rejected
-        project, rejected = self._project(request)
-        if rejected:
-            return rejected
+        # A generated-content section can only hold per-project overrides,
+        # so reverting one requires the project it belongs to.
+        if CMS_SECTIONS[key].get('computed'):
+            project, rejected = self._project(request)
+            if rejected:
+                return rejected
+            if project is None:
+                return Response(
+                    {'detail': 'This generated-content section is '
+                               'project-specific. Select the project whose '
+                               'wording you want to revert.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+        else:
+            project, rejected = self._project(request)
+            if rejected:
+                return rejected
         deleted, _ = ReportSectionOverride.objects.filter(
             project=project, section_key=key).delete()
         from apps.evidence.review import record_audit
@@ -561,7 +624,11 @@ class ReportCMSSectionView(APIView):
                        'project': str(project.id) if project else None},
             metadata={'section_key': key, 'scope': 'project' if project
                       else 'platform'})
-        body, source = get_cms_text(project, key)
+        computed = None
+        if CMS_SECTIONS[key].get('computed') and project is not None:
+            from .ndt_reports import NDTReportService
+            computed = NDTReportService.computed_section_bodies(project)
+        body, source = get_cms_text(project, key, computed=computed)
         return Response({'key': key, 'source': source, 'body': body,
                          'reverted': bool(deleted)})
 
@@ -631,3 +698,292 @@ class NDTWordExportView(APIView):
         response['Content-Disposition'] = \
             f'attachment; filename="ndt_report_{project_id}.docx"'
         return response
+
+
+# ---------------------------------------------------------------------------
+# Public report verification (REFINED EXECUTIVE SUMMARY, PART B missing
+# item 2): the QR code on the report cover resolves here. The endpoint is
+# deliberately public — a report recipient has no platform account. It
+# discloses ONLY whether an archived dossier with this reference + content
+# digest exists and its verification facts; no project data.
+# ---------------------------------------------------------------------------
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from rest_framework.permissions import AllowAny
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ReportVerifyView(APIView):
+    """
+    GET /api/v1/reports/verify/?ref=<report reference>&digest=<content digest>
+    Public verification of one archived NDT dossier. Returns the archive's
+    verification facts (reference, digest, checksum, counts, compliance
+    verdict, archive date) or an honest 'not found' — never project data.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        from .models import ArchivedReport
+        ref = (request.query_params.get('ref') or '').strip()
+        digest = (request.query_params.get('digest') or '').strip()
+        if not ref or not digest:
+            return Response(
+                {'verified': False,
+                 'detail': 'Both a report reference and a content digest are '
+                           'required (as encoded in the report QR code).'},
+                status=status.HTTP_400_BAD_REQUEST)
+        report = (ArchivedReport.objects
+                  .filter(report_reference=ref, content_key=digest)
+                  .first())
+        if report is None:
+            return Response(
+                {'verified': False,
+                 'detail': 'No archived report matches this reference and '
+                           'digest. The document may have been altered, or it '
+                           'was never generated by this platform.'},
+                status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'verified': True,
+            'report_reference': report.report_reference,
+            'title': report.title,
+            'content_digest': report.content_key,
+            'sha256_checksum': report.sha256_checksum,
+            'test_count': report.test_count,
+            'assessed_count': report.assessed_count,
+            'passed_count': report.passed_count,
+            'compliance_status': report.compliance_status,
+            'archived_at': report.created_at,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Report preview (REFINED EXECUTIVE SUMMARY §2.1): the exact report the
+# generate endpoint will produce, streamed without archiving — so the
+# operator can inspect it before committing to the certified dossier.
+# ---------------------------------------------------------------------------
+class NDTReportPreviewView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-report-preview/
+    Renders the identical PDF bytes the generate endpoint produces (same
+    service, same CMS overrides, same branding) but does NOT archive the
+    result. Watermarked 'PREVIEW' by disposition filename.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from .ndt_reports import NDTReportService
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            pdf_bytes = NDTReportService.generate_ndt_report(project,
+                                                             request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('NDT report preview failed')
+            return Response({'detail': f'Report preview failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _pdf_response(pdf_bytes,
+                             f'ndt_report_PREVIEW_{project_id}.pdf')
+
+
+# ---------------------------------------------------------------------------
+# Report branding (REFINED EXECUTIVE SUMMARY §2.3): per-project logo /
+# watermark the report render picks up. Directors only — branding a
+# statutory document is a controlled act.
+# ---------------------------------------------------------------------------
+class ReportBrandingView(APIView):
+    """
+    GET    /api/v1/reports/projects/{project_id}/branding/
+    PATCH  /api/v1/reports/projects/{project_id}/branding/  (multipart:
+           logo / watermark files + position/size/opacity fields)
+    DELETE /api/v1/reports/projects/{project_id}/branding/  (remove branding)
+    """
+    permission_classes = [IsAuthenticated]
+
+    _IMAGE_FIELDS = ('logo', 'watermark')
+
+    def get(self, request, project_id):
+        from .models import ReportBranding
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row = getattr(project, 'report_branding', None)
+        if row is None:
+            return Response({'branding_configured': False})
+        return Response(self._payload(row))
+
+    def patch(self, request, project_id):
+        from apps.evidence.review import record_audit
+        from .models import ReportBranding
+        if not IsCMSDirector().has_permission(request, self):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row, _ = ReportBranding.objects.get_or_create(project=project)
+        data = request.data
+        errors = []
+        for field in ('logo_position', 'watermark_position'):
+            if field in data and data[field] not in dict(
+                    ReportBranding._meta.get_field(field).choices):
+                errors.append(f'{field}: invalid choice.')
+        if 'logo_size' in data and data['logo_size'] not in dict(
+                ReportBranding._meta.get_field('logo_size').choices):
+            errors.append('logo_size: invalid choice.')
+        if 'watermark_opacity_pct' in data:
+            try:
+                op = int(data['watermark_opacity_pct'])
+                if not 0 <= op <= 100:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append('watermark_opacity_pct must be an integer '
+                              '0-100.')
+        for field in self._IMAGE_FIELDS:
+            f = data.get(field)
+            if f is None or f is False or field not in data:
+                continue
+            if hasattr(f, 'content_type') and \
+                    f.content_type not in ('image/png', 'image/jpeg'):
+                errors.append(f'{field}: PNG or JPEG images only.')
+        if errors:
+            return Response({'detail': ' '.join(errors)},
+                            status=status.HTTP_400_BAD_REQUEST)
+        for field in ('logo_position', 'logo_size', 'watermark_position'):
+            if field in data:
+                setattr(row, field, data[field])
+        if 'watermark_opacity_pct' in data:
+            row.watermark_opacity_pct = int(data['watermark_opacity_pct'])
+        for field in self._IMAGE_FIELDS:
+            f = data.get(field)
+            if hasattr(f, 'read'):
+                getattr(row, field).save(
+                    f'branding_{project_id}_{field}_{f.name}',
+                    f, save=False)
+            elif data.get(field) in ('', False, 'remove'):
+                getattr(row, field).delete(save=False)
+                setattr(row, field, '')
+        row.updated_by = (request.user
+                          if getattr(request.user, 'is_authenticated', False)
+                          else None)
+        row.save()
+        record_audit(request.user, 'report_branding_updated',
+                     'ReportBranding', row.id)
+        return Response(self._payload(row))
+
+    def delete(self, request, project_id):
+        from apps.evidence.review import record_audit
+        from .models import ReportBranding
+        if not IsCMSDirector().has_permission(request, self):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row = getattr(project, 'report_branding', None)
+        if row is not None:
+            row.logo.delete(save=False)
+            row.watermark.delete(save=False)
+            row.delete()
+            record_audit(request.user, 'report_branding_removed',
+                         'ReportBranding', project_id)
+        return Response({'branding_configured': False})
+
+    @staticmethod
+    def _payload(row):
+        def _url(f):
+            try:
+                return f.url if f else None
+            except Exception:  # noqa: BLE001 — remote storage may raise
+                return None
+        return {
+            'branding_configured': True,
+            'logo_url': _url(row.logo),
+            'logo_position': row.logo_position,
+            'logo_size': row.logo_size,
+            'watermark_url': _url(row.watermark),
+            'watermark_opacity_pct': row.watermark_opacity_pct,
+            'watermark_position': row.watermark_position,
+            'updated_at': row.updated_at,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Report map data (REFINED EXECUTIVE SUMMARY §2.4): the real test-point
+# coordinates + project location for the interactive map. Only recorded
+# coordinates are returned — a test without a position is simply absent,
+# never placed at a fabricated location.
+# ---------------------------------------------------------------------------
+class ReportMapView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/map/
+    GeoJSON-style payload for the interactive location map: project
+    centre (recorded latitude/longitude or None), one marker per PUNDIT
+    test that carries coordinates, and the per-marker strength facts the
+    legend colour-codes by.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.digital_eye.models import PUNDITTest
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        features = []
+        for t in (PUNDITTest.objects
+                  .filter(project=project, latitude__isnull=False,
+                          longitude__isnull=False)
+                  .exclude(latitude=0, longitude=0)):
+            velocity = t.pulse_velocity_ms
+            props = {
+                'element': t.structural_element or 'element',
+                'floor': t.floor or '',
+                'grid_location': t.test_location or '',
+                'tested_at': t.tested_at,
+                'velocity_m_s': velocity,
+            }
+            # Same f_cu path as every other surface (the project's active
+            # calibration curve; honest None outside the calibrated range).
+            from apps.digital_eye.strength_curves import apply_active_curve
+            v_km_s = (t.velocity_km_s if t.velocity_km_s is not None
+                      else (velocity / 1000.0 if velocity else None))
+            strength = None
+            if v_km_s is not None:
+                strength, _snapshot = apply_active_curve(
+                    project, v_km_s, rebound_number=t.rebound_number,
+                    temperature_c=t.surface_temperature_c)
+            props['strength_n_mm2'] = strength
+            if strength is not None:
+                props['band'] = ('good' if strength >= 25.0 else 'poor')
+            elif velocity is not None:
+                props['band'] = 'unassessed'
+            else:
+                props['band'] = 'no_velocity'
+            features.append({
+                'type': 'Feature',
+                'geometry': {'type': 'Point',
+                             'coordinates': [t.longitude, t.latitude]},
+                'properties': props,
+            })
+        return Response({
+            'project_center': (
+                None if project.latitude is None or project.longitude is None
+                else [project.longitude, project.latitude]),
+            'site_address': project.site_address or '',
+            'test_points': {'type': 'FeatureCollection',
+                            'features': features},
+            'legend': {
+                'good': 'Strength >= 25 N/mm2 (statutory pass)',
+                'poor': 'Strength < 25 N/mm2 (requires technical advice)',
+                'unassessed': 'Velocity recorded, outside the calibrated '
+                              'range — no strength estimate',
+                'no_velocity': 'No computable velocity recorded',
+            },
+        })

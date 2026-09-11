@@ -426,11 +426,12 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='import_template')
     def import_template(self, request):
-        """The .xlsx template for the batch upload (A2), pre-filled with
-        clearly-labelled sample rows. Optional ``?project=<id>`` scopes the
-        samples to that project's imported BIM model: the sample element names
-        become REAL element names from the model, so a try-the-flow upload of
-        the untouched template comes out linked to actual members."""
+        """The .xlsx template for the batch upload (A2): an EMPTY READINGS
+        sheet (the only sheet the importer reads, so example data can never
+        enter the registry) plus an EXAMPLE sheet of filled rows for all
+        three test types. Optional ``?project=<id>`` points the EXAMPLE rows
+        at that project's imported BIM members so the illustrations
+        reference REAL element names from the model."""
         from django.http import HttpResponse
         from .excel_import import build_template_response_bytes
 
@@ -1190,10 +1191,13 @@ class PunditTestViewSet(viewsets.ReadOnlyModelViewSet):
         qs = _scoped_legacy_queryset(super().get_queryset(), self.request.user)
         project = self.request.query_params.get('project') or self.request.query_params.get('project_id')
         element_id = self.request.query_params.get('element_id') or self.request.query_params.get('structural_element_id')
+        element_name = self.request.query_params.get('element_name')
         if project:
             qs = qs.filter(Q(project__id=project) | Q(project_id_str=project) | Q(project_name__icontains=project))
         if element_id:
             qs = qs.filter(Q(structural_element_id_str=element_id) | Q(structural_element__icontains=element_id))
+        if element_name:
+            qs = qs.filter(structural_element__icontains=element_name)
         return qs
 
     def list(self, request, *args, **kwargs):
@@ -1507,6 +1511,46 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST)
         from .strength_curves import run_regression
         return Response(run_regression(points))
+
+    @action(detail=False, methods=['post'], url_path='upload-csv')
+    def upload_csv(self, request):
+        """
+        Parse calibration points from an uploaded CSV (Nexucon Link spec).
+        Format: v (m/s), f (MPa), [r (rebound number)].
+        """
+        import csv
+        uploaded = request.FILES.get('file')
+        if not uploaded:
+            return Response({'detail': 'A "file" upload is required (.csv).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            content = uploaded.read().decode('utf-8').splitlines()
+            reader = csv.DictReader(content)
+            data_points = []
+            for row in reader:
+                # normalize keys
+                row_lower = {k.strip().lower(): v for k, v in row.items() if k}
+                try:
+                    v = float(row_lower.get('v') or row_lower.get('velocity') or 0)
+                    f = float(row_lower.get('f') or row_lower.get('strength') or 0)
+                    if not v or not f:
+                        continue
+                    pt = {'v': v, 'f': f}
+                    r_raw = row_lower.get('r') or row_lower.get('rebound')
+                    if r_raw:
+                        pt['r'] = float(r_raw)
+                    data_points.append(pt)
+                except ValueError:
+                    continue
+            if len(data_points) < 2:
+                return Response(
+                    {'detail': 'The CSV must contain at least 2 valid rows with v (m/s) and f (MPa).'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            return Response({'data_points': data_points})
+        except Exception as e:
+            return Response({'detail': f'Error parsing CSV: {str(e)}'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'])
     def preview(self, request):

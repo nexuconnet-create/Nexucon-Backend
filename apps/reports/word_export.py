@@ -101,6 +101,25 @@ class NDTWordExporter:
         tested = [t.tested_at for t in tests if t.tested_at]
         date_max = max(tested).date() if tested else datetime.now().date()
 
+        # Generated-content CMS bodies (11 Sep): same resolution as the PDF
+        # renderer, so the .docx can never show different wording.
+        from apps.digital_eye.models import BIMElementMapping
+        floors_present = sorted({e['floor_label'] for e in element_data})
+        bim_levels = sorted(set(
+            BIMElementMapping.objects.filter(project=project)
+            .exclude(level='').values_list('level', flat=True)))
+        has_drawings = BIMElementMapping.objects.filter(
+            project=project).exists()
+        same_day = bool(tested) and min(tested).date() == max(tested).date()
+        date_min = min(tested).date() if tested else date_max
+        cms = S._computed_bodies(
+            project, tests=tests, rebar_tests=rebar_tests,
+            element_data=element_data, good_members=good_members,
+            poor_members=poor_members, visual_notes=visual_notes,
+            floors_present=floors_present, bim_levels=bim_levels,
+            has_drawings=has_drawings, tested=tested, same_day=same_day,
+            date_min=date_min, date_max=date_max)
+
         doc = Document()
         # ------------------------------------------------------------ cover
         _add_para(doc, 'LAGOS STATE MATERIALS TESTING LABORATORY',
@@ -128,17 +147,12 @@ class NDTWordExporter:
         _add_heading(doc, '1.0 INTRODUCTION')
         for para in cms_paragraphs(get_cms_text(project, 'introduction')[0]):
             _add_para(doc, para)
-        site_line = ', '.join(
-            p for p in (project.site_address, project.lga, project.state)
-            if p) or 'site address not recorded'
-        _add_para(
-            doc,
-            'In compliance with the Mandatory Non-Destructive Test '
-            'requirement of the Lagos State Government, a Non-Destructive '
-            'compressive strength test (Structural Integrity Test) was '
-            f'conducted on the project "{project.name or "-"}"'
-            + (f' for {project.client_name}' if project.client_name else '')
-            + f' located at {site_line}.')
+        # Generated-content CMS section (11 Sep): the project paragraphs
+        # resolve exactly as the PDF renders them.
+        for para in cms_paragraphs(
+                get_cms_text(project, 'introduction_project',
+                             computed=cms)[0]):
+            _add_para(doc, para)
 
         # ------------------------------------------------------------ 2.0
         _add_heading(doc, '2.0 PURPOSE OF INVESTIGATION')
@@ -182,22 +196,23 @@ class NDTWordExporter:
         for para in cms_paragraphs(get_cms_text(project,
                                                 'visual_preamble')[0]):
             _add_para(doc, para)
-        if visual_notes:
-            for i, note in enumerate(visual_notes):
-                _add_para(doc, f'{chr(ord("a") + i)}) {note}', size=10)
+        # Generated-content CMS section (11 Sep): the recorded observations
+        # resolve exactly as the PDF renders them.
+        visual_body, _src = get_cms_text(project, 'visual_observations',
+                                         computed=cms)
+        if visual_body is not None:
+            for item in cms_list_items(visual_body):
+                _add_para(doc, item, size=10)
         else:
             _add_para(doc, 'No visual/surface condition observations '
                            'recorded.')
 
         # ------------------------------------------------------------ 4.2
         _add_heading(doc, '4.2 METHODOLOGY')
-        _add_para(
-            doc,
-            'This test is determined by using the Portable Ultrasonic '
-            'Non-Destructive Digital Indicating Tester (PUNDIT)'
-            + (' and Profoscope' if rebar_tests else '')
-            + '. Non-Destructive, as the name implies, means that the '
-              'materials being tested are not damaged during the test.')
+        for para in cms_paragraphs(
+                get_cms_text(project, 'methodology_equipment',
+                             computed=cms)[0]):
+            _add_para(doc, para)
         _add_heading(doc, 'CONCRETE', level=2)
         for para in cms_paragraphs(get_cms_text(project,
                                                 'methodology_concrete')[0]):
@@ -233,12 +248,12 @@ class NDTWordExporter:
 
         # ------------------------------------------------------------ 4.3
         _add_heading(doc, '4.3 REINFORCING BAR (REBAR) ASSESSMENT')
-        if rebar_tests:
-            _add_para(doc, 'During the testing, Profoscope was used to check '
-                           'the cover depth of the reinforcement (concrete '
-                           'cover), locate the Rebar position within the '
-                           'structural member and the estimated diameter of '
-                           'the Rebar.')
+        # Generated-content CMS section (11 Sep): resolves exactly as the
+        # PDF renders it; without a survey the honest statement prints.
+        rebar_body, _src = get_cms_text(project, 'rebar_statement',
+                                        computed=cms)
+        if rebar_body is not None:
+            _add_para(doc, rebar_body)
             _add_table(
                 doc,
                 ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
@@ -360,29 +375,10 @@ class NDTWordExporter:
         # ------------------------------------------------------------ 6.0
         _add_heading(doc, '6.0 RECOMMENDATION')
         if element_data:
-            strength_sentence = (
-                f'the test analysis revealed that {len(good_members)} of the '
-                f'{len(element_data)} structural members tested in the '
-                f'building were good in strength at the time of test'
-                + (f', while {len(poor_members)} fell below the statutory '
-                   f'25 N/mm2 strength and require technical advice'
-                   if poor_members else '')
-                + '.'
-            )
             lead_in = get_cms_text(project, 'recommendation_preamble')[0]
-            _add_para(
-                doc,
-                lead_in.rstrip() + ' ' + strength_sentence
-                + ' It is advised that '
-                + (project.client_name.upper() if project.client_name
-                   else 'the client')
-                + ' engage a qualified structural engineer and other '
-                  'relevant professionals in the built environment to '
-                  'proffer solution to the defects observed, technical '
-                  'advice on the poor structural members tested and further '
-                  'analyse the structural arrangement to guarantee the '
-                  'stability, integrity and the serviceability of the '
-                  'building.')
+            findings_body, _src = get_cms_text(project, 'findings_statement',
+                                               computed=cms)
+            _add_para(doc, lead_in.rstrip() + ' ' + findings_body)
         else:
             _add_para(doc, 'No pulse velocity results are available for '
                            'this project; no recommendation on concrete '
@@ -406,23 +402,16 @@ class NDTWordExporter:
         # ------------------------------------------------------------ 7.0
         _add_heading(doc, '7.0 CONCLUSION')
         if element_data:
-            total = len(element_data)
-            good_pct = round(len(good_members) * 100 / total, 1)
             for para in cms_paragraphs(get_cms_text(project,
                                                     'conclusion_preamble')[0]):
                 _add_para(doc, para)
-            _add_para(
-                doc,
-                'The Non-Destructive Test analysis as shown in the summary '
-                'of test result (Section 5.0) shows the percentage of '
-                f'strength for the structural elements tested in the '
-                f'building: {len(good_members)} of {total} elements '
-                f'({good_pct}%) attained the assumed 25 N/mm2 strength at '
-                'the time of test'
-                + (f', while {len(poor_members)} '
-                   f'element{"s" if len(poor_members) != 1 else ""} '
-                   f'({round(len(poor_members) * 100 / total, 1)}%) fell '
-                   'below it.' if poor_members else '.'))
+            # Generated-content CMS section (11 Sep): the conclusion items
+            # resolve exactly as the PDF renders them.
+            for item in cms_list_items(
+                    get_cms_text(project, 'conclusion_items',
+                                 computed=cms)[0]):
+                para = doc.add_paragraph(item, style='List Number')
+                para.paragraph_format.space_after = Pt(4)
             _add_para(
                 doc,
                 'However, it is imperative to state clearly that '

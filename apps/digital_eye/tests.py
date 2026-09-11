@@ -32,7 +32,7 @@ from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
     BIMElementMapping, BIMModelGeometry, FieldDevice, GPRAnomaly, GPRSurvey,
     GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITReading,
-    PUNDITTest, SensorDataFile, TrimbleConnection, TrimbleProject,
+    PUNDITTest, RebarTest, SensorDataFile, TrimbleConnection, TrimbleProject,
 )
 
 User = get_user_model()
@@ -542,8 +542,8 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
 
     def _workbook(self, rows, name='readings.xlsx'):
         """rows: list of dicts keyed by template header (None => blank).
-        The template ships with sample rows — delete them so each test writes
-        exactly its own rows."""
+        The READINGS sheet ships empty (the EXAMPLE sheet is never
+        imported), so each test writes exactly its own rows."""
         import io
         from .excel_import import TEMPLATE_COLUMNS, build_template_bytes
         workbook = build_template_bytes()
@@ -564,7 +564,7 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
             {'project': str(self.project.id), 'file': file},
             format='multipart')
 
-    def test_template_downloads_with_headers_and_sample_rows(self):
+    def test_template_downloads_with_empty_readings_and_example_sheet(self):
         import io
         from openpyxl import load_workbook
         from .excel_import import TEMPLATE_COLUMNS
@@ -578,21 +578,28 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         sheet = workbook['READINGS']
         headers = [c.value for c in sheet[1] if c.value is not None]
         self.assertEqual(headers, TEMPLATE_COLUMNS)
-        # The template ships pre-filled with clearly-labelled sample rows so
-        # it can be uploaded as-is to try the flow.
-        self.assertGreater(sheet.max_row, 1)
-        sample_note = sheet.cell(row=2, column=TEMPLATE_COLUMNS.index('NOTES') + 1).value
-        self.assertIn('SAMPLE ROW', str(sample_note))
-        elements = {sheet.cell(row=r, column=1).value
-                    for r in range(2, sheet.max_row + 1)}
+        # The READINGS sheet ships EMPTY — it is the only sheet imported, so
+        # example data can never enter the registry.
+        self.assertEqual(sheet.max_row, 1)
+        # The EXAMPLE sheet carries the filled format illustration.
+        self.assertIn('EXAMPLE', workbook.sheetnames)
+        example = workbook['EXAMPLE']
+        self.assertEqual([c.value for c in example[1] if c.value is not None],
+                         TEMPLATE_COLUMNS)
+        self.assertGreater(example.max_row, 1)
+        sample_note = example.cell(row=2, column=TEMPLATE_COLUMNS.index('NOTES') + 1).value
+        self.assertIn('EXAMPLE ONLY', str(sample_note))
+        elements = {example.cell(row=r, column=1).value
+                    for r in range(2, example.max_row + 1)}
         self.assertIn('COL-A1', elements)      # pulse velocity
         self.assertIn('BEAM-B2', elements)     # crack depth
         self.assertIn('WALL-W1', elements)     # surface quality
         self.assertIn('HOW TO FILL', workbook.sheetnames)
 
-    def test_uploaded_template_imports_its_sample_rows(self):
-        # The as-downloaded template must import cleanly: the sample rows are
-        # valid operator-shaped readings and exercise the full flow end to end.
+    def test_uploaded_template_is_rejected_until_readings_are_typed(self):
+        # The as-downloaded template must NOT import: its READINGS sheet is
+        # empty and the EXAMPLE sheet is never read, so fabricated example
+        # readings can never reach the registry.
         import io
         from .excel_import import build_template_bytes
         buffer = io.BytesIO()
@@ -604,13 +611,9 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         response = self.client.post(
             reverse('pundit-test-import-readings'),
             {'project': str(self.project.id), 'file': upload}, format='multipart')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data['tests_created'], 3)
-        self.assertEqual(response.data['points_imported'], 7)
-        self.assertEqual(PUNDITTest.objects.count(), 3)
-        # The sample element names match no BIM element of the project, so the
-        # result must say so honestly instead of implying a model link.
-        self.assertTrue(all(t['bim_linked'] is False for t in response.data['tests']))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(any('READINGS' in e['message'] for e in response.data['errors']))
+        self.assertEqual(PUNDITTest.objects.count(), 0)
 
     def test_import_creates_tests_with_computed_means(self):
         rows = [
@@ -730,9 +733,9 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         # The created-test listing says it linked.
         self.assertTrue(response.data['tests'][0]['bim_linked'])
 
-    def test_template_scopes_sample_rows_to_project_bim_elements(self):
+    def test_template_scopes_example_rows_to_project_bim_elements(self):
         # ?project= resolves REAL element names from the imported model so the
-        # untouched template's sample rows link to actual members on upload.
+        # EXAMPLE sheet's illustration rows point at actual members.
         BIMElementMapping.objects.create(
             project=self.project, bim_guid='wallguid0000000000000000',
             element_name='Basic Wall:Exterior', element_id='wall-1', element_type='IfcWall')
@@ -750,12 +753,15 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         import io
         from openpyxl import load_workbook
         workbook = load_workbook(io.BytesIO(response.content))
-        elements = {workbook['READINGS'].cell(row=r, column=1).value
-                    for r in range(2, 8)}
+        example = workbook['EXAMPLE']
+        elements = {example.cell(row=r, column=1).value
+                    for r in range(2, 9)}
         self.assertIn('M_Concrete-Rectangular Beam:225 x 600mm:801629', elements)
         self.assertIn('Floor:200THK RC SLAB:780904', elements)
 
-        # And uploading that template as-is now creates linked tests.
+        # Uploading that template as-is creates nothing: the READINGS sheet is
+        # empty and the EXAMPLE sheet is never imported, so example data
+        # cannot reach the registry.
         buffer = io.BytesIO()
         workbook.save(buffer)
         buffer.seek(0)
@@ -765,12 +771,8 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         response = self.client.post(
             reverse('pundit-test-import-readings'),
             {'project': str(self.project.id), 'file': upload}, format='multipart')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        linked = [t['bim_linked'] for t in response.data['tests']]
-        self.assertTrue(all(linked), response.data['tests'])
-        guids = set(PUNDITTest.objects.filter(project=self.project)
-                    .values_list('structural_element_guid', flat=True))
-        self.assertIn('slabguid0000000000000000', guids)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertEqual(PUNDITTest.objects.filter(project=self.project).count(), 0)
 
     def test_import_rejects_project_outside_scope(self):
         other = User.objects.create_user(
@@ -2630,6 +2632,30 @@ class TrimbleTasksTestCase(TestCase):
         self.assertIn('HTTP 401 token expired', summary['errors'])
 
 
+class HonestModelDefaultsTestCase(DigitalEyeAPITestBase):
+    """Model defaults must never fabricate records (no-dummy-data mandate,
+    10 Sep 2026): a connection that has never synced and a rebar scan with
+    no element entered start blank — nothing is invented for rows that have
+    no real data yet."""
+
+    def test_trimble_connection_starts_with_no_fabricated_sync_state(self):
+        connection = TrimbleConnection.objects.create(name='Unsynced link')
+        self.assertEqual(connection.trimble_project_id, '')
+        self.assertEqual(connection.trimble_project_name, '')
+        self.assertEqual(connection.project_name, '')
+        self.assertEqual(connection.region, '')
+        self.assertIsNone(connection.last_sync_at)
+        self.assertEqual(connection.synced_models_count, 0)
+        self.assertEqual(connection.synced_elements_count, 0)
+        self.assertEqual(connection.bcf_topics_count, 0)
+        self.assertFalse(connection.webhook_active)
+
+    def test_rebar_test_starts_with_no_assumed_element_or_location(self):
+        scan = RebarTest.objects.create(project=self.project)
+        self.assertEqual(scan.structural_element, '')
+        self.assertEqual(scan.test_location, '')
+
+
 # ======================================================================
 # 7 Sep 2026 review meeting (meeting #2) — free-text floors, concrete
 # maturity, evidence-based confidence and the Excel results export.
@@ -3102,6 +3128,53 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
         response = self.client.post(
             reverse('strength-curve-calibrate'),
             {'data_points': [{'v': 3000.0, 'f': 15.0}]}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_upload_csv_parses_calibration_pairs(self):
+        import io
+        csv_body = ('v,f,r\n'
+                    '3000,15.2,30\n'
+                    '3200,18.1,32\n'
+                    '3400,21.4,34\n')
+        upload = SimpleUploadedFile(
+            'calibration.csv', csv_body.encode('utf-8'),
+            content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['data_points'], [
+            {'v': 3000.0, 'f': 15.2, 'r': 30.0},
+            {'v': 3200.0, 'f': 18.1, 'r': 32.0},
+            {'v': 3400.0, 'f': 21.4, 'r': 34.0},
+        ])
+        # Alternative column names (velocity / strength) parse too, and a
+        # file without a rebound column yields pairs with no 'r' key.
+        csv_body = ('velocity,strength\n'
+                    '3000,15.2\n'
+                    '3200,18.1\n')
+        upload = SimpleUploadedFile(
+            'calibration.csv', csv_body.encode('utf-8'),
+            content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['data_points']), 2)
+        self.assertFalse('r' in response.data['data_points'][0])
+
+    def test_upload_csv_rejects_thin_or_missing_files(self):
+        # No file at all.
+        response = self.client.post(reverse('strength-curve-upload-csv'),
+                                    {}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Fewer than 2 valid rows.
+        upload = SimpleUploadedFile(
+            'thin.csv', b'v,f\n3000,15.2\n', content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_preview_computes_the_full_chain(self):
