@@ -8,7 +8,7 @@ from .views import (
     ProjectIntelligenceReportView, QualityReportListView,
     ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
     ReportCMSSectionsView, ReportMapView, ReportTemplateViewSet,
-    ReportVerifyView,
+    ReportVerifyDownloadView, ReportVerifyView,
 )
 
 router = DefaultRouter()
@@ -49,6 +49,8 @@ urlpatterns = router.urls + [
     # per-project logo/watermark branding, and interactive-map data.
     path('reports/verify/', ReportVerifyView.as_view(),
          name='report-verify'),
+    path('reports/verify/download/', ReportVerifyDownloadView.as_view(),
+         name='report-verify-download'),
     path('reports/projects/<uuid:project_id>/ndt-report-preview/',
          NDTReportPreviewView.as_view(), name='project-ndt-report-preview'),
     path('reports/projects/<uuid:project_id>/branding/',

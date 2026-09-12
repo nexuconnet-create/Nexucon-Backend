@@ -3505,6 +3505,36 @@ class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         self.assertNotIn('Marina', raw)          # project name
         self.assertNotIn('Lagos Island', raw)    # site address / LGA
 
+    # ---- public download of the authentic original (12 Sep 2026) ----
+    def test_download_original_with_valid_ref_and_digest(self):
+        response = self.client.get(
+            reverse('report-verify-download'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.content.startswith(b'%PDF'))
+        # The exact archived bytes — byte-for-byte the sealed original.
+        self.archive.file.open('rb')
+        try:
+            self.assertEqual(response.content, self.archive.file.read())
+        finally:
+            self.archive.file.close()
+
+    def test_download_rejects_tampered_digest(self):
+        # A holder of an edited document does not carry the matching digest
+        # — they get an honest 404, never the original.
+        response = self.client.get(
+            reverse('report-verify-download'),
+            {'ref': self.archive.report_reference,
+             'digest': 'f' * 64})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data['verified'])
+
+    def test_download_requires_both_params(self):
+        response = self.client.get(reverse('report-verify-download'),
+                                   {'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 class NDTReportPreviewTests(_HermeticMediaMixin, NDTReportFixtureMixin,
                             APITestCase):
