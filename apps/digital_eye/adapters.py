@@ -586,10 +586,18 @@ class PUNDITAdapter:
         meeting item 6 — the client asked for 93-95%; good field data earns
         it, thin data scores honestly lower; nothing is ever hardcoded).
 
+        Evidence is pooled PER PHYSICAL ELEMENT (12 Sep 2026): the registry
+        and device ingestion record each station measurement as its own test
+        row, so one element's 3+ real test points (BS EN 12504-4) can arrive
+        as several single-point tests. Points and point velocities are
+        aggregated across the tests sharing an element name on the same
+        floor before scoring; an unnamed element is never merged with
+        another, so each unnamed station stands alone.
+
           base 70  — deterministic BS 1881-203 math over recorded readings
           +10      — every graded element has 3+ test points (BS EN 12504-4)
           +10      — within-element point spread within 2% of the mean
-          +5       — every graded velocity inside the E.C.S calibration range
+          +5       — every graded element has an E.C.S (strength estimate)
         and, when the narrative layer ran, +5 for provider synthesis.
         Capped at 95. Returns a 0.0-1.0 fraction (the field's documented
         scale) or None with no evidence.
@@ -597,15 +605,26 @@ class PUNDITAdapter:
         graded = [s for s in element_summaries if s['grade'] != 'pending']
         if not graded:
             return None
+        groups = {}
+        for s in graded:
+            name = (s.get('element') or '').strip().lower()
+            floor = (s.get('floor') or '').strip().lower()
+            key = (name, floor) if name else (None, id(s))
+            g = groups.setdefault(key, {'n_points': 0, 'velocities': []})
+            g['n_points'] += s.get('n_points') or 0
+            g['velocities'].extend(s.get('point_velocities_m_s') or [])
         score = 70.0
-        if all(s['n_points'] >= 3 for s in graded):
+        if all(g['n_points'] >= 3 for g in groups.values()):
             score += 10
-        spreads = [s['point_spread_pct'] for s in graded
-                   if s['point_spread_pct'] is not None]
+        spreads = []
+        for g in groups.values():
+            vs = [v for v in g['velocities'] if v]
+            if len(vs) > 1:
+                mean = sum(vs) / len(vs)
+                if mean > 0:
+                    spreads.append((max(vs) - min(vs)) / mean * 100.0)
         if spreads and max(spreads) <= 2.0:
             score += 10
-        elif not spreads:
-            pass  # single-point elements: no spread evidence, no penalty
         if all(s['mean_ecs_n_mm2'] is not None for s in graded):
             score += 5
         if llm_used:

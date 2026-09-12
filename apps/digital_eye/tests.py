@@ -2722,9 +2722,12 @@ class EvidenceConfidenceTestCase(TestCase):
         self.assertEqual(confidence, 0.70)
 
     def test_high_spread_loses_the_consistency_bonus(self):
-        # 3+ points and an E.C.S, but the points disagree by > 2%.
+        # 3+ points and an E.C.S, but the points genuinely disagree by
+        # > 2% (the velocities themselves — the score no longer trusts a
+        # stored spread field that can contradict its own points).
         confidence = PUNDITAdapter._evidence_confidence(
-            [self._summary(point_spread_pct=4.8)], llm_used=True)
+            [self._summary(point_velocities_m_s=[3900.0, 4000.0, 4100.0],
+                           point_spread_pct=5.0)], llm_used=True)
         self.assertEqual(confidence, 0.90)
 
     def test_no_llm_loses_the_model_bonus(self):
@@ -2738,6 +2741,55 @@ class EvidenceConfidenceTestCase(TestCase):
     def test_ungraded_elements_return_none(self):
         self.assertIsNone(PUNDITAdapter._evidence_confidence(
             [self._summary(grade='pending')], llm_used=True))
+
+    def test_cross_test_points_pool_per_element(self):
+        # 12 Sep 2026: the registry and device ingestion record each station
+        # measurement as its own test row — an element's 3+ real points
+        # (BS EN 12504-4) arrive as several single-point tests. Pooled per
+        # element they earn the coverage and consistency bonuses; scored
+        # per test row (the old behaviour) the same data read as thin.
+        stations = [
+            self._summary(element='WALL-W1', floor='Ground Floor',
+                          n_points=1, point_velocities_m_s=[4000.0],
+                          point_spread_pct=None),
+            self._summary(element='WALL-W1', floor='Ground Floor',
+                          n_points=1, point_velocities_m_s=[4020.0],
+                          point_spread_pct=None),
+            self._summary(element='WALL-W1', floor='Ground Floor',
+                          n_points=1, point_velocities_m_s=[4010.0],
+                          point_spread_pct=None),
+        ]
+        # Same element, same floor: one element with 3 consistent points.
+        self.assertEqual(
+            PUNDITAdapter._evidence_confidence(stations, llm_used=True),
+            0.95)
+        # The identical measurements on DISTINCT elements stay thin data —
+        # each element genuinely has one point only. (No E.C.S so the
+        # score isolates the pooling behaviour: 70 base + 5 LLM.)
+        distinct = [self._summary(element=f'WALL-W{i}', floor='Ground Floor',
+                                  n_points=1,
+                                  point_velocities_m_s=[4000.0 + 10 * i],
+                                  point_spread_pct=None,
+                                  mean_ecs_n_mm2=None)
+                    for i in (1, 2, 3)]
+        self.assertEqual(
+            PUNDITAdapter._evidence_confidence(distinct, llm_used=True),
+            0.75)
+
+    def test_same_element_name_on_different_floors_stays_separate(self):
+        # A name repeated on two floors is two elements — never pooled.
+        # (No E.C.S: 70 base only.)
+        stations = [
+            self._summary(element='COL-A1', floor='Ground Floor',
+                          n_points=1, point_velocities_m_s=[4000.0],
+                          point_spread_pct=None, mean_ecs_n_mm2=None),
+            self._summary(element='COL-A1', floor='First Floor',
+                          n_points=1, point_velocities_m_s=[4000.0],
+                          point_spread_pct=None, mean_ecs_n_mm2=None),
+        ]
+        self.assertEqual(
+            PUNDITAdapter._evidence_confidence(stations, llm_used=False),
+            0.70)
 
 
 class PunditResultsExportTestCase(DigitalEyeAPITestBase):
