@@ -708,6 +708,16 @@ class StrengthCurve(models.Model):
         from . import strength_curves
         return strength_curves.curve_snapshot(self, temperature_c=temperature_c)
 
+    def save(self, *args, **kwargs):
+        # Fit statistics are DERIVED, never client-supplied: recompute them
+        # from the curve's real stored pairs on every save. Curves without
+        # pairs (manual / documented laboratory curves) keep null — a
+        # statistic the data cannot support is never invented.
+        from .strength_curves import curve_fit_stats
+        (self.r2_score, self.standard_error, self.aic) = curve_fit_stats(
+            self.curve_type, self.formula_params or {}, self.data_points or [])
+        super().save(*args, **kwargs)
+
 
 class ProjectCurveSetting(models.Model):
     """

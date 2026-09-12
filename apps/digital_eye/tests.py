@@ -3045,6 +3045,57 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('formula_params', response.data['errors'])
 
+    def test_curve_create_derives_fit_stats_from_real_pairs(self):
+        # A curve saved with its real calibration pairs gets its R²/SE/AIC
+        # derived by the platform from those pairs — never client-supplied.
+        # (A little measurement noise: a perfectly exact fit has zero
+        # residual sum of squares, for which AIC is honestly undefined.)
+        points = [{'v': float(3000 + i * 100),
+                   'f': 0.01 * (3000 + i * 100) - 20.0 + (0.4 if i % 2 else -0.3)}
+                  for i in range(10)]
+        response = self.client.post(self._curve_url(), {
+            'name': 'Derived-stats calibration', 'curve_type': 'linear',
+            'project': str(self.project.id),
+            'formula_params': {'m': 0.01, 'c': -20.0},
+            'valid_range_min_ms': 2000.0, 'valid_range_max_ms': 5000.0,
+            'data_points': points,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        # R² of the curve's OWN params against its pairs (not the
+        # least-squares optimum of them, so below 1.0 with noise present).
+        self.assertGreater(response.data['r2_score'], 0.9)
+        self.assertIsNotNone(response.data['standard_error'])
+        self.assertIsNotNone(response.data['aic'])
+
+        # A curve saved without pairs (manual laboratory parameters) keeps
+        # honest nulls — nothing is invented.
+        response = self.client.post(self._curve_url(), {
+            'name': 'Manual parameters', 'curve_type': 'linear',
+            'project': str(self.project.id),
+            'formula_params': {'m': 0.012, 'c': -30.0},
+            'valid_range_min_ms': 2000.0, 'valid_range_max_ms': 5000.0,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        self.assertIsNone(response.data['r2_score'])
+        self.assertIsNone(response.data['standard_error'])
+        self.assertIsNone(response.data['aic'])
+
+        # Zero residual degrees of freedom (3 pairs, 3 polynomial
+        # parameters): R² still computes, standard error cannot — null.
+        response = self.client.post(self._curve_url(), {
+            'name': 'Degenerate dof', 'curve_type': 'polynomial',
+            'project': str(self.project.id),
+            'formula_params': {'coeffs': [1.0, 0.001, 0.0000001]},
+            'valid_range_min_ms': 2000.0, 'valid_range_max_ms': 5000.0,
+            'data_points': points[:3],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        self.assertIsNotNone(response.data['r2_score'])
+        self.assertIsNone(response.data['standard_error'])
+
     def test_activate_and_the_readings_flow_through_the_curve(self):
         curve_response = self.client.post(self._curve_url(), {
             'name': 'Lekki active calibration', 'curve_type': 'linear',

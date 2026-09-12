@@ -340,6 +340,53 @@ def _fit_stats(f_obs, f_pred, n_params):
     return r2, std_err, aic
 
 
+def curve_fit_stats(curve_type, formula_params, data_points):
+    """
+    R² / standard error / AIC of a curve's OWN stored parameters measured
+    against its REAL stored calibration pairs — the statistics persisted on
+    regressed curves (read-only to API clients; the platform derives them so
+    nothing client-supplied can pose as a fit quality).
+
+    Returns (None, None, None) whenever they cannot be computed honestly:
+    no usable pairs, a lookup table (piecewise interpolation, not a fitted
+    model), a SonReb curve whose pairs lack rebound values, or parameters
+    that fail to evaluate. A statistic the maths cannot support (e.g.
+    standard error with as many parameters as pairs — zero residual degrees
+    of freedom) comes back None from _fit_stats and is stored as null.
+    """
+    if curve_type == 'lookup' or curve_type not in CURVE_TYPES:
+        return None, None, None
+
+    def _num(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    points = [p for p in (data_points or [])
+              if isinstance(p, dict) and _num(p.get('v')) and _num(p.get('f'))]
+    if curve_type == 'sonreb':
+        # Every prediction needs a rebound value or the pair cannot score.
+        points = [p for p in points if _num(p.get('r')) and p['r'] > 0]
+    if len(points) < 2:
+        return None, None, None
+    try:
+        f_obs, f_pred = [], []
+        for p in points:
+            # No valid-range gate here: the pairs ARE the calibration data.
+            value = apply_curve_params(curve_type, formula_params,
+                                       p['v'] / 1000.0,
+                                       rebound_number=p.get('r'))
+            if value is None or not math.isfinite(value):
+                return None, None, None
+            f_obs.append(float(p['f']))
+            f_pred.append(float(value))
+        if curve_type == 'polynomial':
+            n_params = len(formula_params.get('coeffs', []))
+        else:
+            n_params = {'linear': 2, 'exponential': 3, 'sonreb': 3}[curve_type]
+        return _fit_stats(f_obs, f_pred, n_params)
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return None, None, None
+
+
 def run_regression(data_points):
     """
     Fit every supported curve type to calibration pairs
