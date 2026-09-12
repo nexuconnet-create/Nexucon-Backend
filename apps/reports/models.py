@@ -211,6 +211,18 @@ class ReportBranding(models.Model):
                                      default='top-right')
     logo_size = models.CharField(max_length=20, choices=SIZES,
                                  default='medium')
+    # Cover logo (12 Sep 2026): the Lagos State coat of arms drawn top-left
+    # of the cover is the laboratory default. A project may REPLACE it with
+    # its own image or HIDE it entirely — three honest states, nothing
+    # invented: custom image, no logo, or the statutory default.
+    cover_logo = models.FileField(
+        upload_to='reports/branding/%Y/%m/', blank=True, default='',
+        help_text='Replaces the default Lagos State coat of arms on the '
+                  'report cover (drawn in the same top-left position)')
+    cover_logo_hidden = models.BooleanField(
+        default=False,
+        help_text='When True the cover carries no logo at all — the default '
+                  'coat of arms is not drawn either')
     watermark = models.FileField(
         upload_to='reports/branding/%Y/%m/', blank=True, default='',
         help_text='Optional additional watermark image centred behind the '

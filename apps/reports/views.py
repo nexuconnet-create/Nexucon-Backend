@@ -819,7 +819,7 @@ class ReportBrandingView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    _IMAGE_FIELDS = ('logo', 'watermark')
+    _IMAGE_FIELDS = ('logo', 'watermark', 'cover_logo')
 
     def get(self, request, project_id):
         from .models import ReportBranding
@@ -881,9 +881,26 @@ class ReportBrandingView(APIView):
                 getattr(row, field).save(
                     f'branding_{project_id}_{field}_{f.name}',
                     f, save=False)
+                # Uploading a cover image implies showing it — clear a
+                # previously-set hide flag (an explicit cover_logo_hidden
+                # below still wins when both arrive in one request).
+                if field == 'cover_logo':
+                    row.cover_logo_hidden = False
             elif data.get(field) in ('', False, 'remove'):
                 getattr(row, field).delete(save=False)
                 setattr(row, field, '')
+        # Cover-logo visibility flag: uploading a cover image implies showing
+        # it; an explicit false/true (or the string forms) toggles hiding the
+        # cover logo entirely — including the statutory default.
+        if 'cover_logo_hidden' in data:
+            raw = data['cover_logo_hidden']
+            if isinstance(raw, str):
+                row.cover_logo_hidden = raw.strip().lower() in ('true', '1', 'yes')
+            else:
+                row.cover_logo_hidden = bool(raw)
+            if row.cover_logo_hidden:
+                row.cover_logo.delete(save=False)
+                row.cover_logo = ''
         row.updated_by = (request.user
                           if getattr(request.user, 'is_authenticated', False)
                           else None)
@@ -906,6 +923,7 @@ class ReportBrandingView(APIView):
         if row is not None:
             row.logo.delete(save=False)
             row.watermark.delete(save=False)
+            row.cover_logo.delete(save=False)
             row.delete()
             record_audit(request.user, 'report_branding_removed',
                          'ReportBranding', project_id)
@@ -923,6 +941,8 @@ class ReportBrandingView(APIView):
             'logo_url': _url(row.logo),
             'logo_position': row.logo_position,
             'logo_size': row.logo_size,
+            'cover_logo_url': _url(row.cover_logo),
+            'cover_logo_hidden': row.cover_logo_hidden,
             'watermark_url': _url(row.watermark),
             'watermark_opacity_pct': row.watermark_opacity_pct,
             'watermark_position': row.watermark_position,

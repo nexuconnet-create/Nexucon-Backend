@@ -3665,6 +3665,59 @@ class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         row = ReportBranding.objects.get(project=self.project)
         self.assertTrue(row.logo)
 
+    def test_cover_logo_replaces_default_and_hides(self):
+        """
+        Cover-logo dynamics (12 Sep 2026): an uploaded image replaces the
+        Lagos State coat of arms (same 1-image count on the cover — swap,
+        not add); the hide flag removes the cover logo entirely (one fewer
+        image than the default render).
+        """
+        from apps.projects.models import Project
+        from apps.reports.models import ReportBranding
+        self._as(self.director)
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        url = reverse('project-report-branding',
+                      kwargs={'project_id': self.project.id})
+
+        # 1) A custom cover logo replaces the default — still one image.
+        response = self.client.patch(
+            url, {'cover_logo': self.png}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertFalse(response.data['cover_logo_hidden'])
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertTrue(data.startswith(b'%PDF'))
+        self.assertEqual(_pdf_image_count(data), plain_images)
+        row = ReportBranding.objects.get(project=self.project)
+        self.assertTrue(row.cover_logo)
+
+        # 2) Hiding the cover logo removes it — one image fewer.
+        response = self.client.patch(url, {'cover_logo_hidden': True})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['cover_logo_hidden'])
+        self.assertIsNone(response.data['cover_logo_url'])
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertEqual(_pdf_image_count(data), plain_images - 1)
+
+        # 3) Re-uploading after hiding clears the flag and shows the image.
+        # (A fresh in-memory file — the first request consumed self.png.)
+        img = Image.new('RGBA', (40, 40), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        fresh_png = SimpleUploadedFile('logo2.png', buf.getvalue(),
+                                       content_type='image/png')
+        response = self.client.patch(
+            url, {'cover_logo': fresh_png}, format='multipart')
+        self.assertFalse(response.data['cover_logo_hidden'])
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertEqual(_pdf_image_count(data), plain_images)
+
     def test_branded_report_renders_from_remote_storage(self):
         """
         Regression (11 Sep 2026): the render used ``logo.path``, which raises

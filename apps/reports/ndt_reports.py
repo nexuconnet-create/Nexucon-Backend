@@ -339,6 +339,12 @@ class MTLReportPDF(FPDF):
         # ``.path`` raises NotImplementedError) render identically to disk.
         self.branding_logo = None      # (BytesIO, 'top-left'|..., width_mm)
         self.branding_watermark = None  # (BytesIO, opacity_pct 0-100)
+        # Cover logo (12 Sep 2026): the Lagos State coat of arms is the
+        # statutory default drawn top-left of the cover. A project may
+        # replace it with its own image ('replace' bytes) or carry no cover
+        # logo at all ('hidden'); None = the default, unchanged.
+        self.cover_logo = None    # BytesIO replacement image
+        self.cover_logo_hidden = False
         # Reference fonts (bundled in apps/reports/fonts).
         for family, styles in (
             ('Cambria', (('', 'Cambria.ttf'), ('B', 'Cambria-Bold.ttf'),
@@ -450,8 +456,20 @@ class NDTReportBuilder:
         # limit) — suspend automatic page breaks for the whole cover.
         pdf.set_auto_page_break(False)
         pdf.set_text_color(*INK)
+        # Cover logo — dynamic (12 Sep 2026): the project's uploaded image
+        # replaces the Lagos State coat of arms in the same position; the
+        # coat of arms is the statutory default only when neither a custom
+        # image nor a hide flag is configured. Rendered at the default's
+        # measured width (30mm) so the reference layout is preserved.
         try:
-            pdf.image(COVER_LOGO_IMAGE, x=5.8, y=2.4, w=30)
+            if pdf.cover_logo_hidden:
+                pass  # no cover logo at all — the project asked for none
+            elif pdf.cover_logo is not None:
+                pdf.cover_logo.seek(0)
+                pdf.image(pdf.cover_logo, x=5.8, y=2.4, w=30)
+                pdf.cover_logo.seek(0)
+            else:
+                pdf.image(COVER_LOGO_IMAGE, x=5.8, y=2.4, w=30)
         except Exception as exc:                # noqa: BLE001 — never break
             logger.error('cover logo embed failed: %s', exc)
         avail = pdf.w - pdf.l_margin - pdf.r_margin
@@ -2092,6 +2110,19 @@ class NDTReportService:
                                 branding.logo_size, 30.0))
                     finally:
                         branding.logo.close()
+                # Cover logo: custom image replaces the Lagos State coat of
+                # arms; the hide flag removes it entirely. An uploaded image
+                # takes precedence over the flag only because the view keeps
+                # the two mutually exclusive (uploading clears the flag).
+                if branding.cover_logo_hidden:
+                    builder.pdf.cover_logo_hidden = True
+                elif branding.cover_logo:
+                    branding.cover_logo.open('rb')
+                    try:
+                        builder.pdf.cover_logo = io.BytesIO(
+                            branding.cover_logo.read())
+                    finally:
+                        branding.cover_logo.close()
                 if branding.watermark:
                     branding.watermark.open('rb')
                     try:
