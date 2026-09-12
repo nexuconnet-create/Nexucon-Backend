@@ -563,16 +563,22 @@ class ReportCMSSectionView(APIView):
         # A line-kind section is a single-line reference whose two parts
         # print in different places (serial box / header text) — the shape
         # is part of the statutory layout, so it is validated, not assumed.
+        # The exact "NNNN / MTL/NDT/YYYY" shape is enforced (12 Sep 2026):
+        # a loose " / " check let typos like "MTL/NDR" onto statutory
+        # documents, whose QR then referenced a serial the laboratory never
+        # issued.
         if CMS_SECTIONS[key]['kind'] == 'line':
+            import re
             candidate = str(body).strip()
             if '\n' in candidate or '\r' in candidate:
                 return Response(
                     {'detail': 'The report reference must be a single line.'},
                     status=status.HTTP_400_BAD_REQUEST)
-            if ' / ' not in candidate:
+            if not re.fullmatch(r'\d{1,4} / MTL/NDT/\d{4}', candidate):
                 return Response(
-                    {'detail': 'The report reference must keep the shape '
-                               '"SERIAL / MTL/NDT/YEAR" — the part before '
+                    {'detail': 'The report reference must keep the exact '
+                               'shape "NNNN / MTL/NDT/YYYY" (e.g. '
+                               '"0420 / MTL/NDT/2027") — the part before '
                                '" / " prints inside the blue serial box on '
                                'every page.'},
                     status=status.HTTP_400_BAD_REQUEST)

@@ -3202,12 +3202,19 @@ class ReportCMSReferenceSectionTests(ReportCMSBase):
             "report_reference", "0420", project=self.project)
         self.assertEqual(response.status_code,
                          status.HTTP_400_BAD_REQUEST)
-        self.assertIn("SERIAL / MTL/NDT/YEAR", response.data["detail"])
+        self.assertIn("NNNN / MTL/NDT/YYYY", response.data["detail"])
         response = self._save_section(
             "report_reference", "0420 /\nMTL/NDT/2027", project=self.project)
         self.assertEqual(response.status_code,
                          status.HTTP_400_BAD_REQUEST)
         self.assertIn("single line", response.data["detail"])
+        # 12 Sep 2026: the lab spelling is NDT, not NDR — a loose " / "
+        # check let this typo onto a statutory document (and its QR).
+        response = self._save_section(
+            "report_reference", "2099 / MTL/NDR/2027", project=self.project)
+        self.assertEqual(response.status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertIn("NNNN / MTL/NDT/YYYY", response.data["detail"])
         self.assertFalse(
             ReportSectionOverride.objects.filter(
                 section_key="report_reference").exists())
