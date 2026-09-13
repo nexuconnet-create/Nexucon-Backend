@@ -2478,6 +2478,51 @@ class ArchivedReportTests(_HermeticMediaMixin, NDTReportFixtureMixin, APITestCas
             hashlib.sha256(response.content).hexdigest(),
             archive.sha256_checksum)
 
+    # ------------------------------------------------------- versions API
+
+    def _archived(self):
+        self.client.get(self.generate_url)
+        return ArchivedReport.objects.get(project=self.project)
+
+    def test_versions_require_authentication(self):
+        archive = self._archived()
+        url = reverse("archived-report-versions",
+                      kwargs={"report_id": archive.id})
+        self.client.credentials()  # drop the bearer token
+        self.assertEqual(self.client.get(url).status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self.client.post(url, {}, format="json").status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+
+    def test_version_created_and_listed_with_feedback_context(self):
+        from apps.reports.models import ReportVersion
+        archive = self._archived()
+        url = reverse("archived-report-versions",
+                      kwargs={"report_id": archive.id})
+        response = self.client.post(url, {
+            "version_string": "1.1",
+            "ai_feedback_context": "Add the rebar cover table to section 4.",
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["version_string"], "1.1")
+        self.assertEqual(response.data["ai_feedback_context"],
+                         "Add the rebar cover table to section 4.")
+
+        listing = self.client.get(url)
+        self.assertEqual(listing.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listing.data), 1)
+        self.assertEqual(listing.data[0]["version_string"], "1.1")
+        # Newest first, and the creator is the authenticated caller.
+        version = ReportVersion.objects.get()
+        self.assertEqual(version.created_by, self.user)
+        self.assertEqual(version.archived_report, archive)
+
+    def test_versions_of_unknown_report_are_404(self):
+        url = reverse("archived-report-versions",
+                      kwargs={"report_id": uuid.uuid4()})
+        self.assertEqual(self.client.get(url).status_code,
+                         status.HTTP_404_NOT_FOUND)
+
     def test_download_out_of_scope_404(self):
         self.client.get(self.generate_url)
         url = reverse("archived-report-download",

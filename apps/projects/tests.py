@@ -176,3 +176,58 @@ class ColdStoragePolicyTestCase(APITestCase):
             reverse('project-restore-from-cold-storage',
                     args=[self.stale.id]))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ======================================================================
+# E3 (4 Sep 2026 review meeting): role reconciliation — "Agency Head" is a
+# first-class government role (the one every government onboarding
+# creates), so common.permissions must know it: full project visibility,
+# mirroring apps.government.permissions where Agency Head >= Director.
+# ======================================================================
+
+from django.test import TestCase  # noqa: E402
+
+
+class AgencyHeadScopeTestCase(TestCase):
+    """scoped_projects under the reconciled role model."""
+
+    def test_agency_head_sees_all_projects(self):
+        from apps.government.models import Agency, Profile, Role
+        from common.permissions import (GOVERNMENT_ROLES, scoped_projects,
+                                        user_is_agency_head)
+
+        agency = Agency.objects.create(
+            name='Lagos State Building Control Agency', code='LASBCA')
+        head_role = Role.objects.create(name='Agency Head')
+        head = User.objects.create_user(
+            username='head@lasbca.gov', email='head@lasbca.gov',
+            password='Password123!')
+        Profile.objects.create(user=head, agency=agency, role=head_role)
+
+        p1 = Project.objects.create(
+            name='Ikoyi Tower', project_type='Commercial', status='ACTIVE')
+        p2 = Project.objects.create(
+            name='Epe Roadworks', project_type='Infrastructure',
+            status='PLANNING')
+
+        self.assertIn('Agency Head', GOVERNMENT_ROLES)
+        self.assertTrue(user_is_agency_head(head))
+        scoped = scoped_projects(head)
+        self.assertIn(p1, scoped)
+        self.assertIn(p2, scoped)
+
+    def test_roleless_districtless_staff_still_sees_nothing(self):
+        """The reconciliation must not widen anyone else's scope."""
+        from apps.government.models import Profile
+        from common.permissions import scoped_projects, user_is_agency_head
+
+        staff = User.objects.create_user(
+            username='staff@lasbca.gov', email='staff@lasbca.gov',
+            password='Password123!')
+        Profile.objects.create(user=staff)  # no role, no district
+        Project.objects.create(
+            name='Somewhere Estate', project_type='Residential',
+            status='ACTIVE')
+
+        self.assertFalse(user_is_agency_head(staff))
+        self.assertEqual(scoped_projects(staff).count(), 0)

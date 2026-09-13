@@ -81,6 +81,7 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None):
         'formula_params': p['formula_params'],
         'valid_range_ms': p['valid_range_ms'],
         'r2_score': None,
+        'standard_error': None,  # fixed curve: no regression, no error estimate
         'provenance_source': 'Laboratory fixed calibration curve (documented in report section 3.0)',
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
     }
@@ -294,6 +295,7 @@ def curve_snapshot(curve, temperature_c=None):
         'formula_params': curve.formula_params,
         'valid_range_ms': [curve.valid_range_min_ms, curve.valid_range_max_ms],
         'r2_score': curve.r2_score,
+        'standard_error': curve.standard_error,
         'provenance_source': (curve.provenance or {}).get('source'),
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
     }

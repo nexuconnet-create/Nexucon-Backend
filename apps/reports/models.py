@@ -122,6 +122,25 @@ class ArchivedReport(models.Model):
         return f"{self.report_reference} [{self.report_kind}] ({self.project_id})"
 
 
+class ReportVersion(models.Model):
+    """
+    Version Control & Feedback Loop for Reports.
+    Allows tracking revisions of reports, with AI feedback capturing context for regenerations.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    archived_report = models.ForeignKey(ArchivedReport, on_delete=models.CASCADE, related_name='versions')
+    version_string = models.CharField(max_length=20, default='1.0')
+    ai_feedback_context = models.TextField(blank=True, default='', help_text="User feedback/context for AI regeneration")
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.archived_report.report_reference} v{self.version_string}"
+
+
 class ReportSectionOverride(models.Model):
     """
     Report CMS (8 Sep meeting H7 / 4 Sep C4): an editable override for

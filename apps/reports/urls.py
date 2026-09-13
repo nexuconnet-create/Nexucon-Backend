@@ -10,6 +10,7 @@ from .views import (
     ReportCMSSectionsView, ReportMapView, ReportSignOffView,
     ReportTemplateViewSet, ReportVerifyDownloadView, ReportVerifyView,
 )
+from .versions import ReportVersionView
 
 router = DefaultRouter()
 router.register(r'report-templates', ReportTemplateViewSet, basename='report_template')
@@ -60,4 +61,8 @@ urlpatterns = router.urls + [
          ReportSignOffView.as_view(), name='project-report-signoff'),
     path('reports/projects/<uuid:project_id>/map/',
          ReportMapView.as_view(), name='project-report-map'),
+         
+    # Report Versions API
+    path('reports/archived-reports/<uuid:report_id>/versions/',
+         ReportVersionView.as_view(), name='archived-report-versions'),
 ]

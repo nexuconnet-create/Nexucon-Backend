@@ -1111,7 +1111,7 @@ class NDTReportService:
         PUNDIT test count — reproducible from the database alone."""
         digest = hashlib.sha256(str(project.id).encode()).hexdigest()
         serial = (int(digest[:8], 16) + len(tests)) % 10000
-        years = [t.tested_at.year for t in tests if t.tested_at]
+        years = [t.test_date.year for t in tests if t.test_date]
         year = min(years) if years else datetime.now().year
         return f'{serial:04d} / MTL/NDT/{year}', year
 
@@ -1962,7 +1962,7 @@ class NDTReportService:
             .filter(project=project)
             .select_related('device', 'operator')
             .prefetch_related('files', 'readings')
-            .order_by('structural_element', 'tested_at')
+            .order_by('structural_element', 'test_date')
         )
         rebar_tests = list(
             RebarTest.objects.filter(project=project).order_by('recorded_at')
@@ -1976,10 +1976,10 @@ class NDTReportService:
             .exclude(level='').values_list('level', flat=True)))
         has_drawings = BIMElementMapping.objects.filter(
             project=project).exists()
-        tested = [t.tested_at for t in tests if t.tested_at]
-        same_day = bool(tested) and min(tested).date() == max(tested).date()
+        tested = [t.test_date for t in tests if t.test_date]
+        same_day = bool(tested) and min(tested) == max(tested)
         if tested:
-            date_min, date_max = min(tested).date(), max(tested).date()
+            date_min, date_max = min(tested), max(tested)
         else:
             date_min = date_max = datetime.now().date()
         return cls._computed_bodies(
@@ -2124,7 +2124,7 @@ class NDTReportService:
             .filter(project=project)
             .select_related('device', 'operator')
             .prefetch_related('files', 'readings')
-            .order_by('structural_element', 'tested_at')
+            .order_by('structural_element', 'test_date')
         )
         
         rebar_tests = list(
@@ -2204,10 +2204,10 @@ class NDTReportService:
         # with the address). Only the parts that are recorded appear.
         site_parts = [p for p in (project.site_address, project.lga)
                       if p]
-        tested = [t.tested_at for t in tests if t.tested_at]
-        same_day = bool(tested) and min(tested).date() == max(tested).date()
+        tested = [t.test_date for t in tests if t.test_date]
+        same_day = bool(tested) and min(tested) == max(tested)
         if tested:
-            date_min, date_max = min(tested).date(), max(tested).date()
+            date_min, date_max = min(tested), max(tested)
         else:
             date_min = date_max = datetime.now().date()
         builder.cover(serial, project.name,

@@ -219,12 +219,17 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
             'strength_curve_snapshot',
+            'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
+            'ai_data_quality', 'ai_reasoning_traces',
             'crack_depth_mm', 'estimated_crack_depth_mm', 'waveform_samples',
             'operator', 'operator_name', 'tested_at', 'test_date', 'status', 'notes',
             'file_ids', 'files', 'created_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'test_reference', 'velocity_km_s', 'quality_grade',
-                            'strength_curve_snapshot', 'crack_depth_mm', 'operator',
+                            'strength_curve_snapshot',
+                            'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
+                            'ai_data_quality', 'ai_reasoning_traces',
+                            'crack_depth_mm', 'operator',
                             'created_by', 'created_at', 'updated_at']
 
     # ------------------------------------------------------- multi-reading

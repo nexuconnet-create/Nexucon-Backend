@@ -98,8 +98,8 @@ class NDTWordExporter:
         poor_members = [e for e in element_data if e['remark'] == 'POOR']
         visual_notes = S._visual_observations(tests)
         report_no, _year = S._effective_report_number(project, tests)
-        tested = [t.tested_at for t in tests if t.tested_at]
-        date_max = max(tested).date() if tested else datetime.now().date()
+        tested = [t.test_date for t in tests if t.test_date]
+        date_max = max(tested) if tested else datetime.now().date()
 
         # Generated-content CMS bodies (11 Sep): same resolution as the PDF
         # renderer, so the .docx can never show different wording.
@@ -110,8 +110,8 @@ class NDTWordExporter:
             .exclude(level='').values_list('level', flat=True)))
         has_drawings = BIMElementMapping.objects.filter(
             project=project).exists()
-        same_day = bool(tested) and min(tested).date() == max(tested).date()
-        date_min = min(tested).date() if tested else date_max
+        same_day = bool(tested) and min(tested) == max(tested)
+        date_min = min(tested) if tested else date_max
         cms = S._computed_bodies(
             project, tests=tests, rebar_tests=rebar_tests,
             element_data=element_data, good_members=good_members,

@@ -379,6 +379,13 @@ class PUNDITTest(models.Model):
     estimated_crack_depth_mm = models.FloatField(null=True, blank=True)
     waveform_samples = models.JSONField(default=list, blank=True)
 
+    # Multi-Model AI Ensemble / Uncertainty Quantification
+    ai_ci_lower_mpa = models.FloatField(null=True, blank=True)
+    ai_ci_upper_mpa = models.FloatField(null=True, blank=True)
+    ai_pof_pct = models.FloatField(null=True, blank=True, help_text="Probability of failure against design strength")
+    ai_data_quality = models.CharField(max_length=50, blank=True, default='')
+    ai_reasoning_traces = models.JSONField(default=list, blank=True)
+
     operator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='pundit_tests_operated')
     # No fabricated operator attribution: blank until the real operator's
@@ -474,6 +481,97 @@ class PUNDITTest(models.Model):
                   if row['crack_depth_mm'] is not None]
         return (sum(depths) / len(depths)) if depths else None
 
+    def refresh_confidence_metrics(self):
+        """
+        Recompute the ai_* fields from the recorded data using the single
+        honest engine the report also uses (apps.digital_eye.confidence_metrics
+        — no fabricated uncertainty, no Monte Carlo with invented errors):
+
+        * ai_ci_lower/upper_mpa — 95% CI = estimate +/- 1.96 x the curve
+          regression standard error; null when the curve has no regression
+          (laboratory default, lookup table, manual parameters).
+        * ai_pof_pct           — P(true strength < 25 N/mm2), normal
+          approximation; null when no CI exists.
+        * ai_data_quality      — BS EN 12504-4 bucket from point count and
+          within-element velocity spread.
+        * ai_reasoning_traces  — the numbered, data-cited derivation chain.
+
+        Cross-element outlier checks are a project-level analysis and stay
+        in the report path (adapters.PUNDITAdapter._confidence_metrics).
+        Fields are reset to their honest empty values before recomputation
+        so a weaker re-save never leaves stale figures behind.
+        """
+        from . import confidence_metrics as cm
+
+        self.ai_ci_lower_mpa = None
+        self.ai_ci_upper_mpa = None
+        self.ai_pof_pct = None
+        self.ai_data_quality = ''
+        self.ai_reasoning_traces = []
+
+        if self.test_type != 'pulse_velocity':
+            return      # strength confidence applies to strength tests only
+
+        rows = self.reading_rows()
+        point_velocities = [row['velocity_km_s'] for row in rows
+                            if row['velocity_km_s'] is not None]
+        mean_v = (sum(point_velocities) / len(point_velocities)) \
+            if point_velocities else None
+        spread_pct = None
+        if len(point_velocities) > 1 and mean_v:
+            spread_pct = round(
+                (max(point_velocities) - min(point_velocities))
+                / mean_v * 100, 1)
+
+        # Legacy single-reading tests persist their element verdict here
+        # (the multi-reading serializer path already did): the same
+        # active-curve computation the report and serializer use, with the
+        # curve provenance snapshotted. Velocities outside the calibrated
+        # range keep a None strength — never extrapolated.
+        if self.estimated_compressive_strength_mpa is None and mean_v is not None:
+            from .strength_curves import apply_active_curve
+            self.estimated_compressive_strength_mpa, snapshot = apply_active_curve(
+                self.project, mean_v,
+                rebound_number=self.rebound_number,
+                temperature_c=self.surface_temperature_c)
+            if not isinstance(self.strength_curve_snapshot, dict):
+                self.strength_curve_snapshot = snapshot
+
+        # Standard error: prefer the provenance snapshot of the curve that
+        # produced this value; fall back to the project's active curve
+        # (None honestly for curves without a regression).
+        se = None
+        snapshot = self.strength_curve_snapshot
+        if isinstance(snapshot, dict):
+            se = snapshot.get('standard_error')
+        if se is None:
+            se = cm.curve_standard_error_mpa(self.project)
+
+        ecs = self.estimated_compressive_strength_mpa
+        ci = cm.strength_confidence_interval(ecs, se)
+        p_below = (cm.probability_below_design(ecs, se)
+                   if ci is not None else None)
+        quality = cm.data_quality_score(len(rows), spread_pct)
+
+        element_summary = {
+            'element': self.structural_element or self.structural_element_name or None,
+            'point_velocities_m_s': [round(v * 1000, 2)
+                                     for v in point_velocities],
+            'mean_velocity_m_s': None if mean_v is None
+            else round(mean_v * 1000, 2),
+            'mean_ecs_n_mm2': None if ecs is None else round(ecs, 1),
+        }
+        self.ai_reasoning_traces = cm.reasoning_trace(
+            element_summary, se_mpa=se, ci=ci, p_below=p_below,
+            quality=quality)
+        if ci is not None:
+            self.ai_ci_lower_mpa = round(ci[0], 2)
+            self.ai_ci_upper_mpa = round(ci[1], 2)
+        if p_below is not None:
+            self.ai_pof_pct = round(p_below * 100.0, 2)
+        if quality and quality[0]:
+            self.ai_data_quality = quality[0]
+
     def save(self, *args, **kwargs):
         # Ensure test_date is a date object, not a datetime
         if self.test_date is not None and isinstance(self.test_date, datetime):
@@ -496,6 +594,14 @@ class PUNDITTest(models.Model):
             self.structural_element = self.structural_element_name
         elif self.structural_element and not self.structural_element_name:
             self.structural_element_name = self.structural_element
+
+        # Honest confidence metrics (REFINED EXECUTIVE SUMMARY §2.2 "Path to
+        # 95% Confidence"): persist the same figures the report computes —
+        # from the curve's regression standard error and the recorded
+        # readings. Nothing is fabricated; when the curve carries no
+        # regression (laboratory default / lookup / manual entry) the
+        # numeric fields stay null and the trace says so.
+        self.refresh_confidence_metrics()
 
         # Synchronize crack depth
         if self.estimated_crack_depth_mm is not None and self.crack_depth_mm is None:

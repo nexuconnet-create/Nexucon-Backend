@@ -534,6 +534,133 @@ class PUNDITAPITestCase(DigitalEyeAPITestBase):
         self.assertIn('readings', response.data['errors'])
 
 
+class PUNDITConfidenceMetricsTestCase(DigitalEyeAPITestBase):
+    """The honest confidence figures persisted on every strength test
+    (ai_ci_* / ai_pof_pct / ai_data_quality / ai_reasoning_traces): the same
+    engine the report uses, fed by the curve's regression standard error —
+    never a fabricated uncertainty (the deleted ai_ensemble Monte Carlo)."""
+
+    def _activate_regressed_curve(self):
+        """A project-specific linear curve fitted from real calibration
+        pairs, so curve_fit_stats derives a genuine standard error."""
+        from apps.digital_eye.models import ProjectCurveSetting, StrengthCurve
+        curve = StrengthCurve.objects.create(
+            name='Lekki core-calibration 2026',
+            curve_type='linear',
+            standard='BS 1881-203:1999',
+            project=self.project,
+            formula_params={'m': 0.008961, 'c': -7.97},
+            data_points=[
+                {'v': 3000, 'f': 18.9}, {'v': 3500, 'f': 23.5},
+                {'v': 4000, 'f': 27.8}, {'v': 4500, 'f': 32.3},
+            ],
+            valid_range_min_ms=2000, valid_range_max_ms=5000)
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        return curve
+
+    def _posted_and_analysed(self, payload):
+        response = self.client.post(reverse('pundit-test-list'), payload,
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.client.post(reverse('pundit-test-analyze',
+                                 kwargs={'pk': response.data['id']}))
+        return PUNDITTest.objects.get(id=response.data['id'])
+
+    def test_curve_with_regression_populates_honest_confidence(self):
+        from apps.digital_eye.confidence_metrics import Z_95
+        curve = self._activate_regressed_curve()
+        self.assertIsNotNone(curve.standard_error)  # derived from real pairs
+
+        test = self._posted_and_analysed({
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-C24',
+            'readings': [
+                {'path_length_mm': 250.0, 'transit_time_us': 62.5},
+                {'path_length_mm': 250.0, 'transit_time_us': 63.0},
+                {'path_length_mm': 250.0, 'transit_time_us': 62.0},
+            ],
+        })
+        self.assertIsNotNone(test.estimated_compressive_strength_mpa)
+        se = curve.standard_error
+        ecs = test.estimated_compressive_strength_mpa
+        self.assertAlmostEqual(test.ai_ci_lower_mpa,
+                               round(ecs - Z_95 * se, 2), places=2)
+        self.assertAlmostEqual(test.ai_ci_upper_mpa,
+                               round(ecs + Z_95 * se, 2), places=2)
+        # P(f < 25 N/mm2) as a percentage, from the normal approximation.
+        from apps.digital_eye.confidence_metrics import probability_below_design
+        expected = probability_below_design(ecs, se)
+        self.assertIsNotNone(expected)
+        self.assertAlmostEqual(test.ai_pof_pct, round(expected * 100, 2),
+                               places=2)
+        # 3 points, tight spread -> the BS EN 12504-4 bucket.
+        self.assertEqual(test.ai_data_quality, 'HIGH')
+        # The trace cites the recorded point velocities, not a simulation.
+        self.assertTrue(any('velocity' in line.lower()
+                            for line in test.ai_reasoning_traces))
+
+    def test_curve_snapshot_carries_the_standard_error(self):
+        """The provenance snapshot must include the regression standard
+        error it produced the value with (the old hook read a key that was
+        never written, silently forcing the fabricated fallback)."""
+        self._activate_regressed_curve()
+        test = self._posted_and_analysed({
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'path_length_mm': 250.0,
+            'pulse_time_us': 62.5,
+        })
+        self.assertIn('standard_error', test.strength_curve_snapshot)
+        self.assertIsNotNone(test.strength_curve_snapshot['standard_error'])
+
+    def test_curve_without_regression_leaves_numbers_null(self):
+        """The documented laboratory default curve has no regression: no CI,
+        no fabricated probability — the trace states it honestly."""
+        test = self._posted_and_analysed({
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'path_length_mm': 250.0,
+            'pulse_time_us': 62.5,
+        })
+        self.assertIsNotNone(test.estimated_compressive_strength_mpa)
+        self.assertIsNone(test.ai_ci_lower_mpa)
+        self.assertIsNone(test.ai_ci_upper_mpa)
+        self.assertIsNone(test.ai_pof_pct)
+        self.assertTrue(any('No confidence interval available' in line
+                            for line in test.ai_reasoning_traces))
+
+    def test_non_strength_tests_carry_no_confidence_metrics(self):
+        response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'crack_depth',
+            'readings': [{
+                'path_length_mm': 250.0, 'transit_time_us': 70.0,
+                'uncracked_transit_time_us': 62.5}],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        test = PUNDITTest.objects.get(id=response.data['id'])
+        self.assertIsNone(test.ai_ci_lower_mpa)
+        self.assertIsNone(test.ai_ci_upper_mpa)
+        self.assertIsNone(test.ai_pof_pct)
+        self.assertEqual(test.ai_data_quality, '')
+        self.assertEqual(test.ai_reasoning_traces, [])
+
+    def test_serializer_exposes_the_ai_fields(self):
+        self._activate_regressed_curve()
+        self._posted_and_analysed({
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'path_length_mm': 250.0,
+            'pulse_time_us': 62.5,
+        })
+        row = self.client.get(reverse('pundit-test-list')).data[0]
+        for field in ('ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
+                      'ai_data_quality', 'ai_reasoning_traces'):
+            self.assertIn(field, row)
+
+
 class PunditExcelImportTestCase(DigitalEyeAPITestBase):
     """Batch upload of readings from the .xlsx template (review meeting A2).
     One row per test point; an element's consecutive rows form one test with
