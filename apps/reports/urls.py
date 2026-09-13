@@ -7,8 +7,8 @@ from .views import (
     NCRReportView, NDTReportPreviewView, NDTReportView, NDTWordExportView,
     ProjectIntelligenceReportView, QualityReportListView,
     ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
-    ReportCMSSectionsView, ReportMapView, ReportTemplateViewSet,
-    ReportVerifyDownloadView, ReportVerifyView,
+    ReportCMSSectionsView, ReportMapView, ReportSignOffView,
+    ReportTemplateViewSet, ReportVerifyDownloadView, ReportVerifyView,
 )
 
 router = DefaultRouter()
@@ -55,6 +55,9 @@ urlpatterns = router.urls + [
          NDTReportPreviewView.as_view(), name='project-ndt-report-preview'),
     path('reports/projects/<uuid:project_id>/branding/',
          ReportBrandingView.as_view(), name='project-report-branding'),
+    # Approving-engineer COREN credentials on the sign-off (C11, 4 Sep).
+    path('reports/projects/<uuid:project_id>/signoff/',
+         ReportSignOffView.as_view(), name='project-report-signoff'),
     path('reports/projects/<uuid:project_id>/map/',
          ReportMapView.as_view(), name='project-report-map'),
 ]

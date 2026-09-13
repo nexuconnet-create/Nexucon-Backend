@@ -877,6 +877,53 @@ class NDTReportBuilder:
                 pdf.cell(60, 4.4, _latin1(sublabel))
             pdf.set_y(y + 18)
 
+    def coren_signoff_block(self, signoff, signature_img=None):
+        """Approving-engineer credential lines (C11): the project's recorded
+        COREN-registered engineer — name, qualification, COREN registration
+        number and firm, each on a ruled line. Values come verbatim from the
+        Director-recorded ReportSignOff row; blank fields stay blank lines.
+        An optional signature image (already an open BytesIO) is drawn in a
+        reserved area to the right. Nothing is invented: no row means the
+        caller renders nothing at all."""
+        pdf = self.pdf
+        rows = [
+            ('APPROVED BY (NAME)', signoff.approved_by_name),
+            ('PROFESSIONAL QUALIFICATION', signoff.qualification),
+            ('COREN REGISTRATION NO.', signoff.coren_registration_no),
+            ('COMPANY / FIRM', signoff.firm_name),
+        ]
+        needed = sum(1 for _, v in rows if v) + (1 if signature_img else 0)
+        if needed == 0:
+            return
+        pdf.ln(6)
+        pdf.set_font('Trebuchet', '', 10)
+        pdf.set_text_color(*INK)
+        label_x = pdf.l_margin
+        line_w = 72
+        for label, value in rows:
+            y = pdf.get_y()
+            if y > pdf.h - pdf.b_margin - 12:
+                pdf.add_page()
+                y = pdf.get_y()
+            pdf.set_xy(label_x, y)
+            pdf.cell(58, 5.5, _latin1(label + ':'))
+            pdf.set_draw_color(*RULE_GREY)
+            pdf.set_line_width(0.25)
+            pdf.line(label_x + 58, y + 5.5, label_x + 58 + line_w, y + 5.5)
+            if value:
+                pdf.set_xy(label_x + 60, y + 0.4)
+                pdf.cell(line_w - 2, 4.6, _latin1(str(value)))
+            pdf.set_y(y + 6.5)
+        if signature_img is not None:
+            try:
+                signature_img.seek(0)
+                y = pdf.get_y() + 2
+                if y < pdf.h - pdf.b_margin - 24:
+                    pdf.image(signature_img, x=pdf.l_margin, y=y, h=20)
+            except Exception:  # noqa: BLE001 — cosmetic
+                pass
+        pdf.set_line_width(0.2)
+
     def placeholder_box(self, message, height=80):
         """Ruled placeholder box for an expected-but-missing attachment (e.g.
         site location map) — honest, never fabricated."""
@@ -2134,6 +2181,23 @@ class NDTReportService:
         except Exception as exc:  # noqa: BLE001 — branding is cosmetic
             logger.error('report branding could not be applied: %s', exc)
 
+        # ---- Approving-engineer credentials (C11, 4 Sep meeting): the
+        # project's recorded COREN sign-off, if any. Every value was typed by
+        # a Director for this project — nothing is derived or invented, and a
+        # missing row simply leaves the sign-off lines blank as before.
+        signoff = None
+        signature_img = None
+        try:
+            signoff = getattr(project, 'report_signoff', None)
+            if signoff is not None and signoff.signature_image:
+                signoff.signature_image.open('rb')
+                try:
+                    signature_img = io.BytesIO(signoff.signature_image.read())
+                finally:
+                    signoff.signature_image.close()
+        except Exception as exc:  # noqa: BLE001 — cosmetic, never fatal
+            logger.error('report sign-off could not be read: %s', exc)
+
         # ------------------------------------------------------------ cover
         # Client address block: street + LGA, then LAGOS STATE on its own
         # clear line (11 Sep client note — the state never shares a line
@@ -3128,6 +3192,11 @@ class NDTReportService:
         user_label = 'Unauthenticated'
         if user and getattr(user, 'is_authenticated', False):
             user_label = user.get_full_name() or user.email
+        # C11: when the project has a recorded approving engineer, that name
+        # takes the APPROVED BY slot (it is the engineer who actually signs);
+        # the platform user remains in the integrity block below.
+        approved_label = (signoff.approved_by_name if signoff
+                          and signoff.approved_by_name else user_label)
         # Reference: the dotted lines sit at ~150mm (y 425pt) — park the
         # sign-off there when the conclusion ends higher up the page.
         if builder.pdf.get_y() < 140:
@@ -3135,8 +3204,11 @@ class NDTReportService:
         builder.signature_lines([
             (_latin1((operators[0] if operators else 'NOT RECORDED').upper()),
              'TESTED BY'),
-            (_latin1(user_label.upper()), 'APPROVED BY'),
+            (_latin1(approved_label.upper()), 'APPROVED BY'),
         ])
+        # C11: the recorded COREN credentials + optional signature image.
+        if signoff is not None:
+            builder.coren_signoff_block(signoff, signature_img)
 
         # ------------------------ REPORT INTEGRITY (un-TOC'd, C11)
         builder.heading('REPORT INTEGRITY')

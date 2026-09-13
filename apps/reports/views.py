@@ -1008,6 +1008,120 @@ class ReportBrandingView(APIView):
 
 
 # ---------------------------------------------------------------------------
+# Approving-engineer sign-off credentials (C11, 4 Sep meeting): the
+# COREN-registered engineer who gives final input before the report is
+# issued. Director-gated — the credentials are part of the statutory
+# document, so who may set them is restricted. Every value is typed by a
+# Director; nothing is derived from platform data.
+# ---------------------------------------------------------------------------
+class ReportSignOffView(APIView):
+    """
+    GET    /api/v1/reports/projects/{project_id}/signoff/
+    PATCH  /api/v1/reports/projects/{project_id}/signoff/  (multipart:
+           text fields + optional signature_image)
+    DELETE /api/v1/reports/projects/{project_id}/signoff/  (remove the row)
+    """
+    permission_classes = [IsAuthenticated]
+
+    _TEXT_FIELDS = ('approved_by_name', 'qualification',
+                    'coren_registration_no', 'firm_name')
+    # Per-field limits, kept in lockstep with the model's max_lengths so a
+    # view-level pass can never reach the DB and raise there.
+    _FIELD_MAX = {'approved_by_name': 150, 'qualification': 150,
+                  'coren_registration_no': 60, 'firm_name': 150}
+
+    def get(self, request, project_id):
+        from .models import ReportSignOff
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row = getattr(project, 'report_signoff', None)
+        if row is None:
+            return Response({'signoff_configured': False})
+        return Response(self._payload(row))
+
+    def patch(self, request, project_id):
+        from apps.evidence.review import record_audit
+        from .models import ReportSignOff
+        if not IsCMSDirector().has_permission(request, self):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row, _ = ReportSignOff.objects.get_or_create(project=project)
+        data = request.data
+        sig = data.get('signature_image')
+        if sig is not None and hasattr(sig, 'content_type') and \
+                sig.content_type not in ('image/png', 'image/jpeg'):
+            return Response(
+                {'detail': 'signature_image: PNG or JPEG images only.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        for field in self._TEXT_FIELDS:
+            if field in data:
+                value = data.get(field)
+                if value is None:
+                    value = ''
+                value = str(value).strip()
+                max_len = self._FIELD_MAX[field]
+                if len(value) > max_len:
+                    return Response(
+                        {'detail': f'{field}: maximum {max_len} characters.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+                setattr(row, field, value)
+        if hasattr(sig, 'read'):
+            row.signature_image.save(
+                f'signoff_{project_id}_{sig.name}', sig, save=False)
+        elif sig in ('', False, 'remove'):
+            row.signature_image.delete(save=False)
+            row.signature_image = ''
+        row.updated_by = (request.user
+                          if getattr(request.user, 'is_authenticated', False)
+                          else None)
+        row.save()
+        record_audit(request.user, 'report_signoff_updated',
+                     'ReportSignOff', row.id)
+        return Response(self._payload(row))
+
+    def delete(self, request, project_id):
+        from apps.evidence.review import record_audit
+        from .models import ReportSignOff
+        if not IsCMSDirector().has_permission(request, self):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row = getattr(project, 'report_signoff', None)
+        if row is not None:
+            row.signature_image.delete(save=False)
+            row.delete()
+            record_audit(request.user, 'report_signoff_removed',
+                         'ReportSignOff', project_id)
+        return Response({'signoff_configured': False})
+
+    @staticmethod
+    def _payload(row):
+        def _url(f):
+            try:
+                return f.url if f else None
+            except Exception:  # noqa: BLE001 — remote storage may raise
+                return None
+        return {
+            'signoff_configured': True,
+            'approved_by_name': row.approved_by_name,
+            'qualification': row.qualification,
+            'coren_registration_no': row.coren_registration_no,
+            'firm_name': row.firm_name,
+            'signature_image_url': _url(row.signature_image),
+            'updated_at': row.updated_at,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Report map data (REFINED EXECUTIVE SUMMARY §2.4): the real test-point
 # coordinates + project location for the interactive map. Only recorded
 # coordinates are returned — a test without a position is simply absent,
@@ -1018,13 +1132,14 @@ class ReportMapView(APIView):
     GET /api/v1/reports/projects/{project_id}/map/
     GeoJSON-style payload for the interactive location map: project
     centre (recorded latitude/longitude or None), one marker per PUNDIT
-    test that carries coordinates, and the per-marker strength facts the
-    legend colour-codes by.
+    test that carries coordinates, the per-marker strength facts the
+    legend colour-codes by, and one polygon per GNSS boundary survey
+    (only when real boundary points were recorded).
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id):
-        from apps.digital_eye.models import PUNDITTest
+        from apps.digital_eye.models import GnssBoundaryPoint, PUNDITTest
         project = _scoped_project_or_none(request.user, project_id)
         if project is None:
             return Response({'detail': 'Project not found in your scope.'},
@@ -1065,6 +1180,35 @@ class ReportMapView(APIView):
                              'coordinates': [t.longitude, t.latitude]},
                 'properties': props,
             })
+        # Site boundary polygons (spec §2.4): one polygon per GNSS survey
+        # that recorded ordered boundary points. Only real surveyed
+        # coordinates are used — a project with no boundary survey gets an
+        # empty list, never an estimated site extent.
+        boundary_polygons = []
+        boundary_qs = (GnssBoundaryPoint.objects
+                       .filter(survey__project=project)
+                       .select_related('survey')
+                       .order_by('survey__created_at', 'survey_id',
+                                 'sequence'))
+        per_survey = {}
+        for point in boundary_qs:
+            per_survey.setdefault(point.survey_id,
+                                  {'survey': point.survey, 'ring': []})
+            per_survey[point.survey_id]['ring'].append(
+                [point.longitude, point.latitude])
+        for entry in per_survey.values():
+            ring = entry['ring']
+            # A closed GeoJSON ring needs the first point repeated at the
+            # end; a polygon needs at least 3 distinct vertices.
+            if len(ring) < 3:
+                continue
+            if ring[0] != ring[-1]:
+                ring = ring + [ring[0]]
+            boundary_polygons.append({
+                'survey_reference': entry['survey'].survey_reference,
+                'title': entry['survey'].title,
+                'polygon': {'type': 'Polygon', 'coordinates': [ring]},
+            })
         return Response({
             'project_center': (
                 None if project.latitude is None or project.longitude is None
@@ -1072,6 +1216,7 @@ class ReportMapView(APIView):
             'site_address': project.site_address or '',
             'test_points': {'type': 'FeatureCollection',
                             'features': features},
+            'boundary_polygons': boundary_polygons,
             'legend': {
                 'good': 'Strength >= 25 N/mm2 (statutory pass)',
                 'poor': 'Strength < 25 N/mm2 (requires technical advice)',

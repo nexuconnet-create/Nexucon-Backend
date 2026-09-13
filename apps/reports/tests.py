@@ -1289,7 +1289,8 @@ from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.files.base import File as DjangoFile
 
-from apps.digital_eye.models import (FieldDevice, PUNDITReading, PUNDITTest,
+from apps.digital_eye.models import (FieldDevice, GnssBoundaryPoint,
+                                     GnssSurvey, PUNDITReading, PUNDITTest,
                                      SensorDataFile)
 from apps.projects.models import Project
 from apps.reports.ndt_reports import (
@@ -3827,6 +3828,169 @@ class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         self.assertEqual(_pdf_image_count(data), plain_images + 1)
 
 
+class ReportSignOffTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                         APITestCase):
+    """
+    C11 (4 Sep meeting): the approving engineer's COREN credentials on the
+    NDT report sign-off. Every field is Director-recorded real data — nothing
+    seeded, nothing derived. No row means the report's credential lines stay
+    blank, exactly as before.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.director = User.objects.create_superuser(
+            username="signoff_director@nexucon.com",
+            email="signoff_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="signoff_viewer@nexucon.com",
+            email="signoff_viewer@nexucon.com", password="Password123!")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        # A real generated PNG — no fabricated file bytes on disk.
+        img = Image.new('RGBA', (60, 20), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        self.png = SimpleUploadedFile('signature.png', buf.getvalue(),
+                                      content_type='image/png')
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _url(self):
+        return reverse('project-report-signoff',
+                       kwargs={'project_id': self.project.id})
+
+    def test_get_unconfigured_signoff(self):
+        self._as(self.director)
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {'signoff_configured': False})
+
+    def test_signoff_requires_director(self):
+        self._as(self.viewer)
+        response = self.client.patch(self._url(), {'approved_by_name': 'X'})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.delete(self._url())
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_signoff_roundtrip_and_removal(self):
+        from apps.reports.models import ReportSignOff
+        self._as(self.director)
+        response = self.client.patch(
+            self._url(),
+            {'approved_by_name': ' Engr. A. B. Mohammed ',
+             'qualification': 'B.Sc (Eng), M.Sc, MNSE',
+             'coren_registration_no': 'R.20234',
+             'firm_name': 'Nexucon Engineering Ltd.'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['signoff_configured'])
+        # Stored verbatim after strip — nothing invented, nothing mangled.
+        self.assertEqual(response.data['approved_by_name'],
+                         'Engr. A. B. Mohammed')
+        self.assertEqual(response.data['coren_registration_no'], 'R.20234')
+        row = ReportSignOff.objects.get(project=self.project)
+        self.assertEqual(row.updated_by, self.director)
+        # GET reflects it.
+        response = self.client.get(self._url())
+        self.assertTrue(response.data['signoff_configured'])
+        self.assertEqual(response.data['firm_name'],
+                         'Nexucon Engineering Ltd.')
+        # DELETE removes the row entirely.
+        response = self.client.delete(self._url())
+        self.assertEqual(response.data, {'signoff_configured': False})
+        response = self.client.get(self._url())
+        self.assertEqual(response.data, {'signoff_configured': False})
+        self.assertFalse(
+            ReportSignOff.objects.filter(project=self.project).exists())
+
+    def test_signoff_signature_upload_and_removal(self):
+        self._as(self.director)
+        response = self.client.patch(self._url(), {'signature_image': self.png},
+                                     format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertIsNotNone(response.data['signature_image_url'])
+        # Removing it clears the URL but keeps the credential row.
+        response = self.client.patch(self._url(),
+                                     {'signature_image': 'remove'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['signoff_configured'])
+        self.assertIsNone(response.data['signature_image_url'])
+
+    def test_signoff_rejects_bad_values(self):
+        self._as(self.director)
+        # Over-length text rejected per field (60 for COREN no., 150 others).
+        response = self.client.patch(
+            self._url(), {'coren_registration_no': 'R.' + '9' * 100})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.patch(
+            self._url(), {'approved_by_name': 'A' * 151})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Signature must be a real PNG/JPEG upload.
+        txt = SimpleUploadedFile('sig.txt', b'not an image',
+                                 content_type='text/plain')
+        response = self.client.patch(self._url(), {'signature_image': txt},
+                                     format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signoff_renders_credentials_in_report(self):
+        from apps.projects.models import Project
+        self._as(self.director)
+        response = self.client.patch(
+            self._url(),
+            {'approved_by_name': 'Engr. A. B. Mohammed',
+             'qualification': 'B.Sc (Eng), M.Sc, MNSE',
+             'coren_registration_no': 'R.20234',
+             'firm_name': 'Nexucon Engineering Ltd.'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        # A fresh project instance — the reverse one-to-one caches its miss
+        # on the model object, and self.project has not resolved
+        # report_signoff yet, but stay consistent with the branding tests.
+        fresh = Project.objects.get(pk=self.project.pk)
+        text = _pdf_text(NDTReportService.generate_ndt_report(fresh))
+        flat = ' '.join(text.split())
+        self.assertIn('Engr. A. B. Mohammed', flat)
+        self.assertIn('B.Sc (Eng), M.Sc, MNSE', flat)
+        self.assertIn('R.20234', flat)
+        self.assertIn('Nexucon Engineering Ltd.', flat)
+        self.assertIn('COREN REGISTRATION NO.', flat)
+        # Blank credentials still leave an honest blank line — the label row
+        # renders with an empty value, never a fabricated one.
+        response = self.client.patch(self._url(),
+                                     {'approved_by_name': ''})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        fresh = Project.objects.get(pk=self.project.pk)
+        text = _pdf_text(NDTReportService.generate_ndt_report(fresh))
+        flat = ' '.join(text.split())
+        self.assertIn('APPROVED BY (NAME)', flat)
+        self.assertNotIn('Engr. A. B. Mohammed', flat)
+
+    def test_signoff_signature_renders_in_report(self):
+        from apps.projects.models import Project
+        self._as(self.director)
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        response = self.client.patch(self._url(),
+                                     {'approved_by_name': 'Engr. A. B. Mohammed',
+                                      'signature_image': self.png},
+                                     format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertTrue(data.startswith(b'%PDF'))
+        # The scanned signature is genuinely embedded (one more XObject).
+        self.assertEqual(_pdf_image_count(data), plain_images + 1)
+
+
 class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
 
     def setUp(self):
@@ -3893,3 +4057,49 @@ class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
             reverse('project-report-map',
                     kwargs={'project_id': uuid.uuid4()}))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_map_boundary_polygon_from_gnss_survey(self):
+        # A recorded GNSS boundary survey becomes one closed GeoJSON ring —
+        # only real surveyed coordinates, in survey sequence order.
+        survey = GnssSurvey.objects.create(
+            project=self.project, title="Perimeter setting-out")
+        for seq, (lat, lng) in enumerate(
+                [(6.4281, 3.4219), (6.4286, 3.4224),
+                 (6.4289, 3.4217), (6.4284, 3.4212)], start=1):
+            GnssBoundaryPoint.objects.create(
+                survey=survey, sequence=seq, latitude=lat, longitude=lng)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        polygons = response.data['boundary_polygons']
+        self.assertEqual(len(polygons), 1)
+        self.assertEqual(polygons[0]['survey_reference'],
+                         survey.survey_reference)
+        ring = polygons[0]['polygon']['coordinates'][0]
+        self.assertEqual(ring, [[3.4219, 6.4281], [3.4224, 6.4286],
+                                [3.4217, 6.4289], [3.4212, 6.4284],
+                                [3.4219, 6.4281]])  # closed at the start
+        self.assertEqual(polygons[0]['polygon']['type'], 'Polygon')
+
+    def test_map_boundary_polygons_honest_without_survey(self):
+        # No boundary survey recorded -> an empty list, never an estimated
+        # site extent.
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['boundary_polygons'], [])
+
+    def test_map_boundary_needs_three_points(self):
+        # Fewer than 3 distinct vertices is not a polygon — withheld.
+        survey = GnssSurvey.objects.create(
+            project=self.project, title="Two-point traverse")
+        for seq, (lat, lng) in enumerate([(6.4281, 3.4219),
+                                          (6.4286, 3.4224)], start=1):
+            GnssBoundaryPoint.objects.create(
+                survey=survey, sequence=seq, latitude=lat, longitude=lng)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.data['boundary_polygons'], [])

@@ -244,3 +244,44 @@ class ReportBranding(models.Model):
 
     def __str__(self):
         return f'Report branding — {self.project_id}'
+
+
+class ReportSignOff(models.Model):
+    """
+    Approving-engineer credentials for a project's statutory NDT report
+    (C11, 4 Sep meeting): the corroborating COREN-registered engineer who
+    gives final input before the report is issued (client principle 5).
+
+    Every field is recorded by a Director for the project — nothing is
+    seeded and nothing is derived. No row (or a blank field) means the
+    sign-off block simply leaves that line blank, exactly as before; the
+    engineer-review clause in §7.0 prints regardless because the review
+    requirement itself is statutory, not a property of the data.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE,
+                                   related_name='report_signoff')
+    approved_by_name = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text='The COREN-registered engineer approving the report')
+    qualification = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text="e.g. 'B.Sc (Eng), M.Sc, MNSE' — as recorded")
+    coren_registration_no = models.CharField(
+        max_length=60, blank=True, default='',
+        help_text='COREN registration number of the approving engineer')
+    firm_name = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text='Company / firm of the approving engineer')
+    signature_image = models.FileField(
+        upload_to='reports/signoff/%Y/%m/', blank=True, default='',
+        help_text='Optional scanned signature image of the approving engineer')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL,
+                                   null=True, blank=True,
+                                   related_name='report_signoff_edits')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Report sign-off — {self.project_id}'
