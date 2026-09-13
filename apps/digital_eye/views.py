@@ -25,18 +25,19 @@ from common.responses.standard import StandardResponse
 from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .bim_preview import build_preview_geometry
 from .models import (
-    AIAnalysisRecord, BIMElementMapping, BIMModelGeometry, BIMStructuralElement, DeviceReportRecord,
-    DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan,
-    GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream,
-    ProjectCurveSetting, PUNDITTest, PunditTest, ProcessingQueueJob,
-    SensorDataFile, StrengthCurve, TrimbleConnection,
-    TrimbleProject,
+    AIAnalysisRecord, BIMElementMapping, BIMModelGeometry, BIMStructuralElement,
+    CoreSample, DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint,
+    FieldDevice, GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark,
+    GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
+    PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
+    StrengthCurve, TrimbleConnection, TrimbleProject,
 )
 from .serializers import (
     AIAnalysisRecordSerializer, BIMElementMappingSerializer, BIMStructuralElementSerializer,
-    DeviceReportRecordSerializer, DigitalEyeFindingSerializer, EvidenceSpatialPointSerializer,
-    FieldDeviceSerializer, GPRAnomalySerializer, GPRScanSerializer, GPRSurveySerializer,
-    GnssBenchmarkSerializer, GnssBoundaryPointSerializer, GnssSurveySerializer,
+    CoreSampleSerializer, DeviceReportRecordSerializer, DigitalEyeFindingSerializer,
+    EvidenceSpatialPointSerializer, FieldDeviceSerializer, GPRAnomalySerializer,
+    GPRScanSerializer, GPRSurveySerializer, GnssBenchmarkSerializer,
+    GnssBoundaryPointSerializer, GnssSurveySerializer,
     LiveStreamSerializer, PUNDITTestSerializer, PunditTestSerializer,
     ProcessingQueueJobSerializer, SensorDataFileSerializer,
     StrengthCurveSerializer, TrimbleConnectionSerializer, TrimbleProjectSerializer,
@@ -1633,6 +1634,215 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             'status': strength_status,
             'curve_snapshot': snapshot,
         })
+
+
+class CoreSampleViewSet(viewsets.ModelViewSet):
+    """
+    Laboratory core-sample results — the ground-truth layer of the client's
+    "path to 95%" roadmap (Layer 3: cross-validation against real core
+    tests). Each core is typed from the laboratory's test certificate; when
+    it links to the in-situ UPV test at the same location it contributes a
+    real (velocity, strength) calibration pair.
+
+    Reads are authenticated and project-scoped; create/update/delete are
+    Director-only, audited. The `pairs` action collects the project's
+    complete pairs and runs the SAME regression engine as a manual
+    calibration, so a core-based curve is fitted exactly like any other.
+    """
+    serializer_class = CoreSampleSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [SearchFilter]
+    search_fields = ['structural_element', 'test_location', 'lab_report_ref']
+
+    WRITE_ACTIONS = ('create', 'update', 'partial_update', 'destroy')
+
+    def get_permissions(self):
+        if self.action in self.WRITE_ACTIONS:
+            return [IsDirector()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        qs = CoreSample.objects.filter(
+            project__in=scoped_projects(self.request.user)
+        ).select_related('project', 'pundit_test', 'recorded_by')
+        project = self.request.query_params.get('project')
+        if project:
+            qs = qs.filter(project__in=scoped_projects(self.request.user)
+                           .filter(pk=project))
+        return qs
+
+    def perform_create(self, serializer):
+        core = serializer.save(recorded_by=self.request.user)
+        _record_audit(self.request.user, 'digital_eye.core_sample.create',
+                      'CoreSample', core.id,
+                      {'project': str(core.project_id),
+                       'structural_element': core.structural_element,
+                       'lab_strength_mpa': core.lab_strength_mpa,
+                       'pundit_test': str(core.pundit_test_id)
+                       if core.pundit_test_id else None})
+
+    def perform_update(self, serializer):
+        core = serializer.save()
+        _record_audit(self.request.user, 'digital_eye.core_sample.update',
+                      'CoreSample', core.id,
+                      {'project': str(core.project_id),
+                       'lab_strength_mpa': core.lab_strength_mpa})
+
+    def perform_destroy(self, instance):
+        _record_audit(self.request.user, 'digital_eye.core_sample.delete',
+                      'CoreSample', instance.id,
+                      {'project': str(instance.project_id),
+                       'structural_element': instance.structural_element})
+        instance.delete()
+
+    @action(detail=False, methods=['get'])
+    def pairs(self, request):
+        """
+        The project's real core-sample calibration pairs plus — when at
+        least two exist — a regression run over them by the SAME engine a
+        manual calibration uses. Query: ?project=<id> (required). Cores
+        without a lab result or a linked velocity test are listed honestly
+        as not forming a pair; nothing is ever synthesized.
+        """
+        project = scoped_projects(request.user).filter(
+            pk=request.query_params.get('project')).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        cores = self.get_queryset().filter(project=project)
+        pairs = []
+        pending = []
+        for core in cores:
+            pair = core.calibration_pair()
+            if pair is not None:
+                pairs.append(pair)
+            else:
+                reason = ('no laboratory result recorded'
+                          if core.lab_strength_mpa is None else
+                          'no linked PUNDIT test' if core.pundit_test_id is None
+                          else 'linked test has no measured velocity')
+                pending.append({'id': str(core.id),
+                                'structural_element': core.structural_element,
+                                'test_location': core.test_location,
+                                'reason': reason})
+        result = {
+            'project': str(project.id),
+            'n_cores': cores.count(),
+            'n_pairs': len(pairs),
+            'pairs': pairs,
+            'not_forming_a_pair': pending,
+        }
+        if len(pairs) >= 2:
+            from .strength_curves import run_regression
+            result['regression'] = run_regression(pairs)
+        else:
+            result['regression'] = None
+        return Response(result)
+
+
+class PunditAnalysisReviewView(APIView):
+    """
+    Engineer review of a PUNDIT AI analysis (client principle 5): the AI
+    output is decision-support — a qualified engineer must corroborate it
+    (or return it for revision) before it is treated as reviewed.
+
+    GET    /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/
+    POST   /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/
+           body: {"decision": "corroborated" | "returned", "notes": "..."}
+    DELETE /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/
+           (withdraw the review — the analysis returns to pending)
+
+    The analysis record itself is immutable; this is the separate human
+    decision on it, Director-level and audit-logged.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _analysis(self, request, analysis_id):
+        # The evidence AIAnalysisRecord carries only a real `project` FK (no
+        # denormalised project_id_str copy), so scope it the way the evidence
+        # app's own viewsets do — plain project membership.
+        from apps.evidence.models import AIAnalysisRecord
+        allowed = scoped_projects(request.user)
+        return (AIAnalysisRecord.objects.filter(project__in=allowed)
+                .filter(pk=analysis_id).first())
+
+    def get(self, request, analysis_id):
+        from .models import PunditAnalysisReview
+        analysis = self._analysis(request, analysis_id)
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        review = getattr(analysis, 'pundit_review', None)
+        if review is None:
+            return Response({'review_status': 'pending',
+                             'requires_human_review':
+                                 analysis.requires_human_review})
+        return Response({
+            'review_status': review.decision,
+            'requires_human_review': analysis.requires_human_review,
+            'decision': review.decision,
+            'notes': review.notes,
+            'reviewed_by': (review.reviewed_by.get_full_name()
+                            or review.reviewed_by.email)
+            if review.reviewed_by else None,
+            'reviewed_at': review.reviewed_at,
+        })
+
+    def post(self, request, analysis_id):
+        from .models import PunditAnalysisReview
+        if not user_is_director(request.user):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        analysis = self._analysis(request, analysis_id)
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        decision = request.data.get('decision')
+        if decision not in ('corroborated', 'returned'):
+            return Response(
+                {'detail': "decision must be 'corroborated' or 'returned'."},
+                status=status.HTTP_400_BAD_REQUEST)
+        notes = str(request.data.get('notes') or '').strip()
+        if len(notes) > 4000:
+            return Response({'detail': 'notes: maximum 4000 characters.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        review, _ = PunditAnalysisReview.objects.update_or_create(
+            analysis=analysis,
+            defaults={'decision': decision, 'notes': notes,
+                      'reviewed_by': request.user})
+        _record_audit(request.user, 'digital_eye.pundit_analysis.review',
+                      'AIAnalysisRecord', analysis.id,
+                      {'decision': decision, 'analysis_reference':
+                       analysis.analysis_reference})
+        return Response({
+            'review_status': review.decision,
+            'decision': review.decision,
+            'notes': review.notes,
+            'reviewed_by': (review.reviewed_by.get_full_name()
+                            or review.reviewed_by.email)
+            if review.reviewed_by else None,
+            'reviewed_at': review.reviewed_at,
+        })
+
+    def delete(self, request, analysis_id):
+        from .models import PunditAnalysisReview
+        if not user_is_director(request.user):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        analysis = self._analysis(request, analysis_id)
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        review = getattr(analysis, 'pundit_review', None)
+        if review is not None:
+            review.delete()
+            _record_audit(request.user,
+                          'digital_eye.pundit_analysis.review_withdrawn',
+                          'AIAnalysisRecord', analysis.id,
+                          {'analysis_reference': analysis.analysis_reference})
+        return Response({'review_status': 'pending',
+                         'requires_human_review':
+                             analysis.requires_human_review})
 
 
 # NOTE: four endpoints were removed from this module because every value they

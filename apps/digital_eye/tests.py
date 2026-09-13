@@ -3348,3 +3348,274 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
             reverse('strength-curve-detail', args=[default.id]))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(StrengthCurve.objects.filter(pk=default.id).exists())
+
+
+class CoreSampleAPITestCase(DigitalEyeAPITestBase):
+    """
+    Laboratory core results as ground-truth calibration pairs (path-to-95%
+    Layer 3): a core's lab strength pairs with the linked in-situ UPV test's
+    measured velocity — both halves real and typed, nothing synthesized.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from apps.digital_eye.models import FieldDevice
+        self.device = FieldDevice.objects.create(
+            device_reference='DE-CS-01', device_type='pundit',
+            name='Pundit PL-2', model='Pundit PL-2', manufacturer='Proceq',
+            device_id='SN-CS01', status='online',
+            assigned_project=self.project)
+
+    def _make_pundit_test(self, velocity_ms, rebound=None):
+        """A real recorded UPV test with the given measured velocity."""
+        # path_length / transit_time is in mm/us == km/s; pick a path and
+        # solve the transit time that yields exactly this velocity.
+        path_mm = 250.0
+        transit_us = path_mm / (velocity_ms / 1000.0)
+        response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-CS-01', 'floor': 'Ground Floor',
+            'path_length_mm': path_mm,
+            'readings': [{'transit_time_us': transit_us}],
+            'rebound_number': rebound,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        return response.data['id']
+
+    def _post_core(self, **extra):
+        payload = {
+            'project': str(self.project.id),
+            'structural_element': 'COL-CS-01',
+            'test_location': 'Grid D-7',
+            'core_diameter_mm': 100.0,
+            'core_length_mm': 200.0,
+        }
+        payload.update(extra)
+        return self.client.post(reverse('core-sample-list'), payload,
+                                format='json')
+
+    def test_core_crud_and_calibration_pair_formation(self):
+        # A core with a lab result linked to a velocity test forms a pair.
+        test_id = self._make_pundit_test(4000.0, rebound=34.0)
+        response = self._post_core(
+            lab_strength_mpa=27.4, lab_report_ref='LAB/2026/091',
+            pundit_test=test_id)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        core_id = response.data['id']
+        # The pair is the measured velocity vs the typed lab strength —
+        # the rebound rides along for SonReb.
+        self.assertEqual(response.data['calibration_pair'],
+                         {'v': 4000.0, 'f': 27.4, 'r': 34.0})
+        self.assertEqual(response.data['recorded_by_name'],
+                         'de_officer@nexucon.com')
+
+        # A core without a lab result yet forms no pair — honestly.
+        response = self._post_core(structural_element='COL-CS-02',
+                                   pundit_test=test_id)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data['calibration_pair'])
+
+        # A core with a lab result but no linked test forms no pair either.
+        response = self._post_core(lab_strength_mpa=25.0)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data['calibration_pair'])
+
+        # Deleting the lab result drops the pair (update to null is honest).
+        response = self.client.patch(
+            reverse('core-sample-detail', args=[core_id]),
+            {'lab_strength_mpa': None}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertIsNone(response.data['calibration_pair'])
+
+    def test_pair_requires_same_project(self):
+        # A UPV test from ANOTHER project cannot be linked — that would be
+        # fabricated ground truth.
+        other = Project.objects.create(
+            name='Other Project', project_type='Commercial', status='ACTIVE')
+        test_id = self._make_pundit_test(4000.0)
+        response = self._post_core(lab_strength_mpa=27.4,
+                                   project=str(other.id),
+                                   pundit_test=test_id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST,
+                         msg=str(response.data))
+
+    def test_rejects_non_positive_lab_values(self):
+        test_id = self._make_pundit_test(4000.0)
+        response = self._post_core(lab_strength_mpa=-5.0, pundit_test=test_id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self._post_core(core_diameter_mm=0.0)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pairs_endpoint_runs_the_real_regression(self):
+        # Two cores with lab results + linked velocity tests -> the same
+        # regression engine a manual calibration uses, over real pairs.
+        velocities = (3800.0, 4200.0, 4400.0)
+        strengths = (20.5, 27.4, 31.9)
+        for v, f in zip(velocities, strengths):
+            test_id = self._make_pundit_test(v)
+            response = self._post_core(lab_strength_mpa=f,
+                                       lab_report_ref=f'LAB/2026/{int(v)}',
+                                       pundit_test=test_id)
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                             msg=str(response.data))
+        # Plus one core that cannot pair (no lab result) — listed honestly.
+        self._post_core(structural_element='COL-CS-09')
+
+        response = self.client.get(
+            reverse('core-sample-pairs') + f'?project={self.project.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['n_cores'], 4)
+        self.assertEqual(response.data['n_pairs'], 3)
+        # Ordering is -created_at, but cores created within the same test
+        # share a timestamp — assert the SET of pairs, not the order.
+        self.assertEqual(
+            sorted(p['v'] for p in response.data['pairs']),
+            [3800.0, 4200.0, 4400.0])
+        for pair in response.data['pairs']:
+            self.assertIn('f', pair)
+        self.assertEqual(len(response.data['not_forming_a_pair']), 1)
+        self.assertEqual(response.data['not_forming_a_pair'][0]['reason'],
+                         'no laboratory result recorded')
+        regression = response.data['regression']
+        self.assertIsNotNone(regression)
+        self.assertEqual(regression['n_points'], 3)
+        self.assertIn('linear', regression['results'])
+        self.assertIn('best_fit_type', regression)
+
+    def test_pairs_endpoint_without_enough_pairs(self):
+        test_id = self._make_pundit_test(4000.0)
+        self._post_core(lab_strength_mpa=27.4, pundit_test=test_id)
+        response = self.client.get(
+            reverse('core-sample-pairs') + f'?project={self.project.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['n_pairs'], 1)
+        # Honest: no regression is attempted on a single pair.
+        self.assertIsNone(response.data['regression'])
+
+        # No project parameter -> 404, not a guess.
+        response = self.client.get(reverse('core-sample-pairs'))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_writes_require_director_role(self):
+        from apps.digital_eye.models import CoreSample
+        staff = User.objects.create_user(
+            username='cs_field@nexucon.com', email='cs_field@nexucon.com',
+            password='Password123!')
+        refresh = RefreshToken.for_user(staff)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+        # Reads are fine and empty.
+        response = self.client.get(reverse('core-sample-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Writes are refused.
+        response = self._post_core(lab_strength_mpa=27.4)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(CoreSample.objects.exists())
+
+    def test_core_write_is_audited(self):
+        self._post_core(lab_strength_mpa=27.4)
+        self.assertTrue(AuditEvent.objects.filter(
+            action='digital_eye.core_sample.create').exists())
+
+
+class PunditAnalysisReviewTestCase(DigitalEyeAPITestBase):
+    """
+    Engineer review of the PUNDIT AI analysis (client principle 5): the AI
+    output is decision-support — a Director corroborates or returns it, the
+    analysis record itself stays immutable, and no review row means the
+    honest pending state.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Hermetic: never reach a live AI provider from tests (same patch as
+        # PUNDITAPITestCase — the deterministic record is what is reviewed).
+        patcher = patch.object(
+            PUNDITAdapter, '_llm_observations', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _make_analysis(self):
+        """A real stored project-level PUNDIT analysis record (the
+        deterministic engine, no LLM call from tests)."""
+        self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-PR-01',
+            'path_length_mm': 250.0,
+            'readings': [{'transit_time_us': 62.5}],
+        }, format='json')
+        response = self.client.post(
+            reverse('pundit-test-analyze-project'),
+            data={'project': str(self.project.id)}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        return response.data['analysis_id']
+
+    def _url(self, analysis_id):
+        return reverse('pundit-analysis-review', args=[analysis_id])
+
+    def test_unreviewed_analysis_reports_pending(self):
+        analysis_id = self._make_analysis()
+        response = self.client.get(self._url(analysis_id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['review_status'], 'pending')
+        self.assertTrue(response.data['requires_human_review'])
+
+    def test_director_can_corroborate_and_withdraw(self):
+        analysis_id = self._make_analysis()
+        response = self.client.post(self._url(analysis_id), {
+            'decision': 'corroborated',
+            'notes': 'Reviewed against the registry values — concur.',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['review_status'], 'corroborated')
+        self.assertIsNotNone(response.data['reviewed_by'])
+        # GET reflects the review.
+        response = self.client.get(self._url(analysis_id))
+        self.assertEqual(response.data['review_status'], 'corroborated')
+        # Withdraw -> back to the honest pending state.
+        response = self.client.delete(self._url(analysis_id))
+        self.assertEqual(response.data['review_status'], 'pending')
+        response = self.client.get(self._url(analysis_id))
+        self.assertEqual(response.data['review_status'], 'pending')
+
+    def test_review_rejects_bad_decision_and_plain_staff(self):
+        analysis_id = self._make_analysis()
+        response = self.client.post(self._url(analysis_id), {
+            'decision': 'approved-ish'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # A district staff member (scoped to the project's district, but not a
+        # Director) may read the review state yet is refused the write.
+        from apps.government.models import District, Profile, Role
+        district = District.objects.create(name='Lekki Review District',
+                                           code='LKJ-R')
+        self.project.district = district
+        self.project.save()
+        staff = User.objects.create_user(
+            username='pr_field@nexucon.com', email='pr_field@nexucon.com',
+            password='Password123!')
+        Profile.objects.create(user=staff, role=Role.objects.create(
+            name='Field Officer'), district=district)
+        refresh = RefreshToken.for_user(staff)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+        response = self.client.get(self._url(analysis_id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response = self.client.post(self._url(analysis_id), {
+            'decision': 'corroborated'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_review_is_audited(self):
+        analysis_id = self._make_analysis()
+        self.client.post(self._url(analysis_id), {
+            'decision': 'returned', 'notes': 'Retest element COL-PR-01.'},
+            format='json')
+        self.assertTrue(AuditEvent.objects.filter(
+            action='digital_eye.pundit_analysis.review').exists())

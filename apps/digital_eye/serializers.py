@@ -5,11 +5,12 @@ from rest_framework import serializers
 
 from common.permissions import scoped_projects
 from .models import (
-    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, DeviceReportRecord,
-    DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan,
-    GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream,
-    ProjectCurveSetting, PUNDITReading, PUNDITTest, ProcessingQueueJob,
-    SensorDataFile, StrengthCurve, TrimbleConnection, TrimbleProject,
+    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CoreSample,
+    DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice,
+    GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
+    GnssSurvey, LiveStream, ProjectCurveSetting, PUNDITReading, PUNDITTest,
+    ProcessingQueueJob, SensorDataFile, StrengthCurve, TrimbleConnection,
+    TrimbleProject,
 )
 
 
@@ -643,3 +644,60 @@ class ProjectCurveSettingSerializer(serializers.ModelSerializer):
         model = ProjectCurveSetting
         fields = ['id', 'project', 'active_curve', 'updated_by', 'updated_at']
         read_only_fields = ['id', 'updated_by', 'updated_at']
+
+
+class CoreSampleSerializer(serializers.ModelSerializer):
+    """
+    A laboratory core result (ground-truth layer, path-to-95% Layer 3).
+    ``calibration_pair`` is the real (v, f) pair the core contributes —
+    present only when BOTH halves exist (lab result + a linked UPV test
+    with a measured velocity). Never synthesized.
+    """
+    project = ScopedProjectField()
+    pundit_test = serializers.SlugRelatedField(
+        slug_field='id', queryset=PUNDITTest.objects.all(),
+        required=False, allow_null=True)
+    calibration_pair = serializers.SerializerMethodField()
+    recorded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CoreSample
+        fields = [
+            'id', 'project', 'pundit_test', 'structural_element',
+            'test_location', 'core_diameter_mm', 'core_length_mm',
+            'lab_strength_mpa', 'lab_report_ref', 'sampled_at', 'notes',
+            'calibration_pair', 'recorded_by', 'recorded_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'recorded_by', 'created_at', 'updated_at']
+
+    def get_calibration_pair(self, obj):
+        return obj.calibration_pair()
+
+    def get_recorded_by_name(self, obj):
+        if obj.recorded_by:
+            return obj.recorded_by.get_full_name() or obj.recorded_by.email
+        return None
+
+    def validate(self, attrs):
+        # The linked UPV test must belong to the same project — a pair
+        # across projects would be fabricated ground truth.
+        pundit_test = attrs.get('pundit_test') or (
+            self.instance.pundit_test if self.instance else None)
+        project = attrs.get('project') or (
+            self.instance.project if self.instance else None)
+        if pundit_test is not None and project is not None \
+                and pundit_test.project_id != project.pk:
+            raise serializers.ValidationError(
+                {'pundit_test': 'The linked PUNDIT test must belong to the '
+                                'same project as the core sample.'})
+        for field in ('core_diameter_mm', 'core_length_mm'):
+            value = attrs.get(field)
+            if value is not None and value <= 0:
+                raise serializers.ValidationError(
+                    {field: 'Must be positive.'})
+        strength = attrs.get('lab_strength_mpa')
+        if strength is not None and strength <= 0:
+            raise serializers.ValidationError(
+                {'lab_strength_mpa': 'Must be positive.'})
+        return attrs

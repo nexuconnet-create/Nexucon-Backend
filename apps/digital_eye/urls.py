@@ -12,6 +12,9 @@ router.register(r'gpr-surveys', views.GPRSurveyViewSet, basename='gpr-survey')
 router.register(r'gpr-anomalies', views.GPRAnomalyViewSet, basename='gpr-anomaly')
 router.register(r'pundit-tests', views.PUNDITTestViewSet, basename='pundit-test')
 router.register(r'nexucon-link/curves', views.StrengthCurveViewSet, basename='strength-curve')
+# Ground-truth core results (path-to-95% Layer 3): lab-crushed cores whose
+# strength pairs with the in-situ UPV test at the same location.
+router.register(r'nexucon-link/core-samples', views.CoreSampleViewSet, basename='core-sample')
 router.register(r'gnss-surveys', views.GnssSurveyViewSet, basename='gnss-survey')
 router.register(r'gnss-benchmarks', views.GnssBenchmarkViewSet, basename='gnss-benchmark')
 router.register(r'gnss-boundary-points', views.GnssBoundaryPointViewSet, basename='gnss-boundary-point')
@@ -38,6 +41,10 @@ urlpatterns = [
          name='bim-element-import-ifc'),
     path('bim-elements/geometry/', views.BIMModelGeometryView.as_view(),
          name='bim-element-geometry'),
+    # Engineer review of a PUNDIT AI analysis (client principle 5).
+    path('pundit-analysis-review/<uuid:analysis_id>/',
+         views.PunditAnalysisReviewView.as_view(),
+         name='pundit-analysis-review'),
 
     # Removed: 'stats/', 'trimble/status/', 'trimble/sync/' and
     # 'reports/download/pdf/' returned fabricated counters, a fake CONNECTED

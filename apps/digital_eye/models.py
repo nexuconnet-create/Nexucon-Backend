@@ -741,6 +741,119 @@ class ProjectCurveSetting(models.Model):
         return f"{self.project.name}: {curve}"
 
 
+class CoreSample(models.Model):
+    """
+    A concrete core extracted on site and crushed in the laboratory — the
+    ground-truth layer of the client's "path to 95%" roadmap (REFINED
+    EXECUTIVE SUMMARY, Layer 3: cross-validation against real core results).
+
+    The lab-measured compressive strength, paired with the in-situ UPV test
+    performed at the same location (``pundit_test``), forms a REAL
+    calibration pair — measured velocity vs laboratory strength — that feeds
+    the regression engine exactly like a manually typed pair. Nothing is
+    derived or invented here: every number is typed from the laboratory's
+    test certificate, and a core without a lab result or without a linked
+    test simply does not form a pair.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
+                                related_name='core_samples')
+    pundit_test = models.ForeignKey(
+        PUNDITTest, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='core_samples',
+        help_text='The in-situ UPV test at/near the core location — its '
+                  'measured velocity pairs with the laboratory strength')
+    structural_element = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text="Element the core was taken from, e.g. COL-C24")
+    test_location = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text="Where on site the core was extracted")
+    core_diameter_mm = models.FloatField(
+        null=True, blank=True, help_text="Core diameter in mm (e.g. 100)")
+    core_length_mm = models.FloatField(
+        null=True, blank=True, help_text="Core length after trimming, in mm")
+    lab_strength_mpa = models.FloatField(
+        null=True, blank=True,
+        help_text="Compressive strength from the laboratory crushing test "
+                  "(MPa) — typed from the test certificate, never estimated")
+    lab_report_ref = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text="Laboratory test-certificate reference")
+    sampled_at = models.DateTimeField(
+        null=True, blank=True, help_text="When the core was extracted on site")
+    notes = models.TextField(blank=True, default='')
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                    on_delete=models.SET_NULL,
+                                    null=True, blank=True,
+                                    related_name='core_samples_recorded')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        where = ' / '.join(filter(None, (self.structural_element,
+                                         self.test_location)))
+        return (f"Core sample — {where or 'location not recorded'} "
+                f"({self.lab_strength_mpa if self.lab_strength_mpa is not None else 'no lab result yet'} MPa)")
+
+    def calibration_pair(self):
+        """The real (v m/s, f MPa) pair this core contributes — or None when
+        either half is missing (no laboratory result yet, or no linked UPV
+        test / the test has no velocity). The rebound number rides along
+        when the linked test carries one, so SonReb can use the pair too."""
+        if self.lab_strength_mpa is None or self.pundit_test_id is None:
+            return None
+        velocity_ms = self.pundit_test.pulse_velocity_ms
+        if velocity_ms is None:
+            return None
+        pair = {'v': float(velocity_ms), 'f': float(self.lab_strength_mpa)}
+        rebound = self.pundit_test.rebound_number
+        if rebound is not None:
+            pair['r'] = float(rebound)
+        return pair
+
+
+class PunditAnalysisReview(models.Model):
+    """
+    The engineer's corroboration of a PUNDIT AI analysis record (client
+    principle 5: every AI analysis must be reviewed and given final input
+    by a qualified engineer before it feeds a report — the AI is
+    decision-support, never the signatory).
+
+    The analysis itself lives in the Evidence Registry
+    (apps.evidence.AIAnalysisRecord) and is immutable; this row is the
+    separate human decision ON it. No row (or requires_human_review on the
+    analysis) means the analysis still awaits engineer review — an honest
+    pending state, never auto-corroborated.
+    """
+    DECISIONS = [
+        ('corroborated', 'Corroborated by reviewing engineer'),
+        ('returned', 'Returned — revisions / further testing required'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    analysis = models.OneToOneField(
+        'evidence.AIAnalysisRecord', on_delete=models.CASCADE,
+        related_name='pundit_review')
+    decision = models.CharField(max_length=20, choices=DECISIONS)
+    notes = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                    on_delete=models.SET_NULL,
+                                    null=True, blank=True,
+                                    related_name='pundit_analysis_reviews')
+    reviewed_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-reviewed_at']
+
+    def __str__(self):
+        return f"{self.analysis_id} — {self.get_decision_display()}"
+
+
 # ======================================================================
 # Rebar Scanning (Profoscope / Electromagnetic Locator)
 # ======================================================================
