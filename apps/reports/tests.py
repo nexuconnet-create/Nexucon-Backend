@@ -4220,3 +4220,267 @@ class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
             reverse('project-report-map',
                     kwargs={'project_id': self.project.id}))
         self.assertEqual(response.data['boundary_polygons'], [])
+
+
+# ===========================================================================
+# §2.5 document structure (15 Sep 2026): per-project section order,
+# enable/disable state and custom sections — honoured by both the certified
+# PDF and the .docx working copy through report_structure.resolve_report_structure.
+# ===========================================================================
+
+class ReportStructureTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                           APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.director = User.objects.create_superuser(
+            username="structure_director@nexucon.com",
+            email="structure_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="structure_viewer@nexucon.com",
+            email="structure_viewer@nexucon.com", password="Password123!")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _pdf_section_keys(self):
+        """Emitted section keys, in print order, from one bundled render."""
+        _data, bundle = NDTReportService.generate_ndt_report_bundled(
+            self.project)
+        return [s['key'] for s in bundle['sections']]
+
+    # ------------------------------------------------------------- reading
+    def test_default_structure_resolved_for_untouched_project(self):
+        from apps.reports.models import ReportSectionConfig
+        self._as(self.director)
+        response = self.client.get(
+            reverse('project-report-structure',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        sections = response.data['sections']
+        from apps.reports.report_structure import DEFAULT_STRUCTURE
+        self.assertEqual([s['key'] for s in sections],
+                         [k for k, _ in DEFAULT_STRUCTURE])
+        self.assertTrue(all(s['is_enabled'] for s in sections))
+        self.assertTrue(all(not s['is_custom'] for s in sections))
+        # Reading never materialises rows — the default stays virtual until
+        # the first real structure change.
+        self.assertFalse(ReportSectionConfig.objects
+                         .filter(project=self.project).exists())
+
+    def test_structure_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse('project-report-structure',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_structure_out_of_scope_404(self):
+        self._as(self.director)
+        response = self.client.get(
+            reverse('project-report-structure',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ------------------------------------------------------------- reorder
+    def test_reorder_reorders_generated_pdf(self):
+        from apps.reports.report_structure import DEFAULT_STRUCTURE_KEYS
+        self._as(self.director)
+        # Swap the positions of 2.0 (Purpose) and 6.0 (Recommendations) and
+        # move the cover to the end — a displaced cover exercises the
+        # fresh-page reuse logic in both directions.
+        keys = list(DEFAULT_STRUCTURE_KEYS)
+        keys.remove('cover_page')
+        i2, i6 = keys.index('2.0'), keys.index('6.0')
+        keys[i2], keys[i6] = keys[i6], keys[i2]
+        keys.append('cover_page')
+        response = self.client.post(
+            reverse('project-report-structure-reorder',
+                    kwargs={'project_id': self.project.id}),
+            {'order': keys}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        emitted = self._pdf_section_keys()
+        # 5.3 needs an AI analysis record this fixture does not have — it
+        # is honestly absent from the emission.
+        expected = [k for k in keys if k != '5.3']
+        self.assertEqual(emitted, expected)
+        # The reordered document is still a valid PDF.
+        self.assertTrue(NDTReportService.generate_ndt_report(self.project)
+                        .startswith(b'%PDF'))
+
+    def test_reorder_must_be_a_permutation(self):
+        from apps.reports.report_structure import DEFAULT_STRUCTURE_KEYS
+        self._as(self.director)
+        url = reverse('project-report-structure-reorder',
+                      kwargs={'project_id': self.project.id})
+        # Missing key
+        response = self.client.post(
+            url, {'order': list(DEFAULT_STRUCTURE_KEYS)[:-1]}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Unknown key
+        response = self.client.post(
+            url, {'order': list(DEFAULT_STRUCTURE_KEYS)[:-1] + ['9.9']},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Duplicate key
+        order = list(DEFAULT_STRUCTURE_KEYS)
+        order[-1] = order[0]
+        response = self.client.post(url, {'order': order}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # -------------------------------------------------------------- toggle
+    def test_toggle_hides_and_restores_section(self):
+        self._as(self.director)
+        url = reverse('project-report-structure-toggle',
+                      kwargs={'project_id': self.project.id,
+                              'section_key': '3.0'})
+        response = self.client.post(url, {'is_enabled': False},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        disabled = {s['key']: s['is_enabled']
+                    for s in response.data['sections']}
+        self.assertFalse(disabled['3.0'])
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn('LITERATURE REVIEW', flat)
+        self.assertIn('INTRODUCTION', flat)  # everything else still prints
+        # Re-enabling restores it.
+        response = self.client.post(url, {'is_enabled': True}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('LITERATURE REVIEW', flat)
+
+    def test_toggle_validation(self):
+        self._as(self.director)
+        url = reverse('project-report-structure-toggle',
+                      kwargs={'project_id': self.project.id,
+                              'section_key': '3.0'})
+        response = self.client.post(url, {'is_enabled': 'yes'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(
+            reverse('project-report-structure-toggle',
+                    kwargs={'project_id': self.project.id,
+                            'section_key': '9.9'}),
+            {'is_enabled': False}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ------------------------------------------------- custom section CRUD
+    def test_custom_section_lifecycle(self):
+        self._as(self.director)
+        base = reverse('project-report-structure-custom',
+                       kwargs={'project_id': self.project.id})
+        response = self.client.post(
+            base, {'title': 'Limitations of the Survey',
+                   'body': 'The survey covered **only** the ground floor '
+                           'slab of the structure.'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        sections = response.data['sections']
+        custom = [s for s in sections if s['is_custom']]
+        self.assertEqual(len(custom), 1)
+        self.assertEqual(custom[0]['label'], 'Limitations of the Survey')
+        self.assertEqual(sections[-1]['key'], custom[0]['key'])
+        # The custom section genuinely prints in the PDF — heading and body —
+        # and registers in the preview sidebar.
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('LIMITATIONS OF THE SURVEY', flat)
+        self.assertIn('The survey covered only the ground floor slab', flat)
+        self.assertIn(custom[0]['key'], self._pdf_section_keys())
+        # ... and in the .docx working copy.
+        from apps.reports.word_export import NDTWordExporter
+        from docx import Document as DocxDocument
+        docx_bytes = NDTWordExporter.export_docx(self.project)
+        document = DocxDocument(io.BytesIO(docx_bytes))
+        docx_text = '\n'.join(p.text for p in document.paragraphs)
+        self.assertIn('LIMITATIONS OF THE SURVEY', docx_text)
+        self.assertIn('ground floor slab', docx_text)
+        # Editing the content changes the next render.
+        section_url = reverse(
+            'project-report-structure-section',
+            kwargs={'project_id': self.project.id,
+                    'section_key': custom[0]['key']})
+        response = self.client.patch(
+            section_url, {'body': 'Revised scope: first floor columns.'},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('Revised scope: first floor columns.', flat)
+        # Deleting removes it entirely.
+        response = self.client.delete(section_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(any(s['is_custom']
+                             for s in response.data['sections']))
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn('LIMITATIONS OF THE SURVEY', flat)
+
+    def test_custom_section_validation(self):
+        self._as(self.director)
+        base = reverse('project-report-structure-custom',
+                       kwargs={'project_id': self.project.id})
+        response = self.client.post(base, {'body': 'no title'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(base, {'title': 'x' * 201}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_builtin_sections_cannot_be_deleted_or_edited(self):
+        self._as(self.director)
+        section_url = reverse(
+            'project-report-structure-section',
+            kwargs={'project_id': self.project.id, 'section_key': '3.0'})
+        response = self.client.delete(section_url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.patch(section_url, {'body': 'nope'},
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --------------------------------------------------------- permissions
+    def test_mutations_require_director(self):
+        self._as(self.viewer)
+        project_id = self.project.id
+        cases = [
+            ('post', reverse('project-report-structure-reorder',
+                             kwargs={'project_id': project_id}),
+             {'order': []}),
+            ('post', reverse('project-report-structure-toggle',
+                             kwargs={'project_id': project_id,
+                                     'section_key': '3.0'}),
+             {'is_enabled': False}),
+            ('post', reverse('project-report-structure-custom',
+                             kwargs={'project_id': project_id}),
+             {'title': 'Nope'}),
+        ]
+        for method, url, body in cases:
+            response = getattr(self.client, method)(url, body, format='json')
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN,
+                             msg=f'{method} {url}')
+
+    # ---------------------------------------------------- §2.2 max lengths
+    def test_cms_sections_expose_advisory_max_length(self):
+        self._as(self.director)
+        response = self.client.get(
+            reverse('report-cms-sections'),
+            {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        lengths = {s['key']: s['max_length']
+                   for s in response.data['sections']}
+        # §2.2 wireframe: advisory character limits for the editor's count.
+        self.assertEqual(lengths['executive_summary'], 500)
+        self.assertEqual(lengths['introduction'], 1000)
+        self.assertEqual(lengths['purpose_items'], 500)
+        self.assertEqual(lengths['conclusion_preamble'], 750)
+        self.assertIsNone(lengths['literature_review'])

@@ -186,6 +186,8 @@ CMS_SECTIONS = {
         'label': 'Introduction — opening paragraph (Section 1.0)',
         'kind': 'paragraphs',
         'default': INTRODUCTION_DEFAULT,
+        # §2.2 wireframe: advisory length (advice, not a hard reject).
+        'max_length': 1000,
         'help': 'Blank lines start a new paragraph. The paragraphs '
                 'naming the project, its location and the structural '
                 'drawing policy are computed from project records and '
@@ -195,6 +197,8 @@ CMS_SECTIONS = {
         'label': 'Purpose of investigation — numbered items (Section 2.0)',
         'kind': 'list',
         'default': PURPOSE_ITEMS_DEFAULT,
+        # §2.2 wireframe: advisory length (advice, not a hard reject).
+        'max_length': 500,
         'help': 'One item per line; each line prints as a numbered '
                 'item under "The purpose of the investigation is to:".',
     },
@@ -236,6 +240,8 @@ CMS_SECTIONS = {
         'label': 'Conclusion — standards sentence (Section 7.0)',
         'kind': 'paragraphs',
         'default': CONCLUSION_PREAMBLE_DEFAULT,
+        # §2.2 wireframe: advisory length (advice, not a hard reject).
+        'max_length': 750,
         'help': 'Precedes the numbered conclusion items, whose '
                 'percentages are computed from the test results.',
     },
@@ -245,6 +251,8 @@ CMS_SECTIONS = {
         'kind': 'paragraphs',
         'default': None,
         'computed': True,
+        # §2.2 wireframe: advisory length (advice, not a hard reject).
+        'max_length': 500,
         'help': EXECUTIVE_SUMMARY_HELP,
     },
     'introduction_project': {

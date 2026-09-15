@@ -483,6 +483,10 @@ class ReportCMSSectionsView(APIView):
                 'body': body,
                 'source': source,
                 'computed': bool(meta.get('computed')),
+                # §2.2 wireframe: advisory length for the editor's
+                # character-count display (advice, not a hard reject);
+                # None for sections without a limit.
+                'max_length': meta.get('max_length'),
                 # Generated-content sections are per-project: they have no
                 # body at all without a project selected.
                 'requires_project': bool(meta.get('computed')),
@@ -690,6 +694,243 @@ class ReportCMSPasswordView(APIView):
         record_audit(request.user, 'report_cms_password_set',
                      'ReportCMSPassword', credential.id)
         return Response({'detail': 'Report-CMS password saved.'})
+
+
+# ---------------------------------------------------------------------------
+# Report structure (REFINED EXECUTIVE SUMMARY §2.5 — document flexibility):
+# the per-project section order, per-section enable/disable state and the
+# project's own custom sections. Like branding (§2.3) this is report
+# CONFIGURATION, not template wording — so it is Director-only with NO CMS
+# password gate (the password guards wording edits, not structure).
+# ---------------------------------------------------------------------------
+from .models import ReportSectionConfig
+from .report_structure import (
+    DEFAULT_STRUCTURE_KEYS, ensure_structure_rows, new_custom_section_key,
+    resolve_report_structure,
+)
+
+
+def _structure_payload(project):
+    return {
+        'project': str(project.id),
+        'sections': resolve_report_structure(project),
+    }
+
+
+class ReportStructureView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/structure/
+    The project's report structure — section order, enable/disable state and
+    custom sections — exactly as both emitters (certified PDF and .docx
+    working copy) will render it. A project that has never had a structure
+    change resolves to the canonical default (everything enabled, template
+    order).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(_structure_payload(project))
+
+
+class ReportStructureReorderView(APIView):
+    """
+    POST /api/v1/reports/projects/{project_id}/structure/reorder/
+    Body: {'order': ['APPENDIX', '7.0', 'custom:abc123', ...]} — the
+    complete list of section keys in their new order. Directors only.
+    """
+    permission_classes = [IsCMSDirector]
+
+    def post(self, request, project_id):
+        from apps.evidence.review import record_audit
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        order = (request.data or {}).get('order')
+        if not isinstance(order, list) or not all(
+                isinstance(k, str) for k in order):
+            return Response({'detail': "Body must be {'order': [section "
+                                       'keys in their new order].}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # Materialise the full default set first so the row set is the whole
+        # truth; a reorder must then cover every section exactly once.
+        ensure_structure_rows(project, request.user)
+        known = set(ReportSectionConfig.objects
+                    .filter(project=project)
+                    .values_list('section_key', flat=True))
+        if len(order) != len(set(order)):
+            return Response({'detail': 'Duplicate section keys in order.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if set(order) != known:
+            missing = sorted(known - set(order))
+            extra = sorted(set(order) - known)
+            detail = 'order must be a permutation of every section key.'
+            if missing:
+                detail += f' Missing: {", ".join(missing)}.'
+            if extra:
+                detail += f' Unknown: {", ".join(extra)}.'
+            return Response({'detail': detail},
+                            status=status.HTTP_400_BAD_REQUEST)
+        rows = {r.section_key: r for r in
+                ReportSectionConfig.objects.filter(project=project)}
+        for pos, key in enumerate(order):
+            row = rows[key]
+            row.display_order = pos
+            row.updated_by = request.user
+            row.save(update_fields=['display_order', 'updated_by',
+                                    'updated_at'])
+        record_audit(request.user, 'report_structure_reordered',
+                     'ReportSectionConfig', project.id)
+        return Response(_structure_payload(project))
+
+
+class ReportStructureToggleView(APIView):
+    """
+    POST /api/v1/reports/projects/{project_id}/structure/{section_key}/toggle/
+    Body: {'is_enabled': true/false}. Directors only. Disabling a section
+    removes it from the generated report (both PDF and .docx); the row and
+    its content stay, so re-enabling restores it.
+    """
+    permission_classes = [IsCMSDirector]
+
+    def post(self, request, project_id, section_key):
+        from apps.evidence.review import record_audit
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        enabled = (request.data or {}).get('is_enabled')
+        if not isinstance(enabled, bool):
+            return Response({'detail': "Body must be {'is_enabled': true "
+                                       'or false}.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ensure_structure_rows(project, request.user)
+        row = ReportSectionConfig.objects.filter(
+            project=project, section_key=section_key).first()
+        if row is None:
+            return Response({'detail': 'Unknown section key.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        row.is_enabled = enabled
+        row.updated_by = request.user
+        row.save(update_fields=['is_enabled', 'updated_by', 'updated_at'])
+        record_audit(request.user, 'report_structure_toggled',
+                     'ReportSectionConfig', row.id)
+        return Response(_structure_payload(project))
+
+
+class ReportStructureCustomView(APIView):
+    """
+    POST /api/v1/reports/projects/{project_id}/structure/custom/
+    Body: {'title': str (required), 'body': str (optional)}. Directors only.
+    Appends a new custom section at the end of the document.
+    """
+    permission_classes = [IsCMSDirector]
+
+    def post(self, request, project_id):
+        from apps.evidence.review import record_audit
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        data = request.data or {}
+        title = str(data.get('title') or '').strip()
+        body = str(data.get('body') or '').strip()
+        if not title:
+            return Response({'detail': 'title is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(title) > 200:
+            return Response({'detail': 'title must be 200 characters or '
+                                       'fewer.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ensure_structure_rows(project, request.user)
+        from django.db.models import Max
+        base = (ReportSectionConfig.objects.filter(project=project)
+                .aggregate(m=Max('display_order'))['m'])
+        row = ReportSectionConfig.objects.create(
+            project=project, section_key=new_custom_section_key(),
+            is_custom=True, title=title, body=body,
+            display_order=(base + 1) if base is not None else 0,
+            updated_by=request.user)
+        record_audit(request.user, 'report_structure_custom_added',
+                     'ReportSectionConfig', row.id)
+        return Response(_structure_payload(project), status=201)
+
+
+class ReportStructureSectionView(APIView):
+    """
+    PATCH /api/v1/reports/projects/{project_id}/structure/{section_key}/
+        Body: {'title'?, 'body'?} — edit a CUSTOM section's content.
+        Built-in sections have no editable content (their wording lives in
+        the CMS) and are rejected with 400.
+    DELETE .../structure/{section_key}/
+        Removes a CUSTOM section entirely. Built-ins cannot be deleted —
+        disable them instead (toggle).
+    Directors only.
+    """
+    permission_classes = [IsCMSDirector]
+
+    def _custom_row_or_response(self, request, project_id, section_key):
+        project = _scoped_project_or_none(request.user, project_id)
+        if project is None:
+            return None, Response(
+                {'detail': 'Project not found in your scope.'},
+                status=status.HTTP_404_NOT_FOUND)
+        row = ReportSectionConfig.objects.filter(
+            project=project, section_key=section_key).first()
+        if row is None and section_key not in DEFAULT_STRUCTURE_KEYS:
+            # Neither a materialised row nor a virtual built-in key.
+            return None, Response({'detail': 'Unknown section key.'},
+                                  status=status.HTTP_404_NOT_FOUND)
+        if row is None or not row.is_custom:
+            # A built-in section, materialised or still virtual: its
+            # wording lives in the report CMS and it can only be toggled.
+            return None, Response(
+                {'detail': 'Built-in sections cannot be edited or deleted — '
+                           'their wording lives in the report CMS; disable '
+                           'them with the toggle endpoint instead.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        return row, None
+
+    def patch(self, request, project_id, section_key):
+        from apps.evidence.review import record_audit
+        row, err = self._custom_row_or_response(request, project_id,
+                                                section_key)
+        if err is not None:
+            return err
+        data = request.data or {}
+        if 'title' in data:
+            title = str(data.get('title') or '').strip()
+            if not title:
+                return Response({'detail': 'title cannot be empty.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if len(title) > 200:
+                return Response({'detail': 'title must be 200 characters '
+                                           'or fewer.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            row.title = title
+        if 'body' in data:
+            row.body = str(data.get('body') or '')
+        row.updated_by = request.user
+        row.save()
+        record_audit(request.user, 'report_structure_custom_edited',
+                     'ReportSectionConfig', row.id)
+        return Response(_structure_payload(row.project))
+
+    def delete(self, request, project_id, section_key):
+        from apps.evidence.review import record_audit
+        row, err = self._custom_row_or_response(request, project_id,
+                                                section_key)
+        if err is not None:
+            return err
+        project = row.project
+        record_audit(request.user, 'report_structure_custom_removed',
+                     'ReportSectionConfig', row.id)
+        row.delete()
+        return Response(_structure_payload(project))
 
 
 class NDTWordExportView(APIView):

@@ -215,6 +215,7 @@ class ReportBranding(models.Model):
         ('top-right', 'Top right'),
         ('bottom-left', 'Bottom left'),
         ('bottom-right', 'Bottom right'),
+        ('center', 'Centre'),
     ]
     SIZES = [('small', 'Small'), ('medium', 'Medium'), ('large', 'Large')]
     SIZE_WIDTHS_MM = {'small': 20.0, 'medium': 30.0, 'large': 42.0}
@@ -263,6 +264,50 @@ class ReportBranding(models.Model):
 
     def __str__(self):
         return f'Report branding — {self.project_id}'
+
+
+class ReportSectionConfig(models.Model):
+    """
+    Per-project report structure (REFINED EXECUTIVE SUMMARY §2.5 —
+    document flexibility): the section order, the enable/disable state of
+    each built-in section, and the project's own custom sections.
+
+    A project with NO rows resolves to the canonical default structure
+    (report_structure.DEFAULT_STRUCTURE — the template order, everything
+    enabled), so pre-existing projects keep the exact document they always
+    had. The first structure change materialises the complete default set
+    (report_structure.ensure_structure_rows); from then on the rows are
+    the truth. Built-in sections carry only key/is_enabled/display_order;
+    custom sections (is_custom=True) additionally carry their title/body.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
+                                related_name='report_section_configs')
+    section_key = models.CharField(max_length=80)
+    is_custom = models.BooleanField(default=False)
+    title = models.CharField(max_length=200, blank=True, default='')
+    body = models.TextField(blank=True, default='')
+    is_enabled = models.BooleanField(default=True)
+    display_order = models.IntegerField(default=0)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL,
+                                   null=True, blank=True,
+                                   related_name='report_section_edits')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['display_order', 'created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['project', 'section_key'],
+                name='uniq_project_report_section_config'),
+        ]
+
+    def __str__(self):
+        state = 'off' if not self.is_enabled else 'on'
+        kind = 'custom' if self.is_custom else 'built-in'
+        return f'{self.section_key} ({kind}, {state}) — {self.project_id}'
 
 
 class ReportSignOff(models.Model):

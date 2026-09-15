@@ -9,6 +9,9 @@ from .views import (
     ProjectIntelligenceReportView, QualityReportListView,
     ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
     ReportCMSSectionsView, ReportMapView, ReportSignOffView,
+    ReportStructureCustomView, ReportStructureReorderView,
+    ReportStructureSectionView, ReportStructureToggleView,
+    ReportStructureView,
     ReportTemplateViewSet, ReportVerifyDownloadView, ReportVerifyView,
 )
 from .versions import ReportVersionView
@@ -67,6 +70,24 @@ urlpatterns = router.urls + [
          ReportSignOffView.as_view(), name='project-report-signoff'),
     path('reports/projects/<uuid:project_id>/map/',
          ReportMapView.as_view(), name='project-report-map'),
+    # §2.5 document structure: per-project section order, enable/disable
+    # state and custom sections, honoured by both the certified PDF and
+    # the .docx working copy. The literal 'custom/' path must stay above
+    # the <str:section_key> patterns.
+    path('reports/projects/<uuid:project_id>/structure/',
+         ReportStructureView.as_view(), name='project-report-structure'),
+    path('reports/projects/<uuid:project_id>/structure/reorder/',
+         ReportStructureReorderView.as_view(),
+         name='project-report-structure-reorder'),
+    path('reports/projects/<uuid:project_id>/structure/custom/',
+         ReportStructureCustomView.as_view(),
+         name='project-report-structure-custom'),
+    path('reports/projects/<uuid:project_id>/structure/<str:section_key>/toggle/',
+         ReportStructureToggleView.as_view(),
+         name='project-report-structure-toggle'),
+    path('reports/projects/<uuid:project_id>/structure/<str:section_key>/',
+         ReportStructureSectionView.as_view(),
+         name='project-report-structure-section'),
          
     # Report Versions API
     path('reports/archived-reports/<uuid:report_id>/versions/',

@@ -112,38 +112,35 @@ APPENDIX_ITEM_TITLES = {
 }
 
 # Preview sidebar (REFINED EXECUTIVE SUMMARY §2.1 UI wireframe): the
-# report's main sections in the wireframe's order, keyed by what
-# NDTReportBuilder.record_section() records. Sub-sections (4.3, 4.4, 5.1,
-# 5.2) are intentionally not listed — the wireframe sidebar carries the 14
-# main entries only. Conditional sections simply stay absent when the
-# render skips them (honest state, never a fabricated entry).
-PREVIEW_SECTION_LABELS = {
-    'cover_page': 'Cover Page',
-    'executive_summary': 'Executive Summary',
-    '1.0': 'Introduction',
-    '2.0': 'Purpose',
-    '3.0': 'Literature Review',
-    '3.1': 'Location Map',
-    '4.0': 'Field Work',
-    '4.1': 'Visual Test',
-    '4.2': 'Methodology',
-    '5.0': 'Analysis',
-    '5.3': 'AI Interpretation',
-    '6.0': 'Recommendations',
-    '7.0': 'Conclusion',
-    'APPENDIX': 'Appendix',
-}
+# report's main sections, keyed by what NDTReportBuilder.record_section()
+# records. The canonical set/order lives in report_structure.DEFAULT_STRUCTURE
+# (§2.5) so the sidebar, the DOCUMENT EDITOR and the generator all share
+# one definition. Sub-sections (4.3, 4.4, 5.1, 5.2) are intentionally not
+# listed — the wireframe sidebar carries the 14 main entries only.
+# Conditional sections simply stay absent when the render skips them
+# (honest state, never a fabricated entry).
+from .report_structure import (DEFAULT_STRUCTURE as _DEFAULT_STRUCTURE,
+                               resolve_report_structure)
+PREVIEW_SECTION_LABELS = dict(_DEFAULT_STRUCTURE)
 
 
 def preview_section_map(section_pages):
     """Filter a builder's recorded section_pages down to the wireframe's
-    sidebar list, in wireframe order, with the wireframe labels."""
-    by_key = {entry['key']: entry['page'] for entry in section_pages}
-    return [
-        {'key': key, 'label': label, 'page': by_key[key]}
-        for key, label in PREVIEW_SECTION_LABELS.items()
-        if key in by_key
-    ]
+    sidebar list with the wireframe labels. The recorded order IS the
+    emission order — with a per-project §2.5 structure config that is the
+    configured order — so the sidebar always mirrors the document exactly.
+    Custom sections ('custom:<hex>' keys, recorded with their titles) pass
+    through with their own labels."""
+    out = []
+    for entry in section_pages:
+        key = entry['key']
+        if key in PREVIEW_SECTION_LABELS:
+            out.append({'key': key, 'label': PREVIEW_SECTION_LABELS[key],
+                        'page': entry['page']})
+        elif key.startswith('custom:'):
+            out.append({'key': key, 'label': entry['label'],
+                        'page': entry['page']})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +377,14 @@ class MTLReportPDF(FPDF):
         # logo at all ('hidden'); None = the default, unchanged.
         self.cover_logo = None    # BytesIO replacement image
         self.cover_logo_hidden = False
+        # §2.5 structure: set right after toc_page()'s placeholder break.
+        # The next add_page() reuses the untouched fresh page that break
+        # left (normally the executive summary's) instead of skipping past
+        # it to a blank — so whichever section the project's structure
+        # puts first starts cleanly on that page. One-shot: consumed by
+        # the first add_page() call, and only honoured while the cursor
+        # still sits untouched at the top margin.
+        self.reuse_fresh_page = False
         # Reference fonts (bundled in apps/reports/fonts).
         for family, styles in (
             ('Cambria', (('', 'Cambria.ttf'), ('B', 'Cambria-Bold.ttf'),
@@ -392,6 +397,21 @@ class MTLReportPDF(FPDF):
                 self.add_font(family, style, os.path.join(FONTS_DIR, fname))
         self.set_margins(25.4, 20.7, 25.4)   # reference: 72pt sides, 20.7mm top
         self.set_auto_page_break(auto=True, margin=22)
+
+    def add_page(self, *args, **kwargs):
+        """§2.5-aware page break: when reuse_fresh_page is set and the
+        current page is still untouched (cursor parked at the top margin,
+        exactly where header() left it after the TOC placeholder's break),
+        skip the break and reuse that page. Any other state falls through
+        to a normal page break. See __init__ for the full rationale."""
+        fresh = (self.reuse_fresh_page
+                 and self.page > 0
+                 and abs(self.get_x() - self.l_margin) < 0.01
+                 and abs(self.get_y() - self.t_margin) < 0.01)
+        self.reuse_fresh_page = False
+        if fresh:
+            return
+        super().add_page(*args, **kwargs)
 
     def _apply_branding_watermark(self):
         """Project watermark in the laboratory watermark's position (the
@@ -586,10 +606,14 @@ class NDTReportBuilder:
                 with PILImage.open(logo) as im:
                     aspect = im.height / im.width
                 height_mm = width_mm * aspect
-                x = (page_w - width_mm - 10.0 if 'right' in position
-                     else 10.0)
-                y = (page_h - height_mm - 10.0 if 'bottom' in position
-                     else 10.0)
+                if position == 'center':
+                    x = (page_w - width_mm) / 2.0
+                    y = (page_h - height_mm) / 2.0
+                else:
+                    x = (page_w - width_mm - 10.0 if 'right' in position
+                         else 10.0)
+                    y = (page_h - height_mm - 10.0 if 'bottom' in position
+                         else 10.0)
                 logo.seek(0)
                 pdf.image(logo, x=x, y=y, w=width_mm, h=height_mm)
             except Exception as exc:            # noqa: BLE001 — never break
@@ -674,6 +698,23 @@ class NDTReportBuilder:
                 pdf.set_xy(pdf.l_margin, y)
                 pdf.cell(0, 7.5, f'{disp} ({_to_roman(start_n)}-{end})')
                 y += 9.9
+                continue
+            if (not level and name != 'APPENDIX'
+                    and not re.match(r'^\d+\.\d+$', num)):
+                # §2.5 custom section: an unnumbered top-level entry — the
+                # full title prints in the title column, no number cell.
+                title_x = pdf.l_margin + 25.4
+                avail = (pdf.w - pdf.r_margin - 26) - title_x
+                toc_title = name
+                pdf.set_font('Cambria', 'B', 12)
+                pdf.set_xy(pdf.l_margin, y)
+                lines = _wrap_lines(pdf, toc_title, avail)
+                pdf.set_xy(title_x, y)
+                pdf.multi_cell(avail, 7.5, _latin1(toc_title))
+                pdf.set_xy(172.2, y)
+                pdf.cell(15, 7.5, str(section.page_number - offset),
+                         align='R')
+                y += 9.9 if len(lines) == 1 else len(lines) * 7.5 + 2.4
                 continue
             indent = 12.7 if level else 0
             title_x = pdf.l_margin + 25.4
@@ -2259,35 +2300,25 @@ class NDTReportService:
         except Exception as exc:  # noqa: BLE001 — cosmetic, never fatal
             logger.error('report sign-off could not be read: %s', exc)
 
-        # ------------------------------------------------------------ cover
-        # Client address block: street + LGA, then LAGOS STATE on its own
-        # clear line (11 Sep client note — the state never shares a line
-        # with the address). Only the parts that are recorded appear.
-        site_parts = [p for p in (project.site_address, project.lga)
-                      if p]
+        # Shared preparation several emitters draw on (hoisted out of
+        # the former linear blocks so any §2.5 ordering can reference
+        # them — dates feed the CMS bodies, the calibration curve feeds
+        # both 3.0 and 4.2, the user label feeds 7.0 and integrity).
         tested = [t.test_date for t in tests if t.test_date]
         same_day = bool(tested) and min(tested) == max(tested)
         if tested:
             date_min, date_max = min(tested), max(tested)
         else:
             date_min = date_max = datetime.now().date()
-        builder.cover(serial, project.name,
-                      ', '.join(site_parts), project.client_name,
-                      _cover_date(date_max),
-                      verify_url=report_verification_url(
-                          report_no,
-                          cls._statutory_digest(project, tests, report_no)))
-        # LAGOS STATE on its own clear line below the site address (the
-        # laboratory's jurisdiction; recorded state honoured when present).
-        builder.pdf.set_font('Times', 'B', 18)
-        builder.pdf.set_auto_page_break(False)
-        builder.pdf.set_xy(builder.pdf.l_margin, 267.0)
-        builder.pdf.cell(0, 7.8, _latin1(
-            (project.state or 'LAGOS STATE').upper()), align='C')
-        builder.pdf.set_auto_page_break(auto=True, margin=22)
-
-        # ------------------------------------------------------------- TOC
-        builder.toc_page()
+        from apps.digital_eye.strength_curves import resolve_active_curve
+        try:
+            active_curve = resolve_active_curve(project)
+        except Exception:  # noqa: BLE001 — disclosure must never kill the report
+            active_curve = None
+        ecs_disclosure, ecs_derivation = ecs_report_disclosure(project)
+        user_label = 'Unauthenticated'
+        if user and getattr(user, 'is_authenticated', False):
+            user_label = user.get_full_name() or user.email
 
         pulse_tests = [t for t in tests if t.test_type == 'pulse_velocity']
         crack_tests = [t for t in tests if t.test_type == 'crack_depth']
@@ -2337,940 +2368,1110 @@ class NDTReportService:
             has_drawings=has_drawings, tested=tested, same_day=same_day,
             date_min=date_min, date_max=date_max)
 
-        # ------------------------------- EXECUTIVE SUMMARY (p3, un-TOC'd, C1)
-        # toc_page() left the cursor on this fresh page via the TOC
-        # placeholder's own page break — no add_page() here (that was the
-        # stray blank page).
-        builder.record_section('executive_summary', 'Executive Summary')
-        builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
-        exec_body, _src = get_cms_text(project, 'executive_summary',
-                                       computed=cms)
-        if exec_body is not None:
-            # Generated-content CMS section: a project override rewords it;
-            # the computed body is the exact wording from the recorded data.
-            for para in cms_paragraphs(exec_body):
+        def emit_cover():
+            # ------------------------------------------------------------ cover
+            # Client address block: street + LGA, then LAGOS STATE on its own
+            # clear line (11 Sep client note — the state never shares a line
+            # with the address). Only the parts that are recorded appear.
+            site_parts = [p for p in (project.site_address, project.lga)
+                          if p]
+            builder.cover(serial, project.name,
+                          ', '.join(site_parts), project.client_name,
+                          _cover_date(date_max),
+                          verify_url=report_verification_url(
+                              report_no,
+                              cls._statutory_digest(project, tests, report_no)))
+            # LAGOS STATE on its own clear line below the site address (the
+            # laboratory's jurisdiction; recorded state honoured when present).
+            builder.pdf.set_font('Times', 'B', 18)
+            builder.pdf.set_auto_page_break(False)
+            builder.pdf.set_xy(builder.pdf.l_margin, 267.0)
+            builder.pdf.cell(0, 7.8, _latin1(
+                (project.state or 'LAGOS STATE').upper()), align='C')
+            builder.pdf.set_auto_page_break(auto=True, margin=22)
+
+            # ------------------------------------------------------------- TOC
+            # The cover owns the TOC only while it leads the document. A
+            # §2.5 config that displaces the cover has already emitted the
+            # TOC before the first section — and fpdf2 allows exactly one
+            # placeholder, so it must not be repeated here.
+            if not emission_state['toc_done']:
+                builder.toc_page()
+                # The TOC placeholder's break leaves a fresh page behind:
+                # arm the reuse flag so whatever section comes next starts
+                # on that page instead of skipping it (§2.5 blank-page fix).
+                builder.pdf.reuse_fresh_page = True
+                emission_state['toc_done'] = True
+
+        def emit_exec():
+            # Canonical position (first after the cover): the TOC
+            # placeholder's break already left a fresh page, and the
+            # cover armed reuse_fresh_page — no break here (that was
+            # the stray blank page). Displaced by the §2.5 structure
+            # config: start on its own page like every main section.
+            if not emission_state['first']:
+                builder.pdf.add_page()
+            # ------------------------------- EXECUTIVE SUMMARY (p3, un-TOC'd, C1)
+            builder.record_section('executive_summary', 'Executive Summary')
+            builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
+            exec_body, _src = get_cms_text(project, 'executive_summary',
+                                           computed=cms)
+            if exec_body is not None:
+                # Generated-content CMS section: a project override rewords it;
+                # the computed body is the exact wording from the recorded data.
+                for para in cms_paragraphs(exec_body):
+                    builder.para(para, markdown=True)
+            else:
+                # No data behind this section yet and no override: the honest
+                # unquantified rendering stays (never an invented summary).
+                proj = _latin1(project.name or 'unnamed project').replace('*', '')
+                client = _latin1(project.client_name or '').replace('*', '')
+                site = _latin1(', '.join(
+                    p for p in (project.site_address, project.lga, project.state)
+                    if p)).replace('*', '')
+                prose_dates = (_prose_date(date_max) if same_day
+                               else f'{_prose_date(date_min)} and '
+                                    f'{_prose_date(date_max)}')
+                # Reference p3 paragraph 1 opens with the building profile ("an
+                # existing 2-floor building (A, B &C) belonging to …, at …") — the
+                # storey count comes only from recorded levels/floors; when nothing
+                # is recorded the profile stays unquantified rather than guessed.
+                storeys = cls._storey_count(floors_present, bim_levels)
+                building = (f'an existing {storeys}-floor building' if storeys
+                            else 'an existing building')
+                builder.para(
+                    'In situ Integrity Test (Non-Destructive) of compressive '
+                    f'strength of structural members of {building} '
+                    f'("**{proj}**")'
+                    + (f' belonging to **{client}**' if client else '')
+                    + (f', at **{site}**' if site else '')
+                    + '.',
+                    markdown=True)
+                builder.para(
+                    'The Non-Destructive Integrity Test was carried out '
+                    + (f'on **{prose_dates}**' if tested else 'on dates not recorded')
+                    + ' with the intention to determine the residual compressive '
+                      'strength of concrete component of the structural members '
+                      'considered to be critical to stability, robustness and general '
+                      'safety of the entire structure in its present state.',
+                    markdown=True)
+                # Reference p3 paragraph 3 is ONE paragraph: visual findings + the
+                # Non-Destructive analysis outcome + the structural-arrangement /
+                # drawing-availability statement.
+                if visual_notes:
+                    visual_sentence = (
+                        'The visual inspection revealed structural defects as '
+                        'recorded in Section 4.1 of this report')
+                else:
+                    visual_sentence = (
+                        'The visual inspection did not record any structural '
+                        'defects')
+                if element_data:
+                    analysis_sentence = (
+                        'and the Non-Destructive test analysis shows that '
+                        f'{len(good_members)} of the {len(element_data)} structural '
+                        'members tested were good in strength (average compressive '
+                        'strength at or above the assumed 25 N/mm2)'
+                        + (f', while {len(poor_members)} member(s) fell below it and '
+                           'require technical advice.' if poor_members
+                           else ' at the time of test.'))
+                else:
+                    analysis_sentence = (
+                        'and no ultrasonic pulse velocity results are available '
+                        'for this project.')
+                if has_drawings:
+                    arrangement_sentence = (
+                        'The general structural arrangement of the building was '
+                        'referenced from the structural information available on '
+                        'the platform (reproduced in the Appendix of this report).')
+                else:
+                    arrangement_sentence = (
+                        'The general structural arrangement of the buildings could '
+                        'not be completely ascertained; as no structural drawing '
+                        'was provided.')
+                builder.para(' '.join(
+                    [visual_sentence, analysis_sentence, arrangement_sentence]))
+                builder.para(
+                    'In view of the above, it is advised that a qualified structural '
+                    'engineer should be engaged to proffer solution to the defects '
+                    'observed, give technical advice on the poor structural members '
+                    'tested and further analyse the structural arrangement to '
+                    'guarantee the stability, integrity and the serviceability of the '
+                    'structure.'
+                )
+
+        def emit_intro():
+            # ------------------------------------------------------ 1.0 INTRO
+            # section() always starts a main section on a fresh page, so the
+            # executive summary keeps its own page and body numbering
+            # (Introduction = page 1) starts deterministically.
+            builder.section('1.0', 'INTRODUCTION')
+            # Report CMS (8 Sep meeting H7): editable template sections resolve
+            # through report_cms.get_cms_text — project override > platform
+            # override > the registry default (verbatim the old hardcoded text).
+            for para in cms_paragraphs(get_cms_text(project, 'introduction')[0]):
+                builder.para(para)
+            # Computed project paragraphs — generated-content CMS section
+            # (11 Sep): a project override rewords them.
+            intro_body, _src = get_cms_text(project, 'introduction_project',
+                                            computed=cms)
+            for para in cms_paragraphs(intro_body):
                 builder.para(para, markdown=True)
-        else:
-            # No data behind this section yet and no override: the honest
-            # unquantified rendering stays (never an invented summary).
-            proj = _latin1(project.name or 'unnamed project').replace('*', '')
-            client = _latin1(project.client_name or '').replace('*', '')
-            site = _latin1(', '.join(
-                p for p in (project.site_address, project.lga, project.state)
-                if p)).replace('*', '')
-            prose_dates = (_prose_date(date_max) if same_day
-                           else f'{_prose_date(date_min)} and '
-                                f'{_prose_date(date_max)}')
-            # Reference p3 paragraph 1 opens with the building profile ("an
-            # existing 2-floor building (A, B &C) belonging to …, at …") — the
-            # storey count comes only from recorded levels/floors; when nothing
-            # is recorded the profile stays unquantified rather than guessed.
-            storeys = cls._storey_count(floors_present, bim_levels)
-            building = (f'an existing {storeys}-floor building' if storeys
-                        else 'an existing building')
+
+        def emit_purpose():
+            # ------------------------------------------------------ 2.0 PURPOSE
+            builder.section('2.0', 'PURPOSE OF INVESTIGATION')
+            builder.para('The purpose of the investigation is to:')
+            builder.numbered(cms_list_items(
+                get_cms_text(project, 'purpose_items')[0]))
+
+        def emit_lit():
+            # -------------------------------------------------- 3.0 LITERATURE
+            builder.section('3.0', 'LITERATURE REVIEW')
+            for para in cms_paragraphs(get_cms_text(project,
+                                                    'literature_review')[0]):
+                builder.para(para, leading=5.7)
+            builder.para('The pulse velocity is calculated using the relationship:',
+                         leading=5.7)
+            builder.centered_formula('UPV = L / t')
+            builder.bullet('L = Distance between transducers (mm)')
+            builder.bullet('t = Pulse transit time (microseconds)')
             builder.para(
-                'In situ Integrity Test (Non-Destructive) of compressive '
-                f'strength of structural members of {building} '
-                f'("**{proj}**")'
-                + (f' belonging to **{client}**' if client else '')
-                + (f', at **{site}**' if site else '')
-                + '.',
-                markdown=True)
-            builder.para(
-                'The Non-Destructive Integrity Test was carried out '
-                + (f'on **{prose_dates}**' if tested else 'on dates not recorded')
-                + ' with the intention to determine the residual compressive '
-                  'strength of concrete component of the structural members '
-                  'considered to be critical to stability, robustness and general '
-                  'safety of the entire structure in its present state.',
-                markdown=True)
-            # Reference p3 paragraph 3 is ONE paragraph: visual findings + the
-            # Non-Destructive analysis outcome + the structural-arrangement /
-            # drawing-availability statement.
-            if visual_notes:
-                visual_sentence = (
-                    'The visual inspection revealed structural defects as '
-                    'recorded in Section 4.1 of this report')
-            else:
-                visual_sentence = (
-                    'The visual inspection did not record any structural '
-                    'defects')
-            if element_data:
-                analysis_sentence = (
-                    'and the Non-Destructive test analysis shows that '
-                    f'{len(good_members)} of the {len(element_data)} structural '
-                    'members tested were good in strength (average compressive '
-                    'strength at or above the assumed 25 N/mm2)'
-                    + (f', while {len(poor_members)} member(s) fell below it and '
-                       'require technical advice.' if poor_members
-                       else ' at the time of test.'))
-            else:
-                analysis_sentence = (
-                    'and no ultrasonic pulse velocity results are available '
-                    'for this project.')
-            if has_drawings:
-                arrangement_sentence = (
-                    'The general structural arrangement of the building was '
-                    'referenced from the structural information available on '
-                    'the platform (reproduced in the Appendix of this report).')
-            else:
-                arrangement_sentence = (
-                    'The general structural arrangement of the buildings could '
-                    'not be completely ascertained; as no structural drawing '
-                    'was provided.')
-            builder.para(' '.join(
-                [visual_sentence, analysis_sentence, arrangement_sentence]))
-            builder.para(
-                'In view of the above, it is advised that a qualified structural '
-                'engineer should be engaged to proffer solution to the defects '
-                'observed, give technical advice on the poor structural members '
-                'tested and further analyse the structural arrangement to '
-                'guarantee the stability, integrity and the serviceability of the '
-                'structure.'
+                'UPV testing is widely used for evaluating concrete homogeneity, '
+                'detecting internal discontinuities such as cracks and voids, and '
+                'supporting qualitative assessment of structural integrity.',
+                leading=5.7,
             )
-
-        # ------------------------------------------------------ 1.0 INTRO
-        # section() always starts a main section on a fresh page, so the
-        # executive summary keeps its own page and body numbering
-        # (Introduction = page 1) starts deterministically.
-        builder.section('1.0', 'INTRODUCTION')
-        # Report CMS (8 Sep meeting H7): editable template sections resolve
-        # through report_cms.get_cms_text — project override > platform
-        # override > the registry default (verbatim the old hardcoded text).
-        for para in cms_paragraphs(get_cms_text(project, 'introduction')[0]):
-            builder.para(para)
-        # Computed project paragraphs — generated-content CMS section
-        # (11 Sep): a project override rewords them.
-        intro_body, _src = get_cms_text(project, 'introduction_project',
-                                        computed=cms)
-        for para in cms_paragraphs(intro_body):
-            builder.para(para, markdown=True)
-
-        # ------------------------------------------------------ 2.0 PURPOSE
-        builder.section('2.0', 'PURPOSE OF INVESTIGATION')
-        builder.para('The purpose of the investigation is to:')
-        builder.numbered(cms_list_items(
-            get_cms_text(project, 'purpose_items')[0]))
-
-        # -------------------------------------------------- 3.0 LITERATURE
-        builder.section('3.0', 'LITERATURE REVIEW')
-        for para in cms_paragraphs(get_cms_text(project,
-                                                'literature_review')[0]):
-            builder.para(para, leading=5.7)
-        builder.para('The pulse velocity is calculated using the relationship:',
-                     leading=5.7)
-        builder.centered_formula('UPV = L / t')
-        builder.bullet('L = Distance between transducers (mm)')
-        builder.bullet('t = Pulse transit time (microseconds)')
-        builder.para(
-            'UPV testing is widely used for evaluating concrete homogeneity, '
-            'detecting internal discontinuities such as cracks and voids, and '
-            'supporting qualitative assessment of structural integrity.',
-            leading=5.7,
-        )
-        builder.para(
-            'The testing procedure and interpretation of results are '
-            'conducted in accordance with international standards including:',
-            leading=5.7,
-        )
-        builder.bullet('ASTM C597 - Standard Test Method for Pulse Velocity '
-                       'Through Concrete (2020).')
-        builder.bullet('BS EN 12504-4:2004 - Standard Test Method for '
-                       'determination of the velocity of propagation of '
-                       'pulses of ultrasonic longitudinal waves in concrete.')
-        builder.bullet('ACI 228.2R - Report on Nondestructive Test Methods '
-                       'for Evaluation of Concrete in Structures (2018).')
-        builder.para(
-            'Compliance with these standards ensures that equipment '
-            'calibration, test configuration (direct, semi-direct, or indirect '
-            'transmission), surface preparation, and reporting procedures '
-            'meet current international best practice.',
-            leading=5.7,
-        )
-        builder.para(
-            'It is important to note that pulse velocity is influenced by '
-            'moisture condition, temperature, aggregate type, and stress '
-            'level. Therefore, interpretation must consider site conditions '
-            'and, where necessary, be supported by complementary test methods.',
-            leading=5.7,
-        )
-        builder.para(
-            'The ultrasonic pulse velocity test is a non-destructive '
-            'screening method and does not directly determine compressive '
-            'strength of the reinforced concrete element unless calibrated '
-            'correlation models are established for the specific concrete mix '
-            'used in the structure.',
-            leading=5.7,
-        )
-        # ---- Calibration disclosure (Nexucon Link, 8 Sep meeting): the
-        # formula printed here is the formula actually applied to every
-        # Section 5.0 figure — the project's active calibration curve when
-        # one is set, else the documented laboratory default.
-        from apps.digital_eye.strength_curves import resolve_active_curve
-        try:
-            active_curve = resolve_active_curve(project)
-        except Exception:  # noqa: BLE001 — disclosure must never kill the report
-            active_curve = None
-        ecs_disclosure, ecs_derivation = ecs_report_disclosure(project)
-        builder.para(ecs_disclosure, leading=5.7)
-        # ---- Derivation of the reported results (7 Sep 2026 meeting:
-        # every figure must be recomputable by hand). Element means are
-        # the mean of the PER-POINT velocities (BS EN 12504-4 practice),
-        # not the velocity of the mean transit time — stating the method
-        # is what reconciles manual and system arithmetic.
-        builder.para(
-            'Derivation of the reported results: each test point velocity '
-            'is V = L / t; the element pulse velocity is the arithmetic '
-            'mean of its point velocities, V(element) = (V1 + V2 + ... + '
-            f'Vn) / n; and the estimated compressive strength follows '
-            f'{ecs_derivation}. Pulse velocities in the Section 5.0 tables '
-            'are reported in metres per second (m/s); 1 km/s = 1000 m/s.',
-            leading=5.7,
-        )
-        example = cls._worked_example(project, element_data, active_curve)
-        if example:
-            builder.para(example, leading=5.7)
-
-        # ---------------------------- 3.1 LOCATION MAP / WEATHER (ref p7)
-        # Reference: heading centred bold 14 underlined (no number on the
-        # page itself), address centred bold 18, then TWO images side by
-        # side in fixed frames — left 31.0/74.2mm wide, right 106.6/79.4mm
-        # wide, both from 48.3mm, ~139mm tall — with no captions.
-        builder.pdf.add_page()
-        builder.section('3.1', 'LOCATION MAP/ WEATHER CONDITION',
-                        size=14, centered=True, sub=True)
-        builder.display_line(
-            (project.site_address or 'SITE ADDRESS NOT RECORDED').upper()
-            + (f', {(project.lga or "").upper()}' if project.lga else '')
-            + (f', {(project.state or "").upper()}.' if project.state else '.')
-        )
-        # Map image sources, honest ones only: operator-attached map photo,
-        # the operator's captured BIM 3D preview, then the plan view
-        # rendered from the imported model geometry — two frames are filled,
-        # a single one is centred, none gives the placeholder box.
-        map_sources = []
-        for t in tests:
-            for f in t.files.all():
-                blob = f'{f.file_name or ""} {f.description or ""}'.lower()
-                if f.file_type == 'photo' and 'map' in blob:
-                    try:
-                        url = f.file.url if f.file else ''
-                    except Exception:  # noqa: BLE001 — remote storage
-                        url = ''
-                    if url:
-                        map_sources.append(url)
-                        break
-            if map_sources:
-                break
-        capture_url = cls._bim_capture_url(project)
-        if capture_url:
-            map_sources.append(capture_url)
-        # Google static map around the project's recorded GNSS coordinates
-        # (C6) — a real 500 m radius map image when coordinates + API key
-        # exist; absent otherwise, never fabricated.
-        static_map = cls._google_static_map(project)
-        if static_map is not None:
-            map_sources.insert(0, static_map)
-        if len(map_sources) < 2:
-            try:
-                plan_buf, _cap = cls._generate_bim_plan_view(project)
-            except Exception as exc:        # noqa: BLE001 — never break
-                logger.error('BIM plan view rendering failed: %s', exc)
-                plan_buf = None
-            if plan_buf:
-                map_sources.append(plan_buf)
-        pdf = builder.pdf
-        if not map_sources:
-            builder.placeholder_box('SITE LOCATION MAP NOT PROVIDED',
-                                    height=100)
-        elif len(map_sources) == 1:
-            cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
-                             48.3, 120, 138.9)
-        else:
-            cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9)
-            cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
-        # Weather is operator-recorded; the reference prints none, so a
-        # recorded condition gets a single plain centred line below the
-        # frames and nothing is invented when it is absent.
-        weather_values = [t.weather_condition for t in tests
-                          if t.weather_condition]
-        if weather_values:
-            pdf.set_xy(pdf.l_margin, 189)
-            pdf.set_font('Cambria', '', 12)
-            pdf.set_text_color(*INK)
-            pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
-                     align='C')
-        # Recorded GNSS coordinates + the Google Maps link to the site (C6).
-        # Only when the project carries real coordinates — nothing is guessed.
-        if project.latitude is not None and project.longitude is not None:
-            link = cls._maps_link(project)
-            pdf.set_xy(pdf.l_margin, 196)
-            pdf.set_font('Cambria', 'I', 10)
-            pdf.set_text_color(*INK)
-            pdf.multi_cell(
-                0, 5.0,
-                _latin1(
-                    f'Coordinates: {project.latitude:.6f}°, '
-                    f'{project.longitude:.6f}°  —  view location on Google Maps:'
-                    f' {link}'),
-                align='C', new_x='LMARGIN', new_y='NEXT')
-
-        # ------------------------------------------------------ 4.0 FIELD WORK
-        builder.section('4.0', 'FIELD WORK')
-        if tested:
-            if same_day:
-                builder.para(
-                    'The field work was carried out on '
-                    f'**{_prose_date(date_max)}** and was completed same day.',
-                    leading=7.5, markdown=True)
-            else:
-                builder.para(
-                    'The field work was carried out between '
-                    f'**{_prose_date(date_min)}** and '
-                    f'**{_prose_date(date_max)}**.',
-                    leading=7.5, markdown=True)
-        else:
-            builder.para('The dates of the field work were not recorded.',
-                         leading=7.5)
-        builder.para(
-            'Visual test was carried out on the structure to ascertain any '
-            'possible structural defects (e.g. cracks, differential '
-            'settlement, spalling, honeycombs, hogging and sagging). This is '
-            'a vital aspect of non-destructive test. The Standard Portable '
-            'Ultrasonic Non-Destructive Digital Indicating Tester (Pundit) '
-            'was employed for the estimation of compressive strength of the '
-            'hardened concrete on the structural elements.'
-            + (' Profoscope was used to locate the position of reinforcement '
-               'bars (Rebar).' if rebar_tests else ''),
-            leading=7.5,
-        )
-        builder.para(
-            'It is important to note that during the test some factors were '
-            'taken into consideration, which may impact on the result of the '
-            'compressive strength of the structural members. These are as '
-            'follows:',
-            leading=7.5,
-        )
-        builder.bullet('Surface conditions, temperature and moisture content '
-                       'of the existing concrete.', leading=7.5)
-        builder.bullet('Path length, shape and size of the concrete member.',
-                       leading=7.5)
-        builder.bullet('Concrete stress.', leading=7.5)
-        builder.bullet('Effect of reinforcing bars.', leading=7.5)
-        # Concrete maturity (7 Sep review, item 18): stated only when ages
-        # were actually recorded — no age is assumed.
-        ages = sorted({t.concrete_age_days for t in tests
-                       if t.concrete_age_days})
-        if ages:
-            age_clause = (f'{ages[0]} days' if len(ages) == 1
-                          else f'between {ages[0]} and {ages[-1]} days')
             builder.para(
-                'The age of the concrete at the time of test was recorded as '
-                f'{age_clause}. Strength gain beyond 28 days is minimal, so '
-                'ages within the typical 14-52 day testing window are '
-                'reported for information; no age-based correction is '
-                'applied to the estimated strengths.', leading=7.5)
-        builder.para('The scope of the work done is as follows:', leading=7.5)
-        scope_items = [
-            'Initial visual test was carried out on the building structure '
-            'tested (i.e column, beam, slab, wall etc).',
-        ]
-        if rebar_tests:
-            scope_items.append(
-                'Profoscope, Rebar locator was used to locate the '
-                'reinforcement position, concrete cover measurement and Rebar '
-                'size embedded in the structural members.')
-        if devices:
-            scope_items.append(
-                'Calibration of the Portable Ultrasonic Non-Destructive '
-                'Digital Indicating Tester (PUNDIT) was done before '
-                'commencing the test.')
-        point_counts = sorted({e['n_points'] for e in element_data})
-        if point_counts:
-            if len(point_counts) == 1:
-                n = point_counts[0]
-                word = {1: 'one (1)', 2: 'two (2)', 3: 'three (3)',
-                        4: 'four (4)', 5: 'five (5)'}.get(n, f'{n}')
-                noun = 'test point was' if n == 1 else 'test points were'
-                points_clause = f'{word} {noun} randomly selected'
-            else:
-                points_clause = (f'between {point_counts[0]} and '
-                                 f'{point_counts[-1]} test points were '
-                                 'randomly selected')
-            scope_items.append(
-                f'Indirect method was employed, then {points_clause} to get a '
-                'good representation and result on each structural member, '
-                'according to BS EN 12504-4:2021, for testing concrete.')
-        # Reference §4.0 scope list: number 1.6mm in, text 12.7mm across,
-        # 7.5mm leading.
-        builder.numbered(scope_items, num_indent=1.6, text_indent=12.7,
-                         leading=7.5)
-
-        # ------------------------------- EQUIPMENT STATUS CHECK (ref p9)
-        builder.heading('EQUIPMENT STATUS CHECK')
-        if devices:
-            freqs = sorted({t.transducer_frequency_khz for t in tests
-                            if t.transducer_frequency_khz})
-            for d in devices:
-                rows = [
-                    ('Name of Equipment', d.name or d.model or '-'),
-                    ('Test Equipment ID', d.device_id or '-'),
-                    ('Equipment Status', d.status or '-'),
-                    ('Calibration Date',
-                     d.calibration_date.strftime('%d/%m/%Y')
-                     if d.calibration_date else '-'),
-                ]
-                if freqs:
-                    rows.append(('Transducer',
-                                 ' and '.join(f'{f} kHz' for f in freqs)))
-                builder.kv_table(rows)
-                builder.ln_gap(4)
-        else:
-            builder.para('No field device was recorded against these tests.',
-                         leading=7.5)
-        if operators:
+                'The testing procedure and interpretation of results are '
+                'conducted in accordance with international standards including:',
+                leading=5.7,
+            )
+            builder.bullet('ASTM C597 - Standard Test Method for Pulse Velocity '
+                           'Through Concrete (2020).')
+            builder.bullet('BS EN 12504-4:2004 - Standard Test Method for '
+                           'determination of the velocity of propagation of '
+                           'pulses of ultrasonic longitudinal waves in concrete.')
+            builder.bullet('ACI 228.2R - Report on Nondestructive Test Methods '
+                           'for Evaluation of Concrete in Structures (2018).')
             builder.para(
-                'The test was conducted in the presence of the following '
-                'recorded operator(s) and staff:', leading=7.5)
+                'Compliance with these standards ensures that equipment '
+                'calibration, test configuration (direct, semi-direct, or indirect '
+                'transmission), surface preparation, and reporting procedures '
+                'meet current international best practice.',
+                leading=5.7,
+            )
+            builder.para(
+                'It is important to note that pulse velocity is influenced by '
+                'moisture condition, temperature, aggregate type, and stress '
+                'level. Therefore, interpretation must consider site conditions '
+                'and, where necessary, be supported by complementary test methods.',
+                leading=5.7,
+            )
+            builder.para(
+                'The ultrasonic pulse velocity test is a non-destructive '
+                'screening method and does not directly determine compressive '
+                'strength of the reinforced concrete element unless calibrated '
+                'correlation models are established for the specific concrete mix '
+                'used in the structure.',
+                leading=5.7,
+            )
+            # ---- Calibration disclosure (Nexucon Link, 8 Sep meeting): the
+            # formula printed here is the formula actually applied to every
+            # Section 5.0 figure — the project's active calibration curve when
+            # one is set, else the documented laboratory default.
+            builder.para(ecs_disclosure, leading=5.7)
+            # ---- Derivation of the reported results (7 Sep 2026 meeting:
+            # every figure must be recomputable by hand). Element means are
+            # the mean of the PER-POINT velocities (BS EN 12504-4 practice),
+            # not the velocity of the mean transit time — stating the method
+            # is what reconciles manual and system arithmetic.
+            builder.para(
+                'Derivation of the reported results: each test point velocity '
+                'is V = L / t; the element pulse velocity is the arithmetic '
+                'mean of its point velocities, V(element) = (V1 + V2 + ... + '
+                f'Vn) / n; and the estimated compressive strength follows '
+                f'{ecs_derivation}. Pulse velocities in the Section 5.0 tables '
+                'are reported in metres per second (m/s); 1 km/s = 1000 m/s.',
+                leading=5.7,
+            )
+            example = cls._worked_example(project, element_data, active_curve)
+            if example:
+                builder.para(example, leading=5.7)
+
+        def emit_locmap():
+            # ---------------------------- 3.1 LOCATION MAP / WEATHER (ref p7)
+            # Reference: heading centred bold 14 underlined (no number on the
+            # page itself), address centred bold 18, then TWO images side by
+            # side in fixed frames — left 31.0/74.2mm wide, right 106.6/79.4mm
+            # wide, both from 48.3mm, ~139mm tall — with no captions.
+            builder.pdf.add_page()
+            builder.section('3.1', 'LOCATION MAP/ WEATHER CONDITION',
+                            size=14, centered=True, sub=True)
+            builder.display_line(
+                (project.site_address or 'SITE ADDRESS NOT RECORDED').upper()
+                + (f', {(project.lga or "").upper()}' if project.lga else '')
+                + (f', {(project.state or "").upper()}.' if project.state else '.')
+            )
+            # Map image sources, honest ones only: operator-attached map photo,
+            # the operator's captured BIM 3D preview, then the plan view
+            # rendered from the imported model geometry — two frames are filled,
+            # a single one is centred, none gives the placeholder box.
+            map_sources = []
+            for t in tests:
+                for f in t.files.all():
+                    blob = f'{f.file_name or ""} {f.description or ""}'.lower()
+                    if f.file_type == 'photo' and 'map' in blob:
+                        try:
+                            url = f.file.url if f.file else ''
+                        except Exception:  # noqa: BLE001 — remote storage
+                            url = ''
+                        if url:
+                            map_sources.append(url)
+                            break
+                if map_sources:
+                    break
+            capture_url = cls._bim_capture_url(project)
+            if capture_url:
+                map_sources.append(capture_url)
+            # Google static map around the project's recorded GNSS coordinates
+            # (C6) — a real 500 m radius map image when coordinates + API key
+            # exist; absent otherwise, never fabricated.
+            static_map = cls._google_static_map(project)
+            if static_map is not None:
+                map_sources.insert(0, static_map)
+            if len(map_sources) < 2:
+                try:
+                    plan_buf, _cap = cls._generate_bim_plan_view(project)
+                except Exception as exc:        # noqa: BLE001 — never break
+                    logger.error('BIM plan view rendering failed: %s', exc)
+                    plan_buf = None
+                if plan_buf:
+                    map_sources.append(plan_buf)
             pdf = builder.pdf
-            pdf.set_font('Cambria', 'B', 12)
-            pdf.set_text_color(*INK)
-            for name in operators:
-                pdf.set_x(pdf.l_margin + 12.7)
-                pdf.cell(0, 9.9, f'{_latin1(name)} : ' + '…' * 19,
-                         new_x='LMARGIN', new_y='NEXT')
-            pdf.set_x(pdf.l_margin)
-            pdf.set_font('Cambria', '', 12)
-        else:
-            builder.para('The operator(s) of the test were not recorded.',
-                         leading=7.5)
-        builder.para(
-            'This is part of Lagos State Government\'s effort to reduce the '
-            'incidence of building and civil engineering (construction) '
-            'materials failure and building collapse within the geographical '
-            'boundary of Lagos State.',
-            leading=7.5,
-        )
+            if not map_sources:
+                builder.placeholder_box('SITE LOCATION MAP NOT PROVIDED',
+                                        height=100)
+            elif len(map_sources) == 1:
+                cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
+                                 48.3, 120, 138.9)
+            else:
+                cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9)
+                cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
+            # Weather is operator-recorded; the reference prints none, so a
+            # recorded condition gets a single plain centred line below the
+            # frames and nothing is invented when it is absent.
+            weather_values = [t.weather_condition for t in tests
+                              if t.weather_condition]
+            if weather_values:
+                pdf.set_xy(pdf.l_margin, 189)
+                pdf.set_font('Cambria', '', 12)
+                pdf.set_text_color(*INK)
+                pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
+                         align='C')
+            # Recorded GNSS coordinates + the Google Maps link to the site (C6).
+            # Only when the project carries real coordinates — nothing is guessed.
+            if project.latitude is not None and project.longitude is not None:
+                link = cls._maps_link(project)
+                pdf.set_xy(pdf.l_margin, 196)
+                pdf.set_font('Cambria', 'I', 10)
+                pdf.set_text_color(*INK)
+                pdf.multi_cell(
+                    0, 5.0,
+                    _latin1(
+                        f'Coordinates: {project.latitude:.6f}°, '
+                        f'{project.longitude:.6f}°  —  view location on Google Maps:'
+                        f' {link}'),
+                    align='C', new_x='LMARGIN', new_y='NEXT')
 
-        # -------------------------------------------------- 4.1 VISUAL TEST
-        builder.section('4.1', 'VISUAL TEST', sub=True)
-        for para in cms_paragraphs(get_cms_text(project,
-                                                'visual_preamble')[0]):
-            builder.para(para, leading=7.5)
-        # Generated-content CMS section (11 Sep): the lettered observations
-        # pre-fill from the recorded notes; a project override rewords them.
-        visual_body, visual_src = get_cms_text(project, 'visual_observations',
-                                               computed=cms)
-        if visual_body is not None:
-            builder.lettered(cms_list_items(visual_body))
+        def emit_fieldwork():
+            # ------------------------------------------------------ 4.0 FIELD WORK
+            builder.section('4.0', 'FIELD WORK')
+            if tested:
+                if same_day:
+                    builder.para(
+                        'The field work was carried out on '
+                        f'**{_prose_date(date_max)}** and was completed same day.',
+                        leading=7.5, markdown=True)
+                else:
+                    builder.para(
+                        'The field work was carried out between '
+                        f'**{_prose_date(date_min)}** and '
+                        f'**{_prose_date(date_max)}**.',
+                        leading=7.5, markdown=True)
+            else:
+                builder.para('The dates of the field work were not recorded.',
+                             leading=7.5)
             builder.para(
-                'Following the aforementioned, a Non-Destructive Test was '
-                'conducted. The photographs in the appendix of this report '
-                'show the physical state of the structure as at test time.',
-                leading=7.5)
-        elif visual_src == 'unavailable':
-            builder.para('No visual/surface condition observations recorded.',
-                         leading=7.5)
-
-        # ------------------------------------------------ 4.2 METHODOLOGY
-        builder.section('4.2', 'METHODOLOGY', sub=True)
-        builder.inner_heading('NON-DESTRUCTIVE CONCRETE STRENGTH'
-                              + (' AND REBAR DETERMINATION.' if rebar_tests
-                                 else ' DETERMINATION.'))
-        # Generated-content CMS section (11 Sep): the equipment paragraphs
-        # pre-fill from the tests actually recorded.
-        method_body, _src = get_cms_text(project, 'methodology_equipment',
-                                         computed=cms)
-        for para in cms_paragraphs(method_body):
-            builder.para(para, leading=7.5)
-        builder.inner_heading('CONCRETE', centered=False, underline=False)
-        for para in cms_paragraphs(get_cms_text(project,
-                                                'methodology_concrete')[0]):
-            builder.para(para, leading=7.5)
-        builder.para('The Pundit test equipment can also determine the '
-                     'following:', leading=7.5)
-        builder.bullet('The homogeneity and uniformity of the concrete.',
-                       leading=7.5)
-        builder.bullet('Changes in the strength of the concrete which may '
-                       'occur with time.', leading=7.5)
-        builder.bullet('The quality of the concrete in relation to standard '
-                       'requirements.', leading=7.5)
-        builder.bullet('The quality of one element of concrete in relation to '
-                       'another.', leading=7.5)
-        # Conversion statement mirrors the curve actually applied (Section
-        # 3.0 carries the full disclosure).
-        if active_curve is not None and active_curve.project_id:
-            from apps.digital_eye.strength_curves import formula_display
-            ecs_conversion_line = (
-                formula_display(active_curve.curve_type,
-                                active_curve.formula_params or {})
-                + ' (f_cu in N/mm2, V in m/s'
-                + (', R the rebound number)'
-                   if active_curve.curve_type == 'sonreb' else ')'))
-        else:
-            ecs_conversion_line = ECS_FORMULA_LINE
-        builder.para('Estimated compressive strength conversion: '
-                     + ecs_conversion_line
-                     + '. The full calibration statement is given in '
-                       'Section 3.0.', leading=7.5)
-
-        # ------------------------------------------------------- 4.3 REBAR
-        builder.section('4.3', 'REINFORCING BAR (REBAR) ASSESSMENT', sub=True)
-        # Generated-content CMS section (11 Sep): the rebar statement
-        # pre-fills from the recorded survey; without a survey the honest
-        # "Not Applicable" wording stays fixed (no override can invent one).
-        rebar_body, rebar_src = get_cms_text(project, 'rebar_statement',
-                                             computed=cms)
-        if rebar_body is not None:
-            builder.para(rebar_body, leading=7.5)
-        else:
+                'Visual test was carried out on the structure to ascertain any '
+                'possible structural defects (e.g. cracks, differential '
+                'settlement, spalling, honeycombs, hogging and sagging). This is '
+                'a vital aspect of non-destructive test. The Standard Portable '
+                'Ultrasonic Non-Destructive Digital Indicating Tester (Pundit) '
+                'was employed for the estimation of compressive strength of the '
+                'hardened concrete on the structural elements.'
+                + (' Profoscope was used to locate the position of reinforcement '
+                   'bars (Rebar).' if rebar_tests else ''),
+                leading=7.5,
+            )
             builder.para(
-                'Rebar Assessment: Not Applicable. No rebar survey was '
-                'recorded during this investigation; the reported results '
-                'are limited to the ultrasonic and visual indications of '
-                'Sections 4.1 and 5.0.',
+                'It is important to note that during the test some factors were '
+                'taken into consideration, which may impact on the result of the '
+                'compressive strength of the structural members. These are as '
+                'follows:',
+                leading=7.5,
+            )
+            builder.bullet('Surface conditions, temperature and moisture content '
+                           'of the existing concrete.', leading=7.5)
+            builder.bullet('Path length, shape and size of the concrete member.',
+                           leading=7.5)
+            builder.bullet('Concrete stress.', leading=7.5)
+            builder.bullet('Effect of reinforcing bars.', leading=7.5)
+            # Concrete maturity (7 Sep review, item 18): stated only when ages
+            # were actually recorded — no age is assumed.
+            ages = sorted({t.concrete_age_days for t in tests
+                           if t.concrete_age_days})
+            if ages:
+                age_clause = (f'{ages[0]} days' if len(ages) == 1
+                              else f'between {ages[0]} and {ages[-1]} days')
+                builder.para(
+                    'The age of the concrete at the time of test was recorded as '
+                    f'{age_clause}. Strength gain beyond 28 days is minimal, so '
+                    'ages within the typical 14-52 day testing window are '
+                    'reported for information; no age-based correction is '
+                    'applied to the estimated strengths.', leading=7.5)
+            builder.para('The scope of the work done is as follows:', leading=7.5)
+            scope_items = [
+                'Initial visual test was carried out on the building structure '
+                'tested (i.e column, beam, slab, wall etc).',
+            ]
+            if rebar_tests:
+                scope_items.append(
+                    'Profoscope, Rebar locator was used to locate the '
+                    'reinforcement position, concrete cover measurement and Rebar '
+                    'size embedded in the structural members.')
+            if devices:
+                scope_items.append(
+                    'Calibration of the Portable Ultrasonic Non-Destructive '
+                    'Digital Indicating Tester (PUNDIT) was done before '
+                    'commencing the test.')
+            point_counts = sorted({e['n_points'] for e in element_data})
+            if point_counts:
+                if len(point_counts) == 1:
+                    n = point_counts[0]
+                    word = {1: 'one (1)', 2: 'two (2)', 3: 'three (3)',
+                            4: 'four (4)', 5: 'five (5)'}.get(n, f'{n}')
+                    noun = 'test point was' if n == 1 else 'test points were'
+                    points_clause = f'{word} {noun} randomly selected'
+                else:
+                    points_clause = (f'between {point_counts[0]} and '
+                                     f'{point_counts[-1]} test points were '
+                                     'randomly selected')
+                scope_items.append(
+                    f'Indirect method was employed, then {points_clause} to get a '
+                    'good representation and result on each structural member, '
+                    'according to BS EN 12504-4:2021, for testing concrete.')
+            # Reference §4.0 scope list: number 1.6mm in, text 12.7mm across,
+            # 7.5mm leading.
+            builder.numbered(scope_items, num_indent=1.6, text_indent=12.7,
+                             leading=7.5)
+
+            # ------------------------------- EQUIPMENT STATUS CHECK (ref p9)
+            builder.heading('EQUIPMENT STATUS CHECK')
+            if devices:
+                freqs = sorted({t.transducer_frequency_khz for t in tests
+                                if t.transducer_frequency_khz})
+                for d in devices:
+                    rows = [
+                        ('Name of Equipment', d.name or d.model or '-'),
+                        ('Test Equipment ID', d.device_id or '-'),
+                        ('Equipment Status', d.status or '-'),
+                        ('Calibration Date',
+                         d.calibration_date.strftime('%d/%m/%Y')
+                         if d.calibration_date else '-'),
+                    ]
+                    if freqs:
+                        rows.append(('Transducer',
+                                     ' and '.join(f'{f} kHz' for f in freqs)))
+                    builder.kv_table(rows)
+                    builder.ln_gap(4)
+            else:
+                builder.para('No field device was recorded against these tests.',
+                             leading=7.5)
+            if operators:
+                builder.para(
+                    'The test was conducted in the presence of the following '
+                    'recorded operator(s) and staff:', leading=7.5)
+                pdf = builder.pdf
+                pdf.set_font('Cambria', 'B', 12)
+                pdf.set_text_color(*INK)
+                for name in operators:
+                    pdf.set_x(pdf.l_margin + 12.7)
+                    pdf.cell(0, 9.9, f'{_latin1(name)} : ' + '…' * 19,
+                             new_x='LMARGIN', new_y='NEXT')
+                pdf.set_x(pdf.l_margin)
+                pdf.set_font('Cambria', '', 12)
+            else:
+                builder.para('The operator(s) of the test were not recorded.',
+                             leading=7.5)
+            builder.para(
+                'This is part of Lagos State Government\'s effort to reduce the '
+                'incidence of building and civil engineering (construction) '
+                'materials failure and building collapse within the geographical '
+                'boundary of Lagos State.',
                 leading=7.5,
             )
 
-        # ------------------------------------------------------ 4.4 EQUIPMENT
-        builder.section('4.4', 'EQUIPMENT/REBAR ASSESSMENT TABLE', sub=True)
-        if devices:
-            for d in devices:
-                builder.kv('NAME OF EQUIPMENT', d.name or d.model or '-')
-                builder.kv('EQUIPMENT ID', d.device_id or '-')
-            builder.ln_gap()
-        if rebar_tests:
-            rebar_data = []
-            for idx, rt in enumerate(rebar_tests):
-                main_bar = str(int(rt.main_bar_mm)) if rt.main_bar_mm else '-'
-                links = str(int(rt.links_mm)) if rt.links_mm else '-'
-                spacing = str(rt.spacing_mm) if rt.spacing_mm else '-'
-                cover = str(int(rt.cover_depth_mm)) if rt.cover_depth_mm else '-'
-                rebar_data.append([
-                    str(idx + 1),
-                    (rt.structural_element or 'Unknown').upper(),
-                    main_bar,
-                    links,
-                    spacing,
-                    cover
-                ])
-            builder.ruled_table(
-                ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
-                 'SPACING (MM)', 'COVER DEPTH (MM)'],
-                rebar_data,
-                [12, 45, 30, 28, 30, 31],
-                ['C', 'L', 'C', 'C', 'C', 'C'],
-            )
-        else:
-            builder.para('Rebar scanning: Not Applicable for this project.',
-                         leading=7.5)
-        builder.para('NOTE: This assessment does not cover for the '
-                     'construction reinforcement design.', leading=7.5)
-
-        if crack_tests:
-            builder.para('Crack depth measurements are tabulated in '
-                         'Section 5.0 (time-difference method).',
-                         leading=7.5)
-        else:
-            builder.para('No crack depth measurements recorded.',
-                         leading=7.5)
-
-        # ------------------------------------------------ 5.0 ANALYSIS
-        builder.divider_page('5.0 ANALYSIS OF TEST RESULT')
-        pending_count = sum(1 for t in tests if t.quality_grade == 'pending')
-        if pending_count:
-            builder.para(
-                f'{pending_count} test(s) have not been run through the '
-                f'platform analysis endpoint; velocities shown are computed '
-                f'directly from the recorded measurements using the same '
-                f'deterministic BS 1881-203 relations.'
-            )
-        builder.para(
-            'Crack depth measurements are analysed first (Section 5.1), '
-            'ahead of the pulse velocity parameter tests, so defects that '
-            'bias velocity readings are known before strengths are '
-            'interpreted.'
-        )
-        builder.para(
-            'Element average compressive strength is computed from the '
-            'element mean pulse velocity through the Section 3.0 calibration '
-            'curve, and members are remarked GOOD or POOR against the '
-            'statutory 25 N/mm2 design strength. Pulse velocities are '
-            'reported in metres per second (m/s). Velocities outside the '
-            'calibrated 2.0 - 5.0 km/s range are reported without an E.C.S '
-            'estimate rather than extrapolated. Where an element\'s test '
-            'points disagree by more than 2% of the mean velocity, the '
-            'remark carries the point spread so the variance is visible '
-            'rather than silently averaged.'
-        )
-
-        if crack_tests:
-            builder.section('5.1', 'CRACK DEPTH MEASUREMENTS '
-                                   '(TIME-DIFFERENCE METHOD)', sub=True)
-            # Same A/B/C point layout as the Section 5.0 velocity tables:
-            # the element's name once, one row per test point (its t_c/t_0
-            # pair and the computed per-point depth), and the element
-            # verdict (mean depth + remark) on the middle row.
-            for t in crack_tests:
-                rows = t.reading_rows()
-                mid = len(rows) // 2 if len(rows) > 1 else 0
-                mean_depth = cls._crack_depth(t)
-                table_rows = []
-                for i, r in enumerate(rows):
-                    table_rows.append([
-                        _element_display(t.structural_element) if i == 0 else '',
-                        r['label'] or '-',
-                        cls._fmt(r['path_mm'], 1),
-                        cls._fmt(r['transit_us'], 1),
-                        cls._fmt(r['uncracked_us'], 1),
-                        cls._fmt(r['crack_depth_mm'], 1),
-                        (cls._fmt(mean_depth, 1) + '\n' + cls._crack_remark(t))
-                        if i == mid else '',
-                    ])
-                builder.ruled_table(
-                    ['ELEMENT', 'POINT', 'SPACING L (MM)',
-                     'T CRACKED (US)', 'T UNCRACKED (US)',
-                     'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
-                    table_rows,
-                    [42, 12, 16, 20, 21, 20, 34],
-                    ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
-                )
-                builder.ln_gap(2)
-
-        if not element_data:
-            builder.para('No pulse velocity tests recorded for this project.')
-        else:
-            # ---- Summary of Test Analysis: counts from the real rows
-            builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
-            analysis_groups = {}
-            for e in element_data:
-                key = (e['floor_label'], e['member_type'])
-                g = analysis_groups.setdefault(
-                    key, {'count': 0, 'points': 0})
-                g['count'] += 1
-                g['points'] += e['n_points']
-            builder.ruled_table(
-                ['STRUCTURAL MEMBER', 'NUMBER TESTED', 'LOCATION',
-                 'NO OF POINT TAKEN'],
-                [[member.title(), str(g['count']), floor.title(),
-                  str(g['points'])]
-                 for (floor, member), g in sorted(
-                     analysis_groups.items())],
-                [50, 32, 60, 40],
-                ['C', 'C', 'C', 'C'],
-            )
-            builder.ln_gap(6)
-
-            # ---- Per-floor / per-member result tables (reference layout:
-            # element name once, A/B/C reading rows, average + remark on the
-            # middle row)
-            for floor in floors_present:
-                floor_elements = [e for e in element_data
-                                  if e['floor_label'] == floor]
-                member_order = []
-                for e in floor_elements:
-                    if e['member_type'] not in member_order:
-                        member_order.append(e['member_type'])
-                for member in member_order:
-                    group = [e for e in floor_elements
-                             if e['member_type'] == member]
-                    plural = member if member.endswith('S') else member + 'S'
-                    builder.subheading(
-                        f'{floor.upper()} {plural}'
-                        + (f' OF {project.name.upper()}'
-                           if project.name else ''))
-                    for e in group:
-                        rows = e['rows']
-                        mid = len(rows) // 2 if len(rows) > 1 else 0
-                        # The element's own name (its BIM identity), one
-                        # Revit 'Family:Type:Tag' segment per line — the
-                        # test serial is provenance and stays in the
-                        # registry / integrity digest, not the results
-                        # table.
-                        element_cell = _element_display(e['element'])
-                        remark = e['remark']
-                        if (e['spread_pct'] is not None
-                                and e['spread_pct'] > 2.0):
-                            remark += (f"\nPOINT SPREAD "
-                                       f"{e['spread_km_s'] * 1000:.0f} M/S "
-                                       f"(±{e['spread_pct'] / 2:.1f}%)")
-                        table_rows = []
-                        for i, r in enumerate(rows):
-                            table_rows.append([
-                                element_cell if i == 0 else '',
-                                cls._fp(r['path_mm']),
-                                cls._f1(r['transit_us']),
-                                cls._fms(r['velocity_km_s']),
-                                cls._f1(r['ecs_mpa']),
-                                cls._f1(e['mean_ecs']) if i == mid else '',
-                                remark if i == mid else '',
-                            ])
-                        builder.ruled_table(
-                            ['Structural Element', 'PATH LENGTH',
-                             'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
-                             'E.C.S',
-                             'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
-                             'REMARK'],
-                            table_rows,
-                            [40, 17, 19, 26, 12, 29, 21],
-                            ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
-                        )
-                        builder.ln_gap(2)
-
-            # ---- Summary of Test Results: GOOD / POOR per member & floor
-            builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
-            result_groups = {}
-            for e in element_data:
-                key = (e['floor_label'], e['member_type'])
-                g = result_groups.setdefault(
-                    key, {'good': 0, 'poor': 0, 'total': 0})
-                g['total'] += 1
-                if e['remark'] == 'GOOD':
-                    g['good'] += 1
-                elif e['remark'] == 'POOR':
-                    g['poor'] += 1
-            result_rows = []
-            for (floor, member), g in sorted(result_groups.items()):
-                good_pct = round(g['good'] * 100 / g['total'], 1)
-                poor_pct = round(g['poor'] * 100 / g['total'], 1)
-                result_rows.append([
-                    member.title(),
-                    floor.title(),
-                    f"{g['good']} ({good_pct}%)",
-                    f"{g['poor']} ({poor_pct}%)",
-                ])
-            builder.ruled_table(
-                ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
-                 'POOR (NO, %)'],
-                result_rows,
-                [50, 60, 34, 32],
-                ['C', 'C', 'C', 'C'],
-            )
-            builder.ln_gap(4)
-
-        if surface_tests:
-            builder.section('5.2', 'SURFACE QUALITY OBSERVATIONS', sub=True)
-            # One row per test point carrying the condition observed there;
-            # the element's name and the test-level notes print once.
-            for t in surface_tests:
-                rows = t.reading_rows()
-                # Observation words only — the '[MANUAL_FIELD_ENTRY —
-                # Station …]' provenance stamp never prints.
-                notes = (cls._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
-                         or '-')
-                table_rows = []
-                for i, r in enumerate(rows):
-                    table_rows.append([
-                        _element_display(t.structural_element) if i == 0 else '',
-                        r['label'] or '-',
-                        (r['surface_condition'] or '-'),
-                        notes if i == 0 else '',
-                    ])
-                builder.ruled_table(
-                    ['ELEMENT', 'POINT', 'SURFACE CONDITION', 'NOTES'],
-                    table_rows,
-                    [42, 14, 55, 54],
-                    ['L', 'C', 'L', 'L'],
-                )
-                builder.ln_gap(2)
-
-        # ------------------------------------------------ BAR CHARTS
-        # Reference p33: 'BAR CHART SHOWING SUMMARY OF TEST RESULTS'
-        # Cambria-Bold 18 centred (not underlined), chart A at
-        # 45.3/35.6mm 125.1mm wide with its caption at 112.3mm, chart B at
-        # 45.3/121.9mm with its caption at 211.8mm — captions Cambria 11
-        # centred, drawn by the PDF (not inside the figures).
-        if element_data:
-            try:
-                chart_a, chart_b = cls._generate_charts(element_data)
-                if chart_a and chart_b:
-                    builder.section(
-                        '', 'BAR CHART SHOWING SUMMARY OF TEST RESULTS',
-                        size=18, centered=True, underline=False)
-                    pdf = builder.pdf
-                    pdf.image(chart_a, x=45.3, y=35.6, w=125.1)
-                    pdf.set_xy(pdf.l_margin, 112.3)
-                    pdf.set_font('Cambria', '', 11)
-                    pdf.cell(0, 6, '*CHART ILLUSTRATING THE NUMBER OF '
-                                   'STRUCTURAL MEMBER TESTED', align='C')
-                    pdf.image(chart_b, x=45.3, y=121.9, w=125.1)
-                    pdf.set_xy(pdf.l_margin, 211.8)
-                    pdf.cell(0, 6, '*CHART ILLUSTRATING THE PERCENTAGE OF '
-                                   'STRENGTH OF STRUCTURAL MEMBER TESTED',
-                             align='C')
-                    pdf.set_font('Cambria', '', 12)
-                    pdf.set_xy(pdf.l_margin, 220)
-            except Exception as e:
-                logger.error('Could not generate summary charts: %s', e)
-
-        # ------------------------------- 5.3 AI-ASSISTED INTERPRETATION
-        # The platform's AI analysis layer (analyze_project) stores its
-        # narrative on the project's latest pundit AIAnalysisRecord — the
-        # report surfaces it verbatim, labelled with its provider and
-        # evidence-based confidence. Deterministic-only records (no LLM
-        # configured/available) add nothing the counts prose does not
-        # already say, so the section is skipped honestly.
-        try:
-            from apps.evidence.models import AIAnalysisRecord
-            ai_record = (AIAnalysisRecord.objects
-                         .filter(project=project, analysis_type='pundit')
-                         .order_by('-created_at').first())
-        except Exception as e:
-            logger.error('Could not load AI analysis record: %s', e)
-            ai_record = None
-        if (ai_record and ai_record.observations
-                and (ai_record.model_provider or 'deterministic')
-                != 'deterministic'):
-            builder.section('5.3', 'AI-ASSISTED INTERPRETATION', sub=True)
-            conf_pct = ('not scored' if ai_record.confidence is None
-                        else f'{round(ai_record.confidence * 100)}%')
-            builder.para(
-                'The platform analysis engine recorded the following '
-                'interpretation of the field measurements, synthesised by '
-                f'{ai_record.model_provider} '
-                f'({ai_record.model_version or "model version not recorded"})'
-                f', with an evidence-based confidence of {conf_pct}. It is '
-                'derived solely from the recorded readings in Section 5.0 '
-                'and serves as decision support for the responsible '
-                'engineer, who reviews and signs off this report.')
-            for obs in ai_record.observations:
-                builder.bullet(str(obs))
-            # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
-            # intervals, probability below design strength, cross-element
-            # outlier checks, data quality and the reasoning trace — computed
-            # from the recorded data by the analysis engine and stored on the
-            # record. Rendered verbatim; nothing here is editable prose.
-            for m in (ai_record.correlations or []):
-                if not isinstance(m, dict) or 'mean_ecs_n_mm2' not in m:
-                    continue
-                element = m.get('element') or 'element'
-                floor = f" ({m['floor']})" if m.get('floor') else ''
-                builder.inner_heading(
-                    f"{_element_display(element).upper()}{floor}")
-                rows = [
-                    ('Mean pulse velocity',
-                     '-' if m.get('mean_velocity_m_s') is None
-                     else f"{m['mean_velocity_m_s']:.0f} m/s"),
-                    ('Estimated compressive strength',
-                     f"{m['mean_ecs_n_mm2']:.1f} N/mm2"),
-                ]
-                ci = m.get('confidence_interval_n_mm2')
-                rows.append(('95% confidence interval',
-                             f"{ci[0]:.1f} - {ci[1]:.1f} N/mm2"
-                             if ci else
-                             'Not available — the active calibration curve '
-                             'carries no regression standard error'))
-                p_below = m.get('probability_below_design')
-                rows.append(('Probability of strength below the 25 N/mm2 '
-                             'design strength',
-                             f"{p_below * 100:.1f}%"
-                             if p_below is not None else 'Not computable'))
-                dq = m.get('data_quality')
-                rows.append(('Data quality',
-                             f"{dq['label']} — {dq['reason']}"
-                             if dq else 'Not scored'))
-                outlier = m.get('cross_element_outlier')
-                rows.append(('Cross-element check',
-                             (f"OUTLIER — deviates {outlier['deviation_pct']:+.1f}% "
-                              f"from the {outlier['peer_median_m_s']:.0f} m/s "
-                              f"median of its {outlier['group']}")
-                             if outlier else
-                             'Consistent with its peer group'))
-                builder.kv_table(rows)
-                builder.inner_heading('AI REASONING TRACE')
-                for i, step in enumerate(m.get('reasoning_trace') or [], 1):
-                    builder.para(f'{i}. {step}', leading=7.5)
-
-        # ---------------------------------------------- 6.0 RECOMMENDATIONS
-        builder.section('6.0', 'RECOMMENDATION')
-        if element_data:
-            # CMS override replaces the editable lead-in; the findings
-            # statement is itself a generated-content CMS section (11 Sep)
-            # whose computed default is the wording from the recorded data.
-            lead_in = get_cms_text(project, 'recommendation_preamble')[0]
-            findings_body, _src = get_cms_text(project, 'findings_statement',
-                                               computed=cms)
-            builder.para(
-                lead_in.rstrip()
-                + ' ' + findings_body
-            )
-        else:
-            builder.para('No pulse velocity results are available for this '
-                         'project; no recommendation on concrete quality can '
-                         'be made.')
-        # Stored analysis records carry the platform's official wording —
-        # surface them when present.
-        recommendations = []
-        from apps.evidence.models import AIAnalysisRecord
-        for record in (AIAnalysisRecord.objects
-                       .filter(project=project, analysis_type='pundit')
-                       .order_by('-created_at')[:20]):
-            for rec in (record.recommendations or []):
-                if isinstance(rec, dict):
-                    line = f'[{str(rec.get("priority", "Routine")).upper()}] ' \
-                           f'{rec.get("recommendation", "")}'
-                else:
-                    line = str(rec)
-                if line not in recommendations:
-                    recommendations.append(line)
-        if recommendations:
-            builder.para("The platform's stored analysis records add the "
-                         'following recommendations:')
-            for rec in recommendations:
-                builder.bullet(rec)
-        elif not poor_members and not crack_tests:
-            builder.para('No adverse findings recorded; recorded concrete '
-                         'quality falls within acceptable velocity bands.')
-
-        # -------------------------------------------------- 7.0 CONCLUSION
-        builder.section('7.0', 'CONCLUSION')
-        if element_data:
+        def emit_visual():
+            # -------------------------------------------------- 4.1 VISUAL TEST
+            builder.section('4.1', 'VISUAL TEST', sub=True)
             for para in cms_paragraphs(get_cms_text(project,
-                                                    'conclusion_preamble')[0]):
-                builder.para(para)
-            # Generated-content CMS section (11 Sep): the numbered conclusion
-            # items pre-fill with the computed percentages; a project
-            # override rewords them.
-            conclusion_body, _src = get_cms_text(project, 'conclusion_items',
+                                                    'visual_preamble')[0]):
+                builder.para(para, leading=7.5)
+            # Generated-content CMS section (11 Sep): the lettered observations
+            # pre-fill from the recorded notes; a project override rewords them.
+            visual_body, visual_src = get_cms_text(project, 'visual_observations',
+                                                   computed=cms)
+            if visual_body is not None:
+                builder.lettered(cms_list_items(visual_body))
+                builder.para(
+                    'Following the aforementioned, a Non-Destructive Test was '
+                    'conducted. The photographs in the appendix of this report '
+                    'show the physical state of the structure as at test time.',
+                    leading=7.5)
+            elif visual_src == 'unavailable':
+                builder.para('No visual/surface condition observations recorded.',
+                             leading=7.5)
+
+        def emit_methodology():
+            # ------------------------------------------------ 4.2 METHODOLOGY
+            builder.section('4.2', 'METHODOLOGY', sub=True)
+            builder.inner_heading('NON-DESTRUCTIVE CONCRETE STRENGTH'
+                                  + (' AND REBAR DETERMINATION.' if rebar_tests
+                                     else ' DETERMINATION.'))
+            # Generated-content CMS section (11 Sep): the equipment paragraphs
+            # pre-fill from the tests actually recorded.
+            method_body, _src = get_cms_text(project, 'methodology_equipment',
+                                             computed=cms)
+            for para in cms_paragraphs(method_body):
+                builder.para(para, leading=7.5)
+            builder.inner_heading('CONCRETE', centered=False, underline=False)
+            for para in cms_paragraphs(get_cms_text(project,
+                                                    'methodology_concrete')[0]):
+                builder.para(para, leading=7.5)
+            builder.para('The Pundit test equipment can also determine the '
+                         'following:', leading=7.5)
+            builder.bullet('The homogeneity and uniformity of the concrete.',
+                           leading=7.5)
+            builder.bullet('Changes in the strength of the concrete which may '
+                           'occur with time.', leading=7.5)
+            builder.bullet('The quality of the concrete in relation to standard '
+                           'requirements.', leading=7.5)
+            builder.bullet('The quality of one element of concrete in relation to '
+                           'another.', leading=7.5)
+            # Conversion statement mirrors the curve actually applied (Section
+            # 3.0 carries the full disclosure).
+            if active_curve is not None and active_curve.project_id:
+                from apps.digital_eye.strength_curves import formula_display
+                ecs_conversion_line = (
+                    formula_display(active_curve.curve_type,
+                                    active_curve.formula_params or {})
+                    + ' (f_cu in N/mm2, V in m/s'
+                    + (', R the rebound number)'
+                       if active_curve.curve_type == 'sonreb' else ')'))
+            else:
+                ecs_conversion_line = ECS_FORMULA_LINE
+            builder.para('Estimated compressive strength conversion: '
+                         + ecs_conversion_line
+                         + '. The full calibration statement is given in '
+                           'Section 3.0.', leading=7.5)
+
+            # ------------------------------------------------------- 4.3 REBAR
+            builder.section('4.3', 'REINFORCING BAR (REBAR) ASSESSMENT', sub=True)
+            # Generated-content CMS section (11 Sep): the rebar statement
+            # pre-fills from the recorded survey; without a survey the honest
+            # "Not Applicable" wording stays fixed (no override can invent one).
+            rebar_body, rebar_src = get_cms_text(project, 'rebar_statement',
                                                  computed=cms)
-            # Reference §7.0: text 12.7mm across, 7.5mm leading.
-            builder.numbered(cms_list_items(conclusion_body),
-                             text_indent=12.7, leading=7.5)
-            builder.ln_gap(3)
-            builder.note_block(
-                'The test assumed 25 N/mm2 as the strength of the '
-                'structural members, however a substructure probe is '
-                'required to ascertain the integrity of the building '
-                'foundation.'
-            )
-        else:
+            if rebar_body is not None:
+                builder.para(rebar_body, leading=7.5)
+            else:
+                builder.para(
+                    'Rebar Assessment: Not Applicable. No rebar survey was '
+                    'recorded during this investigation; the reported results '
+                    'are limited to the ultrasonic and visual indications of '
+                    'Sections 4.1 and 5.0.',
+                    leading=7.5,
+                )
+
+            # ------------------------------------------------------ 4.4 EQUIPMENT
+            builder.section('4.4', 'EQUIPMENT/REBAR ASSESSMENT TABLE', sub=True)
+            if devices:
+                for d in devices:
+                    builder.kv('NAME OF EQUIPMENT', d.name or d.model or '-')
+                    builder.kv('EQUIPMENT ID', d.device_id or '-')
+                builder.ln_gap()
+            if rebar_tests:
+                rebar_data = []
+                for idx, rt in enumerate(rebar_tests):
+                    main_bar = str(int(rt.main_bar_mm)) if rt.main_bar_mm else '-'
+                    links = str(int(rt.links_mm)) if rt.links_mm else '-'
+                    spacing = str(rt.spacing_mm) if rt.spacing_mm else '-'
+                    cover = str(int(rt.cover_depth_mm)) if rt.cover_depth_mm else '-'
+                    rebar_data.append([
+                        str(idx + 1),
+                        (rt.structural_element or 'Unknown').upper(),
+                        main_bar,
+                        links,
+                        spacing,
+                        cover
+                    ])
+                builder.ruled_table(
+                    ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
+                     'SPACING (MM)', 'COVER DEPTH (MM)'],
+                    rebar_data,
+                    [12, 45, 30, 28, 30, 31],
+                    ['C', 'L', 'C', 'C', 'C', 'C'],
+                )
+            else:
+                builder.para('Rebar scanning: Not Applicable for this project.',
+                             leading=7.5)
+            builder.para('NOTE: This assessment does not cover for the '
+                         'construction reinforcement design.', leading=7.5)
+
+            if crack_tests:
+                builder.para('Crack depth measurements are tabulated in '
+                             'Section 5.0 (time-difference method).',
+                             leading=7.5)
+            else:
+                builder.para('No crack depth measurements recorded.',
+                             leading=7.5)
+
+        def emit_analysis():
+            # ------------------------------------------------ 5.0 ANALYSIS
+            builder.divider_page('5.0 ANALYSIS OF TEST RESULT')
+            pending_count = sum(1 for t in tests if t.quality_grade == 'pending')
+            if pending_count:
+                builder.para(
+                    f'{pending_count} test(s) have not been run through the '
+                    f'platform analysis endpoint; velocities shown are computed '
+                    f'directly from the recorded measurements using the same '
+                    f'deterministic BS 1881-203 relations.'
+                )
             builder.para(
-                'No ultrasonic pulse velocity results are available for this '
-                'project; no conclusion on concrete quality can be drawn.'
+                'Crack depth measurements are analysed first (Section 5.1), '
+                'ahead of the pulse velocity parameter tests, so defects that '
+                'bias velocity readings are known before strengths are '
+                'interpreted.'
             )
-        # Reference sign-off: exactly TWO slots — tested by (left) and
-        # approved by (right), dotted line above an ALL-CAPS name. Every
-        # operator stays listed in the REPORT INTEGRITY block below.
-        user_label = 'Unauthenticated'
-        if user and getattr(user, 'is_authenticated', False):
-            user_label = user.get_full_name() or user.email
-        # C11: when the project has a recorded approving engineer, that name
-        # takes the APPROVED BY slot (it is the engineer who actually signs);
-        # the platform user remains in the integrity block below.
-        approved_label = (signoff.approved_by_name if signoff
-                          and signoff.approved_by_name else user_label)
-        # Reference: the dotted lines sit at ~150mm (y 425pt) — park the
-        # sign-off there when the conclusion ends higher up the page.
-        if builder.pdf.get_y() < 140:
-            builder.pdf.set_y(140)
-        builder.signature_lines([
-            (_latin1((operators[0] if operators else 'NOT RECORDED').upper()),
-             'TESTED BY'),
-            (_latin1(approved_label.upper()), 'APPROVED BY'),
-        ])
-        # C11: the recorded COREN credentials + optional signature image.
-        if signoff is not None:
-            builder.coren_signoff_block(signoff, signature_img)
+            builder.para(
+                'Element average compressive strength is computed from the '
+                'element mean pulse velocity through the Section 3.0 calibration '
+                'curve, and members are remarked GOOD or POOR against the '
+                'statutory 25 N/mm2 design strength. Pulse velocities are '
+                'reported in metres per second (m/s). Velocities outside the '
+                'calibrated 2.0 - 5.0 km/s range are reported without an E.C.S '
+                'estimate rather than extrapolated. Where an element\'s test '
+                'points disagree by more than 2% of the mean velocity, the '
+                'remark carries the point spread so the variance is visible '
+                'rather than silently averaged.'
+            )
+
+            if crack_tests:
+                builder.section('5.1', 'CRACK DEPTH MEASUREMENTS '
+                                       '(TIME-DIFFERENCE METHOD)', sub=True)
+                # Same A/B/C point layout as the Section 5.0 velocity tables:
+                # the element's name once, one row per test point (its t_c/t_0
+                # pair and the computed per-point depth), and the element
+                # verdict (mean depth + remark) on the middle row.
+                for t in crack_tests:
+                    rows = t.reading_rows()
+                    mid = len(rows) // 2 if len(rows) > 1 else 0
+                    mean_depth = cls._crack_depth(t)
+                    table_rows = []
+                    for i, r in enumerate(rows):
+                        table_rows.append([
+                            _element_display(t.structural_element) if i == 0 else '',
+                            r['label'] or '-',
+                            cls._fmt(r['path_mm'], 1),
+                            cls._fmt(r['transit_us'], 1),
+                            cls._fmt(r['uncracked_us'], 1),
+                            cls._fmt(r['crack_depth_mm'], 1),
+                            (cls._fmt(mean_depth, 1) + '\n' + cls._crack_remark(t))
+                            if i == mid else '',
+                        ])
+                    builder.ruled_table(
+                        ['ELEMENT', 'POINT', 'SPACING L (MM)',
+                         'T CRACKED (US)', 'T UNCRACKED (US)',
+                         'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
+                        table_rows,
+                        [42, 12, 16, 20, 21, 20, 34],
+                        ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
+                    )
+                    builder.ln_gap(2)
+
+            if not element_data:
+                builder.para('No pulse velocity tests recorded for this project.')
+            else:
+                # ---- Summary of Test Analysis: counts from the real rows
+                builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
+                analysis_groups = {}
+                for e in element_data:
+                    key = (e['floor_label'], e['member_type'])
+                    g = analysis_groups.setdefault(
+                        key, {'count': 0, 'points': 0})
+                    g['count'] += 1
+                    g['points'] += e['n_points']
+                builder.ruled_table(
+                    ['STRUCTURAL MEMBER', 'NUMBER TESTED', 'LOCATION',
+                     'NO OF POINT TAKEN'],
+                    [[member.title(), str(g['count']), floor.title(),
+                      str(g['points'])]
+                     for (floor, member), g in sorted(
+                         analysis_groups.items())],
+                    [50, 32, 60, 40],
+                    ['C', 'C', 'C', 'C'],
+                )
+                builder.ln_gap(6)
+
+                # ---- Per-floor / per-member result tables (reference layout:
+                # element name once, A/B/C reading rows, average + remark on the
+                # middle row)
+                for floor in floors_present:
+                    floor_elements = [e for e in element_data
+                                      if e['floor_label'] == floor]
+                    member_order = []
+                    for e in floor_elements:
+                        if e['member_type'] not in member_order:
+                            member_order.append(e['member_type'])
+                    for member in member_order:
+                        group = [e for e in floor_elements
+                                 if e['member_type'] == member]
+                        plural = member if member.endswith('S') else member + 'S'
+                        builder.subheading(
+                            f'{floor.upper()} {plural}'
+                            + (f' OF {project.name.upper()}'
+                               if project.name else ''))
+                        for e in group:
+                            rows = e['rows']
+                            mid = len(rows) // 2 if len(rows) > 1 else 0
+                            # The element's own name (its BIM identity), one
+                            # Revit 'Family:Type:Tag' segment per line — the
+                            # test serial is provenance and stays in the
+                            # registry / integrity digest, not the results
+                            # table.
+                            element_cell = _element_display(e['element'])
+                            remark = e['remark']
+                            if (e['spread_pct'] is not None
+                                    and e['spread_pct'] > 2.0):
+                                remark += (f"\nPOINT SPREAD "
+                                           f"{e['spread_km_s'] * 1000:.0f} M/S "
+                                           f"(±{e['spread_pct'] / 2:.1f}%)")
+                            table_rows = []
+                            for i, r in enumerate(rows):
+                                table_rows.append([
+                                    element_cell if i == 0 else '',
+                                    cls._fp(r['path_mm']),
+                                    cls._f1(r['transit_us']),
+                                    cls._fms(r['velocity_km_s']),
+                                    cls._f1(r['ecs_mpa']),
+                                    cls._f1(e['mean_ecs']) if i == mid else '',
+                                    remark if i == mid else '',
+                                ])
+                            builder.ruled_table(
+                                ['Structural Element', 'PATH LENGTH',
+                                 'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
+                                 'E.C.S',
+                                 'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
+                                 'REMARK'],
+                                table_rows,
+                                [40, 17, 19, 26, 12, 29, 21],
+                                ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
+                            )
+                            builder.ln_gap(2)
+
+                # ---- Summary of Test Results: GOOD / POOR per member & floor
+                builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
+                result_groups = {}
+                for e in element_data:
+                    key = (e['floor_label'], e['member_type'])
+                    g = result_groups.setdefault(
+                        key, {'good': 0, 'poor': 0, 'total': 0})
+                    g['total'] += 1
+                    if e['remark'] == 'GOOD':
+                        g['good'] += 1
+                    elif e['remark'] == 'POOR':
+                        g['poor'] += 1
+                result_rows = []
+                for (floor, member), g in sorted(result_groups.items()):
+                    good_pct = round(g['good'] * 100 / g['total'], 1)
+                    poor_pct = round(g['poor'] * 100 / g['total'], 1)
+                    result_rows.append([
+                        member.title(),
+                        floor.title(),
+                        f"{g['good']} ({good_pct}%)",
+                        f"{g['poor']} ({poor_pct}%)",
+                    ])
+                builder.ruled_table(
+                    ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
+                     'POOR (NO, %)'],
+                    result_rows,
+                    [50, 60, 34, 32],
+                    ['C', 'C', 'C', 'C'],
+                )
+                builder.ln_gap(4)
+
+            if surface_tests:
+                builder.section('5.2', 'SURFACE QUALITY OBSERVATIONS', sub=True)
+                # One row per test point carrying the condition observed there;
+                # the element's name and the test-level notes print once.
+                for t in surface_tests:
+                    rows = t.reading_rows()
+                    # Observation words only — the '[MANUAL_FIELD_ENTRY —
+                    # Station …]' provenance stamp never prints.
+                    notes = (cls._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
+                             or '-')
+                    table_rows = []
+                    for i, r in enumerate(rows):
+                        table_rows.append([
+                            _element_display(t.structural_element) if i == 0 else '',
+                            r['label'] or '-',
+                            (r['surface_condition'] or '-'),
+                            notes if i == 0 else '',
+                        ])
+                    builder.ruled_table(
+                        ['ELEMENT', 'POINT', 'SURFACE CONDITION', 'NOTES'],
+                        table_rows,
+                        [42, 14, 55, 54],
+                        ['L', 'C', 'L', 'L'],
+                    )
+                    builder.ln_gap(2)
+
+            # ------------------------------------------------ BAR CHARTS
+            # Reference p33: 'BAR CHART SHOWING SUMMARY OF TEST RESULTS'
+            # Cambria-Bold 18 centred (not underlined), chart A at
+            # 45.3/35.6mm 125.1mm wide with its caption at 112.3mm, chart B at
+            # 45.3/121.9mm with its caption at 211.8mm — captions Cambria 11
+            # centred, drawn by the PDF (not inside the figures).
+            if element_data:
+                try:
+                    chart_a, chart_b = cls._generate_charts(element_data)
+                    if chart_a and chart_b:
+                        builder.section(
+                            '', 'BAR CHART SHOWING SUMMARY OF TEST RESULTS',
+                            size=18, centered=True, underline=False)
+                        pdf = builder.pdf
+                        pdf.image(chart_a, x=45.3, y=35.6, w=125.1)
+                        pdf.set_xy(pdf.l_margin, 112.3)
+                        pdf.set_font('Cambria', '', 11)
+                        pdf.cell(0, 6, '*CHART ILLUSTRATING THE NUMBER OF '
+                                       'STRUCTURAL MEMBER TESTED', align='C')
+                        pdf.image(chart_b, x=45.3, y=121.9, w=125.1)
+                        pdf.set_xy(pdf.l_margin, 211.8)
+                        pdf.cell(0, 6, '*CHART ILLUSTRATING THE PERCENTAGE OF '
+                                       'STRENGTH OF STRUCTURAL MEMBER TESTED',
+                                 align='C')
+                        pdf.set_font('Cambria', '', 12)
+                        pdf.set_xy(pdf.l_margin, 220)
+                except Exception as e:
+                    logger.error('Could not generate summary charts: %s', e)
+
+        def emit_ai():
+            # ------------------------------- 5.3 AI-ASSISTED INTERPRETATION
+            # The platform's AI analysis layer (analyze_project) stores its
+            # narrative on the project's latest pundit AIAnalysisRecord — the
+            # report surfaces it verbatim, labelled with its provider and
+            # evidence-based confidence. Deterministic-only records (no LLM
+            # configured/available) add nothing the counts prose does not
+            # already say, so the section is skipped honestly.
+            try:
+                from apps.evidence.models import AIAnalysisRecord
+                ai_record = (AIAnalysisRecord.objects
+                             .filter(project=project, analysis_type='pundit')
+                             .order_by('-created_at').first())
+            except Exception as e:
+                logger.error('Could not load AI analysis record: %s', e)
+                ai_record = None
+            if (ai_record and ai_record.observations
+                    and (ai_record.model_provider or 'deterministic')
+                    != 'deterministic'):
+                builder.section('5.3', 'AI-ASSISTED INTERPRETATION', sub=True)
+                conf_pct = ('not scored' if ai_record.confidence is None
+                            else f'{round(ai_record.confidence * 100)}%')
+                builder.para(
+                    'The platform analysis engine recorded the following '
+                    'interpretation of the field measurements, synthesised by '
+                    f'{ai_record.model_provider} '
+                    f'({ai_record.model_version or "model version not recorded"})'
+                    f', with an evidence-based confidence of {conf_pct}. It is '
+                    'derived solely from the recorded readings in Section 5.0 '
+                    'and serves as decision support for the responsible '
+                    'engineer, who reviews and signs off this report.')
+                for obs in ai_record.observations:
+                    builder.bullet(str(obs))
+                # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
+                # intervals, probability below design strength, cross-element
+                # outlier checks, data quality and the reasoning trace — computed
+                # from the recorded data by the analysis engine and stored on the
+                # record. Rendered verbatim; nothing here is editable prose.
+                for m in (ai_record.correlations or []):
+                    if not isinstance(m, dict) or 'mean_ecs_n_mm2' not in m:
+                        continue
+                    element = m.get('element') or 'element'
+                    floor = f" ({m['floor']})" if m.get('floor') else ''
+                    builder.inner_heading(
+                        f"{_element_display(element).upper()}{floor}")
+                    rows = [
+                        ('Mean pulse velocity',
+                         '-' if m.get('mean_velocity_m_s') is None
+                         else f"{m['mean_velocity_m_s']:.0f} m/s"),
+                        ('Estimated compressive strength',
+                         f"{m['mean_ecs_n_mm2']:.1f} N/mm2"),
+                    ]
+                    ci = m.get('confidence_interval_n_mm2')
+                    rows.append(('95% confidence interval',
+                                 f"{ci[0]:.1f} - {ci[1]:.1f} N/mm2"
+                                 if ci else
+                                 'Not available — the active calibration curve '
+                                 'carries no regression standard error'))
+                    p_below = m.get('probability_below_design')
+                    rows.append(('Probability of strength below the 25 N/mm2 '
+                                 'design strength',
+                                 f"{p_below * 100:.1f}%"
+                                 if p_below is not None else 'Not computable'))
+                    dq = m.get('data_quality')
+                    rows.append(('Data quality',
+                                 f"{dq['label']} — {dq['reason']}"
+                                 if dq else 'Not scored'))
+                    outlier = m.get('cross_element_outlier')
+                    rows.append(('Cross-element check',
+                                 (f"OUTLIER — deviates {outlier['deviation_pct']:+.1f}% "
+                                  f"from the {outlier['peer_median_m_s']:.0f} m/s "
+                                  f"median of its {outlier['group']}")
+                                 if outlier else
+                                 'Consistent with its peer group'))
+                    builder.kv_table(rows)
+                    builder.inner_heading('AI REASONING TRACE')
+                    for i, step in enumerate(m.get('reasoning_trace') or [], 1):
+                        builder.para(f'{i}. {step}', leading=7.5)
+
+        def emit_reco():
+            # ---------------------------------------------- 6.0 RECOMMENDATIONS
+            builder.section('6.0', 'RECOMMENDATION')
+            if element_data:
+                # CMS override replaces the editable lead-in; the findings
+                # statement is itself a generated-content CMS section (11 Sep)
+                # whose computed default is the wording from the recorded data.
+                lead_in = get_cms_text(project, 'recommendation_preamble')[0]
+                findings_body, _src = get_cms_text(project, 'findings_statement',
+                                                   computed=cms)
+                builder.para(
+                    lead_in.rstrip()
+                    + ' ' + findings_body
+                )
+            else:
+                builder.para('No pulse velocity results are available for this '
+                             'project; no recommendation on concrete quality can '
+                             'be made.')
+            # Stored analysis records carry the platform's official wording —
+            # surface them when present.
+            recommendations = []
+            from apps.evidence.models import AIAnalysisRecord
+            for record in (AIAnalysisRecord.objects
+                           .filter(project=project, analysis_type='pundit')
+                           .order_by('-created_at')[:20]):
+                for rec in (record.recommendations or []):
+                    if isinstance(rec, dict):
+                        line = f'[{str(rec.get("priority", "Routine")).upper()}] ' \
+                               f'{rec.get("recommendation", "")}'
+                    else:
+                        line = str(rec)
+                    if line not in recommendations:
+                        recommendations.append(line)
+            if recommendations:
+                builder.para("The platform's stored analysis records add the "
+                             'following recommendations:')
+                for rec in recommendations:
+                    builder.bullet(rec)
+            elif not poor_members and not crack_tests:
+                builder.para('No adverse findings recorded; recorded concrete '
+                             'quality falls within acceptable velocity bands.')
+
+        def emit_conclusion():
+            # -------------------------------------------------- 7.0 CONCLUSION
+            builder.section('7.0', 'CONCLUSION')
+            if element_data:
+                for para in cms_paragraphs(get_cms_text(project,
+                                                        'conclusion_preamble')[0]):
+                    builder.para(para)
+                # Generated-content CMS section (11 Sep): the numbered conclusion
+                # items pre-fill with the computed percentages; a project
+                # override rewords them.
+                conclusion_body, _src = get_cms_text(project, 'conclusion_items',
+                                                     computed=cms)
+                # Reference §7.0: text 12.7mm across, 7.5mm leading.
+                builder.numbered(cms_list_items(conclusion_body),
+                                 text_indent=12.7, leading=7.5)
+                builder.ln_gap(3)
+                builder.note_block(
+                    'The test assumed 25 N/mm2 as the strength of the '
+                    'structural members, however a substructure probe is '
+                    'required to ascertain the integrity of the building '
+                    'foundation.'
+                )
+            else:
+                builder.para(
+                    'No ultrasonic pulse velocity results are available for this '
+                    'project; no conclusion on concrete quality can be drawn.'
+                )
+            # Reference sign-off: exactly TWO slots — tested by (left) and
+            # approved by (right), dotted line above an ALL-CAPS name. Every
+            # operator stays listed in the REPORT INTEGRITY block below.
+            # C11: when the project has a recorded approving engineer, that name
+            # takes the APPROVED BY slot (it is the engineer who actually signs);
+            # the platform user remains in the integrity block below.
+            approved_label = (signoff.approved_by_name if signoff
+                              and signoff.approved_by_name else user_label)
+            # Reference: the dotted lines sit at ~150mm (y 425pt) — park the
+            # sign-off there when the conclusion ends higher up the page.
+            if builder.pdf.get_y() < 140:
+                builder.pdf.set_y(140)
+            builder.signature_lines([
+                (_latin1((operators[0] if operators else 'NOT RECORDED').upper()),
+                 'TESTED BY'),
+                (_latin1(approved_label.upper()), 'APPROVED BY'),
+            ])
+            # C11: the recorded COREN credentials + optional signature image.
+            if signoff is not None:
+                builder.coren_signoff_block(signoff, signature_img)
+
+        def emit_appendix():
+            # ------------------------------------------------------ APPENDIX
+            builder.divider_page('APPENDIX')
+            # Reference appendix I-III: a 'BUILDING A' label at the left margin
+            # (Cambria 12) with the drawing images stacked beneath — NO centred
+            # heading. The honest equivalent of the drawings is the imported BIM
+            # model's plan view + structural element schedule; nothing is
+            # fabricated when no model is imported.
+            pdf = builder.pdf
+            pdf.start_section('DRAWING OF THE BUILDING', level=1)
+            pdf.set_font('Cambria', '', 12)
+            pdf.set_text_color(*INK)
+            pdf.set_xy(pdf.l_margin, 16.9)
+            pdf.cell(0, 7.5, _latin1(project.name),
+                     new_x='LMARGIN', new_y='NEXT')
+            bim_elements = list(
+                BIMElementMapping.objects.filter(
+                    project=project).order_by('level', 'element_id')[:400])
+            # The drawing itself: the plan view rendered from the imported
+            # model's geometry (C13 — "the architectural drawing is our BIM").
+            plan_embedded = cls._embed_bim_plan(builder, project)
+            pdf.set_xy(pdf.l_margin, 26.8 + (101.6 + 6 if plan_embedded else 4))
+            if bim_elements:
+                try:
+                    geometry = project.bim_model_geometry
+                    source = geometry.source_file or 'imported BIM model'
+                except Exception:  # noqa: BLE001 — related row may be absent
+                    source = 'imported BIM model'
+                builder.para(
+                    f'Structural element schedule extracted from {source} '
+                    f'({len(bim_elements)} of the imported elements listed '
+                    'below; the interactive 3D model is available on the '
+                    'platform).'
+                )
+                builder.ruled_table(
+                    ['ELEMENT', 'CATEGORY', 'LEVEL', 'MARK',
+                     'MATERIAL / GRADE RECORDED'],
+                    [[_element_display(e.element_name or e.element_id),
+                      _pretty_ifc_category(e.element_type) or '-',
+                      e.level or '-',
+                      e.properties.get('Tag', '-') if e.properties else '-',
+                      _latin1(e.properties.get('Material', '-')
+                              if e.properties else '-') or '-']
+                     for e in bim_elements],
+                    [52, 20, 22, 18, 53],
+                    ['L', 'C', 'C', 'C', 'L'],
+                )
+            else:
+                if not plan_embedded:
+                    builder.placeholder_box('STRUCTURAL DRAWINGS NOT PROVIDED',
+                                            height=100)
+            # Per-floor plans (7 Sep review, item 7): one plan page per tested
+            # floor when the model's recorded levels support the split. When
+            # they do not, nothing is added — the whole-model plan above and
+            # the per-floor result tables carry the floor information instead.
+            cls._embed_bim_floor_plans(
+                builder, project,
+                sorted({e['floor_label'] for e in element_data}))
+            # PHOTOGRAPHS — the reference starts them on a fresh page with no
+            # body heading; the TOC entry points at the first photograph page,
+            # so the section is registered inside _render_appendix once that
+            # page exists.
+            shown = cls._render_appendix(builder, tests)
+            if not shown:
+                builder.pdf.add_page()
+                builder.pdf.start_section('PHOTOGRAPHS', level=1)
+                builder.para('No photographs recorded for these tests.')
+
+        def emit_custom_section(entry):
+            """§2.5 custom section: an unnumbered main-section heading
+            with the project's saved body — recorded for the preview
+            sidebar under its own 'custom:<hex>' key."""
+            title = (entry.get('title') or 'CUSTOM SECTION').strip()
+            builder.section('', _latin1(title.upper()))
+            builder.record_section(entry['key'], title)
+            for para in cms_paragraphs(entry.get('body') or ''):
+                builder.para(para, markdown=True)
+
+        # ---------------------- §2.5 ordered emission (document structure)
+        # The project's structure rows — section order, enable/disable
+        # state and custom sections (REFINED EXECUTIVE SUMMARY §2.5) —
+        # drive emission. A project with no rows resolves to the canonical
+        # template order with everything enabled, so unchanged projects
+        # keep byte-for-byte the document they always had.
+        structure = [entry for entry in resolve_report_structure(project)
+                     if entry['is_enabled']]
+        emitters = {
+            'cover_page': emit_cover,
+            'executive_summary': emit_exec,
+            '1.0': emit_intro,
+            '2.0': emit_purpose,
+            '3.0': emit_lit,
+            '3.1': emit_locmap,
+            '4.0': emit_fieldwork,
+            '4.1': emit_visual,
+            '4.2': emit_methodology,
+            '5.0': emit_analysis,
+            '5.3': emit_ai,
+            '6.0': emit_reco,
+            '7.0': emit_conclusion,
+            'APPENDIX': emit_appendix,
+        }
+        emission_state = {'first': True, 'toc_done': False}
+        if not structure:
+            # Degenerate configuration (every section disabled): the TOC
+            # still leads and the integrity block prints on its page.
+            builder.toc_page()
+            builder.pdf.reuse_fresh_page = True
+            emission_state['toc_done'] = True
+        for entry in structure:
+            if entry['is_custom']:
+                emit_custom_section(entry)
+                emission_state['first'] = False
+                continue
+            emitter = emitters.get(entry['key'])
+            if emitter is None:
+                continue
+            if (emission_state['first'] and not emission_state['toc_done']
+                    and entry['key'] != 'cover_page'):
+                # The cover emitter owns the TOC; with the cover absent or
+                # displaced the TOC still leads the document, and this
+                # first section reuses the fresh page its break leaves.
+                builder.toc_page()
+                builder.pdf.reuse_fresh_page = True
+                emission_state['toc_done'] = True
+            emitter()
+            emission_state['first'] = False
 
         # ------------------------ REPORT INTEGRITY (un-TOC'd, C11)
         builder.heading('REPORT INTEGRITY')
@@ -3290,73 +3491,6 @@ class NDTReportService:
             ('Content digest', digest),
             ('Date', f'{datetime.now():%Y-%m-%d %H:%M}'),
         ])
-
-        # ------------------------------------------------------ APPENDIX
-        builder.divider_page('APPENDIX')
-        # Reference appendix I-III: a 'BUILDING A' label at the left margin
-        # (Cambria 12) with the drawing images stacked beneath — NO centred
-        # heading. The honest equivalent of the drawings is the imported BIM
-        # model's plan view + structural element schedule; nothing is
-        # fabricated when no model is imported.
-        pdf = builder.pdf
-        pdf.start_section('DRAWING OF THE BUILDING', level=1)
-        pdf.set_font('Cambria', '', 12)
-        pdf.set_text_color(*INK)
-        pdf.set_xy(pdf.l_margin, 16.9)
-        pdf.cell(0, 7.5, _latin1(project.name),
-                 new_x='LMARGIN', new_y='NEXT')
-        bim_elements = list(
-            BIMElementMapping.objects.filter(
-                project=project).order_by('level', 'element_id')[:400])
-        # The drawing itself: the plan view rendered from the imported
-        # model's geometry (C13 — "the architectural drawing is our BIM").
-        plan_embedded = cls._embed_bim_plan(builder, project)
-        pdf.set_xy(pdf.l_margin, 26.8 + (101.6 + 6 if plan_embedded else 4))
-        if bim_elements:
-            try:
-                geometry = project.bim_model_geometry
-                source = geometry.source_file or 'imported BIM model'
-            except Exception:  # noqa: BLE001 — related row may be absent
-                source = 'imported BIM model'
-            builder.para(
-                f'Structural element schedule extracted from {source} '
-                f'({len(bim_elements)} of the imported elements listed '
-                'below; the interactive 3D model is available on the '
-                'platform).'
-            )
-            builder.ruled_table(
-                ['ELEMENT', 'CATEGORY', 'LEVEL', 'MARK',
-                 'MATERIAL / GRADE RECORDED'],
-                [[_element_display(e.element_name or e.element_id),
-                  _pretty_ifc_category(e.element_type) or '-',
-                  e.level or '-',
-                  e.properties.get('Tag', '-') if e.properties else '-',
-                  _latin1(e.properties.get('Material', '-')
-                          if e.properties else '-') or '-']
-                 for e in bim_elements],
-                [52, 20, 22, 18, 53],
-                ['L', 'C', 'C', 'C', 'L'],
-            )
-        else:
-            if not plan_embedded:
-                builder.placeholder_box('STRUCTURAL DRAWINGS NOT PROVIDED',
-                                        height=100)
-        # Per-floor plans (7 Sep review, item 7): one plan page per tested
-        # floor when the model's recorded levels support the split. When
-        # they do not, nothing is added — the whole-model plan above and
-        # the per-floor result tables carry the floor information instead.
-        cls._embed_bim_floor_plans(
-            builder, project,
-            sorted({e['floor_label'] for e in element_data}))
-        # PHOTOGRAPHS — the reference starts them on a fresh page with no
-        # body heading; the TOC entry points at the first photograph page,
-        # so the section is registered inside _render_appendix once that
-        # page exists.
-        shown = cls._render_appendix(builder, tests)
-        if not shown:
-            builder.pdf.add_page()
-            builder.pdf.start_section('PHOTOGRAPHS', level=1)
-            builder.para('No photographs recorded for these tests.')
 
         data = builder.bytes()
         bundle = {
