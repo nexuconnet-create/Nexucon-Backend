@@ -1,3 +1,4 @@
+import base64
 import logging
 from django.http import HttpResponse
 from rest_framework.views import APIView
@@ -860,6 +861,39 @@ class NDTReportPreviewView(APIView):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return _pdf_response(pdf_bytes,
                              f'ndt_report_PREVIEW_{project_id}.pdf')
+
+
+class NDTReportPreviewSectionsView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-report-preview/sections/
+    The §2.1 preview sidebar's data AND the preview document in ONE response:
+    the section→page map, the total page count, and the exact PDF bytes
+    (base64) — all from a single render pass, so the sidebar can never
+    describe a different document than the one it navigates. Sections the
+    render skipped honestly (e.g. AI interpretation with no LLM-backed
+    analysis record) are simply absent from the list.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from .ndt_reports import NDTReportService
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
+                project, request.user)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('NDT report preview sections failed')
+            return Response({'detail': f'Report preview failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({
+            'sections': bundle['sections'],
+            'page_count': bundle['page_count'],
+            'pdf_base64': base64.b64encode(pdf_bytes).decode('ascii'),
+        })
 
 
 # ---------------------------------------------------------------------------

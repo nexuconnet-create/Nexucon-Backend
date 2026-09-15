@@ -3640,6 +3640,78 @@ class NDTReportPreviewTests(_HermeticMediaMixin, NDTReportFixtureMixin,
                     kwargs={'project_id': self.project.id}))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    # --------------------------- §2.1 preview sidebar bundle (15 Sep 2026)
+    def test_preview_sections_bundle(self):
+        # One render pass returns the sidebar map, the page count and the
+        # exact PDF — so the sidebar can never describe a different
+        # document than the one it navigates.
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        sections = response.data['sections']
+        # The wireframe's 14 entries in wireframe order — minus the ones
+        # this fixture's render honestly skips (no LLM-backed AI record,
+        # so no 'AI Interpretation').
+        self.assertEqual(
+            [s['key'] for s in sections],
+            ['cover_page', 'executive_summary', '1.0', '2.0', '3.0',
+             '3.1', '4.0', '4.1', '4.2', '5.0', '6.0', '7.0', 'APPENDIX'])
+        self.assertEqual(sections[0]['label'], 'Cover Page')
+        self.assertEqual(sections[0]['page'], 1)
+        pages = [s['page'] for s in sections]
+        self.assertEqual(pages, sorted(pages),
+                         'sidebar pages must be non-decreasing in order')
+        self.assertGreaterEqual(response.data['page_count'], pages[-1])
+        # The bundled document is the same preview the PDF endpoint streams.
+        import base64
+        pdf_bytes = base64.b64decode(response.data['pdf_base64'])
+        self.assertTrue(pdf_bytes.startswith(b'%PDF'))
+
+    def test_preview_sections_ai_absent_honestly(self):
+        # No LLM-backed AI analysis record exists for this project, so the
+        # section is skipped in the render and must be absent from the
+        # sidebar — never a fabricated entry.
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('AI Interpretation',
+                         [s['label'] for s in response.data['sections']])
+
+    def test_preview_sections_ai_present_when_recorded(self):
+        from apps.evidence.models import AIAnalysisRecord
+        AIAnalysisRecord.objects.create(
+            project=self.project, analysis_type='pundit',
+            model_provider='gemini', model_version='gemini-2.0-flash',
+            confidence=0.9, observations=[
+                'Point A velocity is consistent with good-quality concrete.'])
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        labels = [s['label'] for s in response.data['sections']]
+        self.assertIn('AI Interpretation', labels)
+        # It sits between Analysis and Recommendations, as in the wireframe.
+        self.assertLess(labels.index('Analysis'), labels.index('AI Interpretation'))
+        self.assertLess(labels.index('AI Interpretation'),
+                        labels.index('Recommendations'))
+
+    def test_preview_sections_out_of_scope_404(self):
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_preview_sections_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
 
 class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
                           APITestCase):

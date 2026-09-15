@@ -111,6 +111,41 @@ APPENDIX_ITEM_TITLES = {
     'PHOTOGRAPHS': 'Photographs of the Building',
 }
 
+# Preview sidebar (REFINED EXECUTIVE SUMMARY §2.1 UI wireframe): the
+# report's main sections in the wireframe's order, keyed by what
+# NDTReportBuilder.record_section() records. Sub-sections (4.3, 4.4, 5.1,
+# 5.2) are intentionally not listed — the wireframe sidebar carries the 14
+# main entries only. Conditional sections simply stay absent when the
+# render skips them (honest state, never a fabricated entry).
+PREVIEW_SECTION_LABELS = {
+    'cover_page': 'Cover Page',
+    'executive_summary': 'Executive Summary',
+    '1.0': 'Introduction',
+    '2.0': 'Purpose',
+    '3.0': 'Literature Review',
+    '3.1': 'Location Map',
+    '4.0': 'Field Work',
+    '4.1': 'Visual Test',
+    '4.2': 'Methodology',
+    '5.0': 'Analysis',
+    '5.3': 'AI Interpretation',
+    '6.0': 'Recommendations',
+    '7.0': 'Conclusion',
+    'APPENDIX': 'Appendix',
+}
+
+
+def preview_section_map(section_pages):
+    """Filter a builder's recorded section_pages down to the wireframe's
+    sidebar list, in wireframe order, with the wireframe labels."""
+    by_key = {entry['key']: entry['page'] for entry in section_pages}
+    return [
+        {'key': key, 'label': label, 'page': by_key[key]}
+        for key, label in PREVIEW_SECTION_LABELS.items()
+        if key in by_key
+    ]
+
+
 # ---------------------------------------------------------------------------
 # E.C.S calibration (disclosed in Section 3.0 of the rendered report)
 # ---------------------------------------------------------------------------
@@ -437,6 +472,18 @@ class NDTReportBuilder:
     def __init__(self, running_header):
         self.pdf = MTLReportPDF(running_header)
         self.running_header = running_header
+        # Physical page each report section starts on (REFINED EXECUTIVE
+        # SUMMARY §2.1 preview sidebar): filled by record_section() at the
+        # emission points so the preview can jump straight to a section.
+        self.section_pages = []
+
+    def record_section(self, key, label):
+        """Note that the section `key` starts on the CURRENT page. Keys are
+        the section numbers ('1.0', '4.2', ...) plus 'cover_page',
+        'executive_summary' and 'APPENDIX'; preview_section_map() filters
+        them down to the wireframe's sidebar list."""
+        self.section_pages.append(
+            {'key': key, 'label': label, 'page': self.pdf.page_no()})
 
     # ------------------------------------------------------------ cover
     def cover(self, serial, project_name, site_line, client_name, date_line,
@@ -451,6 +498,7 @@ class NDTReportBuilder:
         platform's public report-verification page for this dossier."""
         pdf = self.pdf
         pdf.add_page()
+        self.record_section('cover_page', 'Cover Page')
         # The cover is absolutely positioned at the reference's measured
         # y's (the date line sits at 256.1mm, past the body auto-break
         # limit) — suspend automatic page breaks for the whole cover.
@@ -663,6 +711,8 @@ class NDTReportBuilder:
             # Body page numbering starts at the first numbered section
             # (reference: Introduction = page 1).
             self.pdf.body_page_offset = self.pdf.page_no() - 1
+        if number:
+            self.record_section(number, heading)
         title_text = f'{number} {heading}'.strip()
         self.pdf.start_section(title_text, level=1 if sub else 0)
         self.pdf.set_text_color(*INK)
@@ -814,6 +864,10 @@ class NDTReportBuilder:
         pdf = self.pdf
         pdf.add_page()
         pdf.start_section(_latin1(title), level=0)
+        # The preview sidebar jumps to the divider page itself ('5.0'
+        # analysis / 'APPENDIX'), matching where the TOC entry points.
+        words = title.split()
+        self.record_section(words[0] if len(words) > 1 else title, title)
         pdf.set_text_color(*INK)
         if title.strip() == 'APPENDIX':
             # Reference p38: the divider page itself carries NO page number;
@@ -826,7 +880,6 @@ class NDTReportBuilder:
             # The reference's divider pages carry nothing else.
             pdf.add_page()
             return
-        words = title.split()
         number, rest = (words[0], words[1:]) if len(words) > 1 else ('', words)
         if number:
             pdf.set_y(29.4)              # reference: '5.0' at 83pt
@@ -2116,6 +2169,14 @@ class NDTReportService:
     # -------------------------------------------------------- main entry
     @classmethod
     def generate_ndt_report(cls, project, user=None):
+        return cls.generate_ndt_report_bundled(project, user)[0]
+
+    @classmethod
+    def generate_ndt_report_bundled(cls, project, user=None):
+        """Render the report and return (pdf_bytes, preview_bundle) from ONE
+        generation pass — the bundle carries the §2.1 preview sidebar's
+        section→page map and the total page count, guaranteed to describe
+        exactly the bytes returned alongside them."""
         from apps.digital_eye.adapters import PUNDITAdapter
         from apps.digital_eye.models import PUNDITTest, RebarTest
 
@@ -2280,6 +2341,7 @@ class NDTReportService:
         # toc_page() left the cursor on this fresh page via the TOC
         # placeholder's own page break — no add_page() here (that was the
         # stray blank page).
+        builder.record_section('executive_summary', 'Executive Summary')
         builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
         exec_body, _src = get_cms_text(project, 'executive_summary',
                                        computed=cms)
@@ -3296,7 +3358,12 @@ class NDTReportService:
             builder.pdf.start_section('PHOTOGRAPHS', level=1)
             builder.para('No photographs recorded for these tests.')
 
-        return builder.bytes()
+        data = builder.bytes()
+        bundle = {
+            'sections': preview_section_map(builder.section_pages),
+            'page_count': len(builder.pdf.pages),
+        }
+        return data, bundle
 
     # ------------------------------------------------------------ helpers
     # Provenance stamps the entry forms put inside the notes field

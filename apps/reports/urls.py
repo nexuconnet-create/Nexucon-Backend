@@ -4,7 +4,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ArchivedReportDownloadView, ArchivedReportListView,
     DownloadReportView, GenerateReportView, InspectionReportView,
-    NCRReportView, NDTReportPreviewView, NDTReportView, NDTWordExportView,
+    NCRReportView, NDTReportPreviewSectionsView, NDTReportPreviewView,
+    NDTReportView, NDTWordExportView,
     ProjectIntelligenceReportView, QualityReportListView,
     ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
     ReportCMSSectionsView, ReportMapView, ReportSignOffView,
@@ -54,6 +55,11 @@ urlpatterns = router.urls + [
          name='report-verify-download'),
     path('reports/projects/<uuid:project_id>/ndt-report-preview/',
          NDTReportPreviewView.as_view(), name='project-ndt-report-preview'),
+    # §2.1 preview sidebar: section→page map + page count + the preview PDF
+    # itself, from one render pass.
+    path('reports/projects/<uuid:project_id>/ndt-report-preview/sections/',
+         NDTReportPreviewSectionsView.as_view(),
+         name='project-ndt-report-preview-sections'),
     path('reports/projects/<uuid:project_id>/branding/',
          ReportBrandingView.as_view(), name='project-report-branding'),
     # Approving-engineer COREN credentials on the sign-off (C11, 4 Sep).
