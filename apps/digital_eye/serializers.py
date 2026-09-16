@@ -5,11 +5,12 @@ from rest_framework import serializers
 
 from common.permissions import scoped_projects
 from .models import (
-    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, DeviceReportRecord,
-    DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan,
-    GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream,
-    PUNDITTest, ProcessingQueueJob, SensorDataFile, TrimbleConnection,
-    TrimbleProject,
+    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CoreSample,
+    DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice,
+    GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
+    GnssSurvey, LiveStream, NexuconLinkSettings, ProjectCurveSetting,
+    PUNDITReading, PUNDITTest, ProcessingQueueJob, SensorDataFile,
+    StrengthCurve, TrimbleConnection, TrimbleProject,
 )
 
 
@@ -48,7 +49,7 @@ class SensorDataFileSerializer(serializers.ModelSerializer):
         model = SensorDataFile
         fields = [
             'id', 'file', 'file_type', 'file_name', 'file_size_bytes',
-            'sha256_checksum', 'description', 'uploaded_by', 'uploaded_by_name',
+            'sha256_checksum', 'description', 'project', 'uploaded_by', 'uploaded_by_name',
             'created_at',
         ]
         read_only_fields = ['id', 'file_name', 'file_size_bytes', 'sha256_checksum',
@@ -115,6 +116,57 @@ class GPRSurveySerializer(serializers.ModelSerializer):
                             'created_by', 'created_at', 'updated_at']
 
 
+class PUNDITReadingSerializer(serializers.ModelSerializer):
+    """
+    One reading at one test point (A, B, C, ...). The operator supplies
+    ONLY the field measurement — the transit time (pulse velocity), the
+    cracked + uncracked transit times (crack depth) or the observed
+    surface condition (surface quality). Velocity, E.C.S and crack depth
+    are computed server-side on save and are read-only here. Which
+    measurement is required depends on the parent test's test_type and is
+    enforced in PUNDITTestSerializer.validate.
+    """
+    point_label = serializers.CharField(
+        max_length=10, required=False, allow_blank=True, allow_null=True, default='',
+    )
+
+    class Meta:
+        model = PUNDITReading
+        fields = ['id', 'point_label', 'path_length_mm', 'transit_time_us',
+                  'uncracked_transit_time_us', 'surface_condition',
+                  'rebound_number', 'velocity_km_s', 'ecs_mpa',
+                  'strength_curve_snapshot', 'crack_depth_mm',
+                  'notes', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'velocity_km_s', 'ecs_mpa',
+                            'strength_curve_snapshot', 'crack_depth_mm',
+                            'created_at', 'updated_at']
+        extra_kwargs = {
+            # Which measurement a point carries depends on the parent test's
+            # test_type — enforced there, not here.
+            'transit_time_us': {'required': False, 'allow_null': True},
+        }
+
+    def validate_transit_time_us(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('Transit time is the field measurement — it must be a positive value.')
+        return value
+
+    def validate_uncracked_transit_time_us(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('Uncracked transit time is a field measurement — it must be a positive value.')
+        return value
+
+    def validate_rebound_number(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('Rebound number must be positive when provided.')
+        return value
+
+    def validate_path_length_mm(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('Path length must be positive when provided.')
+        return value
+
+
 class PUNDITTestSerializer(serializers.ModelSerializer):
     project = ScopedProjectField(required=False, allow_null=True)
     test_type_display = serializers.CharField(source='get_test_type_display', read_only=True)
@@ -126,17 +178,30 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
     )
     files = SensorDataFileSerializer(many=True, read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True)
+    # Multiple test points per element (review meeting A1): a test accepts a
+    # list of readings instead of a single scalar measurement. Labels are
+    # auto-assigned A, B, C... in submission order when omitted.
+    readings = PUNDITReadingSerializer(many=True, required=False)
 
     def get_estimated_compressive_strength_mpa(self, obj):
         """
-        Estimated compressive strength (E.C.S) from pulse velocity, using the
-        documented calibration curve that the official NDT report renders
-        (apps.reports.ndt_reports) — single source of truth.
+        Estimated compressive strength (E.C.S) from pulse velocity through
+        the project's active Nexucon Link curve (strength_curves module —
+        the single f_cu path). Multi-reading tests carry the element-mean
+        E.C.S persisted at write time; legacy rows without one are computed
+        on read through the same active-curve path.
         """
         if obj.estimated_compressive_strength_mpa is not None:
             return obj.estimated_compressive_strength_mpa
-        from apps.reports.ndt_reports import estimated_compressive_strength
-        return estimated_compressive_strength(obj.velocity_km_s)
+        from apps.digital_eye.strength_curves import apply_active_curve
+        strength, _snapshot = apply_active_curve(
+            obj.project, obj.velocity_km_s,
+            rebound_number=obj.rebound_number,
+            temperature_c=obj.surface_temperature_c,
+            # obj.velocity_km_s is the element mean for a multi-reading test,
+            # so the confidence margin narrows as sqrt(n) of its points.
+            n_points=obj.element_point_count())
+        return strength
 
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
 
@@ -146,41 +211,212 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'id', 'test_reference', 'project', 'project_name', 'device', 'scan_session',
             'project_id_str', 'structural_element_id_str', 'structural_element_name',
             'structural_element_guid', 'device_model',
-            'test_type', 'test_type_display', 'structural_element',
+            'test_type', 'test_type_display', 'structural_element', 'floor',
+            'weather_condition', 'concrete_age_days', 'readings',
             'transducer_frequency_khz', 'transducer_type', 'transducer_type_display',
             'test_location',
             'path_length_mm', 'pulse_time_us', 'transit_time_us',
             'crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us',
-            'surface_temperature_c', 'surface_condition', 'latitude', 'longitude',
+            'surface_temperature_c', 'surface_condition', 'rebound_number',
+            'latitude', 'longitude',
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
+            'strength_curve_snapshot',
+            'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
+            'ai_data_quality', 'ai_reasoning_traces',
             'crack_depth_mm', 'estimated_crack_depth_mm', 'waveform_samples',
             'operator', 'operator_name', 'tested_at', 'test_date', 'status', 'notes',
             'file_ids', 'files', 'created_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'test_reference', 'velocity_km_s', 'quality_grade',
-                            'crack_depth_mm', 'operator', 'created_by',
-                            'created_at', 'updated_at']
+                            'strength_curve_snapshot',
+                            'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
+                            'ai_data_quality', 'ai_reasoning_traces',
+                            'crack_depth_mm', 'operator',
+                            'created_by', 'created_at', 'updated_at']
+
+    # ------------------------------------------------------- multi-reading
+    @staticmethod
+    def _assign_labels(readings_data):
+        """Auto-assign point labels A, B, C, ... to any reading that arrives
+        without one. Duplicate labels are rejected — each point on an element
+        must be distinct."""
+        used_labels = set()
+        for reading in readings_data:
+            explicit = (reading.get('point_label') or '').strip().upper()
+            if explicit:
+                if len(explicit) > 10:
+                    raise serializers.ValidationError(
+                        {'readings': f'Point label {explicit!r} is too long (max 10 characters).'})
+                if explicit in used_labels:
+                    raise serializers.ValidationError(
+                        {'readings': f'Duplicate test-point label {explicit!r} — each point on an element must be distinct.'})
+                used_labels.add(explicit)
+
+        alphabet_idx = 0
+        for idx, reading in enumerate(readings_data):
+            label = (reading.get('point_label') or '').strip().upper()
+            if not label:
+                while True:
+                    candidate = chr(ord('A') + alphabet_idx) if alphabet_idx < 26 else f"P{alphabet_idx + 1}"
+                    alphabet_idx += 1
+                    if candidate not in used_labels:
+                        label = candidate
+                        used_labels.add(label)
+                        break
+            reading['point_label'] = label
+        return [r['point_label'] for r in readings_data]
+
+    def _sync_readings(self, test, readings_data):
+        """Replace the test's reading rows, then persist the element-level
+        verdict: for pulse velocity the mean velocity, grade from the mean
+        and mean E.C.S; for crack depth the element-mean crack depth. The
+        operator never enters any of these — they are computed."""
+        from apps.digital_eye.adapters import PUNDITAdapter
+        from apps.digital_eye.strength_curves import apply_active_curve
+        test.readings.all().delete()
+        PUNDITReading.objects.bulk_create(
+            [PUNDITReading(test=test, **data) for data in readings_data]
+        )
+        # bulk_create skips save(); recompute the derived fields explicitly.
+        for reading in test.readings.all():
+            reading.compute()
+            reading.save(update_fields=['velocity_km_s', 'ecs_mpa',
+                                        'strength_curve_snapshot', 'crack_depth_mm',
+                                        'updated_at'])
+        mean_v = test.element_mean_velocity_km_s()
+        test.velocity_km_s = mean_v
+        test.pulse_velocity_ms = round(mean_v * 1000.0, 1) if mean_v is not None else None
+        # The element verdict's E.C.S flows through the project's active
+        # Nexucon Link curve, with the curve provenance snapshotted (8 Sep
+        # meeting — f_cu is the reason the Neural Link exists).
+        mean_ecs, curve_snap = apply_active_curve(
+            test.project, mean_v,
+            rebound_number=test.rebound_number,
+            temperature_c=test.surface_temperature_c,
+            # mean_v is the mean of the points that yielded a velocity, so the
+            # divisor is that same set — the readings are computed above, so
+            # the count is now accurate. Not len(readings_data): a submitted
+            # point missing its path length or transit time stores a row but
+            # contributes nothing to mean_v, and counting it would claim a
+            # tighter margin than the averaged data supports.
+            n_points=test.element_point_count())
+        test.estimated_compressive_strength_mpa = mean_ecs
+        test.strength_curve_snapshot = curve_snap
+        test.quality_grade = PUNDITAdapter.grade_quality(mean_v)
+        if test.test_type == 'crack_depth':
+            mean_d = test.element_mean_crack_depth_mm()
+            test.crack_depth_mm = mean_d
+            test.estimated_crack_depth_mm = mean_d
+        if readings_data:
+            # Keep the scalar columns in step with the first reading so
+            # legacy consumers (registry, waveform viewer) still show a real
+            # measurement rather than blanks — the columns written match the
+            # test type.
+            first = test.readings.first()
+            if test.test_type == 'crack_depth':
+                test.crack_path_length_mm = first.path_length_mm
+                test.crack_pulse_time_us = first.transit_time_us
+                test.uncracked_pulse_time_us = first.uncracked_transit_time_us
+            elif test.test_type == 'surface_quality':
+                test.surface_condition = first.surface_condition
+            else:
+                test.path_length_mm = first.path_length_mm
+                test.pulse_time_us = first.transit_time_us
+                test.transit_time_us = first.transit_time_us
+        test.save()
+
+    def create(self, validated_data):
+        readings_data = validated_data.pop('readings', None) or []
+        test = super().create(validated_data)
+        if readings_data:
+            self._sync_readings(test, readings_data)
+        return test
+
+    def update(self, instance, validated_data):
+        readings_data = validated_data.pop('readings', None)
+        test = super().update(instance, validated_data)
+        if readings_data is not None:
+            self._sync_readings(test, readings_data)
+        return test
 
     def validate(self, attrs):
         test_type = attrs.get('test_type', getattr(self.instance, 'test_type', 'pulse_velocity'))
+        readings = attrs.get('readings')
         if test_type == 'pulse_velocity':
-            for field in ('path_length_mm', 'pulse_time_us'):
-                value = attrs.get(field, getattr(self.instance, field, None) if self.instance else None)
-                if value is None and field == 'pulse_time_us':
-                    value = attrs.get('transit_time_us', getattr(self.instance, 'transit_time_us', None) if self.instance else None)
-                if value is None:
+            if readings is not None:
+                # Multi-reading path: each point needs its own transit time;
+                # path length may be given per reading or shared from the test.
+                if not readings:
                     raise serializers.ValidationError(
-                        {field: 'Required for pulse-velocity testing (BS 1881-203).'})
-                if value <= 0:
-                    raise serializers.ValidationError({field: 'Must be a positive measurement.'})
+                        {'readings': 'Provide at least one test point (A) for pulse-velocity testing.'})
+                self._assign_labels(readings)
+                shared_path = attrs.get('path_length_mm') or (getattr(self.instance, 'path_length_mm', None) if self.instance else None)
+                for reading in readings:
+                    if reading.get('path_length_mm') is None:
+                        if not shared_path:
+                            raise serializers.ValidationError(
+                                {'readings': 'Path length is required (per reading or on the test) — it is a physical measurement.'})
+                        reading['path_length_mm'] = shared_path
+                # The scalar pair is not required when readings carry the
+                # measurements; the create/update paths write the first
+                # reading back onto the scalar columns for legacy consumers.
+            else:
+                for field in ('path_length_mm', 'pulse_time_us'):
+                    value = attrs.get(field, getattr(self.instance, field, None) if self.instance else None)
+                    if value is None and field == 'pulse_time_us':
+                        value = attrs.get('transit_time_us', getattr(self.instance, 'transit_time_us', None) if self.instance else None)
+                    if value is None:
+                        raise serializers.ValidationError(
+                            {field: 'Required for pulse-velocity testing (BS 1881-203).'})
+                    if value <= 0:
+                        raise serializers.ValidationError({field: 'Must be a positive measurement.'})
         if test_type == 'crack_depth':
-            for field in ('crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us'):
-                value = attrs.get(field, getattr(self.instance, field, None) if self.instance else None)
-                if value is None:
+            if readings is not None:
+                # Multi-point path (A1, crack depth): each point carries its
+                # own t_cracked + t_0 pair; the transducer spacing L is shared
+                # from the test (or given per reading).
+                if not readings:
                     raise serializers.ValidationError(
-                        {field: 'Required for crack-depth (time-difference) testing.'})
+                        {'readings': 'Provide at least one test point (A) for crack-depth testing.'})
+                self._assign_labels(readings)
+                shared_path = attrs.get('crack_path_length_mm') or (
+                    getattr(self.instance, 'crack_path_length_mm', None) if self.instance else None)
+                for reading in readings:
+                    if not reading.get('transit_time_us') or not reading.get('uncracked_transit_time_us'):
+                        raise serializers.ValidationError(
+                            {'readings': 'Each crack-depth test point needs both the cracked '
+                                         'transit time t_c and the uncracked transit time t_0 — '
+                                         'they are field measurements.'})
+                    if reading.get('path_length_mm') is None:
+                        if not shared_path:
+                            raise serializers.ValidationError(
+                                {'readings': 'Transducer spacing L is required (per reading or '
+                                             'on the test) — it is a physical measurement.'})
+                        reading['path_length_mm'] = shared_path
+                # The scalar triple is not required when readings carry the
+                # measurements; _sync_readings writes the first reading back
+                # onto the scalar columns for legacy consumers.
+            else:
+                for field in ('crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us'):
+                    value = attrs.get(field, getattr(self.instance, field, None) if self.instance else None)
+                    if value is None:
+                        raise serializers.ValidationError(
+                            {field: 'Required for crack-depth (time-difference) testing.'})
+        if test_type == 'surface_quality' and readings is not None:
+            # Multi-point path (A1, surface quality): each point carries the
+            # observed surface condition at that point of the element.
+            if not readings:
+                raise serializers.ValidationError(
+                    {'readings': 'Provide at least one test point (A) for surface-quality testing.'})
+            self._assign_labels(readings)
+            for reading in readings:
+                if not (reading.get('surface_condition') or '').strip():
+                    raise serializers.ValidationError(
+                        {'readings': 'Each surface-quality test point needs its observed '
+                                     'surface condition — it is the field record.'})
         return attrs
+
 
 
 class PunditTestSerializer(serializers.ModelSerializer):
@@ -352,3 +588,242 @@ class DeviceReportRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = DeviceReportRecord
         fields = '__all__'
+
+
+class StrengthCurveSerializer(serializers.ModelSerializer):
+    """
+    Nexucon Link calibration curve (8 Sep meeting). Formula parameters are
+    stored in the m/s velocity domain; the engine converts once on apply.
+    """
+    project = ScopedProjectField(required=False, allow_null=True)
+    curve_type_display = serializers.CharField(
+        source='get_curve_type_display', read_only=True)
+    formula_display = serializers.SerializerMethodField()
+    se_adjustment_method_display = serializers.CharField(
+        source='get_se_adjustment_method_display', read_only=True)
+    se_analysis = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StrengthCurve
+        fields = [
+            'id', 'name', 'curve_type', 'curve_type_display', 'standard',
+            'project', 'velocity_unit', 'strength_unit', 'formula_params',
+            'formula_display', 'data_points', 'valid_range_min_ms',
+            'valid_range_max_ms', 'r2_score', 'standard_error', 'aic',
+            'se_adjustment_method', 'se_adjustment_method_display',
+            'se_adjustment_factor', 'se_analysis',
+            'is_default', 'provenance', 'version', 'created_by',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'velocity_unit', 'strength_unit',
+                            'r2_score', 'standard_error', 'aic', 'version',
+                            'created_by', 'created_at', 'updated_at']
+
+    def get_formula_display(self, obj):
+        from .strength_curves import formula_display
+        try:
+            return formula_display(obj.curve_type, obj.formula_params or {})
+        except Exception:
+            return None
+
+    def get_se_analysis(self, obj):
+        """The curve's standard-error picture, derived from its own real
+        calibration pairs. Computed on read — never stored, so it can never
+        drift from the data it describes. A missing calibration set yields
+        the honest "no standard error available" payload rather than an
+        empty object."""
+        from .se_adjustment import analysis_payload
+        try:
+            return analysis_payload(obj)
+        except Exception:
+            return None
+
+    def validate_curve_type(self, value):
+        from .strength_curves import CURVE_TYPES
+        if value not in CURVE_TYPES:
+            raise serializers.ValidationError(
+                f"Unknown curve type. Must be one of: {', '.join(CURVE_TYPES)}.")
+        return value
+
+    def validate(self, attrs):
+        curve_type = attrs.get('curve_type') or (
+            self.instance.curve_type if self.instance else None)
+        params = attrs.get('formula_params') or (
+            self.instance.formula_params if self.instance else None)
+        if not params:
+            raise serializers.ValidationError(
+                {'formula_params': 'Curve parameters are required.'})
+        # The engine is the single validator of every parameter set: it
+        # rejects the wrong keys per type before anything is persisted.
+        from .strength_curves import validate_curve_params
+        try:
+            validate_curve_params(curve_type, params)
+        except ValueError as exc:
+            raise serializers.ValidationError({'formula_params': str(exc)})
+
+        # Every calibration pair is ground truth fitted into the curve, so an
+        # implausible strength is rejected at the door rather than allowed to
+        # move the curve every strength is later read from (15 Sep 2026).
+        # Only pairs actually SUBMITTED are judged: a PATCH that does not
+        # touch the calibration set must not become unsaveable because of a
+        # value already stored before this guard existed.
+        from .strength_curves import strength_plausibility_error
+        for index, pair in enumerate(attrs.get('data_points') or [], start=1):
+            if not isinstance(pair, dict):
+                continue
+            implausible = strength_plausibility_error(pair.get('f'))
+            if implausible:
+                raise serializers.ValidationError(
+                    {'data_points': f'Calibration point {index}: {implausible}'})
+
+        # A curve may only be marked default by the platform (Directors
+        # approve one fallback); anything else stays a project curve.
+        if attrs.get('is_default'):
+            attrs['is_default'] = False
+
+        # Standard-error policy: the method must be one the engine
+        # implements, and an adjustment may not be switched on for a curve
+        # whose own data cannot support an error estimate — otherwise the
+        # setting would silently do nothing while claiming to act.
+        from .se_adjustment import (ADJUSTMENT_METHODS, analysis_payload,
+                                    MIN_PAIRS_FOR_ADJUSTMENT)
+        method = attrs.get('se_adjustment_method') or (
+            self.instance.se_adjustment_method if self.instance else 'none')
+        if method not in ADJUSTMENT_METHODS:
+            raise serializers.ValidationError(
+                {'se_adjustment_method':
+                 f"Must be one of: {', '.join(ADJUSTMENT_METHODS)}."})
+        factor = attrs.get('se_adjustment_factor')
+        if factor is None and self.instance is not None:
+            factor = self.instance.se_adjustment_factor
+        if factor is not None:
+            if factor < 0:
+                raise serializers.ValidationError(
+                    {'se_adjustment_factor':
+                     'The confidence factor must be zero or greater.'})
+            if method == 'confidence_margin' and factor == 0:
+                raise serializers.ValidationError(
+                    {'se_adjustment_factor':
+                     'A confidence margin with factor 0 would change '
+                     'nothing. Use the "none" method instead.'})
+        if method != 'none':
+            pairs = attrs.get('data_points')
+            if pairs is None and self.instance is not None:
+                pairs = self.instance.data_points
+            n_pairs = len([p for p in (pairs or []) if isinstance(p, dict)])
+            if n_pairs < MIN_PAIRS_FOR_ADJUSTMENT:
+                raise serializers.ValidationError(
+                    {'se_adjustment_method':
+                     f'A standard-error adjustment needs at least '
+                     f'{MIN_PAIRS_FOR_ADJUSTMENT} real calibration pairs to '
+                     f'be computed from; this curve has {n_pairs}. Record '
+                     'more calibration pairs first, or leave the method as '
+                     '"none".'})
+        return attrs
+
+
+class NexuconLinkSettingsSerializer(serializers.ModelSerializer):
+    """
+    The platform-wide Nexucon Link system settings (wireframe "System
+    Settings"). Writes are Director-only at the view; this serializer only
+    shape-checks.
+    """
+    preferred_curve_type_display = serializers.SerializerMethodField()
+    updated_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NexuconLinkSettings
+        fields = ['preferred_curve_type', 'preferred_curve_type_display',
+                  'default_standard', 'velocity_unit', 'strength_unit',
+                  'updated_by_name', 'updated_at']
+        read_only_fields = ['updated_by_name', 'updated_at']
+
+    def get_preferred_curve_type_display(self, obj):
+        return obj.get_preferred_curve_type_display()
+
+    def get_updated_by_name(self, obj):
+        user = obj.updated_by
+        if user is None:
+            return None
+        return user.get_full_name() or user.get_username()
+
+    def validate_preferred_curve_type(self, value):
+        from .strength_curves import CURVE_TYPES
+        if value not in CURVE_TYPES:
+            raise serializers.ValidationError(
+                f"Unknown curve type. Must be one of: {', '.join(CURVE_TYPES)}.")
+        return value
+
+
+class ProjectCurveSettingSerializer(serializers.ModelSerializer):
+    active_curve = StrengthCurveSerializer(read_only=True)
+    project = ScopedProjectField()
+
+    class Meta:
+        model = ProjectCurveSetting
+        fields = ['id', 'project', 'active_curve', 'updated_by', 'updated_at']
+        read_only_fields = ['id', 'updated_by', 'updated_at']
+
+
+class CoreSampleSerializer(serializers.ModelSerializer):
+    """
+    A laboratory core result (ground-truth layer, path-to-95% Layer 3).
+    ``calibration_pair`` is the real (v, f) pair the core contributes —
+    present only when BOTH halves exist (lab result + a linked UPV test
+    with a measured velocity). Never synthesized.
+    """
+    project = ScopedProjectField()
+    pundit_test = serializers.SlugRelatedField(
+        slug_field='id', queryset=PUNDITTest.objects.all(),
+        required=False, allow_null=True)
+    calibration_pair = serializers.SerializerMethodField()
+    recorded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CoreSample
+        fields = [
+            'id', 'project', 'pundit_test', 'structural_element',
+            'test_location', 'core_diameter_mm', 'core_length_mm',
+            'lab_strength_mpa', 'lab_report_ref', 'sampled_at', 'notes',
+            'calibration_pair', 'recorded_by', 'recorded_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'recorded_by', 'created_at', 'updated_at']
+
+    def get_calibration_pair(self, obj):
+        return obj.calibration_pair()
+
+    def get_recorded_by_name(self, obj):
+        if obj.recorded_by:
+            return obj.recorded_by.get_full_name() or obj.recorded_by.email
+        return None
+
+    def validate(self, attrs):
+        # The linked UPV test must belong to the same project — a pair
+        # across projects would be fabricated ground truth.
+        pundit_test = attrs.get('pundit_test') or (
+            self.instance.pundit_test if self.instance else None)
+        project = attrs.get('project') or (
+            self.instance.project if self.instance else None)
+        if pundit_test is not None and project is not None \
+                and pundit_test.project_id != project.pk:
+            raise serializers.ValidationError(
+                {'pundit_test': 'The linked PUNDIT test must belong to the '
+                                'same project as the core sample.'})
+        for field in ('core_diameter_mm', 'core_length_mm'):
+            value = attrs.get(field)
+            if value is not None and value <= 0:
+                raise serializers.ValidationError(
+                    {field: 'Must be positive.'})
+        strength = attrs.get('lab_strength_mpa')
+        if strength is not None and strength <= 0:
+            raise serializers.ValidationError(
+                {'lab_strength_mpa': 'Must be positive.'})
+        # A core is ground truth: its pair is fitted into the curve, and the
+        # curve is what every later strength is read from. A strength no
+        # concrete reaches is a mis-entry, not a measurement (15 Sep 2026).
+        from .strength_curves import strength_plausibility_error
+        implausible = strength_plausibility_error(strength)
+        if implausible:
+            raise serializers.ValidationError({'lab_strength_mpa': implausible})
+        return attrs

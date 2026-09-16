@@ -24,6 +24,21 @@ class ReportTemplateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 
+from .models import ReportVersion
+
+class ReportVersionSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReportVersion
+        fields = ['id', 'archived_report', 'version_string', 'ai_feedback_context', 'created_at', 'created_by', 'created_by_name']
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.email
+        return None
+
+
 class ArchivedReportSerializer(serializers.ModelSerializer):
     """A generated statutory dossier archived exactly as produced (checksummed
     PDF bytes + real counts/verdicts from the tests it was rendered from)."""

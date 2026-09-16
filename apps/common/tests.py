@@ -285,6 +285,37 @@ class AIServiceGeminiRetryTests(TestCase):
         self.assertFalse(AIService._is_gemini_quota_exhausted(
             Exception("429 rate limited, please retry in 30s")))
 
+    def test_daily_free_tier_quota_is_permanent_despite_retry_hint(self):
+        # The REAL free-tier daily quota error (observed 10 Sep 2026) carries
+        # a misleading "Please retry in 56s" hint alongside the daily quota
+        # metric — it must fail fast, never enter the 60 s sleep-retry loop.
+        self.assertTrue(AIService._is_gemini_quota_exhausted(
+            Exception(
+                "429 You exceeded your current quota, please check your plan "
+                "and billing details. * Quota exceeded for metric: "
+                "generativelanguage.googleapis.com/generate_content_free_tier_requests, "
+                "limit: 20, model: gemini-3.8-flash. Please retry in "
+                "56.00884797s. [violations { quota_id: "
+                "GenerateRequestsPerDayPerProjectPerModel-FreeTier }]")))
+        # ...while a plain per-minute throttle with the same hint stays
+        # retriable (no daily/free-tier metric in the text).
+        self.assertFalse(AIService._is_gemini_quota_exhausted(
+            Exception("429 quota exceeded for metric "
+                      "generate_content_per_minute_requests, please retry in 30s")))
+
+    def test_invalid_api_key_is_permanent_not_retriable(self):
+        # Google answers an invalid/expired key with 429 RESOURCE_EXHAUSTED —
+        # it must be classified permanent so no 60 s retry sleeps happen.
+        for text in ("429 RESOURCE_EXHAUSTED. API key not valid. "
+                     "Please pass a valid API key.",
+                     "permission_denied: API_KEY_INVALID",
+                     "API key expired"):
+            self.assertTrue(AIService._is_gemini_quota_exhausted(Exception(text)))
+        # ...and the quota check runs before the temporary classifier, so the
+        # '429' in those messages never reaches the retriable branch.
+        self.assertTrue(AIService._is_gemini_temporary_rate_limit(
+            Exception("429 RESOURCE_EXHAUSTED. API key not valid.")))
+
     def test_temporary_rate_limit_classification(self):
         for text in ("429 too many requests", "rate limit exceeded",
                      "RATE_LIMIT hit", "Too Many Requests"):

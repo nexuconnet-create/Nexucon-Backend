@@ -5,6 +5,10 @@ __pycache__/
 *.pyo
 *.pyd
 db.sqlite3
+# Local snapshots taken before a destructive management command. Same client
+# evidence as db.sqlite3, so they stay out of the repo the same way — the
+# pattern above only matches the exact filename.
+db.sqlite3.bak*
 .env
 .DS_Store
 cookies.txt

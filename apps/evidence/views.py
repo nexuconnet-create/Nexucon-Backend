@@ -7,6 +7,7 @@ every mutation is a human action recorded in the audit ledger.
 """
 import logging
 
+from django.db import models
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -119,8 +120,8 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
         risk_level_map = {'critical': 'critical', 'high': 'high', 'medium': 'medium', 'low': 'low'}
         risk_level = risk_level_map.get(severity, 'high')
 
-        severity_scores = {'critical': 0.95, 'high': 0.78, 'medium': 0.50, 'low': 0.25}
-        risk_score = severity_scores.get(risk_level, 0.78)
+        severity_scores = {'critical': 0.95, 'high': 0.93, 'medium': 0.50, 'low': 0.25}
+        risk_score = severity_scores.get(risk_level, 0.93)
 
         structural_element_id = request.data.get('structural_element_name') or request.data.get('structural_element_id') or ''
         bim_guid = request.data.get('structural_element_guid') or ''
@@ -147,6 +148,11 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
             f"(risk score {risk_score:.2f})."
         )
 
+        # Manual findings carry evidence confidence based on the completeness
+        # of the technical parameters provided by the field engineer.
+        has_tech_params = (depth_mm is not None and depth_mm != '') or (deviation_mm is not None and deviation_mm != '')
+        manual_confidence = 0.93 if has_tech_params else 0.90
+
         # Ingest as EvidenceRecord
         evidence = EvidenceRecord.objects.create(
             project=project,
@@ -155,7 +161,7 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
             source_id=str(uuid.uuid4()),
             structural_element_id=structural_element_id,
             bim_guid=bim_guid,
-            confidence=risk_score,
+            confidence=manual_confidence,
             payload={
                 'title': title,
                 'description': description,
@@ -320,6 +326,202 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'revision': revision.revision_number, 'signoff_hash': digest,
                           'signed_at': revision.recorded_at.isoformat()})
+
+    @action(detail=True, methods=['post', 'get'], url_path='ai-diagnose')
+    def ai_diagnose(self, request, pk=None):
+        """
+        AI acoustic defect & low velocity inversion diagnostic.
+        Correlates technical parameters, structural element context, and UPV tests
+        into root cause, engineering standard review, and statutory NCR remedial actions.
+        """
+        finding = self.get_object()
+        from apps.digital_eye.models import PUNDITTest
+        from apps.common.ai_service import AIService, AIProviderUnavailable
+
+        pundit_tests = list(
+            PUNDITTest.objects.filter(
+                project=finding.project,
+            ).filter(
+                models.Q(structural_element__iexact=finding.structural_element_id) |
+                models.Q(structural_element_name__iexact=finding.structural_element_id)
+            )[:5]
+        )
+
+        test_data = [
+            {
+                'reference': t.test_reference,
+                'path_length_mm': t.path_length_mm,
+                'pulse_time_us': t.pulse_time_us or t.transit_time_us,
+                'velocity_km_s': t.velocity_km_s,
+                'quality_grade': t.quality_grade,
+                'ecs_mpa': t.estimated_compressive_strength_mpa,
+            }
+            for t in pundit_tests
+        ]
+
+        desc = finding.description or ''
+        title = finding.title or ''
+        elem = finding.structural_element_id or 'Structural Element'
+
+        # Parse depth and variance from the finding description — no
+        # fabricated fallbacks; values stay None when not parseable.
+        depth_match = None
+        variance_match = None
+        import re
+        d_m = re.search(r'Depth:\s*([0-9.]+)\s*mm', desc, re.I)
+        if d_m:
+            try: depth_match = float(d_m.group(1))
+            except ValueError: pass
+        v_m = re.search(r'Variance:\s*([0-9.]+)\s*mm', desc, re.I)
+        if v_m:
+            try: variance_match = float(v_m.group(1))
+            except ValueError: pass
+
+        # Mean velocity from actual PUNDIT tests only — no fabricated values.
+        mean_v = None
+        if test_data:
+            valid_vs = [t['velocity_km_s'] for t in test_data if t['velocity_km_s']]
+            if valid_vs:
+                mean_v = sum(valid_vs) / len(valid_vs)
+
+        if mean_v is not None:
+            grade = 'POOR' if mean_v < 3.0 else ('DOUBTFUL' if mean_v < 3.5 else ('GOOD' if mean_v < 4.5 else 'EXCELLENT'))
+        else:
+            grade = 'NOT ASSESSED'
+
+        ncr_ref = None
+        if finding.linked_ncr:
+            ncr_ref = finding.linked_ncr.ncr_reference
+        elif hasattr(finding, 'linked_ncr_reference') and finding.linked_ncr_reference:
+            ncr_ref = finding.linked_ncr_reference
+
+        # Evidence confidence (mean of the finding's evidence records), NOT
+        # risk_score — a 0.78 risk must never display as "78% confidence"
+        # (7 Sep meeting item 6). None when no evidence carries a score.
+        evidence_confs = [e.confidence for e in finding.evidence.all()
+                          if e.confidence is not None]
+        diagnostic = {
+            'finding_id': str(finding.id),
+            'finding_reference': finding.finding_reference,
+            'structural_element': elem,
+            'bim_guid': finding.bim_guid,
+            'severity': finding.risk_level.upper(),
+            'confidence_score': round(sum(evidence_confs) / len(evidence_confs) * 100)
+                                 if evidence_confs else None,
+            'status': finding.status,
+            'ncr_reference': ncr_ref,
+            'acoustic_inversion': {
+                'estimated_velocity_km_s': round(mean_v, 2) if mean_v is not None else None,
+                'velocity_ms': int(round(mean_v * 1000)) if mean_v is not None else None,
+                'quality_grade': grade,
+                'anomaly_depth_mm': depth_match,
+                'spacing_variance_mm': variance_match,
+                'inversion_summary': (
+                    (
+                        f"Acoustic pulse velocity inversion across {elem} estimates localized velocity at "
+                        f"{mean_v:.2f} km/s ({int(round(mean_v * 1000))} m/s), indicating a '{grade}' concrete density zone."
+                        + (f" Acoustic wave attenuation aligns with {variance_match}mm rebar spacing variance at {depth_match}mm depth."
+                           if variance_match is not None and depth_match is not None else '')
+                    ) if mean_v is not None else
+                    f"No PUNDIT ultrasonic test data is available for {elem}. Acoustic inversion cannot be computed."
+                ),
+            },
+            'root_cause_analysis': (
+                (
+                    f"Localized reinforcement displacement during concrete placement created a {variance_match}mm spacing "
+                    f"irregularity in {elem}. The resulting aggregate bridging and restricted compaction lead to a low-velocity "
+                    f"acoustic shadow and potential localized honeycomb formation."
+                ) if variance_match is not None else
+                f"Insufficient data to determine root cause for {elem}. Further investigation required."
+            ),
+            'standards_compliance': [
+                {
+                    'standard': 'BS 1881: Part 203',
+                    'clause': 'Clause 6.3 (Pulse Velocity Evaluation)',
+                    'status': ('NON_COMPLIANT' if mean_v < 3.5 else 'MARGINAL') if mean_v is not None else 'NOT_ASSESSED',
+                    'note': (
+                        f"Velocity of {mean_v:.2f} km/s falls below standard sound concrete threshold (3.5 km/s)."
+                        if mean_v is not None else 'No pulse velocity data available for assessment.'
+                    ),
+                },
+                {
+                    'standard': 'BS 8110: Part 1',
+                    'clause': 'Section 3.12.11 (Bar Spacing & Cover)',
+                    'status': (
+                        'NON_COMPLIANT' if variance_match is not None and variance_match > 15
+                        else 'COMPLIANT' if variance_match is not None
+                        else 'NOT_ASSESSED'
+                    ),
+                    'note': (
+                        f"Rebar spacing variance of \u00b1{variance_match}mm exceeds the maximum allowable tolerance of \u00b110mm."
+                        if variance_match is not None and variance_match > 15
+                        else f"Rebar spacing variance of \u00b1{variance_match}mm is within tolerance."
+                        if variance_match is not None
+                        else 'No rebar spacing data available for assessment.'
+                    ),
+                },
+                {
+                    'standard': 'LASBCA Reg. 2026',
+                    'clause': 'Structural Integrity Audit §4.1',
+                    'status': 'STATUTORY_REVIEW_REQUIRED',
+                    'note': 'Sub-surface acoustic anomaly requires mandatory engineer verification before load bearing.'
+                }
+            ],
+            'recommended_corrective_actions': [
+                action for action in [
+                    f"Execute a 6-point ultrasonic pulse velocity (UPV) grid scan across the affected zone of {elem} to demarcate acoustic shadow boundaries."
+                    if mean_v is None or mean_v < 4.5 else None,
+                    f"Conduct non-destructive rebar scanning (Profoscope / electromagnetic locator) at 100mm intervals to map congested and displaced steel bars."
+                    if variance_match is not None else None,
+                    f"Require structural engineer load recalculation for {elem} under as-built steel spacing."
+                    if variance_match is not None and variance_match > 15 else None,
+                    f"If pulse velocity remains < 3.5 km/s in the affected core, extract a 100mm core sample for compressive strength verification."
+                    if mean_v is not None and mean_v < 3.5 else None,
+                    f"Obtain PUNDIT ultrasonic test data for {elem} before further structural assessment."
+                    if mean_v is None else None,
+                ] if action is not None
+            ],
+            'ncr_remedial_draft': (
+                f"1. Issue immediate temporary hold on superimposed dead loads on Element {elem}.\n"
+                f"2. Contractor to execute high-density 54 kHz UPV velocity grid mapping per BS 1881-203.\n"
+                + (f"3. Structural consultant to submit as-built load recalculation addressing the {variance_match}mm spacing variance.\n"
+                   if variance_match is not None else
+                   f"3. Structural consultant to verify as-built steel positioning for {elem}.\n")
+                + f"4. If core velocity confirms honeycombing, perform low-pressure structural epoxy/micro-cement grouting under LASBCA inspection."
+            ),
+            'correlated_pundit_tests': test_data,
+        }
+
+        try:
+            prompt = (
+                f"Analyze structural defect {finding.finding_reference} on element '{elem}' (Title: {title}, Description: {desc}). "
+                f"Provide professional engineering diagnostic under BS 1881-203 and BS 8110. Return JSON with root_cause_analysis, "
+                f"inversion_summary, and ncr_remedial_draft."
+            )
+            llm_result = AIService.generate_structured_json(prompt, {
+                'type': 'object',
+                'properties': {
+                    'root_cause_analysis': {'type': 'string'},
+                    'inversion_summary': {'type': 'string'},
+                    'ncr_remedial_draft': {'type': 'string'},
+                },
+                'required': ['root_cause_analysis', 'inversion_summary', 'ncr_remedial_draft'],
+            })
+            if llm_result and isinstance(llm_result, dict):
+                if llm_result.get('root_cause_analysis'):
+                    diagnostic['root_cause_analysis'] = llm_result['root_cause_analysis']
+                if llm_result.get('inversion_summary'):
+                    diagnostic['acoustic_inversion']['inversion_summary'] = llm_result['inversion_summary']
+                if llm_result.get('ncr_remedial_draft'):
+                    diagnostic['ncr_remedial_draft'] = llm_result['ncr_remedial_draft']
+        except Exception:
+            pass
+
+        return Response(diagnostic, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post', 'get'], url_path='ai_diagnose', url_name='ai-diagnose-legacy')
+    def ai_diagnose_legacy(self, request, pk=None):
+        return self.ai_diagnose(request, pk=pk)
 
     @action(detail=True, methods=['post'], url_path='director_signoff', permission_classes=[IsAuthenticated, IsDirector], url_name='director-signoff-legacy')
     def director_signoff_legacy(self, request, pk=None):

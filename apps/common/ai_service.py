@@ -190,16 +190,30 @@ class AIService:
     @staticmethod
     def _is_gemini_quota_exhausted(error: Exception) -> bool:
         error_text = str(error).lower()
+        # Daily / free-tier quota exhaustion is permanent for our purposes —
+        # the window resets at the next day boundary, so the "Please retry in
+        # Xs" hint these errors carry must NOT turn them into a 60 s
+        # sleep-retry loop. Checked before the retriable-hint guard so a
+        # daily quota is never retried.
+        daily_quota_indicators = [
+            "generate_content_free_tier_requests",
+            "generaterequestsperdayperprojectpermodel-freetier",
+            "perdayperprojectpermodel",
+            "free_tier_requests",
+        ]
+        if any(indicator in error_text for indicator in daily_quota_indicators):
+            return True
         if "retry in" in error_text or "retry_delay" in error_text:
             return False
         permanent_quota_indicators = [
             "you exceeded your current quota",
             "quota exceeded",
             "quota_exceeded",
-            "generate_content_free_tier_requests",
-            "generaterequestsperdayperprojectpermodel-freetier",
-            "perdayperprojectpermodel",
-            "free_tier_requests",
+            # A bad key is permanent too: an invalid/expired key must not be
+            # retried as a temporary rate limit either.
+            "api key not valid",
+            "api_key_invalid",
+            "api key expired",
         ]
         return any(indicator in error_text for indicator in permanent_quota_indicators)
 

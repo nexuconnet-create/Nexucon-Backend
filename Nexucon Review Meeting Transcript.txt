@@ -1,0 +1,884 @@
+Nexucon Review Meeting
+Fri, Sep 4, 2026
+
+0:01 - Abdulwahab Onike
+So I should be able to click, and once I click, it should ask me to choose a file. Then I choose a file, then before I can then now upload, and as I've chosen, as you've chosen this part, the names that are supposed to be at that equal is supposed to be proposed, not the equality, because the project name is not equal. I don't know if you get my point.
+
+0:21 - Abdullateef Ojugbeĺe
+Yes, I get to say. Okay, now. But the thing about it is that we've created a project before.
+
+0:30 - Abdulwahab Onike
+think the algorithm file is linked to that project no no I know I'm just so the the point is these are things we would definitely sit back at a moderate I'm only just identifying some gaps so that we can know that oh this should follow because now the file we uploaded supposed to have its own name there and the name of the file is supposed to be proposed supposed proposed yeah not equal. So, in this case, Iko E has override the data for proposed.
+
+ So, an idea, and just like where you choose choose file and order, this choose file should be a submenu on that eco, whereby when I click, it takes me there and then click the name of the file, it appears on the list of folders or file or projects we have, or we are working to about to work on, blah, blah, like that. So, yes, sir. There is it. I'm sure you get what I'm trying to say, yes.
+
+1:29 - Abdullateef Ojugbeĺe
+I get an answer, okay, boss.
+
+1:31 - Abdulwahab Onike
+Let's go, okay.
+
+1:33 - Abdullateef Ojugbeĺe
+So, so our advice to go for a new project so I can like explain everything well.
+
+1:39 - Abdulwahab Onike
+Is that well?
+
+1:40 - Abdullateef Ojugbeĺe
+I advise I change projects so I'll be able to explain everything also.
+
+1:46 - Abdulwahab Onike
+So, which project do you want to change?
+
+1:49 - Abdullateef Ojugbeĺe
+So, I can use this eco-Atlantic.
+
+1:51 - Abdulwahab Onike
+I don't have the data now. And no, no, it's not, bro. We can still go ahead with the name of the title.
+
+1:58 - Abdullateef Ojugbeĺe
+Oh, okay, sir.
+
+1:59 - Abdulwahab Onike
+You didn't get my point. Let me explain. This file will share with the BIM file. I don't have the EcoAtlantic folder yet. Now, and this file we have is a real-time project that is ongoing. And the floor itself is completed as I speak to you. It's the reason why I said I can say I will run a test next week. I've actually agreed with those people. But if SK can tell me, because this will help us to test the live data thing.
+
+ So if SK can tell me that, oh, we can have the inspector application by next week, I can share the meeting with them. So it will give us an avenue because Lagos State themselves are the ones I'm calling for, calling to come and run this test. So it gives me the avenue. You know, check all the accessories, all their tools that will inform all we are doing here. I don't know if you're getting, and like I said, I don't want to go and meet them first.
+
+ I want to come with the solution. Let's go with the solution, let's go and meet them with the solution, engage them, and then the conversation will be more interesting, not at the mercy of anybody. Yeah, so once they come next week, it makes sense. Once they come next week, or once. Is able to give me the update for that. So the live data, we can test it. I have a tablet. If it's a tablet you want to recommend for, if it is an Android, if it's an iOS, let's know that, oh, for this kind of what it called you, oh, this is how we will be transferring that.
+
+ So create an architectural layout whereby I shared one. I don't know that will be useful. You can improvise, you can look at it and see how best. We can go about this thing. We know we have something to solve, we have a problem to solve, and then we have this avenue that I'll be calling them to, because it was expensive, calling them to come and run this. And unfortunately, the location of the site is really, really, you have to cross the water to the other side.
+
+ So I have to bring them down to run this as a live project. And the reason why I'm using this as a live project. The project is a known and a renowned. Let me see. So imagine you're using a Exon Mobile project to run this test and speak volume of the output. I've worked extensively on the report. I've worked on the field work. So if I now have to do presentation of the live data, live information, and you're using an ExxonMobil.
+
+ Not doctoring results. It's not a mock-up data. It's a live data. Trust me, whosoever wants to listen, there's a credibility from what we are doing. There is a credibility. That's why I said I was using something. Imagine you and someone with Kekena Pep. I don't know if this guy, it was this platform I was having that conversation. And someone with Nibo said. Yeah, someone with Monizine. They are all for the same thing.
+
+ But because therefore Nimosik appears bigger, they will price you differently. So now the goal for us is let's do something more reasonable. The class of people we're bringing on board will also determine the negotiation or the kind of engagement we'll be having with these guys. And it's not just lab car. The point has the honest truth. We are spreading beyond lab car. The Ferrara government, which already creates the table two for N and all that.
+
+ So agencies and every, mind you, every ministry has a project. That's the fortunate thing. Every ministries, government agencies have one project or the other. So it is needed and it's going to be needed. So is the reason why the strategic position is essential. The choice and the class of what we are doing is also essential. Yoruba will say, I'm not feeling it might be time consuming. Like I said, that was why I said, I appreciate every input.
+
+ I'm not taking any of you guys for granted, and then make God make it easier. Thank you guys. And it's not definitely going to be a thank you. This might be a lifetime relationship. So let's see how we're going to push this. I've really appreciated SK for this time he has put in to ensure that we're doing this. Um, in as much as uh, God will bless every one of us, and then our hand work to bless us on this very job, inshallah.
+
+ Yeah, let's so, um, let's progress. So, I won't bore you guys with the love uh story.
+
+6:45 - Abdullateef Ojugbeĺe
+So, I want to upload the new imports now, so I'll come over here to offline manual imports. So come.
+
+7:02 - Abdullateef Ojugbeĺe
+Okay, I'll come in. Yes. I go the document, I prepared it down.
+
+7:09 - Abdullateef Ojugbeĺe
+Make it like go smooth smoothly. So it's a document on scale not for the one.
+
+7:22 - Abdullateef Ojugbeĺe
+So for here now we are starting with the reference code. So get the reference code and choose the targets and choose this targets structural elements. So all these come from the BIM that are uploaded.
+
+7:50 - Abdulwahab Onike
+All right.
+
+7:51 - Abdullateef Ojugbeĺe
+So I can choose one or not.
+
+7:53 - Abdulwahab Onike
+Are you clicking them?
+
+7:54 - Abdullateef Ojugbeĺe
+Yes, sir. It's not showing. It's not shown.
+
+8:00 - Abdulwahab Onike
+Well, no, I'll go to my, I'll go to my own sections. I'm going to do copyright.
+
+8:05 - Abdullateef Ojugbeĺe
+Is it because of it? Is it showing up?
+
+8:16 - Abdulwahab Onike
+Yeah, the Have you chosen the target structure element?
+
+8:23 - Abdullateef Ojugbeĺe
+No, sir.
+
+8:24 - Abdulwahab Onike
+Okay, what about the single reference code?
+
+8:27 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+8:29 - Abdulwahab Onike
+So, what do you have there?
+
+8:31 - Abdullateef Ojugbeĺe
+I have UPV iPhone FLD 2026 iPhone 01.
+
+8:37 - Abdulwahab Onike
+iPhone iPhone 01. What I have is UPV iPhone FLD iPhone 2026 iPhone 01.
+
+8:49 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+8:50 - Abdulwahab Onike
+Okay, yeah, let's go now.
+
+8:51 - Abdullateef Ojugbeĺe
+So I will choose the target structure elements. So for here now, I can choose if wants to choose this standard simple memory.
+
+9:09 - Abdulwahab Onike
+What I'm seeing on your this is different from what I have here. Sorry, apologies. Okay, sir.
+
+9:18 - Abdulwahab Onike
+Okay, oh sorry, multi-click.
+
+9:22 - Abdullateef Ojugbeĺe
+So for here now, I can decide to choose if I want to go for the standard template member in order to get this target element has not been choosing it has been choosing yes sir.
+
+9:43 - Unidentified Speaker
+Can it, sir?
+
+9:45 - Abdullateef Ojugbeĺe
+Like flow, I'll come. I should share my whole screen instead.
+
+9:49 - Unidentified Speaker
+I'll come.
+
+9:52 - Abdullateef Ojugbeĺe
+I think that's what it's called.
+
+10:00 - Abdullateef Ojugbeĺe
+Are you seeing it now, sir?
+
+10:04 - Abdullateef Ojugbeĺe
+So this 200 CHK. 781094 I chose.
+
+10:14 - Abdulwahab Onike
+Let me see you got time.
+
+10:16 - Abdullateef Ojugbeĺe
+So I think it's on to when I create it finished that you see it out aside.
+
+10:21 - Abdulwahab Onike
+It will upload. Okay.
+
+10:22 - Abdullateef Ojugbeĺe
+Okay. So it's when I upload it finished that you see it out your side.
+
+10:25 - Abdulwahab Onike
+Yeah, yeah, go ahead then.
+
+10:27 - Abdullateef Ojugbeĺe
+Okay, so um So, but here I can actually want to go for this standard template, the robust infrastructures and bridges, and the foundation and mass concrete. For ENL, I can choose the standard structure elements calibration. So, I think these are the standards.
+
+10:56 - Unidentified Speaker
+Specifications.
+
+10:58 - Abdullateef Ojugbeĺe
+Yes, sir. Like now, for the standard templates, member.
+
+11:03 - Abdulwahab Onike
+So now like in this one, please, you need to have slab, beam, and wall. Slab, beam, wall, and column. This very for standard. You only have slab and wall. So make it so it should be specification for beams for columns and wall. Okay, sir.
+
+11:29 - Abdullateef Ojugbeĺe
+So here now I'll go for the simplest number.
+
+11:33 - Abdulwahab Onike
+So sorry again. Sorry again. So please let's have a conversation around the specifications. So like the like the thickness you have there to be 200. I think for all of these things I mentioned, it should not be more than between 120 to 150 or between 100 to 150. So averagely we can do 120. So let's do 100 to 150 for this standard structural element calibration process. Yeah, but then the transer 25.
+
+
+
+12:06 - Abdullateef Ojugbeĺe
+Okay, the transer is 25.
+
+12:10 - Unidentified Speaker
+Okay, sir.
+
+12:11 - Abdullateef Ojugbeĺe
+So the length will be um around 150. I'll be sir.
+
+12:16 - Abdulwahab Onike
+The length, let's do 120.
+
+12:18 - Abdullateef Ojugbeĺe
+120. Okay, sir.
+
+12:20 - Abdulwahab Onike
+The regular one.
+
+12:22 - Abdullateef Ojugbeĺe
+Okay. The transit time.
+
+12:24 - Abdulwahab Onike
+that one is variable. Transit time is variable.
+
+12:32 - Abdulwahab Onike
+The transducer frequency is constant, the path length is constant. The transit time is what we want to use. We want to use the transducer to calculate how much time it will take for the sound wave to travel. Through the path of 120. The shorter the travel time, the higher the strength. We are setting the path to be 120 within the member, like within the column or beam or slab. So now, if, for instance, the thickness of the column is 230 by 230 or 230 by 450.
+
+ I will not put my transducer along the 450 because the part is too small. But I can put my transducer along the 230. 120 will still be within the core section of 230. I don't know if you get the ideology now. Yes, I'm getting so if I have 230, so I'll put my transducer either as direct. Or indirect. Now, direct means that I will have to put the transducer opposite each other. Standing, imagine I'm standing in front of a column and the ticket is just 230 and the length is 450.
+
+ So I'll have to put the transducer on the either side of the column. So that's direct, meaning that and the transducer, they are two. One transmit, one receive. You get back. Once because I place it against the member on the opposite side. The waves, the sound wave transceipts. So, if I'm setting it to be 120, because you have to set a bound, otherwise, it will precise over the diminish, you won't get the real value.
+
+ So, it's a reason why we are setting the path time. Now, I have overall thickness of 230, but I've defined. A confined space of 120. So the sound will transmit through the transducer and the other one receives on the other end. So, what we are calculating is the time it takes to travel within that 120 that we've set is what will give us or enable us to calculate our pulse velocity, which will translate to what?
+
+ Stress.
+
+15:05 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+15:07 - Abdulwahab Onike
+I don't know if you get now. So the path length is constant for every project. You want to, so you have to set it. So the only thing, the variable thing is just the transit time we are calculating. The time taking it takes one of the transer, which is the transmitter, to get to the other side, a receiver. So the time taking it takes the goat to reach is what matters. Sorry. Hello, England, Mongboy Hello Moaquen.
+
+
+
+15:49 - Abdulwahab Onike
+Oh, yeah, me two o'clock. Money meeting BB, two o'clock, Mato Pari. So two o'clock, even go, Molati soon meeting. Two lawfess or muna panny meeting for two pen money lot or badge. I only moratiba is it.
+
+16:04 - Abdulwahab Onike
+So Edgar Love meeting, Eda Love Fumbeck for two more Okay, I get to a lot of move about you see my binary juncture alone. Hello? Hello, so more on the meeting. Hey, I did look at me. Root here. When I conversation with a beautiful coach, of who me tell it, or then I disobey on our deep page.
+
+16:43 - Abdulwahab Onike
+Elisa all these of me, a barita, you are a barita.
+
+16:49 - Abdulwahab Onike
+All right.
+
+16:54 - Unidentified Speaker
+Hello?
+
+16:56 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+16:59 - Abdulwahab Onike
+So, let's proceed.
+
+17:05 - Abdullateef Ojugbeĺe
+So, what would that be for the transit time like this?
+
+17:10 - Abdulwahab Onike
+Like I said, now the target element. Okay, now there's something because the transit time is not something we can determine. It's a reason why we are running the test. We don't know.
+
+17:24 - Abdulwahab Onike
+So, it is when. Can, now we are filling the manual, except now we are filling the manual, except we already have the manual, we have the results, we have the value by ourselves. Am I fishing with our means that each element will be doing it one after the other? And for your information, for every member, we have three tests, minimum of three tests to test on it. Which I was saying the other day. So imagine a column standing.
+
+ I can't just pick one point. I have to have like at least a minimum of three points on column, maybe the upper part, the middle part, and the lower part. So the mean value of the two is what I will consider as the strength of the concrete. So I might just take a parameter of parameter middle, one test test point on that same material, maybe the upper part, another one at the middle, and another one at the lower.
+
+ And then document it. In this case, if I'm able to understand what this is, then see we can actually quickly adjust it and the formula will be so. Now, this very manual distance is it just for one element?
+
+18:39 - Abdullateef Ojugbeĺe
+Yes, sir, it's for one element.
+
+18:41 - Abdulwahab Onike
+So, meaning that we have to reconfigure it, the transit time has to be in such a way that you can actually input. More than one element, if this is one element, meaning that one element should have a minimum of two transit time to calculate the mean estimated compressive strength. I don't know if you're getting it because all I need to do is 120 divided by my transit time will give me, let's say, test.
+
+ Let's assume I have column. Now, column is a structural member, one structural member. Now, one column which I cut, let's say, C one. Now, the C1, I put it for me to test and say, oh, I'm okay with it. I have to test three different layers: the upper layer, middle, and the middle, and the lower. So, what I'm testing is my transit time. So, my transit has to be have, we have to have options for. So, you need to make this more flexible in such a way that I can calculate.
+
+ My path length is constant. The only thing I will just be calculating is the only variables there is just translate time, which I will input A, B, C, or D, or E, depending on the number of test points I considered on each member or on each column. I don't know if my message is clear.
+
+20:07 - Abdulwahab Onike
+Can I come again?
+
+20:13 - Abdullateef Ojugbeĺe
+I'm good to you, sir.
+
+20:16 - Abdulwahab Onike
+So SKN, yeah, and I'm going to reconfigure this so that multiple transit tanks can come in.
+
+20:28 - Abdulwahab Onike
+And now, most let me check your transducer are remake.
+
+20:39 - Abdulwahab Onike
+So, most times the letters say people they use indirect. So, good enough, you have three options.
+
+20:47 - Abdullateef Ojugbeĺe
+Yes, sir. Yes, sir.
+
+20:49 - Abdulwahab Onike
+So, we can always take the time. This oftentimes, the indirect one.
+
+20:58 - Abdulwahab Onike
+How are we do this?
+
+21:09 - Abdulwahab Onike
+The transit time for each member, the minimum you have the minimum data is three or more. So we need to ensure that because the time that is just the variable items.
+
+21:38 - Abdulwahab Onike
+Do you get me?
+
+21:41 - Abdullateef Ojugbeĺe
+Yes, I'm getting.
+
+21:43 - Abdulwahab Onike
+But let's run this first.
+
+21:47 - Abdulwahab Onike
+Let's see how this goes.
+
+21:53 - Abdulwahab Onike
+So we can use a transit time of let's say let's say 29.5 or 29.8.
+
+22:11 - Abdullateef Ojugbeĺe
+Okay, so for the plant use arrangements, let's use most times let's use indirect indirect.
+
+22:27 - Abdulwahab Onike
+Okay, sorry. In some cases, direct, in some cases, they use indirect.
+
+22:32 - Abdullateef Ojugbeĺe
+Oh, okay, sorry. Okay, for the test location.
+
+22:38 - Abdulwahab Onike
+That's the Lado, Exomobile, Lador. Lador, I think Exomobile L E Lazor L E D O L L E L E D O L Okay Exomobile L E You can make a capital letter also L E T for Dome Sir V A L. For name okay Ladot X on so remove the E on mobile okay remove the last E yes I've taken it also all right inspector engineer the current engineer just say three four four zero just put one three four four zero okay sir or three nine four zero five three nine four zero five okay sir Okay, for the observation that let's say we don't have anything up.
+
+
+
+24:09 - Abdullateef Ojugbeĺe
+Okay, sir. So you have to get evidence of a picture of that column, of that very column. Yes, sir. Right?
+
+24:18 - Abdulwahab Onike
+Let's say column was launched. Let me give you, let me send a picture to you on the group.
+
+24:23 - Abdullateef Ojugbeĺe
+Okay, sir.
+
+24:37 - Abdulwahab Onike
+Informational picture hands off a look.
+
+25:25 - Abdulwahab Onike
+So you don't look at the what's it called?
+
+25:28 - Abdullateef Ojugbeĺe
+The group look at the group. Okay, sir.
+
+25:44 - Abdulwahab Onike
+Have you seen it?
+
+25:45 - Abdullateef Ojugbeĺe
+Yes, I've seen sir.
+
+25:53 - Abdullateef Ojugbeĺe
+I'm coming, sir. I want to transfer it to my laptop.
+
+26:18 - Abdullateef Ojugbeĺe
+More closely, where is the content?
+
+27:04 - Abdullateef Ojugbeĺe
+Okay.
+
+27:13 - Abdullateef Ojugbeĺe
+Have you uploaded it? Um I'm just downloading it, sir. My network is a bit poor congested. I don't know why. Now the upload probably might be might become very Okay, so I'll choose the file. So I'm uploading it already.
+
+27:36 - Abdulwahab Onike
+Yeah, so maybe what we'll do is this.
+
+27:40 - Abdullateef Ojugbeĺe
+Okay, so I've uploaded it already. So I'll click on submit verified manual record to government register.
+
+28:17 - Abdulwahab Onike
+We uploaded it.
+
+28:19 - Abdullateef Ojugbeĺe
+Yes, I've Very close.
+
+28:24 - Abdulwahab Onike
+I can't see.
+
+28:31 - Abdullateef Ojugbeĺe
+The word it die ladder, okay, ladder.
+
+28:38 - Abdullateef Ojugbeĺe
+Are you listening, sir?
+
+28:56 - Unidentified Speaker
+Okay.
+
+29:02 - Abdullateef Ojugbeĺe
+Okay, sir.
+
+29:08 - Abdulwahab Onike
+Yeah, I've seen it.
+
+29:10 - Abdullateef Ojugbeĺe
+Okay, sir.
+
+29:12 - Abdulwahab Onike
+Okay, so check it on my part.
+
+29:14 - Abdullateef Ojugbeĺe
+I'm yet to submit it so it's my it will not show until I submit it first, sir.
+
+29:21 - Abdulwahab Onike
+Okay, sorry. So now, what I intend to do now, what I want to say to this, a better way to make our work easier.
+
+29:35 - Abdulwahab Onike
+Okay, until you.
+
+29:37 - Abdullateef Ojugbeĺe
+Until I submit it. So it doesn't even be able to see it at your site, sir.
+
+29:43 - Abdulwahab Onike
+Okay, so what do you now upload? Just the picture. Yes, sir.
+
+29:47 - Abdullateef Ojugbeĺe
+Do I conclude like multiple files, like multiple pictures? Like, yes, sir.
+
+29:54 - Abdulwahab Onike
+So now we need to look at it now from this perspective. Is there any way we can have an Excel generated of all the tested? Can you share, SK, can you share the results? The report. I'll go to the table where we have the where we have the those raw data. Like, let me take you through something.
+
+30:22 - Abdulwahab Onike
+Is that Ask you, Aski Hello Is Asuki there?
+
+31:05 - Olowonishaye Sunkanmi
+Sorry, sir.
+
+31:06 - Abdulwahab Onike
+What about if you if you uh hello I'm in a yeah please I think you need to come so I can start setting up please um sorry older hello yeah sorry I'm in the meeting. How about is it possible you send me a lag?
+
+31:42 - Abdulwahab Onike
+Okay, young five meeting.
+
+31:48 - Olanrewaju Aminat
+Sorry, apologies.
+
+31:49 - Abdulwahab Onike
+Um, please, can you share the reports with the the reports? To explain something where we have those data, those tables.
+
+32:10 - Unidentified Speaker
+Hello.
+
+32:16 - Abdulwahab Onike
+Hello, SK.
+
+32:18 - Abdullateef Ojugbeĺe
+Probably isn't your talk.
+
+32:29 - Unidentified Speaker
+Hello.
+
+32:30 - Abdulwahab Onike
+So while while we are waiting for SK, so what left after this?
+
+32:35 - Abdullateef Ojugbeĺe
+So I will submit it, sir. So you'll be able that. I'm a prompted to submit it, sir. Yeah, let's submit.
+
+32:42 - Abdulwahab Onike
+Show up, show up, please.
+
+32:46 - Abdullateef Ojugbeĺe
+So it's submitting. So it has been submitted. So you can see that you're side over there now. There have been, sir.
+
+32:57 - Abdulwahab Onike
+Yeah, I can see. Okay, on my own part.
+
+33:00 - Abdullateef Ojugbeĺe
+Yes, sir. Let me check. 2026. 5c. I think you have to load that picture.
+
+33:08 - Abdulwahab Onike
+Like refresh, are we?
+
+33:10 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+33:23 - Abdulwahab Onike
+Yeah, it's been, it's been, it has been, yeah.
+
+33:28 - Abdullateef Ojugbeĺe
+Okay, sir. So if I click on us logon, it takes me to the page of the waveform oscillogram. The oscillogam button over there.
+
+33:41 - Abdulwahab Onike
+It takes me to the display.
+
+33:48 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+34:09 - Abdulwahab Onike
+So now my challenge is we have multiple data. That's why I want Oski to like, you know, I want us to go through something. Are you there, please?
+
+34:23 - Abdulwahab Onike
+So, from here, what next?
+
+34:34 - Abdullateef Ojugbeĺe
+Tell some people to BIM elements.
+
+34:42 - Abdulwahab Onike
+There is a visual record. There is one you did.
+
+34:45 - Olowonishaye Sunkanmi
+Yes, sir.
+
+34:47 - Abdulwahab Onike
+I'm coming.
+
+34:49 - Olowonishaye Sunkanmi
+Okay, this was pretty.
+
+34:51 - Abdulwahab Onike
+Hello, Abdulwahab.
+
+34:54 - Olowonishaye Sunkanmi
+Sorry, sir. I was oh, sir.
+
+34:58 - Abdulwahab Onike
+You are closing what?
+
+34:59 - Olowonishaye Sunkanmi
+Like I slipped off like I was trying to sorry.
+
+35:04 - Abdulwahab Onike
+About the moon alone.
+
+35:07 - Olowonishaye Sunkanmi
+sorry sir.
+
+35:09 - Abdulwahab Onike
+Sorry, but this is a viable now.
+
+35:14 - Abdulwahab Onike
+So now what I'm actually asking, can you show I want you to display the share your screen by showing us the report. The report of these uh of that this very template. Now we have a case whereby we have multiple columns, multiple beams and slab funnel we want to run a test concurrently.
+
+35:36 - Abdulwahab Onike
+Now, this has analyzed the input, what does it call the report, right? So, how do we put all of these several reports to give us that format? That's where we're heading to.
+
+35:49 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+35:50 - Abdulwahab Onike
+And before we head down there, now I realize put, we had to feed in these reports manually.
+
+36:03 - Abdulwahab Onike
+This transfer time manually. Isn't there a way I can compute all of my test report, be it in an Excel sheet, right? Template in the order of that template, so that I can once all I need is just to upload. So the option to upload the transfer time, since it's manually done, will be there. So I upload all my data. As an Excel sheet and everything will be calculated. That makes it easier.
+
+36:39 - Abdullateef Ojugbeĺe
+Okay, so please don't ask a question.
+
+36:42 - Abdulwahab Onike
+Yeah.
+
+36:46 - Abdullateef Ojugbeĺe
+So I'll be able to upload all this one at once.
+
+36:50 - Abdulwahab Onike
+Which one?
+
+36:51 - Abdullateef Ojugbeĺe
+All the target structure elements.
+
+36:56 - Abdulwahab Onike
+So I'm coming.
+
+36:59 - Abdulwahab Onike
+All I need to do, I'm coming. Okay, you can scroll up.
+
+37:06 - Abdullateef Ojugbeĺe
+Yeah, now is it that I should be able to like upload everything instead of just choosing them?
+
+37:14 - Abdulwahab Onike
+No, so sir, this is it. So now in this case, you only put the file name there. It's not like the elements, you only target when you click on this thing. It is just the name you put in there. Other file. Can you open the other files?
+
+37:32 - Abdullateef Ojugbeĺe
+Sir?
+
+37:34 - Unidentified Speaker
+The other file.
+
+37:37 - Abdulwahab Onike
+The seven word of communal. I'll see Which one did you put?
+
+37:50 - Abdulwahab Onike
+So the one you want you just did is seven, eight, one. Zero nine four. Am I correct?
+
+37:58 - Abdullateef Ojugbeĺe
+Yes, sir. Seven eight eight one zero nine four.
+
+38:02 - Abdulwahab Onike
+Seven eight okay, you only just pick one. So now this is it.
+
+38:16 - Abdulwahab Onike
+These numbers you have, they are just uh they are components that make up had it been your BIM can display which one? Because you know you didn't do it that it can be displayed. Adip a click, a BIM model that is virtual on the side, which will make it easier. I can see the one I'm picking. Then I can randomly pick the one I tested. In some cases, not test all the elements. For instance, a whole entire slab.
+
+ This very slab in question has 20 panels.
+
+38:56 - Abdullateef Ojugbeĺe
+You get me?
+
+38:57 - Abdulwahab Onike
+I have 20 panels. Now, the 20 panel now, this BIM that you uploaded, is if you can I visualize it in the BIM model.
+
+39:09 - Abdullateef Ojugbeĺe
+Can you not yes?
+
+39:11 - Abdulwahab Onike
+Yeah, you know, we have a BIM model. So, yes, sir.
+
+39:16 - Abdullateef Ojugbeĺe
+I don't like so is it possible to like visualize a BIM model?
+
+39:23 - Abdulwahab Onike
+Yes now BIM is a visual I don't know the information like it's visible look at it if you look at the front end that SK did it has an interface.
+
+39:37 - Abdullateef Ojugbeĺe
+I'm escaping your, yeah, I think. Yeah, I saw it. Let me check it out. I think I saw it.
+
+39:41 - Abdulwahab Onike
+It has an interface where you can actually see everything, like a model.
+
+39:46 - Abdullateef Ojugbeĺe
+Is this it? I'll be literally your viewer. It has a view, and it's telling me to choose my. I don't have a scan session yet. So that's why it's not shown. He's page. Yes, yes, sir.
+
+40:14 - Abdulwahab Onike
+So, okay, only I think he has it as under design review where you have SK, you remove, you've removed something. So, I've been in MVP, Luile is in MVP.
+
+40:28 - Abdullateef Ojugbeĺe
+That's count to BIM.
+
+40:31 - Unidentified Speaker
+Scan to BIM.
+
+40:37 - Abdulwahab Onike
+I'm coming off.
+
+40:45 - Abdulwahab Onike
+Scan to BIM is not really coming up like the way it's because there's no any projects there, sir.
+
+40:52 - Abdullateef Ojugbeĺe
+We just uploaded the back end, so the database is empty. Though I can upload like a some some Please, in order to test it out.
+
+41:11 - Abdulwahab Onike
+All right.
+
+41:16 - Abdulwahab Onike
+All right.
+
+41:16 - Abdullateef Ojugbeĺe
+So because there's um, we've never worked on any scans station, so that's why it's saying the information you uploaded.
+
+41:36 - Abdulwahab Onike
+You have that SK or Hadu. Is that an injection for Pondit? That's not mistaken. L25C no MVP. No. That should be another sign.
+
+41:48 - Abdullateef Ojugbeĺe
+I don't won't take note of it. I think that's an oversight.
+
+41:52 - Abdulwahab Onike
+So a BIM is something that is virtual. It should have a display point.
+
+41:58 - Abdullateef Ojugbeĺe
+Okay, I'll check out, make my search on it, check it out. Is SK there?
+
+42:04 - Abdulwahab Onike
+You need to be on this very or when are you going to be available?
+
+42:11 - Abdulwahab Onike
+Hello, SK. Because this is the one that this one concerns you. So we all need to be very we need to be together.
+
+42:24 - Abdulwahab Onike
+Yeah, like we need to be ahead.
+
+42:30 - Abdulwahab Onike
+Yes. Go and look at the BIM. You see the approved model. You see the display, the viewer.
+
+42:37 - Abdullateef Ojugbeĺe
+BIM. Okay, approved model.
+
+42:40 - Abdulwahab Onike
+Have you seen? Have you seen? So, so if you click on that thing on the number, okay.
+
+42:47 - Abdullateef Ojugbeĺe
+Yes, sir. Okay.
+
+42:53 - Abdullateef Ojugbeĺe
+Okay, approved model. Okay.
+
+42:57 - Abdulwahab Onike
+So as you uploaded that document, we're meant to have a display here. You can see it's actually a viewer. You should be able to display, and for every of those elements, once you click on that element, oh my, I liked Lori layout here because information stuff you put it together. I don't know if you get my point.
+
+43:21 - Abdullateef Ojugbeĺe
+Yes, I get to say.
+
+43:22 - Abdulwahab Onike
+So, because if I'm if I'm building that, let's as I'm drawing this, uh, what is it called? This slab. Property slab auto. Property beams auto. Property column auto. Property spooting auto. You get so if I click on that element in question, let's assume, for instance, now for the slab, I have 20 panels. So automatically, I don't want to test all the I might just decide. Let me just test 10. 10 should generalize, should be data for 10, should be able to, stand in for the O20.
+
+ So every selected 10 back and position between, you know, so you display what that would inform. I'm coming.
+
+44:17 - Abdulwahab Onike
+You've seen it. This is it. So that will inform. That's the essence of having a on the platform.
+
+44:27 - Abdulwahab Onike
+So it's virtual, it's not abstract, it's not for technical people alone, it's for people who are non-technical, but by virtue of visual, they can interpret and relate.
+
+44:39 - Abdullateef Ojugbeĺe
+Okay, sir.
+
+44:40 - Abdulwahab Onike
+I don't know if you get my point. Yes, sir. I've got some uploaded this document with all those properties. Once I click on one of them, like this one you just tested, or you just run it, it's all information. Oh, yeah, keep visual display. I'll work on that so that it can be visible. I'll just be for a way for this meeting. I've a moon and all of that, because it's better to appear.
+
+45:07 - Abdullateef Ojugbeĺe
+I will check if I can do it before then, sir.
+
+45:10 - Abdulwahab Onike
+All right, I appreciate it.
+
+45:11 - Abdullateef Ojugbeĺe
+Is it by please by two? To be by two.
+
+45:16 - Abdulwahab Onike
+I'll try and then see this is by true. But worst case scenario, let me see if I can it is actually by true. If there's going to be delay, only very delay African time, maybe 30 or 30 minutes delay and all that. Because I'll try and connect.
+
+45:32 - Abdullateef Ojugbeĺe
+Because then I'll be at the marks by themselves.
+
+45:34 - Abdulwahab Onike
+So that's why we'll be at the mark. So that's true. So you know what happened? It has happened, it has happened. But amount of people were dying. Whichever means why you look from back through any was it called, I will try and work on it. But I think we have to feed in the right thing. What is the worst case scenario? I might actually call for maybe a private section. I'll just say attendee, see what's going on, and then from there, it's not a problem.
+
+ Right? So I'll only need the earliest feedback because that will boost my confidence level. Like, okay, if we are to schedule. Another.
+
+46:10 - Abdullateef Ojugbeĺe
+Okay, so so I'll work on the review of it, sir. So I'll try today before that time, sir. So I'll start working on it immediately.
+
+46:19 - Abdulwahab Onike
+So, yeah, so that it's called preview. I mean, a preview near Abi.
+
+46:23 - Abdullateef Ojugbeĺe
+Yes, sir. I've got to check it online. So I've seen it already.
+
+46:28 - Abdulwahab Onike
+All right, then. So now we haven't gotten to the report yet. So my point is, before we get to the report, I want SK to display something, sir.
+
+46:41 - Abdulwahab Onike
+Eskay needs to be in this meeting. Is just drawing us back.
+
+46:50 - Abdulwahab Onike
+Hello Engineer SK Hello. All right.
+
+47:18 - Abdulwahab Onike
+Hello.
+
+47:48 - Olowonishaye Sunkanmi
+Hello Eski Hello, sorry, sir.
+
+48:12 - Abdulwahab Onike
+Are you with your girlfriend here?
+
+48:14 - Unidentified Speaker
+No, no, no, no.
+
+48:15 - Abdulwahab Onike
+no, no, you're a businessman, say you are a manager, you are running two different meetings. I don't get you, no, sir. No, sir. I beg.
+
+48:30 - Olowonishaye Sunkanmi
+I was lying down.
+
+48:32 - Abdulwahab Onike
+Okay, I beg, we need your attention here.
+
+48:36 - Abdulwahab Onike
+Can you help display what he called? The report I want to show some, I want to show and do something. Okay, Abdu, do you have the report with you?
+
+48:49 - Olowonishaye Sunkanmi
+Yes, I must have sent it to Abdu, but let me let me so if I can actually, I also need your attention here.
+
+49:01 - Abdulwahab Onike
+So you'll be able to work on the front end, you know, for easy flow of what's it called. So I can move from this space to the next space. I don't want to forget.
+
+49:35 - Unidentified Speaker
+that.
+
+50:03 - Abdulwahab Onike
+Thank you, Pascal.
+
+50:13 - Abdulwahab Onike
+Yeah, exactly. Can we go down where we have the table?
+
+50:23 - Abdulwahab Onike
+Because with what just explained now, or what we just, I don't think we are close to generating this yet. Hold on, hold on, please. You can see, okay, so on the PL200, Lolo. Equipment model is pointed PL two hundred transactions, you can see, and then yeah, let's let's proceed.
+
+51:01 - Olowonishaye Sunkanmi
+Yes, sir.
+
+51:06 - Abdulwahab Onike
+See down the this is analysis of analysis yeah hold on when you go up so we have this from you can see it hold on yeah the target elements hold on up let's keep yes I go up a bit let it down Is Abdu is Abdu with us?
+
+51:42 - Abdullateef Ojugbeĺe
+Yes, sir. I'm with you, sir.
+
+51:45 - Abdulwahab Onike
+Oh, the Wasisalia.
+
+51:47 - Olowonishaye Sunkanmi
+Okay, sir.
+
+51:48 - Abdulwahab Onike
+I want the heading to display. The heading of this thing, it display the heading. That's where the column starts.
+
+52:01 - Olowonishaye Sunkanmi
+Analysis of good. Test results. This is somewhere of test analysis base.
+
+52:12 - Olowonishaye Sunkanmi
+Okay.
+
+52:16 - Abdulwahab Onike
+Ground floor. No, no.
+
+52:24 - Olowonishaye Sunkanmi
+You get like this.
+
+52:29 - Abdulwahab Onike
+Oh, oh, oh, though.
+
+52:32 - Abdulwahab Onike
+Now, Abdulwahab. Oh, okay. You need the three the two tables to show at the same time. To explain something to Abdulwahab. Okay, I need the truth table to appear. So, can you go up a bit?
+
+53:01 - Abdulwahab Onike
+Can you go up? I need the two tables here to like to show, but you can look on this blue.
+
+53:09 - Olowonishaye Sunkanmi
+Okay. Let me okay, yeah.
+
+53:17 - Abdulwahab Onike
+Okay, thank you. Now, I heard. So, Abdulwahab Now, you can see that just only one. And imagine you have your target structural member or element. You can see we have column or the column on the ground floor. Test is looking.
+
+53:41 - Abdullateef Ojugbeĺe
+Okay, sir.
+
+53:43 - Abdulwahab Onike
+So at times you have ground floor, we have first floor. Don't mind the word suspended because if you use the word suspended, you can have so many suspended floor. So if we are having our own tabulation, we may have the subject as suspended, but when we have a series of numbers on the floor, so now the element is column. It can be beam, it can be slab. Now, the total number of columns on the ground floor is like almost 100.
+
+ But we selected, we took 44. In some cases, we can take all. But on this very project, we took, we tested 44 columns. The location where the columns lie on the building, now this 44 is a little points taken. If you multiply 44 times 3, it will give you 132, meaning that for every column.
+
+54:52 - Abdulwahab Onike
+Average of three points were kicking. A minimum of three points. Abdulwahab, excuse me. So, same thing also for the column on the ground floor. Sorry, first floor, which in this case is regarded as suspended floor. The number, the total number of kicking. So, my point is, we need to be able to do this thing.
+
+55:22 - Abdulwahab Onike
+Together so that it will not make it difficult because it will be double entry. I'm only trying to simulate, simplify, and make the process faster. Now, having to now go, you having to do one to one one, then it will make it boring. And at the end of the day, you won't get what desire point. Now? Take for instance now for the column. You can see the structural element, which is the target element now.
+
+ This lab 7.8, we've taken. If you look at you, realize that ABC, these are the non-tested points on this member, column one.
+
+56:08 - Abdullateef Ojugbeĺe
+Yes, sir.
+
+56:10 - Abdulwahab Onike
+And the transit time varies. We have 31.2, 32.2, and 30.1. So the transit time is all that we want to input because our settings are stable there.
+
+56:26 - Abdulwahab Onike
+120 is stable. Except maybe another element is that is robust that we want to adjust. So it will be specifically on that element. We will do what? We will work on by adjusting its own parameter. And if all have the same trans part length, we don't have any issue. But the one, maybe the one that is bigger in size that we want to adjust just the length, we can just select it from the model that we've uploaded, go to the number with the aid of the with the aid of the preview.
+
+
+
+57:14 - Abdullateef Ojugbeĺe
+what are it like how do we like how do I put it as we have to do it for the backend you have to do what yeah it's be out of the in the backend so okay so about the question so yeah like this um stuffs now like they are generated from the bim file of it Order, order, order.
+
+57:45 - Abdulwahab Onike
+Is in a meeting. Let me allow him to finish.
+
+57:53 - Abdulwahab Onike
+Are you with us?
+
+57:56 - Olowonishaye Sunkanmi
+Okay, I'll get back to you.
+
+58:04 - Olowonishaye Sunkanmi
+Sorry, sir, sorry, sir. He can't kill me, sir.
+
+58:06 - Abdulwahab Onike
+Okay. So we're saying something.
+
+58:22 - Abdulwahab Onike
+He was trying, he knew I was trying to get your attention. So because he knew we were also busy, Abdulwahab was to engage me on the side. I'm not going to be not Abdulwahab.
+
+58:35 - Olowonishaye Sunkanmi
+Sorry, sir. So, no, no, it's not a problem.
+
+58:38 - Abdulwahab Onike
+It's not a problem. So, you need to be able, you guys both need to work on this thing collectively. We need your interface, which is um uh

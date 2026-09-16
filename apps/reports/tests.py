@@ -54,9 +54,14 @@ class ReportIntegrationTests(APITestCase):
         )
 
     @patch("apps.storage.cloudinary_service.CloudinaryService.upload_file")
+    @patch("apps.common.ai_service.AIService.generate_recommendations")
     @patch("apps.reports.tasks.generate_report_task.delay")
-    def test_generate_report(self, mock_delay, mock_pdf):
+    def test_generate_report(self, mock_delay, mock_ai, mock_pdf):
         mock_pdf.return_value = "https://res.cloudinary.com/demo/image/upload/v1/mock.pdf"
+        # Hermetic (like every sibling test): no live provider call — the
+        # real API once 429'd here on exhausted quota and failed the suite.
+        mock_ai.return_value = {"recommendations": ["Monitor the crack."],
+                                "text_confidence": 0.9}
         """
         POST to generate_report should synchronously build the QA/QC report and
         return 201 with the full report payload.  The async Celery task is mocked
@@ -1284,20 +1289,52 @@ from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.files.base import File as DjangoFile
 
-from apps.digital_eye.models import FieldDevice, PUNDITTest, SensorDataFile
+from apps.digital_eye.models import (FieldDevice, GnssBoundaryPoint,
+                                     GnssSurvey, PUNDITReading, PUNDITTest,
+                                     SensorDataFile)
 from apps.projects.models import Project
 from apps.reports.ndt_reports import (
-    ECS_CALIBRATION_SOURCE, NDTReportService, estimated_compressive_strength,
+    ECS_CALIBRATION_SOURCE, NDTReportService, _element_display,
+    estimated_compressive_strength,
 )
-from apps.digital_eye.adapters import PUNDITAdapter
 from PIL import Image
 
 
 def _pdf_text(data):
-    """Extract the full text of a rendered PDF through pypdf."""
+    """Extract the full text of a rendered PDF through pypdf.
+
+    pypdf reconstructs spacing from glyph positions, so justified Cambria
+    text extracts with doubled spaces and adjacent cells land on separate
+    lines. Collapse each page's whitespace to single spaces so phrase
+    assertions are layout-robust; pages stay '\n'-separated.
+    """
     from pypdf import PdfReader
-    return '\n'.join(p.extract_text() or ''
+    return '\n'.join(' '.join((p.extract_text() or '').split())
                      for p in PdfReader(io.BytesIO(data)).pages)
+
+
+def _pdf_image_count(pdf_bytes):
+    """
+    Distinct image XObjects referenced by the PDF's pages — the branding
+    logo and watermark each add one, so tests can assert the images really
+    made it in (the branding render degrades silently on failure by
+    design). Distinct objects, not raw marker bytes: an alpha image also
+    carries an /SMask stream that would double-count.
+    """
+    from pypdf import PdfReader
+    names = set()
+    for page in PdfReader(io.BytesIO(pdf_bytes)).pages:
+        res = page.get('/Resources')
+        if not res:
+            continue
+        xo = res.get('/XObject')
+        if not xo:
+            continue
+        for name, obj in xo.items():
+            o = obj.get_object()
+            if o.get('/Subtype') == '/Image':
+                names.add((name, o.get('/Width'), o.get('/Height')))
+    return len(names)
 
 
 class NDTReportFixtureMixin:
@@ -1366,6 +1403,67 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                   for v in (2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)]
         self.assertEqual(values, sorted(values))
 
+    def test_report_discloses_project_calibration_curve(self):
+        # 8 Sep 2026 meeting (Nexucon Link): with a project curve active,
+        # Section 3.0 discloses THAT curve — formula, calibration points,
+        # validity — and the worked example substitutes its real
+        # parameters; without one, the documented laboratory default.
+        from apps.digital_eye.models import (ProjectCurveSetting,
+                                             StrengthCurve)
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('8.961', flat)  # the laboratory default curve
+
+        curve = StrengthCurve.objects.create(
+            name='Marina trial-mix calibration', curve_type='linear',
+            project=self.project, standard='Project cube tests, Aug 2026',
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
+            data_points=[{'v': 3000.0, 'f': 6.0}, {'v': 4000.0, 'f': 18.0}])
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('project-specific calibration curve', flat)
+        self.assertIn('f_cu = 0.012 x V - 30', flat)
+        self.assertIn('2 real calibration pair', flat)
+        self.assertIn('Project cube tests, Aug 2026', flat)
+        # The worked example substitutes the project curve's parameters:
+        # 250 mm / 62.5 us = 4000 m/s -> f_cu = 0.012*4000 - 30 = 18 N/mm2.
+        self.assertIn('f_cu = 0.012 x 4000.00 - 30 = 18.00', flat)
+        # And the Section 5.0 verdict itself follows the project curve.
+        self.assertIn('18.0', flat)
+
+    def test_report_element_verdicts_follow_the_project_curve(self):
+        # The Section 5.0 average compressive strength — and the archive's
+        # pass/fail basis — flow through the project's active curve, not a
+        # fixed formula (8 Sep meeting: f_cu is the reason for the link).
+        from apps.digital_eye.models import (ProjectCurveSetting,
+                                             StrengthCurve)
+        test = self.make_test(self.project, self.device,
+                              path_length_mm=250.0, pulse_time_us=62.5)
+        for label, transit in (('A', 62.5), ('B', 62.5), ('C', 62.5)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=250.0,
+                transit_time_us=transit)
+        curve = StrengthCurve.objects.create(
+            name='Marina strict calibration', curve_type='linear',
+            project=self.project,
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0)
+        ProjectCurveSetting.objects.create(project=self.project,
+                                           active_curve=curve)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # 4000 m/s -> 0.012*4000 - 30 = 18.0 N/mm2 (the fixed curve would
+        # have said 27.9); 18 < 25 so the remark is POOR.
+        self.assertIn('18.0', flat)
+        element = NDTReportService._element_data([test])[0]
+        self.assertAlmostEqual(element['mean_ecs'], 18.0, places=2)
+        self.assertEqual(element['remark'], 'POOR')
+
     # ----------------------------------------------------- report number
     def test_report_number_deterministic_and_well_formed(self):
         self.make_test(self.project, self.device,
@@ -1391,10 +1489,10 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         for expected in (
             'LAGOS STATE MATERIALS TESTING LABORATORY',
             'OJODU BERGER, LAGOS.',
-            'TABLE OF CONTENTS',
+            'TABLE OF CONTENT',
             '1.0 INTRODUCTION',
             '4.2 METHODOLOGY',
-            '5.0 ANALYSIS OF TEST RESULTS',
+            'ANALYSIS OF TEST RESULT',
             '7.0 CONCLUSION',
             '8.96',  # calibration curve disclosed in the report
         ):
@@ -1413,16 +1511,319 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
         toc_text = reader.pages[1].extract_text() or ''
-        entries = re.findall(r'(\d\.\d [A-Z][A-Z /(),\-]+?)\s+(\d+)\b',
+        # Reference TOC entries are Title Case ("1.0. Introduction 1"),
+        # so parse number + title-case heading + arabic page number.
+        entries = re.findall(r'(\d\.\d)\.?\s+([A-Za-z][A-Za-z /(),&\-]+?)\s+(\d+)\b',
                              toc_text)
         self.assertTrue(entries, 'TOC entries not parsed from the document')
-        for name, page in entries:
-            page = int(page)
+        # The Title-Case TOC wording maps onto the ALL-CAPS body headings
+        # (the reference diverges: "Field Work/Equipment Status Check" for
+        # the body's "FIELD WORK", plural "Recommendations", ...).
+        body_headings = {
+            'Introduction': 'INTRODUCTION',
+            'Purpose of investigation': 'PURPOSE OF INVESTIGATION',
+            'Literature Review': 'LITERATURE REVIEW',
+            'Location Map/ Weather Condition': 'LOCATION MAP/ WEATHER',
+            'Field Work/Equipment Status Check': 'FIELD WORK',
+            'Visual Test': 'VISUAL TEST',
+            'Methodology': 'METHODOLOGY',
+            'Reinforcing Bar (Rebar) Assessment':
+                'REINFORCING BAR (REBAR) ASSESSMENT',
+            'Equipment/Rebar Assessment Table':
+                'EQUIPMENT/REBAR ASSESSMENT TABLE',
+            'Analysis of Test Results': 'ANALYSIS OF TEST RESULT',
+            'Recommendations': 'RECOMMENDATION',
+            'Conclusion': 'CONCLUSION',
+        }
+        # TOC numbers are BODY page numbers (reference numbering:
+        # Introduction = page 1; cover/TOC/summary pages are unnumbered).
+        # Locate the physical Introduction page to recover the offset.
+        intro_page = None
+        for idx in range(2, len(reader.pages)):
+            flat = ' '.join((reader.pages[idx].extract_text() or '').split())
+            if '1.0 INTRODUCTION' in flat:
+                intro_page = idx + 1
+                break
+        self.assertIsNotNone(intro_page,
+                             'physical Introduction page not found')
+        offset = intro_page - 1
+        for num, title, page in entries:
+            heading = body_headings.get(title, title.upper())
+            page = int(page) + offset       # body number -> physical page
             self.assertLessEqual(page, len(reader.pages))
             body = reader.pages[page - 1].extract_text() or ''
-            self.assertIn(name.split(' ', 1)[1][:12], body,
-                          f'TOC says {name!r} is on page {page} but the '
-                          f'heading is not there')
+            if page < len(reader.pages):
+                body += '\n' + (reader.pages[page].extract_text() or '')
+            # Divider pages (e.g. '5.0 ANALYSIS OF TEST RESULT') draw the
+            # title on separate centred lines, so compare with whitespace
+            # collapsed.
+            body_flat = ' '.join(body.split())
+            self.assertIn(heading, body_flat,
+                          f'TOC says {num} {title!r} is on page {page} but '
+                          f'the heading is not there (or on the next page)')
+
+    def test_executive_summary_present_but_absent_from_toc(self):
+        # C1: the executive summary is a real page but deliberately not a
+        # TOC entry (reference layout).
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        data = NDTReportService.generate_ndt_report(self.project)
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        full = _pdf_text(data)
+        self.assertIn('EXECUTIVE SUMMARY', full)
+        toc_text = reader.pages[1].extract_text() or ''
+        self.assertNotIn('EXECUTIVE SUMMARY', toc_text)
+
+    def test_storey_count_from_test_floors_and_bim_levels(self):
+        # The building profile is quantified only from real records: test
+        # floors and imported BIM levels both count, unmapped labels (Roof,
+        # FLOOR NOT RECORDED) contribute nothing, and nothing recorded
+        # leaves the profile unquantified (None).
+        self.assertIsNone(NDTReportService._storey_count(
+            ['FLOOR NOT RECORDED'], []))
+        self.assertEqual(NDTReportService._storey_count(
+            ['Ground Floor', 'First Floor'], []), 2)
+        self.assertEqual(NDTReportService._storey_count(
+            ['Ground Floor'], ['0. NGL', '1. First Floor']), 2)
+        self.assertEqual(NDTReportService._storey_count(
+            ['Roof'], ['0. NGL']), 1)
+
+    def test_executive_summary_building_profile_and_arrangement(self):
+        # Reference p3 paragraph 1: "…of an existing 2-floor building (A, B
+        # &C) belonging to …, at …" — the storey count derives only from
+        # recorded levels; paragraph 3 states the drawing availability
+        # honestly either way.
+        from apps.digital_eye.models import BIMElementMapping
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        # Nothing recorded: unquantified profile + reference's no-drawing
+        # statement.
+        self.assertIn('of an existing building ("Marina NDT Test Project") '
+                      'belonging to', flat)
+        self.assertIn('no structural drawing was provided', flat)
+
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='a' * 22, element_id='S-101',
+            element_name='RC Slab 200', element_type='IfcSlab',
+            level='0. NGL', source='ifc_upload')
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='b' * 22, element_id='C-201',
+            element_name='RC Column', element_type='IfcColumn',
+            level='1. First Floor', source='ifc_upload')
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        self.assertIn('an existing 2-floor building ("Marina NDT Test '
+                      'Project")', flat)
+        self.assertIn('referenced from the structural information available '
+                      'on the platform', flat)
+
+    def test_appendix_schedule_lists_imported_bim_elements(self):
+        # The appendix schedule lists the REAL imported elements
+        # (BIMElementMapping) with the properties the import recorded —
+        # never the legacy demo table.
+        from apps.digital_eye.models import BIMElementMapping
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        BIMElementMapping.objects.create(
+            project=self.project, bim_guid='c' * 22, element_id='S-780904',
+            element_name='Floor:200THK RC SLAB:780904',
+            element_type='IfcSlab', level='0. NGL', source='ifc_upload',
+            properties={'Tag': '780904',
+                        'Material': 'Concrete - Cast-in-Place Concrete '
+                                    '(200 mm)'})
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        # The appendix 'drawing' page is registered in the TOC and carries
+        # the project-name label; the heading itself is deliberately not
+        # rendered (reference layout).
+        self.assertIn('Drawing of the Building', flat)
+        # One Revit segment per line — whole tokens, no mid-word breaks.
+        self.assertIn('Floor 200THK RC SLAB 780904', flat)
+        # The CATEGORY column reads as plain words for non-technical
+        # reviewers — never the raw IFC class name or a STEP dump.
+        self.assertIn(' Slab ', flat)
+        self.assertNotIn('IfcSlab', flat)
+        self.assertIn('MATERIAL / GRADE RECORDED', flat)
+        self.assertIn('Concrete - Cast-in-Place Concrete (200 mm)', flat)
+
+    def test_visual_observations_are_reference_style_sentences(self):
+        # §4.1 reads like the reference — 'Tacky floor observed on <element>
+        # (see pic i).' — not raw record dumps: the '[MANUAL_FIELD_ENTRY —
+        # Station …]' provenance stamp never prints, the observation words
+        # stay the operator's own, and the element/location are appended as
+        # context.
+        t1 = self.make_test(
+            self.project, self.device,
+            structural_element='Floor:200THK RC SLAB:780904',
+            test_location='First Floor',
+            notes='[MANUAL_FIELD_ENTRY — Station UPV-FLD-2026-002] tacky '
+                  'floor')
+        t2 = self.make_test(
+            self.project, self.device,
+            structural_element='M_Footing-Rectangular:900 x 900 x 200mm:803486',
+            surface_condition='dsmooth finishing')
+        obs = NDTReportService._visual_observations([t1, t2])
+        self.assertEqual(obs, [
+            'Tacky floor observed at First Floor on '
+            'Floor:200THK RC SLAB:780904.',
+            'Dsmooth finishing observed on '
+            'M_Footing-Rectangular:900 x 900 x 200mm:803486.',
+        ])
+
+    def test_visual_observation_references_appendix_photo(self):        # The '(see pic N)' cross-reference must point at the photograph the
+        # appendix actually numbers — same walk, same roman numeral.
+        media = tempfile.mkdtemp(prefix="ndt_media_")
+        hermetic = dict(
+            MEDIA_ROOT=media,
+            MEDIA_URL='/media/',
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+        )
+        try:
+            with self.settings(**hermetic):
+                png_path = os.path.join(media, "slab_photo.png")
+                Image.new("RGB", (60, 40), (200, 30, 30)).save(png_path)
+                with open(png_path, "rb") as fh:
+                    data_file = SensorDataFile.objects.create(
+                        file_type="photo",
+                        file_name="slab_photo.png",
+                        file_size_bytes=os.path.getsize(png_path),
+                    )
+                    data_file.file.save("slab_photo.png", DjangoFile(fh),
+                                        save=True)
+                test = self.make_test(
+                    self.project, self.device,
+                    structural_element='Floor:200THK RC SLAB:780904',
+                    path_length_mm=250.0, pulse_time_us=62.5,
+                    notes='[MANUAL_FIELD_ENTRY — Station UPV-FLD-2026-002] '
+                          'tacky floor')
+                test.files.add(data_file)
+                text = _pdf_text(
+                    NDTReportService.generate_ndt_report(self.project))
+                flat = ' '.join(text.split())
+                self.assertIn('Tacky floor observed on Floor:200THK RC '
+                              'SLAB:780904 (see pic i).', flat)
+                self.assertIn('PIC I: slab_photo.png', text)
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
+
+    def test_member_type_from_bim_style_element_names(self):
+        # BIM-style names ('M_Footing-Rectangular:900 x 900 x 200mm:803711')
+        # classify to readable member types — the §5.0 group headings and
+        # summary tables must never print raw name fragments like
+        # 'M_FOOTINGS' or 'FLOOR:200THKS'.
+        mt = NDTReportService._member_type
+        self.assertEqual(mt('COL-C24'), 'COLUMN')
+        self.assertEqual(mt('Floor:200THK RC SLAB:781094'), 'SLAB')
+        self.assertEqual(
+            mt('M_Footing-Rectangular:900 x 900 x 200mm:803711'),
+            'FOUNDATION')
+        self.assertEqual(mt('WALL-W2'), 'WALL')
+        self.assertEqual(mt('BEAM-B12'), 'BEAM')
+        self.assertEqual(mt(''), 'UNSPECIFIED')
+
+    def test_element_display_breaks_revit_segments(self):
+        # Revit names are 'Family:Type:Tag' — one segment per line in the
+        # narrow report columns, so names never break mid-token
+        # ('M_Footing-Rectangula / r:900').
+        self.assertEqual(
+            _element_display('M_Footing-Rectangular:900 x 900 x 200mm:803711'),
+            'M_Footing-Rectangular\n900 x 900 x 200mm\n803711')
+        self.assertEqual(
+            _element_display('Floor:200THK RC SLAB:781235'),
+            'Floor\n200THK RC SLAB\n781235')
+        self.assertEqual(_element_display('COL-C24'), 'COL-C24')
+        self.assertEqual(_element_display(''), '-')
+        self.assertEqual(_element_display(None), '-')
+
+    def test_section5_readable_for_bim_element_names(self):
+        # End-to-end: the §5.0 group heading, the summary tables and the
+        # §5.2 notes column read like the reference — member words, not
+        # name fragments, and no provenance stamps.
+        self.make_test(
+            self.project, self.device,
+            structural_element='Floor:200THK RC SLAB:781235',
+            floor='Second Floor',
+            path_length_mm=120.0, pulse_time_us=62.5)
+        self.make_test(
+            self.project, self.device, test_type='surface_quality',
+            structural_element='M_Footing-Rectangular:900 x 900 x 200mm:803486',
+            surface_condition='dsmooth finishing',
+            notes='[MANUAL_FIELD_ENTRY — Station UPV-FLD-2026-004] '
+                  'smooth dense surface')
+        # Multi-point (A1) crack test on another long Revit name — §5.1's
+        # per-point table must fit the same segmented element display.
+        crack = self.make_test(
+            self.project, self.device, test_type='crack_depth',
+            structural_element='M_Footing-Rectangular:900 x 900 x 200mm:803711',
+            crack_path_length_mm=300.0)
+        for label, (tc, t0) in zip('ABC', ((70.0, 62.5), (75.0, 62.5), (80.0, 62.5))):
+            PUNDITReading.objects.create(
+                test=crack, point_label=label, path_length_mm=300.0,
+                transit_time_us=tc, uncracked_transit_time_us=t0)
+        mean_depth = crack.element_mean_crack_depth_mm()
+        crack.crack_depth_mm = mean_depth
+        crack.estimated_crack_depth_mm = mean_depth
+        crack.save()
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        self.assertIn('SECOND FLOOR SLABS OF', flat)
+        # The element renders one Revit segment per line — whole tokens
+        # (this fails if the name breaks mid-word) and no colons in the
+        # table (the §4.1 prose keeps the full name).
+        self.assertIn('M_Footing-Rectangular 900 x 900 x 200mm 803486',
+                      flat)
+        self.assertIn('M_Footing-Rectangular 900 x 900 x 200mm 803711',
+                      flat)
+        # §5.1 renders one row per point with its computed depth and the
+        # element mean.
+        self.assertIn('CRACK DEPTH MEASUREMENTS', flat)
+        self.assertIn('75.7', flat)
+        self.assertIn('98.3', flat)
+        self.assertIn('dsmooth finishing', flat)
+        self.assertIn('smooth dense surface', flat)
+        # Raw fragments and provenance stamps never print.
+        self.assertNotIn('FLOOR:200THKS', flat)
+        self.assertNotIn('M_FOOTINGS', flat)
+        self.assertNotIn('MANUAL_FIELD_ENTRY', flat)
+
+    def test_charts_section_is_registered_in_toc(self):
+        # The reference TOC carries no charts entry (C14's original intent —
+        # a section, not an anonymous page — is met by the numbered
+        # BAR CHART section in the body, which the exact-reference TOC
+        # deliberately omits).
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        data = NDTReportService.generate_ndt_report(self.project)
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        toc_text = reader.pages[1].extract_text() or ''
+        self.assertNotIn('BAR CHART', toc_text)
+        full = _pdf_text(data)
+        self.assertIn('BAR CHART SHOWING SUMMARY OF TEST RESULTS', full)
+
+    def test_rebar_table_only_when_rebar_rows_exist(self):
+        # C12: never claim "not applicable" and then print a table.
+        from apps.digital_eye.models import RebarTest
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn('Rebar scanning: Not Applicable', text)
+        self.assertNotIn('MAIN BAR (MM)', text)
+
+        RebarTest.objects.create(
+            project=self.project, structural_element='COL-R01',
+            test_location='Ground Floor', main_bar_mm=16.0,
+            links_mm=8.0, spacing_mm='200', cover_depth_mm=25.0)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        self.assertIn('MAIN BAR (MM)', flat)
+        self.assertIn('COVER DEPTH', flat)
 
     # --------------------------------------------------- section 5.0 data
     def test_section5_groups_by_element_with_averages(self):
@@ -1433,27 +1834,60 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                        structural_element="BEAM-B12",
                        path_length_mm=400.0, pulse_time_us=100.0)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('STRUCTURAL ELEMENT: COL-C24', text)
-        self.assertIn('STRUCTURAL ELEMENT: BEAM-B12', text)
-        # 250 mm / 62.5 us = 4.00 km/s -> E.C.S round(27.87) = 28 N/mm2.
-        self.assertIn('4.00', text)
-        self.assertIn('28', text)
-        # Element averages are printed.
-        self.assertIn('AVERAGE PULSE VELOCITY: 4.00 KM/S', text)
+        # Reference 7-column layout: element name once, per-point rows,
+        # average compressive strength + remark columns (header wraps in the
+        # narrow column, so compare on flattened text).
+        flat = ' '.join(text.split())
+        self.assertIn('COL-C24', flat)
+        self.assertIn('BEAM-B12', flat)
+        self.assertIn('AVERAGE COMPRESSIVE STRENGTH (N/mm2)', flat)
+        self.assertIn('REMARK', flat)
+        # 250 mm / 62.5 us = 4.00 km/s -> E.C.S 8.961*4.0 - 7.97 = 27.9.
+        self.assertIn('27.9', text)
+        # Velocities print like the reference (one decimal).
+        self.assertIn('4.0', text)
+        # Both summaries come from the real rows.
+        self.assertIn('SUMMARY OF TEST ANALYSIS', text)
+        self.assertIn('SUMMARY OF TEST RESULTS', text)
 
-    def test_ecs_remark_consistent_with_adapter_grade(self):
-        # Two tests on one element: mean velocity (4.00 + 2.90) / 2 = 3.45
-        # km/s -> 'questionable' by the platform's own adapter.
+    def test_readings_render_as_point_rows(self):
+        # The multi-reading model: one element, three A/B/C test points,
+        # verdict from the element means.
+        from apps.digital_eye.models import PUNDITReading
+        test = self.make_test(self.project, self.device,
+                              structural_element="COL-G01", floor="Ground Floor",
+                              path_length_mm=250.0)
+        for label, transit in (('A', 62.5), ('B', 60.0), ('C', 61.0)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=250.0,
+                transit_time_us=transit)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        # Point labels and their one-decimal values appear in the table.
+        self.assertIn('A', text)
+        self.assertIn('62.5', text)
+        self.assertIn('60.0', text)
+        # Mean velocity (4.0 + 4.167 + 4.098)/3 = 4.088 -> E.C.S 28.7 -> GOOD.
+        self.assertIn('28.7', text)
+        self.assertIn('GOOD', text)
+        # The floor groups the block (reference 'GROUND FLOOR ...' header).
+        self.assertIn('GROUND FLOOR', text)
+
+    def test_ecs_remark_consistent_with_statutory_threshold(self):
+        # GOOD/POOR is decided at the statutory 25 N/mm2 design strength:
+        # 4.0 km/s -> 27.9 N/mm2 (GOOD); 2.9 km/s -> 18.0 N/mm2 (POOR).
         self.make_test(self.project, self.device,
                        structural_element="COL-C24",
                        path_length_mm=250.0, pulse_time_us=62.5)
         self.make_test(self.project, self.device,
-                       structural_element="COL-C24",
+                       structural_element="COL-C25",
                        path_length_mm=290.0, pulse_time_us=100.0)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('AVERAGE PULSE VELOCITY: 3.45 KM/S', text)
-        self.assertIn('QUESTIONABLE', text)
-        self.assertEqual(PUNDITAdapter.grade_quality(3.45), 'questionable')
+        self.assertIn('27.9', text)
+        self.assertIn('18.0', text)
+        self.assertIn('GOOD', text)
+        self.assertIn('POOR', text)
+        self.assertGreater(estimated_compressive_strength(4.0), 25.0)
+        self.assertLess(estimated_compressive_strength(2.9), 25.0)
 
     def test_pending_and_missing_tests_are_honest(self):
         # A test never run through the analyze endpoint still shows its
@@ -1468,7 +1902,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         self.assertIn('have not been run through the platform analysis '
                       'endpoint', text)
-        self.assertIn('4.00', text)          # computed on the fly for pending
+        self.assertIn('4.0', text)           # computed on the fly for pending
         self.assertIn('NOT RECORDED', text)  # element without measurements
 
     def test_crack_depth_subtable(self):
@@ -1482,6 +1916,51 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         self.assertIn('99.5', text)
         flat = ' '.join(text.split())
         self.assertIn('Depth exceeds 25 mm - structural review required', flat)
+
+    def test_multi_point_crack_and_surface_subtables(self):
+        """A1 for crack depth + surface quality: the report renders one row
+        per test point (label / measurements / computed value) exactly like
+        the Section 5.0 velocity tables, with the element verdict (mean
+        depth / observed conditions) alongside."""
+        crack = self.make_test(self.project, self.device,
+                               test_type="crack_depth", structural_element="SLAB-S3",
+                               crack_path_length_mm=300.0)
+        for label, (tc, t0) in zip('ABC', ((70.0, 62.5), (75.0, 62.5), (80.0, 62.5))):
+            PUNDITReading.objects.create(
+                test=crack, point_label=label, path_length_mm=300.0,
+                transit_time_us=tc, uncracked_transit_time_us=t0)
+        # Persist the element verdict the way the serializer does.
+        mean_depth = crack.element_mean_crack_depth_mm()
+        crack.crack_depth_mm = mean_depth
+        crack.estimated_crack_depth_mm = mean_depth
+        crack.save()
+
+        surface = self.make_test(self.project, self.device,
+                                 test_type="surface_quality",
+                                 structural_element="WALL-W2",
+                                 surface_condition="Smooth finished")
+        for label, condition in (('A', 'Smooth finished'),
+                                 ('B', 'Honeycombing at mid-height'),
+                                 ('C', 'Hairline cracks near the support')):
+            PUNDITReading.objects.create(test=surface, point_label=label,
+                                         surface_condition=condition)
+
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        flat = ' '.join(text.split())
+        # Per-point crack rows: each label's own t_c / t_0 / depth.
+        self.assertIn('CRACK DEPTH MEASUREMENTS', flat)
+        self.assertIn('POINT', flat)
+        self.assertIn('75.7', flat)   # point A: 150*sqrt(1.12^2-1)
+        self.assertIn('119.8', flat)  # point C: 150*sqrt(1.28^2-1)
+        # The element verdict = the mean of the three depths (98.3) with its
+        # remark, on the middle row.
+        self.assertIn('98.3', flat)
+        self.assertIn('Depth exceeds 25 mm - structural review required', flat)
+        # Per-point surface rows carry each observed condition.
+        self.assertIn('SURFACE QUALITY OBSERVATIONS', flat)
+        self.assertIn('Honeycombing at mid-height', flat)
+        self.assertIn('Hairline cracks near the support', flat)
+        self.assertIn('Smooth finished', flat)
 
     # ------------------------------------------------- layout regression
     def test_wrap_lines_fit_column_and_lose_nothing(self):
@@ -1519,8 +1998,10 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                           'exposed reinforcement at the north face over '
                           'approximately two square metres around mid-height')
         long_reference = 'UPV-FLD-2026-VERY-LONG-STATION-REF-0001'
+        long_element = ('M_Footing-Rectangular:900 x 900 x 200mm:803711')
         self.make_test(
             self.project, self.device, test_reference=long_reference,
+            structural_element=long_element,
             path_length_mm=250.0, pulse_time_us=62.5,
             notes='Measured with 54 kHz transducers — direct mode — per '
                   'operator field sheet')
@@ -1555,10 +2036,13 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
 
         for i, (page, x, y, h, text) in enumerate(runs):
             # Body text may never sit inside the running-header band: the
-            # header's own runs live at y=10..16, the rule is at 17.5 and
-            # the top margin is 24. Anything body-like at 10.5..23 is the
-            # page-break bug come back.
-            if page >= 2 and 10.5 <= y <= 23:
+            # reference header's own runs live at y=1.6..12.8 (MTL text +
+            # serial box) and the top margin is 20.7. Anything body-like at
+            # 12.9..15.5 is the page-break bug come back — but the
+            # reference's appendix drawing-page label legitimately sits at
+            # y=16.9 ('BUILDING A' below the header), so the band stops
+            # short of it.
+            if page >= 2 and 12.9 <= y <= 15.5:
                 self.fail(
                     f'body text inside the header band: {text[:40]!r} at y={y}')
             for page2, x2, y2, h2, text2 in runs[i + 1:]:
@@ -1569,18 +2053,245 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                         and x2 + min(len(text2) * 0.5, 170) > x + 1.0):
                     self.fail(f'overlapping text runs: '
                               f'{text[:30]!r} / {text2[:30]!r}')
-        # Long values are rendered whole — wrapped, never truncated.
+        # Long values are rendered whole — wrapped, never truncated. The
+        # long element name exercises the §5.0 table's narrow column; the
+        # test reference is provenance and deliberately does NOT print in
+        # the results table (it lives in the registry / integrity digest).
         flat = ' '.join(_pdf_text(data).split())
         self.assertIn(' '.join(long_condition.split()), flat)
-        self.assertIn(long_reference, flat.replace(' ', ''))
+        self.assertIn(long_element.replace(' ', ''),
+                      flat.replace(' ', ''))
+        self.assertNotIn(long_reference, flat)
 
     def test_empty_project_report_is_honest(self):
         data = NDTReportService.generate_ndt_report(self.project)
         self.assertTrue(data.startswith(b'%PDF'))
         text = _pdf_text(data)
         self.assertIn('No pulse velocity tests recorded', text)
-        self.assertIn('DATE OF TEST: NOT RECORDED', text)
+        # The reference cover carries a single ordinal date line
+        # ("27TH APRIL, 2026.") — with no recorded tests it falls back to
+        # today, honestly, in that exact format.
+        self.assertRegex(text, r'\d{1,2}(ST|ND|RD|TH) [A-Z]+, \d{4}\.')
         self.assertIn('No photographs recorded for these tests.', text)
+
+    # ------------------------------------------------- BIM site-plan (C6)
+    def test_bim_model_plan_view_replaces_map_placeholder(self):
+        # With an imported BIM model, the map page renders the model's real
+        # plan-view geometry in one of the two reference image frames instead
+        # of the "SITE LOCATION MAP NOT PROVIDED" placeholder (the reference
+        # prints no captions under the frames — the images speak alone).
+        from apps.digital_eye.models import BIMModelGeometry
+        from pypdf import PdfReader
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file='STACKING_AREA_IFC.rvt',
+            element_count=2,
+            elements=[
+                # A 4 m x 3 m slab: two triangles over four corner verts.
+                {'guid': 'g1', 'name': 'Slab-1', 'type': 'IfcSlab',
+                 'verts': [0, 0, 0, 4000, 0, 0, 4000, 3000, 0, 0, 3000, 0],
+                 'faces': [0, 1, 2, 0, 2, 3]},
+                {'guid': 'g2', 'name': 'Col-1', 'type': 'IfcColumn',
+                 'verts': [1000, 1000, 0, 1000, 1200, 0, 1200, 1200, 0,
+                           1200, 1000, 0],
+                 'faces': [0, 1, 2, 0, 2, 3]},
+            ])
+        data = NDTReportService.generate_ndt_report(self.project)
+        self.assertTrue(data.startswith(b'%PDF'))
+        text = _pdf_text(data)
+        self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
+        # The map page carries the running watermark PLUS the plan image
+        # (single source -> one centred frame).
+        reader = PdfReader(io.BytesIO(data))
+        map_pages = [p for p in reader.pages
+                     if 'LOCATION MAP' in (p.extract_text() or '')]
+        self.assertTrue(map_pages, 'map page not found')
+        self.assertGreaterEqual(len(map_pages[0].images), 2,
+                                'map page should carry the watermark and the '
+                                'BIM plan view')
+
+    def test_map_placeholder_when_no_bim_model_or_attachment(self):
+        # No imported model and no attached map photo — the honest
+        # placeholder box stays.
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        data = NDTReportService.generate_ndt_report(self.project)
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED', _pdf_text(data))
+
+    def test_bim_plan_view_honest_for_degenerate_geometry(self):
+        # Geometry whose plan projection collapses to a line has nothing
+        # honest to draw — the placeholder must come back rather than a
+        # zero-width "plan".
+        from apps.digital_eye.models import BIMModelGeometry
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file='flat.ifc', element_count=1,
+            elements=[{'guid': 'g1', 'name': 'Line', 'type': 'IfcBeam',
+                       'verts': [0, 0, 0, 1000, 0, 0, 2000, 0, 0],
+                       'faces': [0, 1, 2]}])
+        buf, caption = NDTReportService._generate_bim_plan_view(self.project)
+        self.assertIsNone(buf)
+        self.assertEqual(caption, '')
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED',
+                      _pdf_text(
+                          NDTReportService.generate_ndt_report(self.project)))
+
+    def test_bim_preview_capture_used_as_site_map(self):
+        # An operator's screenshot of the BIM model 3D preview (project-level
+        # SensorDataFile photo marked 'BIM 3D model view') fills one of the
+        # two reference map frames; the server-rendered plan view fills the
+        # other — the reference prints no captions, so the frames are
+        # verified by their embedded images.
+        from apps.digital_eye.models import BIMModelGeometry, SensorDataFile
+        from pypdf import PdfReader
+        media = tempfile.mkdtemp(prefix="ndt_media_")
+        hermetic = dict(
+            MEDIA_ROOT=media,
+            MEDIA_URL='/media/',
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+        )
+        try:
+            with self.settings(**hermetic):
+                png_path = os.path.join(media, "bim_capture.png")
+                Image.new("RGB", (160, 100), (15, 23, 42)).save(png_path)
+                with open(png_path, "rb") as fh:
+                    data_file = SensorDataFile.objects.create(
+                        project=self.project,
+                        file_type="photo",
+                        file_name="bim_capture.png",
+                        file_size_bytes=os.path.getsize(png_path),
+                        description=(
+                            'BIM 3D model view — captured from the platform '
+                            'model preview'),
+                    )
+                    data_file.file.save("bim_capture.png", DjangoFile(fh),
+                                        save=True)
+                self.make_test(self.project, self.device,
+                               path_length_mm=250.0, pulse_time_us=62.5)
+                BIMModelGeometry.objects.create(
+                    project=self.project, source_file='STACKING_AREA_IFC.rvt',
+                    element_count=1,
+                    elements=[{'guid': 'g1', 'name': 'Slab-1',
+                               'type': 'IfcSlab',
+                               'verts': [0, 0, 0, 4000, 0, 0,
+                                         4000, 3000, 0, 0, 3000, 0],
+                               'faces': [0, 1, 2, 0, 2, 3]}])
+                data = NDTReportService.generate_ndt_report(self.project)
+                text = _pdf_text(data)
+                self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
+                # The map page carries the watermark, the operator's capture
+                # AND the BIM plan view (both frames filled).
+                reader = PdfReader(io.BytesIO(data))
+                map_pages = [p for p in reader.pages
+                             if 'LOCATION MAP' in (p.extract_text() or '')]
+                self.assertTrue(map_pages, 'map page not found')
+                self.assertGreaterEqual(len(map_pages[0].images), 3,
+                                        'map page should carry the watermark, '
+                                        'the BIM capture and the plan view')
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
+
+    # ------------------------------------------- C6: Google Maps link + map
+    def test_recorded_coordinates_print_google_maps_link(self):
+        # Real GNSS coordinates on the project print the exact coordinates
+        # and the Google Maps link on the map page — the address section of
+        # the report can be followed to the site.
+        project = self.make_project(latitude=6.4281, longitude=3.4219)
+        self.make_test(project, self.device)
+        data = NDTReportService.generate_ndt_report(project)
+        text = _pdf_text(data)
+        self.assertIn('6.428100', text)
+        self.assertIn('3.421900', text)
+        self.assertIn('https://www.google.com/maps/search/?api=1&query=6.4281,3.4219',
+                      text)
+
+    def test_no_coordinates_means_no_maps_link(self):
+        # Without recorded coordinates the link line is absent — the location
+        # section never carries a guessed point.
+        data = NDTReportService.generate_ndt_report(self.project)
+        text = _pdf_text(data)
+        self.assertNotIn('google.com/maps', text)
+        self.assertNotIn('Coordinates:', text)
+
+    def test_static_map_used_when_key_and_coordinates_exist(self):
+        # With coordinates + a configured key, the Google static map fills
+        # the first reference map frame (mocked fetch — tests never call the
+        # network). The map page then carries the watermark + the map image.
+        from pypdf import PdfReader
+        png = io.BytesIO()
+        Image.new('RGB', (640, 640), (240, 240, 235)).save(png, format='PNG')
+        png.seek(0)
+        with patch.object(NDTReportService, '_google_static_map',
+                          return_value=png) as fetch:
+            with self.settings(GOOGLE_MAPS_API_KEY='test-key'):
+                project = self.make_project(latitude=6.4281, longitude=3.4219)
+                self.make_test(project, self.device)
+                data = NDTReportService.generate_ndt_report(project)
+        fetch.assert_called_once()
+        text = _pdf_text(data)
+        self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
+        reader = PdfReader(io.BytesIO(data))
+        map_pages = [p for p in reader.pages
+                     if 'LOCATION MAP' in (p.extract_text() or '')]
+        self.assertTrue(map_pages, 'map page not found')
+        self.assertGreaterEqual(len(map_pages[0].images), 2,
+                                'map page should carry the watermark and the '
+                                'Google static map')
+
+    def test_static_map_absent_without_key(self):
+        # No key configured -> the static-map helper itself returns no map
+        # (verified directly — no fetch is possible), and the report falls
+        # through to the honest fallbacks (placeholder, no model here).
+        with self.settings(GOOGLE_MAPS_API_KEY=''):
+            project = self.make_project(latitude=6.4281, longitude=3.4219)
+            self.assertIsNone(
+                NDTReportService._google_static_map(project))
+            self.make_test(project, self.device)
+            data = NDTReportService.generate_ndt_report(project)
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED', _pdf_text(data))
+        # The link line still prints — coordinates alone are enough for it.
+        self.assertIn('https://www.google.com/maps/search/', _pdf_text(data))
+
+    def test_unmarked_project_photo_is_not_treated_as_bim_capture(self):
+        # Only photos explicitly marked 'BIM 3D model view' are used as the
+        # §3.0 map — an ordinary project photo must not hijack the slot.
+        from apps.digital_eye.models import SensorDataFile
+        media = tempfile.mkdtemp(prefix="ndt_media_")
+        hermetic = dict(
+            MEDIA_ROOT=media,
+            MEDIA_URL='/media/',
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+        )
+        try:
+            with self.settings(**hermetic):
+                png_path = os.path.join(media, "site_photo.png")
+                Image.new("RGB", (60, 40), (30, 200, 30)).save(png_path)
+                with open(png_path, "rb") as fh:
+                    data_file = SensorDataFile.objects.create(
+                        project=self.project,
+                        file_type="photo",
+                        file_name="site_photo.png",
+                        file_size_bytes=os.path.getsize(png_path),
+                        description='Progress photo of the site entrance',
+                    )
+                    data_file.file.save("site_photo.png", DjangoFile(fh),
+                                        save=True)
+                self.make_test(self.project, self.device,
+                               path_length_mm=250.0, pulse_time_us=62.5)
+                self.assertIn('SITE LOCATION MAP NOT PROVIDED',
+                              _pdf_text(
+                                  NDTReportService.generate_ndt_report(
+                                      self.project)))
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
 
     # --------------------------------------------------------- appendix
     def test_appendix_embeds_photos_and_honest_when_none(self):
@@ -1612,7 +2323,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                 test.files.add(data_file)
                 text = _pdf_text(
                     NDTReportService.generate_ndt_report(self.project))
-                self.assertIn('Photo 1: column_crack.png', text)
+                self.assertIn('PIC I: column_crack.png', text)
 
                 # Once the photo is detached, the appendix states so honestly.
                 test.files.remove(data_file)
@@ -1767,9 +2478,2009 @@ class ArchivedReportTests(_HermeticMediaMixin, NDTReportFixtureMixin, APITestCas
             hashlib.sha256(response.content).hexdigest(),
             archive.sha256_checksum)
 
+    # ------------------------------------------------------- versions API
+
+    def _archived(self):
+        self.client.get(self.generate_url)
+        return ArchivedReport.objects.get(project=self.project)
+
+    def test_versions_require_authentication(self):
+        archive = self._archived()
+        url = reverse("archived-report-versions",
+                      kwargs={"report_id": archive.id})
+        self.client.credentials()  # drop the bearer token
+        self.assertEqual(self.client.get(url).status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self.client.post(url, {}, format="json").status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+
+    def test_version_created_and_listed_with_feedback_context(self):
+        from apps.reports.models import ReportVersion
+        archive = self._archived()
+        url = reverse("archived-report-versions",
+                      kwargs={"report_id": archive.id})
+        response = self.client.post(url, {
+            "version_string": "1.1",
+            "ai_feedback_context": "Add the rebar cover table to section 4.",
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["version_string"], "1.1")
+        self.assertEqual(response.data["ai_feedback_context"],
+                         "Add the rebar cover table to section 4.")
+
+        listing = self.client.get(url)
+        self.assertEqual(listing.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listing.data), 1)
+        self.assertEqual(listing.data[0]["version_string"], "1.1")
+        # Newest first, and the creator is the authenticated caller.
+        version = ReportVersion.objects.get()
+        self.assertEqual(version.created_by, self.user)
+        self.assertEqual(version.archived_report, archive)
+
+    def test_versions_of_unknown_report_are_404(self):
+        url = reverse("archived-report-versions",
+                      kwargs={"report_id": uuid.uuid4()})
+        self.assertEqual(self.client.get(url).status_code,
+                         status.HTTP_404_NOT_FOUND)
+
     def test_download_out_of_scope_404(self):
         self.client.get(self.generate_url)
         url = reverse("archived-report-download",
                       kwargs={"report_id": uuid.uuid4()})
         self.assertEqual(self.client.get(url).status_code,
                          status.HTTP_404_NOT_FOUND)
+
+
+class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
+    """7 Sep 2026 review meeting (meeting #2) regressions: m/s table cells
+    with decimal points (never commas), the averaging method stated with a
+    worked example, point-spread disclosure, crack-depth-first analysis
+    order, concrete maturity notes and per-floor BIM plan pages."""
+
+    def setUp(self):
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+
+    def _multi_point_test(self, **kwargs):
+        """The client's averaging case: 120 mm at 30 / 29 / 33.3 us."""
+        from apps.digital_eye.models import PUNDITReading
+        defaults = dict(structural_element="COL-G01", floor="Ground Floor",
+                        path_length_mm=120.0)
+        defaults.update(kwargs)
+        test = self.make_test(self.project, self.device, **defaults)
+        for label, transit in (("A", 30.0), ("B", 29.0), ("C", 33.3)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label, path_length_mm=120.0,
+                transit_time_us=transit)
+        return test
+
+    # --------------------------------------------- m/s display standard
+    def test_velocity_tables_print_ms_two_decimals_no_commas(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn("PULSE VELOCITY (M/S)", text)
+        # 250 mm / 62.5 us = 4000.00 m/s — two decimals, never a comma.
+        self.assertIn("4000.00", text)
+        self.assertNotIn("4,000", text)
+
+    # -------------------------------------- averaging method + example
+    def test_averaging_is_mean_of_point_velocities_with_worked_example(self):
+        self._multi_point_test()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # Per-point velocities: 120/30, 120/29, 120/33.3 us.
+        self.assertIn("4000.00", flat)
+        self.assertIn("4137.93", flat)
+        self.assertIn("3603.60", flat)
+        # Element verdict = MEAN of the point velocities = 3913.84 m/s
+        # (not the velocity of the mean transit time — that is the manual
+        # vs system arithmetic the client asked to reconcile).
+        self.assertIn("3913.84", flat)
+        # f_cu = 8.961 x 3.914 - 7.97 = 27.10 N/mm2, shown to 2 decimals.
+        self.assertIn("27.10", flat)
+        # The method statement and the worked example are both printed.
+        self.assertIn("V(element) = (V1 + V2 + ... + Vn) / n", flat)
+        self.assertIn("Worked example", flat)
+
+    def test_point_spread_disclosed_when_points_disagree(self):
+        self._multi_point_test()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # max-min = 534 m/s (13.6% of the mean) — flagged, not averaged away.
+        self.assertIn("POINT SPREAD 534 M/S", flat)
+
+    # ------------------------------------- crack depth before velocity
+    def test_crack_depth_analysis_precedes_velocity_tables(self):
+        from apps.digital_eye.models import PUNDITReading
+        crack = self.make_test(self.project, self.device,
+                               test_type="crack_depth",
+                               structural_element="SLAB-S3",
+                               floor="Ground Floor",
+                               crack_path_length_mm=300.0)
+        for label, (tc, t0) in zip("ABC", ((70.0, 62.5), (75.0, 62.5),
+                                           (80.0, 62.5))):
+            PUNDITReading.objects.create(
+                test=crack, point_label=label, path_length_mm=300.0,
+                transit_time_us=tc, uncracked_transit_time_us=t0)
+        mean_depth = crack.element_mean_crack_depth_mm()
+        crack.crack_depth_mm = mean_depth
+        crack.estimated_crack_depth_mm = mean_depth
+        crack.save()
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        crack_pos = flat.find("CRACK DEPTH MEASUREMENTS")
+        velocity_pos = flat.find("PULSE VELOCITY (M/S)")
+        self.assertGreater(crack_pos, 0)
+        self.assertGreater(velocity_pos, 0)
+        self.assertLess(crack_pos, velocity_pos)
+
+    # ------------------------------------------- concrete maturity note
+    def test_concrete_age_note_only_when_recorded(self):
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       concrete_age_days=28)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("recorded as 28 days", flat)
+        self.assertIn("Strength gain beyond 28 days is minimal", flat)
+
+        # A second project without recorded ages prints no maturity note.
+        bare = self.make_project(name="No Age Recorded Project")
+        self.make_test(bare, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        bare_flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(bare)).split())
+        self.assertNotIn("age of the concrete at the time of test",
+                         bare_flat)
+
+    # ------------------------------------------------ per-floor plans
+    @staticmethod
+    def _quad(x, y, z, w=2.0, d=3.0):
+        return ([x, y, z, x + w, y, z, x + w, y + d, z, x, y + d, z],
+                [0, 1, 2, 0, 2, 3])
+
+    def _import_two_level_model(self):
+        from apps.digital_eye.models import (BIMElementMapping,
+                                             BIMModelGeometry)
+        v0, f0 = self._quad(0.0, 0.0, 0.0)
+        v1, f1 = self._quad(0.0, 0.0, 3.6)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file="levels.ifc", element_count=2,
+            elements=[
+                {"guid": "G-SLAB-G", "name": "Ground slab",
+                 "type": "IfcSlab", "verts": v0, "faces": f0},
+                {"guid": "G-SLAB-1", "name": "First floor slab",
+                 "type": "IfcSlab", "verts": v1, "faces": f1},
+            ])
+        for guid, level in (("G-SLAB-G", "Ground Floor"),
+                            ("G-SLAB-1", "First Floor")):
+            BIMElementMapping.objects.create(
+                project=self.project, bim_guid=guid, element_id=guid,
+                element_name=f"{level} slab", element_type="IfcSlab",
+                level=level, source="ifc_upload")
+
+    def test_per_floor_plan_pages_render_per_tested_floor(self):
+        self._import_two_level_model()
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-101", floor="First Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The appendix TOC registers the per-floor pages (title case, like
+        # the reference's lettered appendix entries).
+        self.assertIn("Floor Plans", flat)
+        # One labelled page per tested floor, captioned with the level the
+        # elements were grouped by.
+        self.assertIn('level "Ground Floor"', flat)
+        self.assertIn('level "First Floor"', flat)
+
+    def test_no_floor_plan_pages_without_level_mappings(self):
+        # Geometry whose elements carry no recorded levels cannot be split
+        # honestly — the whole-model plan stands and no floor pages appear.
+        from apps.digital_eye.models import BIMModelGeometry
+        v0, f0 = self._quad(0.0, 0.0, 0.0)
+        v1, f1 = self._quad(0.0, 0.0, 3.6)
+        BIMModelGeometry.objects.create(
+            project=self.project, source_file="no-levels.ifc",
+            element_count=2,
+            elements=[
+                {"guid": "X1", "name": "A", "type": "IfcSlab",
+                 "verts": v0, "faces": f0},
+                {"guid": "X2", "name": "B", "type": "IfcSlab",
+                 "verts": v1, "faces": f1},
+            ])
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn("Floor Plans", flat)
+        self.assertNotIn('level "', flat)
+
+    # --------------------------------------- AI analysis in the PDF
+    def _ai_record(self, **kwargs):
+        from apps.evidence.models import AIAnalysisRecord
+        defaults = dict(
+            project=self.project, analysis_type="pundit",
+            observations=[
+                "Ground Floor: COL-G01 shows a mean pulse velocity of "
+                "3913.84 m/s, within the good concrete band.",
+                "The 534 m/s point spread on COL-G01 warrants a retest at "
+                "additional stations per ACI 228.2R.",
+            ],
+            recommendations=[{
+                "recommendation": "Retest COL-G01 at three further stations.",
+                "priority": "Routine",
+            }],
+            model_provider="gemini", model_version="gemini-3.5-flash-lite",
+            confidence=0.93,
+        )
+        defaults.update(kwargs)
+        return AIAnalysisRecord.objects.create(**defaults)
+
+    def test_ai_narrative_is_embedded_as_decision_support(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self._ai_record()
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The section exists, after the measurement tables it interprets.
+        self.assertIn("AI-ASSISTED INTERPRETATION", flat)
+        self.assertLess(flat.find("PULSE VELOCITY (M/S)"),
+                        flat.find("AI-ASSISTED INTERPRETATION"))
+        # The narrative itself, verbatim.
+        self.assertIn("3913.84 m/s, within the good concrete band", flat)
+        self.assertIn("warrants a retest", flat)
+        # Provider, model and the evidence-based confidence are disclosed.
+        # The phrase is asserted in two halves — a page break can land inside
+        # it and the extracted text then carries the running footer between
+        # the halves ("evidence-based 12 MTL/NDT/2026 7298 confidence").
+        self.assertIn("synthesised by gemini (gemini-3.5-flash-lite)", flat)
+        self.assertIn("evidence-based", flat)
+        self.assertIn("confidence of 93%", flat)
+        # The sign-off caveat — the professional, not the AI, owns the report.
+        self.assertIn("decision support for the responsible engineer", flat)
+
+    def test_deterministic_only_analysis_prints_no_ai_section(self):
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        self._ai_record(model_provider="deterministic",
+                        model_version="BS 1881-203 / ASTM C597 v1",
+                        confidence=None)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)
+
+
+# ======================================================================
+# Report CMS + Word export (8 Sep 2026 review meeting, item H7; 4 Sep
+# register C4/C5): password-protected editable template sections and the
+# .docx edition of the statutory NDT report.
+# ======================================================================
+
+from django.contrib.auth.hashers import check_password
+
+from apps.reports.models import ReportCMSPassword, ReportSectionOverride
+
+
+class ReportCMSBase(NDTReportFixtureMixin, APITestCase):
+    """Superuser Director + plain non-Director + a real PUNDIT test."""
+
+    def setUp(self):
+        self.director = User.objects.create_superuser(
+            username="cms_director@nexucon.com",
+            email="cms_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="cms_viewer@nexucon.com",
+            email="cms_viewer@nexucon.com", password="Password123!")
+        self._as(self.director)
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _set_password(self, new="CmsSecretPass-9", current=None):
+        payload = {"new_password": new}
+        if current is not None:
+            payload["current_password"] = current
+        return self.client.post(reverse("report-cms-password"), payload,
+                                format="json")
+
+    def _save_section(self, key, body, project=None, password="CmsSecretPass-9"):
+        payload = {"body": body, "cms_password": password}
+        if project is not None:
+            payload["project"] = str(project.id)
+        return self.client.put(reverse("report-cms-section", kwargs={"key": key}),
+                               payload, format="json")
+
+    def _sections(self, project=None):
+        url = reverse("report-cms-sections")
+        if project is not None:
+            # Accept a Project row or a raw id string — never str(Project),
+            # which is the display name.
+            pid = project.id if hasattr(project, "id") else project
+            url += f"?project={pid}"
+        return self.client.get(url)
+
+
+class ReportCMSPasswordTests(ReportCMSBase):
+
+    def test_only_directors_can_set_the_password(self):
+        self._as(self.viewer)
+        response = self._set_password()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ReportCMSPassword.objects.exists())
+
+    def test_password_minimum_length_enforced(self):
+        response = self._set_password(new="short")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(ReportCMSPassword.objects.exists())
+
+    def test_set_then_change_password(self):
+        self.assertEqual(self._set_password().status_code, 200)
+        self.assertTrue(ReportCMSPassword.objects.exists())
+        # The stored value is a hash, never the plaintext.
+        credential = ReportCMSPassword.objects.first()
+        self.assertNotEqual(credential.password_hash, "CmsSecretPass-9")
+        self.assertTrue(check_password("CmsSecretPass-9",
+                                       credential.password_hash))
+        # Changing requires the current password.
+        response = self._set_password(new="NewSecretPass-11", current="wrong")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self._set_password(new="NewSecretPass-11",
+                                      current="CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(check_password("NewSecretPass-11",
+                                       ReportCMSPassword.objects.first()
+                                       .password_hash))
+
+
+class ReportCMSSectionTests(ReportCMSBase):
+
+    def test_sections_list_shows_every_registry_section_default(self):
+        from apps.reports.report_cms import CMS_SECTIONS
+        response = self._sections()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sections = {s["key"]: s for s in response.data["sections"]}
+        self.assertEqual(set(sections), set(CMS_SECTIONS))
+        # Static sections show their registry default; generated-content
+        # sections have no body without a project to compute from, so they
+        # resolve to the honest 'unavailable' lock instead.
+        static = {k for k, m in CMS_SECTIONS.items() if not m.get("computed")}
+        self.assertTrue(all(sections[k]["source"] == "default"
+                            for k in static))
+        self.assertTrue(all(sections[k]["source"] == "unavailable"
+                            for k in set(CMS_SECTIONS) - static))
+        self.assertFalse(response.data["password_set"])
+
+    def test_sections_list_scoped_project_404_for_unknown(self):
+        response = self._sections(project=uuid.uuid4())
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_edit_blocked_before_any_password_is_set(self):
+        response = self._save_section("introduction", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("No report-CMS password", response.data["detail"])
+
+    def test_edit_blocked_for_non_director_even_with_password(self):
+        self._set_password()
+        self._as(self.viewer)
+        response = self._save_section("introduction", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_edit_blocked_with_wrong_password(self):
+        self._set_password()
+        response = self._save_section("introduction", "Override body.",
+                                      password="wrong-password")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unknown_section_key_rejected(self):
+        self._set_password()
+        response = self._save_section("no_such_section", "Override body.")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_uuid_project_value_is_a_404_not_a_500(self):
+        # A client sending a project name (or any non-UUID) must get a clean
+        # 404, never an unhandled UUID-parse 500.
+        self._set_password()
+        response = self.client.put(
+            reverse("report-cms-section", kwargs={"key": "introduction"}),
+            {"body": "Override body.", "cms_password": "CmsSecretPass-9",
+             "project": "Marina NDT Test Project (not a uuid)"},
+            format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        response = self._sections(project="not-a-uuid")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_empty_body_rejected(self):
+        self._set_password()
+        response = self._save_section("introduction", "   ")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_project_override_beats_platform_override_beats_default(self):
+        self._set_password()
+        # Platform-wide override first.
+        response = self._save_section(
+            "introduction", "PLATFORM OVERRIDE TEXT 7Q4", project=None)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "platform_override")
+        # A project override wins for its project.
+        response = self._save_section(
+            "introduction", "PROJECT OVERRIDE TEXT 9Z6", project=self.project)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "project_override")
+        # Resolution through the list endpoint mirrors it.
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction"]["body"],
+                         "PROJECT OVERRIDE TEXT 9Z6")
+        self.assertEqual(sections["introduction"]["source"],
+                         "project_override")
+        # Without the project query the platform override shows.
+        sections = {s["key"]: s
+                    for s in self._sections().data["sections"]}
+        self.assertEqual(sections["introduction"]["body"],
+                         "PLATFORM OVERRIDE TEXT 7Q4")
+        # Reverting the project override falls back to the platform one.
+        response = self.client.delete(
+            reverse("report-cms-section", kwargs={"key": "introduction"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "platform_override")
+        # Reverting the platform override falls back to the default.
+        response = self.client.delete(
+            reverse("report-cms-section", kwargs={"key": "introduction"})
+            + "?cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "default")
+        self.assertEqual(
+            ReportSectionOverride.objects.count(), 0)
+
+    def test_override_changes_are_audit_logged(self):
+        from apps.audit.models import AuditEvent
+        self._set_password()
+        self._save_section("purpose_items",
+                           "First custom purpose.\nSecond custom purpose.")
+        self.assertTrue(
+            AuditEvent.objects.filter(
+                action="report_cms_section_saved",
+                resource_type="ReportSectionOverride").exists())
+
+    def test_override_reaches_the_generated_pdf(self):
+        self._set_password()
+        self._save_section(
+            "introduction",
+            "CMS INTRODUCTION SENTENCE XQ77 for the statutory dossier.",
+            project=self.project)
+        self._save_section(
+            "purpose_items",
+            "Custom CMS purpose item one.\nCustom CMS purpose item two.",
+            project=self.project)
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("CMS INTRODUCTION SENTENCE XQ77", flat)
+        self.assertIn("Custom CMS purpose item one.", flat)
+        self.assertIn("Custom CMS purpose item two.", flat)
+        # The replaced default wording is gone.
+        self.assertNotIn("As a result, indirect method was used.", flat)
+        self.assertNotIn("To comply with government", flat)
+
+
+class ReportCMSComputedSectionTests(ReportCMSBase):
+    """
+    Generated-content sections (11 Sep client request): the wording the
+    report computes from the project's recorded data arrives pre-filled in
+    the CMS, is editable per project, and stays honestly locked when no
+    recorded data backs it.
+    """
+
+    def test_sections_list_without_project_shows_computed_keys_unavailable(self):
+        from apps.reports.report_cms import CMS_SECTIONS
+        response = self._sections()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sections = {s["key"]: s for s in response.data["sections"]}
+        computed_keys = {k for k, m in CMS_SECTIONS.items()
+                         if m.get("computed")}
+        self.assertEqual(
+            computed_keys,
+            {"report_reference", "executive_summary", "introduction_project",
+             "visual_observations", "methodology_equipment",
+             "rebar_statement", "findings_statement",
+             "conclusion_items"})
+        for key in computed_keys:
+            self.assertTrue(sections[key]["computed"])
+            self.assertTrue(sections[key]["requires_project"])
+            # Without a project there is no computed body — honest lock,
+            # never a fabricated one.
+            self.assertEqual(sections[key]["source"], "unavailable")
+            self.assertIsNone(sections[key]["body"])
+            self.assertIsNone(sections[key]["default"])
+        # Static sections still resolve to their defaults.
+        self.assertEqual(sections["introduction"]["source"], "default")
+        self.assertIn("Non-Destructive Test (NDT), as the name implies",
+                      sections["introduction"]["body"])
+
+    def test_sections_list_scoped_to_project_pre_fills_generated_wording(self):
+        from apps.digital_eye.models import RebarTest
+        RebarTest.objects.create(
+            project=self.project, structural_element="COL-R01",
+            test_location="Ground Floor", main_bar_mm=16.0,
+            links_mm=8.0, spacing_mm="200", cover_depth_mm=25.0)
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C25", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       notes="Hairline crack observed at the beam-column "
+                             "junction")
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        # The exact wording the report will print, pre-filled.
+        for key in ("executive_summary", "introduction_project",
+                    "visual_observations", "methodology_equipment",
+                    "rebar_statement", "findings_statement",
+                    "conclusion_items"):
+            self.assertEqual(sections[key]["source"], "computed",
+                             f"{key} should resolve to its computed body")
+            self.assertTrue(sections[key]["body"])
+        self.assertIn("Marina NDT Test Project",
+                      sections["executive_summary"]["body"])
+        self.assertIn("Hairline crack observed",
+                      sections["visual_observations"]["body"])
+        self.assertIn("Profoscope",
+                      sections["methodology_equipment"]["body"])
+        self.assertIn("cover depth of the reinforcement",
+                      sections["rebar_statement"]["body"])
+        # setUp's COL-C24 test plus this COL-C25 test => 2 members, both
+        # good (both 4.0 km/s -> 27.9 N/mm2 >= 25).
+        self.assertIn("2 of the 2 structural members tested",
+                      sections["executive_summary"]["body"])
+
+    def test_sections_without_backing_data_stay_unavailable(self):
+        # No visual observation notes and no rebar survey were recorded —
+        # those sections must show no editable body, honestly.
+        self.make_test(self.project, self.device,
+                       structural_element="COL-C24",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["visual_observations"]["source"],
+                         "unavailable")
+        self.assertIsNone(sections["visual_observations"]["body"])
+        self.assertEqual(sections["rebar_statement"]["source"],
+                         "unavailable")
+        self.assertIsNone(sections["rebar_statement"]["body"])
+        # Sections whose data exists remain computed.
+        self.assertEqual(sections["executive_summary"]["source"],
+                         "computed")
+
+    def test_computed_section_save_requires_a_project(self):
+        self._set_password()
+        response = self._save_section(
+            "executive_summary", "Reworded executive summary.",
+            project=None)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("project-specific", response.data["detail"])
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                section_key="executive_summary").exists())
+
+    def test_computed_section_save_refused_without_backing_data(self):
+        self._set_password()
+        # A fresh project with no recorded data at all.
+        empty = self.make_project(name="Empty NDT Project")
+        response = self._save_section(
+            "executive_summary", "Invented summary text.", project=empty)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("No recorded data backs this section",
+                      response.data["detail"])
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                section_key="executive_summary").exists())
+
+    def test_computed_section_project_override_reaches_pdf_and_reverts(self):
+        self._set_password()
+        response = self._save_section(
+            "executive_summary",
+            "COMPUTED OVERRIDE SUMMARY KQ31 — reworded before generating.",
+            project=self.project)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "project_override")
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("COMPUTED OVERRIDE SUMMARY KQ31", flat)
+        # The computed wording it replaced is gone.
+        self.assertNotIn("In situ Integrity Test (Non-Destructive)",
+                         flat)
+        # Reverting returns the computed wording, not null.
+        response = self.client.delete(
+            reverse("report-cms-section",
+                    kwargs={"key": "executive_summary"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "computed")
+        self.assertIn("In situ Integrity Test",
+                      response.data["body"])
+        self.assertIn("Marina NDT Test Project", response.data["body"])
+
+    def test_computed_section_delete_requires_a_project(self):
+        self._set_password()
+        response = self.client.delete(
+            reverse("report-cms-section",
+                    kwargs={"key": "executive_summary"})
+            + "?cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("project-specific", response.data["detail"])
+
+    def test_computed_section_override_isolates_projects(self):
+        self._set_password()
+        other = self.make_project(name="Second NDT Project")
+        self._save_section(
+            "introduction_project",
+            "ISOLATED INTRO PJ61 — project two only.",
+            project=other)
+        sections = {s["key"]: s
+                    for s in self._sections(project=other)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction_project"]["body"],
+                         "ISOLATED INTRO PJ61 — project two only.")
+        # The first project is untouched — its computed wording stands.
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        self.assertEqual(sections["introduction_project"]["source"],
+                         "computed")
+        self.assertIn("Mandatory Non-Destructive Test",
+                      sections["introduction_project"]["body"])
+        # No platform-wide row was created for a computed section.
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                project__isnull=True,
+                section_key="introduction_project").exists())
+
+    def test_computed_section_override_reaches_word_export(self):
+        self._set_password()
+        # The backing observation must exist BEFORE the override is saved —
+        # the PUT refuses to edit a section with no recorded data behind it.
+        self.make_test(self.project, self.device,
+                       structural_element="COL-V01",
+                       notes="Crack at column base")
+        self._save_section(
+            "visual_observations", "OBSERVED ITEM WR88 in the Word copy.",
+            project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = NDTWordExportTests._full_docx_text(self, response.content)
+        self.assertIn("OBSERVED ITEM WR88 in the Word copy.", text)
+
+
+class ReportCMSReferenceSectionTests(ReportCMSBase):
+    """
+    The report reference (11 Sep client request): the deterministic
+    "NNNN / MTL/NDT/YYYY" serial is a generated-content section — pre-filled
+    with the number the report will print, editable per project to match the
+    laboratory's official numbering, honoured by the PDF, the archive and
+    the Word export alike.
+    """
+
+    def test_reference_pre_filled_with_deterministic_serial(self):
+        from apps.digital_eye.models import PUNDITTest
+        tests = list(PUNDITTest.objects.filter(project=self.project))
+        expected = NDTReportService._report_number(self.project, tests)[0]
+        sections = {s["key"]: s
+                    for s in self._sections(project=self.project)
+                    .data["sections"]}
+        ref = sections["report_reference"]
+        self.assertEqual(ref["source"], "computed")
+        self.assertEqual(ref["kind"], "line")
+        self.assertEqual(ref["body"], expected)
+        self.assertRegex(ref["body"], r"^\d{4} / MTL/NDT/\d{4}$")
+        # Per-project like every generated-content section: no body without
+        # a project selection.
+        sections = {s["key"]: s for s in self._sections().data["sections"]}
+        self.assertEqual(sections["report_reference"]["source"],
+                         "unavailable")
+        self.assertIsNone(sections["report_reference"]["body"])
+
+    def test_reference_override_reaches_pdf_and_archive(self):
+        from apps.digital_eye.models import PUNDITTest
+        from apps.reports.models import ArchivedReport
+        self._set_password()
+        response = self._save_section(
+            "report_reference", "0420 / MTL/NDT/2027", project=self.project)
+        self.assertEqual(response.status_code, 200, msg=str(response.data))
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The overridden serial and laboratory reference both print, and
+        # the deterministic number no longer does.
+        self.assertIn("0420", flat)
+        self.assertIn("MTL/NDT/2027", flat)
+        self.assertNotIn("MTL/NDT/2026", flat)
+        # The archive records the same effective reference and digests it.
+        pdf = NDTReportService.generate_ndt_report(self.project)
+        archived = NDTReportService.archive_ndt_report(
+            self.project, self.director, pdf)
+        self.assertEqual(archived.report_reference, "0420 / MTL/NDT/2027")
+        tests = list(PUNDITTest.objects.filter(project=self.project))
+        self.assertEqual(
+            archived.content_key,
+            NDTReportService._statutory_digest(
+                self.project, tests, "0420 / MTL/NDT/2027"))
+
+    def test_reference_revert_returns_computed_serial(self):
+        from apps.digital_eye.models import PUNDITTest
+        self._set_password()
+        self._save_section("report_reference", "0420 / MTL/NDT/2027",
+                           project=self.project)
+        response = self.client.delete(
+            reverse("report-cms-section",
+                    kwargs={"key": "report_reference"})
+            + f"?project={self.project.id}&cms_password=CmsSecretPass-9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["source"], "computed")
+        tests = list(PUNDITTest.objects.filter(project=self.project))
+        self.assertEqual(response.data["body"],
+                         NDTReportService._report_number(self.project,
+                                                         tests)[0])
+
+    def test_reference_rejects_wrong_shape(self):
+        self._set_password()
+        response = self._save_section(
+            "report_reference", "0420", project=self.project)
+        self.assertEqual(response.status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertIn("NNNN / MTL/NDT/YYYY", response.data["detail"])
+        response = self._save_section(
+            "report_reference", "0420 /\nMTL/NDT/2027", project=self.project)
+        self.assertEqual(response.status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertIn("single line", response.data["detail"])
+        # 12 Sep 2026: the lab spelling is NDT, not NDR — a loose " / "
+        # check let this typo onto a statutory document (and its QR).
+        response = self._save_section(
+            "report_reference", "2099 / MTL/NDR/2027", project=self.project)
+        self.assertEqual(response.status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertIn("NNNN / MTL/NDT/YYYY", response.data["detail"])
+        self.assertFalse(
+            ReportSectionOverride.objects.filter(
+                section_key="report_reference").exists())
+
+    def test_reference_override_reaches_word_export(self):
+        self._set_password()
+        self._save_section("report_reference", "0420 / MTL/NDT/2027",
+                           project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = NDTWordExportTests._full_docx_text(self, response.content)
+        self.assertIn("0420 / MTL/NDT/2027", text)
+
+
+class NDTWordExportTests(ReportCMSBase):
+
+    def _full_docx_text(self, data):
+        from docx import Document as DocxDocument
+        document = DocxDocument(io.BytesIO(data))
+        parts = [p.text for p in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                parts.extend(cell.text for cell in row.cells)
+        return "\n".join(parts)
+
+    def test_word_export_streams_docx_with_real_values(self):
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            "wordprocessingml.document", response["Content-Type"])
+        self.assertIn("ndt_report_", response["Content-Disposition"])
+        # A .docx is a zip archive.
+        self.assertTrue(response.content.startswith(b"PK"))
+        text = self._full_docx_text(response.content)
+        # Real project data, not placeholders: 250 mm / 62.5 us = 4000.00
+        # m/s -> f_cu = 8.961*4.0 - 7.97 = 27.9 N/mm2 (GOOD at 25 N/mm2).
+        self.assertIn("Marina NDT Test Project", text)
+        self.assertIn("4000.00", text)
+        self.assertIn("27.9", text)
+        self.assertIn("GOOD", text)
+        self.assertIn("UPV = L / t", text)
+        # The editable-copy disclosure is present.
+        self.assertIn("editable working copy", text)
+
+    def test_word_export_respects_cms_overrides(self):
+        self._set_password()
+        self._save_section(
+            "introduction", "WORD CMS SENTENCE WD42 override.",
+            project=self.project)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = self._full_docx_text(response.content)
+        self.assertIn("WORD CMS SENTENCE WD42 override.", text)
+        self.assertNotIn("As a result, indirect method was used.", text)
+
+    def test_word_export_out_of_scope_project_404(self):
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_word_export_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+# ===========================================================================
+# REFINED EXECUTIVE SUMMARY (11 Sep 2026) — honest AI confidence metrics,
+# cover QR + public verification, preview-before-generate, per-project
+# branding, interactive-map data, Lagos State cover line, rebar wording.
+# ===========================================================================
+import json  # noqa: E402
+
+from django.core.files.uploadedfile import SimpleUploadedFile  # noqa: E402
+
+
+class ConfidenceMetricsUnitTests(TestCase):
+    """Pure-function tests for apps.digital_eye.confidence_metrics."""
+
+    def test_ci_from_curve_standard_error(self):
+        from apps.digital_eye.confidence_metrics import (
+            strength_confidence_interval, Z_95)
+        ci = strength_confidence_interval(27.8, 1.5)
+        self.assertAlmostEqual(ci[0], 27.8 - Z_95 * 1.5, places=9)
+        self.assertAlmostEqual(ci[1], 27.8 + Z_95 * 1.5, places=9)
+        # Missing inputs never produce an interval.
+        self.assertIsNone(strength_confidence_interval(None, 1.5))
+        self.assertIsNone(strength_confidence_interval(27.8, None))
+
+    def test_probability_below_design(self):
+        from apps.digital_eye.confidence_metrics import (
+            probability_below_design)
+        # Estimate far above 25 -> tiny probability.
+        self.assertLess(probability_below_design(35.0, 1.0), 0.001)
+        # Estimate far below 25 -> near-certain.
+        self.assertGreater(probability_below_design(10.0, 1.0), 0.999)
+        # Estimate exactly at the design strength -> 50%.
+        self.assertAlmostEqual(probability_below_design(25.0, 1.0), 0.5,
+                               places=3)
+        # No SE -> no fabricated probability.
+        self.assertIsNone(probability_below_design(25.0, None))
+
+    def test_data_quality_buckets(self):
+        from apps.digital_eye.confidence_metrics import data_quality_score
+        self.assertEqual(data_quality_score(3, 1.0)[0], 'HIGH')
+        self.assertEqual(data_quality_score(2, 3.0)[0], 'MEDIUM')
+        self.assertEqual(data_quality_score(2, 40.0)[0], 'LOW')
+        self.assertEqual(data_quality_score(1, None)[0], 'LOW')
+        label, reason = data_quality_score(0, None)
+        self.assertIsNone(label)
+        self.assertIn('no recorded test points', reason)
+
+    def test_cross_element_outliers(self):
+        from apps.digital_eye.confidence_metrics import cross_element_outliers
+        summaries = [
+            {'element': 'COL-A', 'floor': 'GF', 'mean_velocity_m_s': 3900.0},
+            {'element': 'COL-B', 'floor': 'GF', 'mean_velocity_m_s': 3950.0},
+            {'element': 'COL-C', 'floor': 'GF', 'mean_velocity_m_s': 3920.0},
+            {'element': 'COL-D', 'floor': 'GF', 'mean_velocity_m_s': 700.0},
+        ]
+        outliers = cross_element_outliers(summaries)
+        self.assertEqual(len(outliers), 1)
+        flag = list(outliers.values())[0]
+        self.assertEqual(flag['element'], 'COL-D')
+        self.assertEqual(flag['peer_median_m_s'], 3920.0)
+        self.assertLess(flag['deviation_pct'], -80.0)
+        # A consistent set has no outliers.
+        consistent = [dict(s, mean_velocity_m_s=3900.0 + i * 10)
+                      for i, s in enumerate(summaries)]
+        self.assertEqual(cross_element_outliers(consistent), {})
+
+    def test_reasoning_trace_cites_the_data(self):
+        from apps.digital_eye.confidence_metrics import reasoning_trace
+        summary = {
+            'element': 'COL-C24',
+            'point_velocities_m_s': [3986.0, 4026.0, 3960.0],
+            'mean_velocity_m_s': 3990.7,
+            'mean_ecs_n_mm2': 27.8,
+        }
+        trace = reasoning_trace(
+            summary, se_mpa=1.5,
+            ci=(24.9, 30.7), p_below=0.162,
+            quality=('HIGH', '3 points, spread 1.7%'))
+        joined = ' '.join(trace)
+        self.assertIn('3986', joined)      # the recorded point velocities
+        self.assertIn('3991', joined)      # the mean velocity, cited
+        self.assertIn('27.8', joined)      # the strength estimate
+        self.assertIn('24.9', joined)      # the interval lower bound
+        self.assertIn('30.7', joined)      # the interval upper bound
+        self.assertIn('16.2%', joined)     # the probability below design
+        self.assertIn('HIGH', joined)      # the quality verdict
+        # Missing SE is disclosed honestly, never invented.
+        trace = reasoning_trace(summary)
+        self.assertTrue(any('No confidence interval available' in t
+                            for t in trace))
+
+    def test_curve_standard_error_none_without_regression(self):
+        from apps.digital_eye.confidence_metrics import (
+            curve_standard_error_mpa)
+        # No regression-fitted curve seeded -> the laboratory default
+        # carries no standard error -> honestly None.
+        self.assertIsNone(curve_standard_error_mpa(None))
+
+
+class AIConfidenceMetricsIntegrationTests(NDTReportFixtureMixin, TestCase):
+    """analyze_project stores the per-element confidence metrics."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        t = self.make_test(self.project, self.device,
+                           structural_element="COL-C24", floor="Ground Floor",
+                           path_length_mm=200.0, pulse_time_us=50.0,
+                           latitude=6.4281, longitude=3.4219)
+        # Three consistent readings -> ~4.0 km/s, spread under 1%.
+        for label, tt in (('A', 50.0), ('B', 50.2), ('C', 49.8)):
+            PUNDITReading.objects.create(
+                test=t, point_label=label, path_length_mm=200.0,
+                transit_time_us=tt)
+
+    def test_analyze_project_stores_confidence_metrics(self):
+        from apps.digital_eye.adapters import PUNDITAdapter
+        record = PUNDITAdapter.analyze_project(self.project)
+        metrics = record.correlations
+        self.assertEqual(len(metrics), 1)
+        m = metrics[0]
+        for key in ('confidence_interval_n_mm2', 'probability_below_design',
+                    'data_quality', 'cross_element_outlier',
+                    'reasoning_trace'):
+            self.assertIn(key, m)
+        # Without a regression-fitted curve there is honestly no interval.
+        self.assertIsNone(m['confidence_interval_n_mm2'])
+        self.assertIsNone(m['probability_below_design'])
+        # But the quality score and reasoning trace come from real data.
+        self.assertEqual(m['data_quality']['label'], 'HIGH')
+        self.assertTrue(any('4000' in step for step in m['reasoning_trace']))
+
+
+class ReportQrAndCoverTests(NDTReportFixtureMixin, TestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+
+    def test_cover_qr_png_renders(self):
+        from apps.reports.ndt_reports import _cover_qr_png
+        buf = _cover_qr_png('https://nexucon.net/verify/report/?ref=X&digest=Y')
+        self.assertIsNotNone(buf)
+        self.assertGreater(len(buf.getvalue()), 100)
+
+    def test_verification_url_uses_frontend_setting(self):
+        from apps.reports.ndt_reports import report_verification_url
+        with override_settings(FRONTEND_URL='https://nexucon.net/'):
+            url = report_verification_url('0481 / MTL/NDT/2026', 'abc123')
+        self.assertTrue(url.startswith('https://nexucon.net/verify/report/'))
+        self.assertIn('digest=abc123', url)
+
+    def test_cover_lagos_state_own_line(self):
+        # LAGOS STATE prints on its own clear line of the cover (page 1),
+        # from the recorded state — not sharing the site-address line.
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        pages = _pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split('\n')
+        cover = ' '.join(pages[0].split())
+        self.assertIn('LAGOS STATE', cover)
+        self.assertIn('12 MARINA ROAD, LAGOS ISLAND, LAGOS ISLAND', cover)
+
+    def test_rebar_not_applicable_wording(self):
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn('Rebar Assessment: Not Applicable', text)
+
+
+class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                                APITestCase):
+    """Public verification of archived dossiers (the cover QR target)."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        pdf = NDTReportService.generate_ndt_report(self.project)
+        self.archive = NDTReportService.archive_ndt_report(
+            self.project, None, pdf)
+        self.client.credentials()  # deliberately public — no auth at all
+
+    def test_verify_with_valid_ref_and_digest(self):
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['verified'])
+        self.assertEqual(response.data['report_reference'],
+                         self.archive.report_reference)
+        self.assertEqual(response.data['sha256_checksum'],
+                         self.archive.sha256_checksum)
+        self.assertEqual(response.data['test_count'], 1)
+        self.assertEqual(response.data['assessed_count'], 1)
+
+    def test_verify_rejects_tampered_digest(self):
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': self.archive.report_reference,
+             'digest': 'f' * 64})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data['verified'])
+
+    def test_verify_requires_both_params(self):
+        response = self.client.get(reverse('report-verify'),
+                                   {'ref': self.archive.report_reference})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_verify_discloses_no_project_data(self):
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key})
+        raw = json.dumps(response.data, default=str)
+        self.assertNotIn('Marina', raw)          # project name
+        self.assertNotIn('Lagos Island', raw)    # site address / LGA
+
+    # ---- public download of the authentic original (12 Sep 2026) ----
+    def test_download_original_with_valid_ref_and_digest(self):
+        response = self.client.get(
+            reverse('report-verify-download'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.content.startswith(b'%PDF'))
+        # The exact archived bytes — byte-for-byte the sealed original.
+        self.archive.file.open('rb')
+        try:
+            self.assertEqual(response.content, self.archive.file.read())
+        finally:
+            self.archive.file.close()
+
+    def test_download_rejects_tampered_digest(self):
+        # A holder of an edited document does not carry the matching digest
+        # — they get an honest 404, never the original.
+        response = self.client.get(
+            reverse('report-verify-download'),
+            {'ref': self.archive.report_reference,
+             'digest': 'f' * 64})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data['verified'])
+
+    def test_download_requires_both_params(self):
+        response = self.client.get(reverse('report-verify-download'),
+                                   {'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class NDTReportPreviewTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                            APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_superuser(
+            username="previewer@nexucon.com",
+            email="previewer@nexucon.com", password="Password123!")
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+
+    def test_preview_streams_pdf_without_archiving(self):
+        before = ArchivedReport.objects.count()
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('PREVIEW', response['Content-Disposition'])
+        self.assertTrue(response.content.startswith(b'%PDF'))
+        self.assertEqual(ArchivedReport.objects.count(), before)
+
+    def test_preview_matches_generated_report(self):
+        # Same service, same content: the preview is exactly the document
+        # the generate endpoint will produce (same digest basis).
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = ' '.join(_pdf_text(response.content).split())
+        self.assertIn('PULSE VELOCITY', text)
+        self.assertIn('COL-C24', text)
+        self.assertIn('REPORT INTEGRITY', text)
+
+    def test_preview_out_of_scope_404(self):
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_preview_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse('project-ndt-report-preview',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # --------------------------- §2.1 preview sidebar bundle (15 Sep 2026)
+    def test_preview_sections_bundle(self):
+        # One render pass returns the sidebar map, the page count and the
+        # exact PDF — so the sidebar can never describe a different
+        # document than the one it navigates.
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        sections = response.data['sections']
+        # The wireframe's 14 entries in wireframe order — minus the ones
+        # this fixture's render honestly skips (no LLM-backed AI record,
+        # so no 'AI Interpretation').
+        self.assertEqual(
+            [s['key'] for s in sections],
+            ['cover_page', 'executive_summary', '1.0', '2.0', '3.0',
+             '3.1', '4.0', '4.1', '4.2', '5.0', '6.0', '7.0', 'APPENDIX'])
+        self.assertEqual(sections[0]['label'], 'Cover Page')
+        self.assertEqual(sections[0]['page'], 1)
+        pages = [s['page'] for s in sections]
+        self.assertEqual(pages, sorted(pages),
+                         'sidebar pages must be non-decreasing in order')
+        self.assertGreaterEqual(response.data['page_count'], pages[-1])
+        # The bundled document is the same preview the PDF endpoint streams.
+        import base64
+        pdf_bytes = base64.b64decode(response.data['pdf_base64'])
+        self.assertTrue(pdf_bytes.startswith(b'%PDF'))
+
+    def test_preview_sections_ai_absent_honestly(self):
+        # No LLM-backed AI analysis record exists for this project, so the
+        # section is skipped in the render and must be absent from the
+        # sidebar — never a fabricated entry.
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('AI Interpretation',
+                         [s['label'] for s in response.data['sections']])
+
+    def test_preview_sections_ai_present_when_recorded(self):
+        from apps.evidence.models import AIAnalysisRecord
+        AIAnalysisRecord.objects.create(
+            project=self.project, analysis_type='pundit',
+            model_provider='gemini', model_version='gemini-2.0-flash',
+            confidence=0.9, observations=[
+                'Point A velocity is consistent with good-quality concrete.'])
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        labels = [s['label'] for s in response.data['sections']]
+        self.assertIn('AI Interpretation', labels)
+        # It sits between Analysis and Recommendations, as in the wireframe.
+        self.assertLess(labels.index('Analysis'), labels.index('AI Interpretation'))
+        self.assertLess(labels.index('AI Interpretation'),
+                        labels.index('Recommendations'))
+
+    def test_preview_sections_out_of_scope_404(self):
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_preview_sections_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse('project-ndt-report-preview-sections',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class ReportBrandingTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                          APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.director = User.objects.create_superuser(
+            username="branding_director@nexucon.com",
+            email="branding_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="branding_viewer@nexucon.com",
+            email="branding_viewer@nexucon.com", password="Password123!")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        # A real generated PNG — no fabricated file bytes on disk.
+        img = Image.new('RGBA', (40, 40), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        self.png = SimpleUploadedFile('logo.png', buf.getvalue(),
+                                      content_type='image/png')
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def test_get_unconfigured_branding(self):
+        self._as(self.director)
+        response = self.client.get(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {'branding_configured': False})
+
+    def test_branding_requires_director(self):
+        self._as(self.viewer)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_branding_roundtrip_and_removal(self):
+        self._as(self.director)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png, 'logo_position': 'top-right',
+             'logo_size': 'medium', 'watermark_opacity_pct': 60},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['branding_configured'])
+        self.assertEqual(response.data['logo_position'], 'top-right')
+        self.assertEqual(response.data['watermark_opacity_pct'], 60)
+        # GET reflects it.
+        response = self.client.get(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertTrue(response.data['branding_configured'])
+        self.assertIsNotNone(response.data['logo_url'])
+        # DELETE removes it entirely.
+        response = self.client.delete(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.data, {'branding_configured': False})
+        response = self.client.get(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.data, {'branding_configured': False})
+
+    def test_branding_rejects_bad_values(self):
+        self._as(self.director)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo_position': 'diagonal', 'watermark_opacity_pct': 150},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_branded_report_renders(self):
+        from apps.projects.models import Project
+        from apps.reports.models import ReportBranding
+        self._as(self.director)
+        # Baseline: the unbranded report's embedded-image count.
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        # A fresh project instance — the reverse one-to-one caches its
+        # miss on the model object, and self.project already resolved
+        # report_branding as absent while rendering the plain baseline.
+        fresh = Project.objects.get(pk=self.project.pk)
+        # The render picks the branding up and still produces a valid PDF —
+        # with the logo genuinely embedded (one more image XObject).
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertTrue(data.startswith(b'%PDF'))
+        self.assertEqual(_pdf_image_count(data), plain_images + 1)
+        row = ReportBranding.objects.get(project=self.project)
+        self.assertTrue(row.logo)
+
+    def test_cover_logo_replaces_default_and_hides(self):
+        """
+        Cover-logo dynamics (12 Sep 2026): an uploaded image replaces the
+        Lagos State coat of arms (same 1-image count on the cover — swap,
+        not add); the hide flag removes the cover logo entirely (one fewer
+        image than the default render).
+        """
+        from apps.projects.models import Project
+        from apps.reports.models import ReportBranding
+        self._as(self.director)
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        url = reverse('project-report-branding',
+                      kwargs={'project_id': self.project.id})
+
+        # 1) A custom cover logo replaces the default — still one image.
+        response = self.client.patch(
+            url, {'cover_logo': self.png}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertFalse(response.data['cover_logo_hidden'])
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertTrue(data.startswith(b'%PDF'))
+        self.assertEqual(_pdf_image_count(data), plain_images)
+        row = ReportBranding.objects.get(project=self.project)
+        self.assertTrue(row.cover_logo)
+
+        # 2) Hiding the cover logo removes it — one image fewer.
+        response = self.client.patch(url, {'cover_logo_hidden': True})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['cover_logo_hidden'])
+        self.assertIsNone(response.data['cover_logo_url'])
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertEqual(_pdf_image_count(data), plain_images - 1)
+
+        # 3) Re-uploading after hiding clears the flag and shows the image.
+        # (A fresh in-memory file — the first request consumed self.png.)
+        img = Image.new('RGBA', (40, 40), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        fresh_png = SimpleUploadedFile('logo2.png', buf.getvalue(),
+                                       content_type='image/png')
+        response = self.client.patch(
+            url, {'cover_logo': fresh_png}, format='multipart')
+        self.assertFalse(response.data['cover_logo_hidden'])
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertEqual(_pdf_image_count(data), plain_images)
+
+    def test_branded_report_renders_from_remote_storage(self):
+        """
+        Regression (11 Sep 2026): the render used ``logo.path``, which raises
+        NotImplementedError on remote storages (R2/S3) — the branding saved
+        fine but silently never appeared in the PDF. The render now reads
+        bytes through the FieldFile API, so a storage without local paths
+        produces the identical branded output.
+        """
+        from apps.projects.models import Project
+        from apps.reports.models import ReportBranding
+
+        class _NoPathStorage:
+            """Remote-backend stand-in: reads by name delegate to the real
+            storage, while ``path()`` raises like S3Boto3Storage. (A plain
+            FileSystemStorage subclass would not do — its own ``_open``
+            routes through ``path()``, so reads would break too.)"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def path(self, name):
+                raise NotImplementedError(
+                    "This backend doesn't support absolute paths.")
+
+            def open(self, name, mode="rb"):
+                return self._inner.open(name, mode)
+
+            def __getattr__(self, name):
+                inner = self.__dict__.get("_inner")
+                if inner is None:
+                    raise AttributeError(name)
+                return getattr(inner, name)
+
+        self._as(self.director)
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        # A second, distinct PNG — fpdf2 dedupes identical image bytes into
+        # one XObject, so logo and watermark must differ to count as two.
+        img2 = Image.new('RGBA', (30, 30), (200, 30, 30, 128))
+        buf2 = io.BytesIO()
+        img2.save(buf2, format='PNG')
+        buf2.seek(0)
+        watermark = SimpleUploadedFile('wm.png', buf2.getvalue(),
+                                       content_type='image/png')
+        response = self.client.patch(
+            reverse('project-report-branding',
+                    kwargs={'project_id': self.project.id}),
+            {'logo': self.png, 'watermark': watermark}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        row = ReportBranding.objects.get(project=self.project)
+        # Swap both branded fields to the path-less backend. A fresh
+        # project instance too — the reverse one-to-one caches its miss
+        # on the model object (see test_branded_report_renders).
+        logo_field = row._meta.get_field('logo')
+        wm_field = row._meta.get_field('watermark')
+        originals = (logo_field.storage, wm_field.storage)
+        logo_field.storage = _NoPathStorage(originals[0])
+        wm_field.storage = _NoPathStorage(originals[1])
+        try:
+            fresh = Project.objects.get(pk=self.project.pk)
+            data = NDTReportService.generate_ndt_report(fresh)
+        finally:
+            logo_field.storage, wm_field.storage = originals
+        self.assertTrue(data.startswith(b'%PDF'))
+        # Logo + uploaded watermark both embedded despite .path raising, and
+        # the uploaded watermark REPLACES the default laboratory watermark
+        # (which would otherwise draw on top at the same position and hide
+        # it): +1 logo, +1 uploaded watermark, −1 default = net +1.
+        self.assertEqual(_pdf_image_count(data), plain_images + 1)
+
+
+class ReportSignOffTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                         APITestCase):
+    """
+    C11 (4 Sep meeting): the approving engineer's COREN credentials on the
+    NDT report sign-off. Every field is Director-recorded real data — nothing
+    seeded, nothing derived. No row means the report's credential lines stay
+    blank, exactly as before.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.director = User.objects.create_superuser(
+            username="signoff_director@nexucon.com",
+            email="signoff_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="signoff_viewer@nexucon.com",
+            email="signoff_viewer@nexucon.com", password="Password123!")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        # A real generated PNG — no fabricated file bytes on disk.
+        img = Image.new('RGBA', (60, 20), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        self.png = SimpleUploadedFile('signature.png', buf.getvalue(),
+                                      content_type='image/png')
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _url(self):
+        return reverse('project-report-signoff',
+                       kwargs={'project_id': self.project.id})
+
+    def test_get_unconfigured_signoff(self):
+        self._as(self.director)
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {'signoff_configured': False})
+
+    def test_signoff_requires_director(self):
+        self._as(self.viewer)
+        response = self.client.patch(self._url(), {'approved_by_name': 'X'})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.delete(self._url())
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_signoff_roundtrip_and_removal(self):
+        from apps.reports.models import ReportSignOff
+        self._as(self.director)
+        response = self.client.patch(
+            self._url(),
+            {'approved_by_name': ' Engr. A. B. Mohammed ',
+             'qualification': 'B.Sc (Eng), M.Sc, MNSE',
+             'coren_registration_no': 'R.20234',
+             'firm_name': 'Nexucon Engineering Ltd.'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['signoff_configured'])
+        # Stored verbatim after strip — nothing invented, nothing mangled.
+        self.assertEqual(response.data['approved_by_name'],
+                         'Engr. A. B. Mohammed')
+        self.assertEqual(response.data['coren_registration_no'], 'R.20234')
+        row = ReportSignOff.objects.get(project=self.project)
+        self.assertEqual(row.updated_by, self.director)
+        # GET reflects it.
+        response = self.client.get(self._url())
+        self.assertTrue(response.data['signoff_configured'])
+        self.assertEqual(response.data['firm_name'],
+                         'Nexucon Engineering Ltd.')
+        # DELETE removes the row entirely.
+        response = self.client.delete(self._url())
+        self.assertEqual(response.data, {'signoff_configured': False})
+        response = self.client.get(self._url())
+        self.assertEqual(response.data, {'signoff_configured': False})
+        self.assertFalse(
+            ReportSignOff.objects.filter(project=self.project).exists())
+
+    def test_signoff_signature_upload_and_removal(self):
+        self._as(self.director)
+        response = self.client.patch(self._url(), {'signature_image': self.png},
+                                     format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertIsNotNone(response.data['signature_image_url'])
+        # Removing it clears the URL but keeps the credential row.
+        response = self.client.patch(self._url(),
+                                     {'signature_image': 'remove'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['signoff_configured'])
+        self.assertIsNone(response.data['signature_image_url'])
+
+    def test_signoff_rejects_bad_values(self):
+        self._as(self.director)
+        # Over-length text rejected per field (60 for COREN no., 150 others).
+        response = self.client.patch(
+            self._url(), {'coren_registration_no': 'R.' + '9' * 100})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.patch(
+            self._url(), {'approved_by_name': 'A' * 151})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Signature must be a real PNG/JPEG upload.
+        txt = SimpleUploadedFile('sig.txt', b'not an image',
+                                 content_type='text/plain')
+        response = self.client.patch(self._url(), {'signature_image': txt},
+                                     format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signoff_renders_credentials_in_report(self):
+        from apps.projects.models import Project
+        self._as(self.director)
+        response = self.client.patch(
+            self._url(),
+            {'approved_by_name': 'Engr. A. B. Mohammed',
+             'qualification': 'B.Sc (Eng), M.Sc, MNSE',
+             'coren_registration_no': 'R.20234',
+             'firm_name': 'Nexucon Engineering Ltd.'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        # A fresh project instance — the reverse one-to-one caches its miss
+        # on the model object, and self.project has not resolved
+        # report_signoff yet, but stay consistent with the branding tests.
+        fresh = Project.objects.get(pk=self.project.pk)
+        text = _pdf_text(NDTReportService.generate_ndt_report(fresh))
+        flat = ' '.join(text.split())
+        self.assertIn('Engr. A. B. Mohammed', flat)
+        self.assertIn('B.Sc (Eng), M.Sc, MNSE', flat)
+        self.assertIn('R.20234', flat)
+        self.assertIn('Nexucon Engineering Ltd.', flat)
+        self.assertIn('COREN REGISTRATION NO.', flat)
+        # Blank credentials still leave an honest blank line — the label row
+        # renders with an empty value, never a fabricated one.
+        response = self.client.patch(self._url(),
+                                     {'approved_by_name': ''})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        fresh = Project.objects.get(pk=self.project.pk)
+        text = _pdf_text(NDTReportService.generate_ndt_report(fresh))
+        flat = ' '.join(text.split())
+        self.assertIn('APPROVED BY (NAME)', flat)
+        self.assertNotIn('Engr. A. B. Mohammed', flat)
+
+    def test_signoff_signature_renders_in_report(self):
+        from apps.projects.models import Project
+        self._as(self.director)
+        plain = NDTReportService.generate_ndt_report(self.project)
+        plain_images = _pdf_image_count(plain)
+        response = self.client.patch(self._url(),
+                                     {'approved_by_name': 'Engr. A. B. Mohammed',
+                                      'signature_image': self.png},
+                                     format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        fresh = Project.objects.get(pk=self.project.pk)
+        data = NDTReportService.generate_ndt_report(fresh)
+        self.assertTrue(data.startswith(b'%PDF'))
+        # The scanned signature is genuinely embedded (one more XObject).
+        self.assertEqual(_pdf_image_count(data), plain_images + 1)
+
+
+class ReportMapEndpointTests(NDTReportFixtureMixin, APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_superuser(
+            username="mapper@nexucon.com",
+            email="mapper@nexucon.com", password="Password123!")
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+
+    def test_map_returns_only_geolocated_tests(self):
+        self.make_test(self.project, self.device, structural_element="COL-A",
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       latitude=6.4281, longitude=3.4219)
+        self.make_test(self.project, self.device, structural_element="COL-B",
+                       path_length_mm=250.0, pulse_time_us=62.5)  # no coords
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        features = response.data['test_points']['features']
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0]['geometry']['coordinates'],
+                         [3.4219, 6.4281])
+        # The located test carries its real facts + a legend band.
+        self.assertEqual(features[0]['properties']['element'], 'COL-A')
+        self.assertIn('strength_n_mm2', features[0]['properties'])
+        self.assertIn(features[0]['properties']['band'],
+                      ('good', 'poor', 'unassessed', 'no_velocity'))
+        # The legend explains the bands.
+        self.assertIn('legend', response.data)
+        self.assertIn('good', response.data['legend'])
+
+    def test_map_without_any_geolocated_tests_is_honest(self):
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['test_points']['features'], [])
+        # No fabricated project centre either.
+        self.assertIsNone(response.data['project_center'])
+
+    def test_map_reports_recorded_project_location(self):
+        # The coordinates captured at project creation are real recorded
+        # data — the map centres on them even when no test carries GPS.
+        located = self.make_project(name="Located NDT Project",
+                                    latitude=6.5244, longitude=3.3792)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': located.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['project_center'],
+                         [3.3792, 6.5244])
+        # GeoJSON order: [longitude, latitude].
+        self.assertEqual(response.data['test_points']['features'], [])
+
+    def test_map_out_of_scope_404(self):
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_map_boundary_polygon_from_gnss_survey(self):
+        # A recorded GNSS boundary survey becomes one closed GeoJSON ring —
+        # only real surveyed coordinates, in survey sequence order.
+        survey = GnssSurvey.objects.create(
+            project=self.project, title="Perimeter setting-out")
+        for seq, (lat, lng) in enumerate(
+                [(6.4281, 3.4219), (6.4286, 3.4224),
+                 (6.4289, 3.4217), (6.4284, 3.4212)], start=1):
+            GnssBoundaryPoint.objects.create(
+                survey=survey, sequence=seq, latitude=lat, longitude=lng)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        polygons = response.data['boundary_polygons']
+        self.assertEqual(len(polygons), 1)
+        self.assertEqual(polygons[0]['survey_reference'],
+                         survey.survey_reference)
+        ring = polygons[0]['polygon']['coordinates'][0]
+        self.assertEqual(ring, [[3.4219, 6.4281], [3.4224, 6.4286],
+                                [3.4217, 6.4289], [3.4212, 6.4284],
+                                [3.4219, 6.4281]])  # closed at the start
+        self.assertEqual(polygons[0]['polygon']['type'], 'Polygon')
+
+    def test_map_boundary_polygons_honest_without_survey(self):
+        # No boundary survey recorded -> an empty list, never an estimated
+        # site extent.
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['boundary_polygons'], [])
+
+    def test_map_boundary_needs_three_points(self):
+        # Fewer than 3 distinct vertices is not a polygon — withheld.
+        survey = GnssSurvey.objects.create(
+            project=self.project, title="Two-point traverse")
+        for seq, (lat, lng) in enumerate([(6.4281, 3.4219),
+                                          (6.4286, 3.4224)], start=1):
+            GnssBoundaryPoint.objects.create(
+                survey=survey, sequence=seq, latitude=lat, longitude=lng)
+        response = self.client.get(
+            reverse('project-report-map',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.data['boundary_polygons'], [])
+
+
+# ===========================================================================
+# §2.5 document structure (15 Sep 2026): per-project section order,
+# enable/disable state and custom sections — honoured by both the certified
+# PDF and the .docx working copy through report_structure.resolve_report_structure.
+# ===========================================================================
+
+class ReportStructureTests(_HermeticMediaMixin, NDTReportFixtureMixin,
+                           APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.director = User.objects.create_superuser(
+            username="structure_director@nexucon.com",
+            email="structure_director@nexucon.com", password="Password123!")
+        self.viewer = User.objects.create_user(
+            username="structure_viewer@nexucon.com",
+            email="structure_viewer@nexucon.com", password="Password123!")
+        self.project = self.make_project()
+        self.device = self.make_device(self.project)
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+
+    def _pdf_section_keys(self):
+        """Emitted section keys, in print order, from one bundled render."""
+        _data, bundle = NDTReportService.generate_ndt_report_bundled(
+            self.project)
+        return [s['key'] for s in bundle['sections']]
+
+    # ------------------------------------------------------------- reading
+    def test_default_structure_resolved_for_untouched_project(self):
+        from apps.reports.models import ReportSectionConfig
+        self._as(self.director)
+        response = self.client.get(
+            reverse('project-report-structure',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        sections = response.data['sections']
+        from apps.reports.report_structure import DEFAULT_STRUCTURE
+        self.assertEqual([s['key'] for s in sections],
+                         [k for k, _ in DEFAULT_STRUCTURE])
+        self.assertTrue(all(s['is_enabled'] for s in sections))
+        self.assertTrue(all(not s['is_custom'] for s in sections))
+        # Reading never materialises rows — the default stays virtual until
+        # the first real structure change.
+        self.assertFalse(ReportSectionConfig.objects
+                         .filter(project=self.project).exists())
+
+    def test_structure_requires_authentication(self):
+        self.client.credentials()
+        response = self.client.get(
+            reverse('project-report-structure',
+                    kwargs={'project_id': self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_structure_out_of_scope_404(self):
+        self._as(self.director)
+        response = self.client.get(
+            reverse('project-report-structure',
+                    kwargs={'project_id': uuid.uuid4()}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ------------------------------------------------------------- reorder
+    def test_reorder_reorders_generated_pdf(self):
+        from apps.reports.report_structure import DEFAULT_STRUCTURE_KEYS
+        self._as(self.director)
+        # Swap the positions of 2.0 (Purpose) and 6.0 (Recommendations) and
+        # move the cover to the end — a displaced cover exercises the
+        # fresh-page reuse logic in both directions.
+        keys = list(DEFAULT_STRUCTURE_KEYS)
+        keys.remove('cover_page')
+        i2, i6 = keys.index('2.0'), keys.index('6.0')
+        keys[i2], keys[i6] = keys[i6], keys[i2]
+        keys.append('cover_page')
+        response = self.client.post(
+            reverse('project-report-structure-reorder',
+                    kwargs={'project_id': self.project.id}),
+            {'order': keys}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        emitted = self._pdf_section_keys()
+        # 5.3 needs an AI analysis record this fixture does not have — it
+        # is honestly absent from the emission.
+        expected = [k for k in keys if k != '5.3']
+        self.assertEqual(emitted, expected)
+        # The reordered document is still a valid PDF.
+        self.assertTrue(NDTReportService.generate_ndt_report(self.project)
+                        .startswith(b'%PDF'))
+
+    def test_reorder_must_be_a_permutation(self):
+        from apps.reports.report_structure import DEFAULT_STRUCTURE_KEYS
+        self._as(self.director)
+        url = reverse('project-report-structure-reorder',
+                      kwargs={'project_id': self.project.id})
+        # Missing key
+        response = self.client.post(
+            url, {'order': list(DEFAULT_STRUCTURE_KEYS)[:-1]}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Unknown key
+        response = self.client.post(
+            url, {'order': list(DEFAULT_STRUCTURE_KEYS)[:-1] + ['9.9']},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Duplicate key
+        order = list(DEFAULT_STRUCTURE_KEYS)
+        order[-1] = order[0]
+        response = self.client.post(url, {'order': order}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # -------------------------------------------------------------- toggle
+    def test_toggle_hides_and_restores_section(self):
+        self._as(self.director)
+        url = reverse('project-report-structure-toggle',
+                      kwargs={'project_id': self.project.id,
+                              'section_key': '3.0'})
+        response = self.client.post(url, {'is_enabled': False},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        disabled = {s['key']: s['is_enabled']
+                    for s in response.data['sections']}
+        self.assertFalse(disabled['3.0'])
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn('LITERATURE REVIEW', flat)
+        self.assertIn('INTRODUCTION', flat)  # everything else still prints
+        # Re-enabling restores it.
+        response = self.client.post(url, {'is_enabled': True}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('LITERATURE REVIEW', flat)
+
+    def test_toggle_validation(self):
+        self._as(self.director)
+        url = reverse('project-report-structure-toggle',
+                      kwargs={'project_id': self.project.id,
+                              'section_key': '3.0'})
+        response = self.client.post(url, {'is_enabled': 'yes'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(
+            reverse('project-report-structure-toggle',
+                    kwargs={'project_id': self.project.id,
+                            'section_key': '9.9'}),
+            {'is_enabled': False}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ------------------------------------------------- custom section CRUD
+    def test_custom_section_lifecycle(self):
+        self._as(self.director)
+        base = reverse('project-report-structure-custom',
+                       kwargs={'project_id': self.project.id})
+        response = self.client.post(
+            base, {'title': 'Limitations of the Survey',
+                   'body': 'The survey covered **only** the ground floor '
+                           'slab of the structure.'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        sections = response.data['sections']
+        custom = [s for s in sections if s['is_custom']]
+        self.assertEqual(len(custom), 1)
+        self.assertEqual(custom[0]['label'], 'Limitations of the Survey')
+        self.assertEqual(sections[-1]['key'], custom[0]['key'])
+        # The custom section genuinely prints in the PDF — heading and body —
+        # and registers in the preview sidebar.
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('LIMITATIONS OF THE SURVEY', flat)
+        self.assertIn('The survey covered only the ground floor slab', flat)
+        self.assertIn(custom[0]['key'], self._pdf_section_keys())
+        # ... and in the .docx working copy.
+        from apps.reports.word_export import NDTWordExporter
+        from docx import Document as DocxDocument
+        docx_bytes = NDTWordExporter.export_docx(self.project)
+        document = DocxDocument(io.BytesIO(docx_bytes))
+        docx_text = '\n'.join(p.text for p in document.paragraphs)
+        self.assertIn('LIMITATIONS OF THE SURVEY', docx_text)
+        self.assertIn('ground floor slab', docx_text)
+        # Editing the content changes the next render.
+        section_url = reverse(
+            'project-report-structure-section',
+            kwargs={'project_id': self.project.id,
+                    'section_key': custom[0]['key']})
+        response = self.client.patch(
+            section_url, {'body': 'Revised scope: first floor columns.'},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('Revised scope: first floor columns.', flat)
+        # Deleting removes it entirely.
+        response = self.client.delete(section_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(any(s['is_custom']
+                             for s in response.data['sections']))
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertNotIn('LIMITATIONS OF THE SURVEY', flat)
+
+    def test_custom_section_validation(self):
+        self._as(self.director)
+        base = reverse('project-report-structure-custom',
+                       kwargs={'project_id': self.project.id})
+        response = self.client.post(base, {'body': 'no title'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(base, {'title': 'x' * 201}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_builtin_sections_cannot_be_deleted_or_edited(self):
+        self._as(self.director)
+        section_url = reverse(
+            'project-report-structure-section',
+            kwargs={'project_id': self.project.id, 'section_key': '3.0'})
+        response = self.client.delete(section_url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.patch(section_url, {'body': 'nope'},
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --------------------------------------------------------- permissions
+    def test_mutations_require_director(self):
+        self._as(self.viewer)
+        project_id = self.project.id
+        cases = [
+            ('post', reverse('project-report-structure-reorder',
+                             kwargs={'project_id': project_id}),
+             {'order': []}),
+            ('post', reverse('project-report-structure-toggle',
+                             kwargs={'project_id': project_id,
+                                     'section_key': '3.0'}),
+             {'is_enabled': False}),
+            ('post', reverse('project-report-structure-custom',
+                             kwargs={'project_id': project_id}),
+             {'title': 'Nope'}),
+        ]
+        for method, url, body in cases:
+            response = getattr(self.client, method)(url, body, format='json')
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN,
+                             msg=f'{method} {url}')
+
+    # ---------------------------------------------------- §2.2 max lengths
+    def test_cms_sections_expose_advisory_max_length(self):
+        self._as(self.director)
+        response = self.client.get(
+            reverse('report-cms-sections'),
+            {'project': str(self.project.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        lengths = {s['key']: s['max_length']
+                   for s in response.data['sections']}
+        # §2.2 wireframe: advisory character limits for the editor's count.
+        self.assertEqual(lengths['executive_summary'], 500)
+        self.assertEqual(lengths['introduction'], 1000)
+        self.assertEqual(lengths['purpose_items'], 500)
+        self.assertEqual(lengths['conclusion_preamble'], 750)
+        self.assertIsNone(lengths['literature_review'])

@@ -8,15 +8,38 @@ District Scope -> Project Scope -> Evidence Scope -> role-scoped AI insights.
 `scoped_projects(user)` is the single helper every list/aggregation endpoint
 should use so multi-tenant district isolation (plan §8 Security Baseline) is
 enforced consistently.
+
+Role standings (the written statement E3 asked for — kept in one place and
+mirrored by apps/government/permissions.py):
+
+* Agency Head  — head of a government agency (created at onboarding with
+                 "admin"/"all.delete" permissions). Full visibility of
+                 projects and full CRUD; the only government role that may
+                 DELETE (apps.government.IsAgencyHead).
+* Director     — State Headquarters Directorate: full visibility, full CRUD
+                 except DELETE (apps.government.IsDirector).
+* Inspector    — field inspector: the projects they are assigned to
+                 (inspection FK or assigned_inspector) union their district;
+                 create/read/update, no DELETE.
+* Client Developer — external developer organisation: only the projects
+                 linked to their developer organisation; no government
+                 standing.
+* District staff (any other profile with a district) — read visibility of
+                 their district's projects only.
+
+Agency Head and Director see all projects because the platform has one
+state-level project registry with no Project->Agency partition; every other
+role is narrowed as above.
 """
 from rest_framework.permissions import BasePermission
 
 # Role names recognised by the platform (apps.government.Role / Profile).
+ROLE_AGENCY_HEAD = 'Agency Head'
 ROLE_DIRECTOR = 'Director'
 ROLE_INSPECTOR = 'Inspector'
 ROLE_CLIENT_DEVELOPER = 'Client Developer'
 
-GOVERNMENT_ROLES = {ROLE_DIRECTOR, ROLE_INSPECTOR}
+GOVERNMENT_ROLES = {ROLE_AGENCY_HEAD, ROLE_DIRECTOR, ROLE_INSPECTOR}
 
 
 def get_profile(user):
@@ -29,6 +52,10 @@ def get_profile(user):
 def user_role_name(user):
     profile = get_profile(user)
     return profile.role.name if profile and profile.role else ''
+
+
+def user_is_agency_head(user):
+    return user_role_name(user) == ROLE_AGENCY_HEAD
 
 
 def user_is_director(user):
@@ -60,7 +87,7 @@ def user_agency(user):
 def scoped_projects(user):
     """
     Projects visible to `user` under the hierarchy:
-      State HQ / Director -> all projects
+      State HQ / Director / Agency Head -> all projects
       District staff      -> projects in their district
       Inspector           -> projects they are assigned to (inspector FK or
                              assigned_inspector field), else their district
@@ -71,7 +98,7 @@ def scoped_projects(user):
 
     if user is None or not getattr(user, 'is_authenticated', False):
         return Project.objects.none()
-    if user.is_superuser or user_is_state_hq(user):
+    if user.is_superuser or user_is_state_hq(user) or user_is_agency_head(user):
         return Project.objects.all()
 
     profile = get_profile(user)
@@ -100,11 +127,13 @@ def scoped_projects(user):
 
 
 class IsDirector(BasePermission):
-    """Allows access only to Directors (or superusers)."""
+    """Allows access only to Directors, Agency Heads (the two full-standing
+    government roles — mirrors apps.government.IsDirector) or superusers."""
     message = 'Director-level role required.'
 
     def has_permission(self, request, view):
-        return user_is_director(request.user)
+        return (user_is_director(request.user)
+                or user_is_agency_head(request.user))
 
 
 class IsGovernmentStaff(BasePermission):

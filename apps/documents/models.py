@@ -85,12 +85,12 @@ class Document(models.Model):
     title = models.CharField(max_length=255)
     document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPES, default='PROJECT_DOCUMENT')
     discipline = models.CharField(max_length=50, choices=DISCIPLINE_CHOICES, default='Architecture')
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='APPROVED')
-    
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='PENDING_REVIEW')
+
     current_version = models.CharField(max_length=50, default='v1.0')
     file_url = models.CharField(max_length=500, blank=True, null=True)
     file_size = models.CharField(max_length=50, blank=True, null=True)
-    file_format = models.CharField(max_length=20, default='PDF')
+    file_format = models.CharField(max_length=20, blank=True, null=True)
     pages_count = models.IntegerField(null=True, blank=True)
     
     is_starred = models.BooleanField(default=False)
@@ -141,8 +141,8 @@ class Version(models.Model):
     version_label = models.CharField(max_length=50, default='v1.0')
     changes_summary = models.TextField(blank=True, null=True)
     
-    author_name = models.CharField(max_length=255, default='Lead Architect')
-    author_role = models.CharField(max_length=255, default='Review Team')
+    author_name = models.CharField(max_length=255, blank=True, null=True)
+    author_role = models.CharField(max_length=255, blank=True, null=True)
     
     file_url = models.CharField(max_length=500, blank=True, null=True)
     file_size = models.CharField(max_length=50, blank=True, null=True)
@@ -297,9 +297,9 @@ class DocumentTemplate(models.Model):
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='INSPECTION')
     description = models.TextField()
     
-    file_format = models.CharField(max_length=20, default='PDF')
+    file_format = models.CharField(max_length=20, blank=True, null=True)
     file_url = models.CharField(max_length=500, blank=True, null=True)
-    file_size = models.CharField(max_length=50, default='450 KB')
+    file_size = models.CharField(max_length=50, blank=True, null=True)
     usage_count = models.IntegerField(default=0)
     
     created_at = models.DateTimeField(default=timezone.now)

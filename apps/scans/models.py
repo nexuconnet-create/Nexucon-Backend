@@ -73,6 +73,10 @@ class Defect(models.Model):
         ('thermal_anomaly', 'Thermal Anomaly'),
         ('deformation', 'Deformation'),
         ('delamination', 'Delamination'),
+        ('honeycombing', 'Concrete Honeycombing'),
+        ('voids', 'Internal Voids'),
+        ('moisture_ingress', 'Moisture Ingress'),
+        ('reinforcement_exposure', 'Reinforcement Exposure'),
     ]
     SEVERITY_CHOICES = [
         ('low', 'Low'),
