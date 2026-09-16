@@ -188,8 +188,26 @@ class UserInvitation(models.Model):
         blank=True,
         related_name='sent_staff_invitations'
     )
+    invite_code = models.CharField(max_length=20, blank=True, default='')
+    temporary_password = models.CharField(max_length=128, blank=True, default='')
+    agency = models.ForeignKey(
+        'government.Agency',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='user_invitations'
+    )
+    district = models.ForeignKey(
+        'government.District',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='user_invitations'
+    )
+    assigned_projects = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']

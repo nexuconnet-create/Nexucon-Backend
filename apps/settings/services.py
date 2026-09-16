@@ -939,20 +939,42 @@ class SettingsService:
         return results
 
     @classmethod
-    def invite_user(cls, email: str, name: str, role: str = "Reviewer", department: str = "Urban Planning", invited_by=None):
+    def invite_user(
+        cls,
+        email: str,
+        name: str,
+        role: str = "Reviewer",
+        department: str = "Urban Planning",
+        invited_by=None,
+        agency_id=None,
+        district_id=None,
+        assigned_projects=None,
+        invite_code: str = None,
+        expires_days: int = 7
+    ):
         import uuid
-        # Generate temporary secure password
+        code = (invite_code or f"{uuid.uuid4().hex[:4].upper()}-{uuid.uuid4().hex[4:8].upper()}").strip().upper()
         temp_password = f"Nexucon@{uuid.uuid4().hex[:4].upper()}2026!"
 
+        from apps.government.models import Agency, District
+        agency = Agency.objects.filter(id=agency_id).first() if agency_id else None
+        district = District.objects.filter(id=district_id).first() if district_id else None
+        projects_list = assigned_projects if isinstance(assigned_projects, list) else []
+
         invitation, _ = UserInvitation.objects.update_or_create(
-            email=email,
+            email=email.strip().lower(),
             defaults={
-                'name': name,
+                'name': name.strip(),
                 'role': role,
                 'department': department,
                 'invited_by': invited_by if getattr(invited_by, 'is_authenticated', False) else None,
                 'status': 'Pending',
-                'expires_at': timezone.now() + timezone.timedelta(days=7)
+                'invite_code': code,
+                'temporary_password': temp_password,
+                'agency': agency,
+                'district': district,
+                'assigned_projects': projects_list,
+                'expires_at': timezone.now() + timezone.timedelta(days=expires_days)
             }
         )
 
@@ -961,11 +983,11 @@ class SettingsService:
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ''
 
-        user = User.objects.filter(email=email).first()
+        user = User.objects.filter(email=email.strip().lower()).first()
         if not user:
             user = User.objects.create_user(
-                username=email,
-                email=email,
+                username=email.strip().lower(),
+                email=email.strip().lower(),
                 first_name=first_name,
                 last_name=last_name,
                 password=temp_password,
@@ -978,6 +1000,20 @@ class SettingsService:
             user.set_password(temp_password)
             user.save()
 
+        # Link Profile
+        from apps.government.models import Profile, Role
+        role_obj = Role.objects.filter(name__iexact=role).first()
+        if not role_obj:
+            role_obj = Role.objects.create(name=role)
+
+        profile, _ = Profile.objects.get_or_create(user=user)
+        if agency:
+            profile.agency = agency
+        if district:
+            profile.district = district
+        profile.role = role_obj
+        profile.save()
+
         if getattr(invited_by, 'is_authenticated', False):
             AuditEvent.objects.create(
                 user=invited_by,
@@ -985,7 +1021,15 @@ class SettingsService:
                 action="INVITE_STAFF_USER",
                 resource_type="UserInvitation",
                 resource_id=str(invitation.id),
-                new_state={"email": email, "role": role, "department": department, "temp_password": temp_password}
+                new_state={
+                    "email": email,
+                    "role": role,
+                    "department": department,
+                    "agency": agency.name if agency else None,
+                    "district": district.name if district else None,
+                    "assigned_projects": projects_list,
+                    "invite_code": code
+                }
             )
 
         # Dispatch Resend HTML Invitation Email with Temporary Passcode
@@ -998,7 +1042,8 @@ class SettingsService:
                 department=department,
                 invite_token=str(invitation.id),
                 invited_by=invited_by,
-                temp_password=temp_password
+                temp_password=temp_password,
+                invite_code=code
             )
         except Exception as e:
             logger.warning(f"Failed to dispatch invitation email via Resend: {e}")
@@ -1006,61 +1051,257 @@ class SettingsService:
         return invitation
 
     @classmethod
-    def accept_invitation(cls, email: str, token: str = None, password: str = None, full_name: str = None):
-        """Finalize invite acceptance, activate user with permanent password, and return JWT credentials."""
-        user = User.objects.filter(email=email).first()
-        invitation = UserInvitation.objects.filter(email=email).first()
+    def validate_inspector_invitation(cls, token: str = None, invite_code: str = None, email: str = None, temp_password: str = None):
+        """
+        Strictly validate inspector invitation by invite_code, temporary_password, or token.
+        Inspectors CANNOT proceed unless officially registered via the Government Directorate.
+        """
+        import uuid
+        from django.db.models import Q
+        email_clean = (email or '').strip().lower()
+        invitation = None
 
-        if not user and not invitation:
-            return {"success": False, "message": f"No invitation found for {email}."}
+        if token:
+            try:
+                val_uuid = uuid.UUID(str(token))
+                invitation = UserInvitation.objects.filter(Q(id=val_uuid) | Q(token=str(token))).first()
+            except (ValueError, AttributeError):
+                invitation = UserInvitation.objects.filter(token=str(token)).first()
 
-        name_parts = (full_name or (invitation.name if invitation else '')).strip().split(' ', 1)
+        if not invitation and email_clean:
+            invitation = UserInvitation.objects.filter(email__iexact=email_clean).first()
+
+        if not invitation and invite_code:
+            norm_code = invite_code.strip().replace('-', '').upper()
+            for inv in UserInvitation.objects.all():
+                if (inv.invite_code or '').strip().replace('-', '').upper() == norm_code:
+                    invitation = inv
+                    break
+
+        if not invitation:
+            return {
+                "valid": False,
+                "error_code": "NOT_REGISTERED",
+                "message": "Access Denied: This email has not been registered as an accredited inspector by the Agency Directorate. Access is strictly invite-based."
+            }
+
+        if invitation.status == 'Revoked':
+            return {
+                "valid": False,
+                "error_code": "REVOKED",
+                "message": "This invitation has been revoked. Contact your Agency Directorate."
+            }
+
+        if invitation.status == 'Accepted':
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            existing_user = User.objects.filter(email__iexact=invitation.email).first()
+            if existing_user and existing_user.is_verified:
+                return {
+                    "valid": False,
+                    "error_code": "ALREADY_ACCEPTED",
+                    "message": "This inspector account is already activated. Please sign in directly with your permanent password."
+                }
+
+        if invitation.expires_at and timezone.now() > invitation.expires_at:
+            if invitation.status != 'Expired':
+                invitation.status = 'Expired'
+                invitation.save(update_fields=['status'])
+            return {
+                "valid": False,
+                "error_code": "EXPIRED",
+                "message": "This invitation has expired. Contact your Agency Directorate."
+            }
+
+        # Verification of Invite Code or Temporary Password
+        code_matched = False
+        temp_matched = False
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        u = User.objects.filter(email__iexact=invitation.email).first()
+
+        expected_code = (invitation.invite_code or '').strip().replace('-', '').upper()
+        expected_temp = (invitation.temporary_password or '').strip()
+
+        # Check all provided credentials against both expected invite_code and temporary_password
+        provided_creds = [c.strip() for c in [invite_code, temp_password] if c and c.strip()]
+        for cred in provided_creds:
+            norm_cred = cred.replace('-', '').upper()
+            if expected_code and (norm_cred == expected_code or cred.upper() == expected_code):
+                code_matched = True
+            if expected_temp and cred == expected_temp:
+                temp_matched = True
+            if u and u.check_password(cred):
+                temp_matched = True
+
+        token_matched = bool(token and invitation and (str(invitation.id) == str(token) or invitation.token == str(token)))
+
+        if not (code_matched or temp_matched or token_matched):
+            return {
+                "valid": False,
+                "error_code": "INVALID_CREDENTIALS",
+                "message": "Verification failed: You must input the valid Invite Code or Temporary Password provided in your dispatch notice."
+            }
+
+        from apps.projects.models import Project
+        assigned_projects_data = []
+        if invitation.assigned_projects and isinstance(invitation.assigned_projects, list):
+            projects = Project.objects.filter(id__in=invitation.assigned_projects)
+            for p in projects:
+                assigned_projects_data.append({
+                    "id": str(p.id),
+                    "name": p.name,
+                    "reference_number": p.reference_number,
+                    "site_address": p.site_address or f"{p.lga or ''}, {p.state or ''}".strip(', '),
+                    "status": p.status,
+                    "project_type": p.project_type or 'General Construction'
+                })
+
+        return {
+            "valid": True,
+            "id": str(invitation.id),
+            "token": invitation.token,
+            "invite_code": invitation.invite_code,
+            "email": invitation.email,
+            "name": invitation.name,
+            "role": invitation.role,
+            "department": invitation.department,
+            "agency_name": invitation.agency.name if invitation.agency else "State Building Control Agency",
+            "district_name": invitation.district.name if invitation.district else "Central Directorate",
+            "assigned_projects": assigned_projects_data,
+            "temporary_password": invitation.temporary_password,
+            "expires_at": invitation.expires_at
+        }
+
+    @classmethod
+    def accept_invitation(cls, email: str = None, token: str = None, password: str = None, full_name: str = None, invite_code: str = None, temp_password: str = None):
+        """Finalize invite acceptance with strict verification of invite_code or temporary_password."""
+        from django.db.models import Q
+        email_clean = (email or '').strip().lower()
+        invitation = None
+
+        if token:
+            try:
+                import uuid
+                val_uuid = uuid.UUID(str(token))
+                invitation = UserInvitation.objects.filter(Q(id=val_uuid) | Q(token=str(token))).first()
+            except (ValueError, AttributeError):
+                invitation = UserInvitation.objects.filter(token=str(token)).first()
+
+        if not invitation and email_clean:
+            invitation = UserInvitation.objects.filter(email__iexact=email_clean).first()
+
+        if not invitation and invite_code:
+            norm_code = invite_code.strip().replace('-', '').upper()
+            for inv in UserInvitation.objects.all():
+                if (inv.invite_code or '').strip().replace('-', '').upper() == norm_code:
+                    invitation = inv
+                    break
+
+        if not invitation:
+            return {"success": False, "message": f"Access Denied: No invitation record found for {email_clean or 'provided credentials'}. Registration must be completed via the Government Directorate."}
+
+        # Check credentials match
+        code_matched = False
+        temp_matched = False
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=invitation.email).first()
+
+        expected_code = (invitation.invite_code or '').strip().replace('-', '').upper()
+        expected_temp = (invitation.temporary_password or '').strip()
+
+        provided_creds = [c.strip() for c in [invite_code, temp_password] if c and c.strip()]
+        for cred in provided_creds:
+            norm_cred = cred.replace('-', '').upper()
+            if expected_code and (norm_cred == expected_code or cred.upper() == expected_code):
+                code_matched = True
+            if expected_temp and cred == expected_temp:
+                temp_matched = True
+            elif user and user.check_password(cred):
+                temp_matched = True
+
+        token_matched = bool(token and invitation and (str(invitation.id) == str(token) or invitation.token == str(token)))
+
+        if not (code_matched or temp_matched or token_matched):
+            return {
+                "success": False,
+                "message": "Access Restricted: You must input the valid Invite Code or Temporary Password issued by the Agency Directorate."
+            }
+
+        if not password or len(password) < 8:
+            return {"success": False, "message": "Permanent password must be at least 8 characters long."}
+
+        name_parts = (full_name or invitation.name or '').strip().split(' ', 1)
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ''
+        user_email = invitation.email
 
         if not user:
             user = User.objects.create_user(
-                username=email,
-                email=email,
+                username=user_email,
+                email=user_email,
                 first_name=first_name,
                 last_name=last_name,
-                password=password or 'Nexucon@2026!',
+                password=password,
                 is_active=True,
                 is_verified=True
             )
         else:
             if first_name: user.first_name = first_name
             if last_name: user.last_name = last_name
-            if password: user.set_password(password)
+            user.set_password(password)
             user.is_active = True
             user.is_verified = True
             user.save()
 
-        # Mark invitation as Accepted
-        if invitation:
-            invitation.status = 'Accepted'
-            invitation.save()
+        invitation.status = 'Accepted'
+        invitation.accepted_at = timezone.now()
+        invitation.save()
+
+        from apps.government.models import Profile, Role
+        user_role_str = invitation.role or 'Inspector'
+        role_obj = Role.objects.filter(name__iexact=user_role_str).first()
+        if not role_obj:
+            role_obj = Role.objects.create(name=user_role_str)
+
+        profile, _ = Profile.objects.get_or_create(user=user)
+        if invitation.agency:
+            profile.agency = invitation.agency
+        if invitation.district:
+            profile.district = invitation.district
+        profile.role = role_obj
+        profile.is_active_staff = True
+        profile.save()
+
+        if invitation.assigned_projects and isinstance(invitation.assigned_projects, list):
+            from apps.projects.models import Project
+            from apps.inspections.models import Inspection
+            for proj_id in invitation.assigned_projects:
+                proj = Project.objects.filter(id=proj_id).first()
+                if proj:
+                    proj.assigned_inspector = user.get_full_name() or user.email
+                    proj.save(update_fields=['assigned_inspector'])
+                    Inspection.objects.filter(
+                        project=proj,
+                        status__in=['REQUESTED', 'SCHEDULED'],
+                        inspector__isnull=True
+                    ).update(inspector=user, inspector_name=user.get_full_name() or user.email)
 
         from rest_framework_simplejwt.tokens import RefreshToken
         refresh = RefreshToken.for_user(user)
 
-        user_role = invitation.role if invitation else 'Government Agency Head'
-        user_dept = invitation.department if invitation else 'Urban Planning'
+        from apps.accounts.serializers import UserMeSerializer
+        user_data = UserMeSerializer(user).data
 
         return {
             "success": True,
-            "message": "Account successfully activated.",
+            "message": "Inspector terminal successfully activated.",
             "access": str(refresh.access_token),
             "refresh": str(refresh),
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "role_name": user_role,
-                "department": user_dept,
-                "is_verified": True
-            }
+            "user": user_data
         }
 
     @classmethod

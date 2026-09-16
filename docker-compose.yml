@@ -45,7 +45,7 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - FRONTEND_URL=${FRONTEND_URL:-https://nexucon.net}
-      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,187.7.20.123,localhost,127.0.0.1}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,inspector.nexucon.com,inspector.nexucon.net,187.7.20.123,localhost,127.0.0.1}
 
   celery:
     build: .

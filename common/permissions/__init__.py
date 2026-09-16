@@ -79,17 +79,12 @@ def scoped_projects(user):
     role = user_role_name(user)
 
     if role == ROLE_INSPECTOR:
-        from apps.inspections.models import Inspection
-        assigned_via_inspections = Project.objects.filter(
-            inspections__inspector=user,
-        ).distinct()
-        assigned_direct = Project.objects.filter(
-            assigned_inspector=str(user.get_full_name() or user.email),
-        )
-        qs = (assigned_via_inspections | assigned_direct).distinct()
+        from django.db.models import Q
+        inspector_name = str(user.get_full_name() or user.email)
+        q = Q(inspections__inspector=user) | Q(assigned_inspector=inspector_name)
         if district:
-            qs = (qs | Project.objects.filter(district=district)).distinct()
-        return qs
+            q |= Q(district=district)
+        return Project.objects.filter(q).distinct()
 
     # Client developer: projects tied to their developer record.
     from apps.stakeholders.models import Developer

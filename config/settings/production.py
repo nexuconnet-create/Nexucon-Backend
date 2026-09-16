@@ -10,8 +10,17 @@ if not SECRET_KEY or SECRET_KEY.startswith("dummy-secret-key"):
     raise RuntimeError("Production requires a real DJANGO_SECRET_KEY environment variable.")
 if os.getenv("DJANGO_ALLOWED_HOSTS"):
     ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS").split(",") if h.strip()]
-elif "*" in ALLOWED_HOSTS:
-    raise RuntimeError("Production requires an explicit DJANGO_ALLOWED_HOSTS list (wildcards are not allowed).")
+else:
+    ALLOWED_HOSTS = [
+        "api.nexucon.net",
+        "nexucon.net",
+        "www.nexucon.net",
+        "inspector.nexucon.net",
+        "inspector.nexucon.com",
+        "187.7.20.123",
+        "localhost",
+        "127.0.0.1",
+    ]
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
@@ -59,6 +68,10 @@ raw_origins = [
     os.getenv("CSRF_TRUSTED_ORIGINS", ""),
     "https://api.nexucon.net",
     "https://nexucon.net",
+    "https://inspector.nexucon.com",
+    "http://inspector.nexucon.com",
+    "https://inspector.nexucon.net",
+    "http://inspector.nexucon.net",
     "http://187.7.20.123",
     "http://187.7.20.123:8000",
 ]
