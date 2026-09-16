@@ -57,9 +57,53 @@ class CustomLoginView(TokenObtainPairView):
                     # Mark the step used so the code cannot be replayed.
                     import time as _time
                     two_factor.last_used_counter = int(_time.time()) // 30
-                    two_factor.save(update_fields=['last_used_counter', 'updated_at'])
+        # Check if an invited inspector is providing their invite code or temporary passcode
+        email = (request.data.get('email') or '').strip().lower()
+        password = request.data.get('password', '')
+        if email and password:
+            from apps.settings.models import UserInvitation
+            inv = UserInvitation.objects.filter(email__iexact=email).first()
+            if inv and inv.status == 'Pending':
+                norm_pw = password.strip().replace('-', '').upper()
+                norm_code = (inv.invite_code or '').strip().replace('-', '').upper()
+                is_invite_code = bool(norm_code and (norm_pw == norm_code or password.strip().upper() == norm_code))
+                is_temp_pass = bool(inv.temporary_password and password.strip() == inv.temporary_password.strip())
+                if is_invite_code or is_temp_pass:
+                    return Response({
+                        'success': False,
+                        'requires_activation': True,
+                        'message': 'Account activation required: You must establish your permanent password using your official invite credentials.',
+                        'email': email,
+                        'invite_code': inv.invite_code,
+                        'data': {
+                            'requires_activation': True,
+                            'name': inv.name,
+                            'role': inv.role,
+                            'email': email,
+                            'invite_code': inv.invite_code
+                        }
+                    }, status=status.HTTP_200_OK)
 
         response = super().post(request, *args, **kwargs)
+        if response.status_code == 401 and email:
+            from apps.settings.models import UserInvitation
+            inv = UserInvitation.objects.filter(email__iexact=email).first()
+            portal = request.headers.get('X-Portal-Type') or request.data.get('portal')
+            is_inspector = bool(inv and 'inspector' in (inv.role or '').lower())
+            if portal == 'inspector' or is_inspector:
+                if not inv:
+                    return Response({
+                        'detail': 'Access Denied: This email has not been registered as an accredited inspector by the Agency Directorate. Access is strictly invite-based.',
+                        'is_registered': False,
+                        'code': 'NOT_REGISTERED'
+                    }, status=status.HTTP_401_UNAUTHORIZED)
+                elif inv.status == 'Pending':
+                    return Response({
+                        'detail': 'Access Restricted: Your inspector account is pending activation. Please input your official Invite Code or Temporary Password to activate your account.',
+                        'is_registered': True,
+                        'is_pending': True,
+                        'code': 'PENDING_ACTIVATION'
+                    }, status=status.HTTP_401_UNAUTHORIZED)
         if response.status_code == 200:
             access_token = response.data.get('access')
             refresh_token = response.data.get('refresh')

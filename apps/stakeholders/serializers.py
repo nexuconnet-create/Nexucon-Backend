@@ -28,10 +28,63 @@ class ConsultantSerializer(serializers.ModelSerializer):
 
 
 class InspectorSerializer(serializers.ModelSerializer):
+    email = serializers.SerializerMethodField()
+    invite_code = serializers.SerializerMethodField()
+    temporary_password = serializers.SerializerMethodField()
+    invitation_status = serializers.SerializerMethodField()
+
     class Meta:
         model = Inspector
         fields = '__all__'
         read_only_fields = ('id', 'inspector_id', 'created_at', 'updated_at')
+
+    def _get_target_email(self, obj):
+        if hasattr(obj, 'user') and obj.user and obj.user.email:
+            return obj.user.email
+        if hasattr(obj, 'email') and obj.email:
+            return obj.email
+        # Lookup invitation by inspector name
+        from apps.settings.models import UserInvitation
+        inv = UserInvitation.objects.filter(name__iexact=obj.name).first()
+        if inv:
+            return inv.email
+        # Try matching last name
+        last_word = obj.name.strip().split()[-1] if obj.name else ''
+        if last_word and len(last_word) > 2:
+            inv = UserInvitation.objects.filter(name__icontains=last_word).first()
+            if inv:
+                return inv.email
+        return None
+
+    def get_email(self, obj):
+        return self._get_target_email(obj)
+
+    def get_invite_code(self, obj):
+        target_email = self._get_target_email(obj)
+        if target_email:
+            from apps.settings.models import UserInvitation
+            inv = UserInvitation.objects.filter(email__iexact=target_email).first()
+            if inv:
+                return inv.invite_code
+        return None
+
+    def get_temporary_password(self, obj):
+        target_email = self._get_target_email(obj)
+        if target_email:
+            from apps.settings.models import UserInvitation
+            inv = UserInvitation.objects.filter(email__iexact=target_email).first()
+            if inv and inv.status == 'Pending':
+                return inv.temporary_password
+        return None
+
+    def get_invitation_status(self, obj):
+        target_email = self._get_target_email(obj)
+        if target_email:
+            from apps.settings.models import UserInvitation
+            inv = UserInvitation.objects.filter(email__iexact=target_email).first()
+            if inv:
+                return inv.status
+        return 'Accepted'
 
 
 class LicensedProfessionalSerializer(serializers.ModelSerializer):

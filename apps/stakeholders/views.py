@@ -108,7 +108,19 @@ class InspectorViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        ins = serializer.save()
+        user = None
+        user_id = self.request.data.get('user') or self.request.data.get('user_id')
+        if user_id:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            user = User.objects.filter(id=user_id).first()
+        if not user:
+            email = self.request.data.get('email') or self.request.data.get('contact_email')
+            if email:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                user = User.objects.filter(email=email.strip().lower()).first()
+        ins = serializer.save(user=user) if user else serializer.save()
         StakeholderService.log_audit(
             user=self.request.user,
             action="STAKEHOLDER_INSPECTOR_CREATED",

@@ -20,10 +20,16 @@ class ProjectSerializer(serializers.ModelSerializer):
     milestones = ProjectMilestoneSerializer(many=True, read_only=True)
     professionals = ProjectProfessionalSerializer(many=True, required=False)
     project_documents = ProjectDocumentSerializer(many=True, read_only=True)
+    last_activity_at = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = '__all__'
+
+    def get_last_activity_at(self, obj):
+        """Newest real activity (own edits or captured records) — drives the
+        cold-storage policy."""
+        return obj.last_activity_at()
 
     def create(self, validated_data):
         professionals_data = validated_data.pop('professionals', [])

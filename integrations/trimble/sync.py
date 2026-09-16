@@ -70,6 +70,14 @@ class IFCElementExtractor:
             import os
             os.unlink(tmp_path)
 
+        # Length-unit scale (file units -> SI metres), used to report
+        # material layer thicknesses in mm whatever unit the file uses.
+        try:
+            from ifcopenshell.util.unit import calculate_unit_scale
+            unit_scale = calculate_unit_scale(ifc)
+        except Exception:
+            unit_scale = 1.0
+
         elements = []
         for product in ifc.by_type('IfcBuildingElement'):
             guid = getattr(product, 'GlobalId', None)
@@ -91,24 +99,88 @@ class IFCElementExtractor:
             try:
                 placement = getattr(product, 'ObjectPlacement', None)
                 if placement is not None:
-                    location = (product.ObjectPlacement.RelativePlacement.Location
-                                .Coordinates)
+                    # Prefer WORLD coordinates (the placement matrix
+                    # accumulated up the spatial hierarchy) — local
+                    # placements are usually 0,0,0 in Revit IFC exports.
+                    try:
+                        from ifcopenshell.util.placement import get_local_placement
+                        matrix = get_local_placement(placement)
+                        location = [float(matrix[0][3]), float(matrix[1][3]),
+                                    float(matrix[2][3])]
+                        source = 'ifc_world_placement'
+                    except Exception:
+                        location = (placement.RelativePlacement.Location
+                                    .Coordinates)
+                        source = 'ifc_object_placement'
                     coordinates = {
                         'x': float(location[0]) if len(location) > 0 else None,
                         'y': float(location[1]) if len(location) > 1 else None,
                         'z': float(location[2]) if len(location) > 2 else None,
-                        'source': 'ifc_object_placement',
+                        'source': source,
                     }
             except Exception:
                 pass
+            # The FULL property set the model actually carries — every
+            # property set AND quantity set value, keyed
+            # '{PsetOrQtoName}.{PropertyName}'. These are the properties
+            # attributed to each element in the platform's model preview;
+            # nothing is summarised or dropped here.
             properties = {}
             try:
                 from ifcopenshell.util.element import get_psets
+                # Default flags return BOTH property sets and quantity sets.
                 psets = get_psets(product)
                 for pset_name, pset in (psets or {}).items():
                     for key, value in pset.items():
-                        if key in ('Mark', 'Tag', 'OmniClass', 'LoadBearing', 'Reference'):
-                            properties[f'{pset_name}.{key}'] = str(value)
+                        if key == 'id':  # ifcopenshell bookkeeping, not a model property
+                            continue
+                        if value is None or value == '':
+                            continue
+                        properties[f'{pset_name}.{key}'] = str(value)
+            except Exception:
+                pass
+            # Direct attributes and associations the file carries even when
+            # property sets are absent — Autodesk APS RVT->IFC translations
+            # export geometry only, but the element Tag, its family/type
+            # name and its material association are still real attributed
+            # data and must not be dropped. Pset-derived values win on
+            # key collisions (setdefault).
+            tag = getattr(product, 'Tag', None)
+            if tag:
+                properties.setdefault('Tag', str(tag))
+            try:
+                from ifcopenshell.util.element import get_type
+                # NOTE: get_type returns the TYPE ENTITY, not a string —
+                # keep it in its own variable so the clean is_a() class
+                # name in element_type is never clobbered (a str()'d
+                # entity prints as a raw STEP line like
+                # "#64=IfcSlabType('232RR...', ...)" in every surface
+                # that shows the category).
+                type_product = get_type(product)
+                type_name = getattr(type_product, 'Name', None)
+                if type_name:
+                    properties.setdefault('ElementType', str(type_name))
+            except Exception:
+                pass
+            try:
+                from ifcopenshell.util.element import get_material
+                material = get_material(product)
+                if material is not None:
+                    # A layer set (or a usage pointing at one) is described
+                    # by its layers; thicknesses are raw model values.
+                    layer_set = getattr(material, 'ForLayerSet', material)
+                    layers = getattr(layer_set, 'MaterialLayers', None)
+                    if layers:
+                        layer_names = ', '.join(
+                            f'{getattr(l.Material, "Name", "?")} '
+                            f'({l.LayerThickness * unit_scale * 1000:g} mm)'
+                            for l in layers if getattr(l, 'Material', None) is not None)
+                        if layer_names:
+                            properties.setdefault('Material', layer_names)
+                    else:
+                        material_name = getattr(material, 'Name', None)
+                        if material_name:
+                            properties.setdefault('Material', str(material_name))
             except Exception:
                 pass
 

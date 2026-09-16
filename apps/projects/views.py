@@ -40,6 +40,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
         status_param = self.request.query_params.get('status')
         search_param = self.request.query_params.get('search')
 
+        # Cold storage (8 Sep meeting): projects inactive for months drop
+        # out of the default browse LIST; every record stays reachable
+        # directly — retrieve/update and the detail actions fetch by pk and
+        # must never 404 on a cold-stored project.
+        if self.action == 'list':
+            storage_param = self.request.query_params.get('storage')
+            if storage_param == 'cold':
+                queryset = queryset.filter(cold_storage=True)
+            elif (self.request.query_params.get('include_cold', '').lower()
+                    not in ('true', '1')):
+                queryset = queryset.filter(cold_storage=False)
+
         if status_param:
             queryset = queryset.filter(status__iexact=status_param)
 
@@ -52,6 +64,50 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
         return queryset
+
+    @action(detail=True, methods=['post'])
+    def restore_from_cold_storage(self, request, pk=None):
+        """Bring a cold-stored project back into the hot working set.
+        Director-level and audited — cold storage never deletes anything,
+        this only flips the browse flag."""
+        from common.permissions import IsDirector
+        if not IsDirector().has_permission(request, self):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        # get_object() would 404: the default queryset EXCLUDES cold
+        # projects — fetch it directly (a malformed id must 404, not 500).
+        try:
+            project = Project.objects.filter(pk=pk).first()
+        except Exception:
+            project = None
+        if project is None:
+            return Response({'detail': 'Project not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if not project.cold_storage:
+            return Response({'detail': 'Project is not in cold storage.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        project.cold_storage = False
+        project.cold_stored_at = None
+        project.save(update_fields=['cold_storage', 'cold_stored_at',
+                                    'updated_at'])
+        try:
+            from apps.audit.models import AuditEvent
+            from common.permissions import user_role_name
+            AuditEvent.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                user_name=(request.user.get_full_name() or request.user.email
+                           if request.user.is_authenticated else 'System'),
+                user_role=user_role_name(request.user)
+                if request.user.is_authenticated else 'System',
+                action='projects.project.restore_from_cold_storage',
+                resource_type='Project', resource_id=str(project.id),
+                metadata={'name': project.name})
+        except Exception:
+            pass
+        from django.core.cache import cache
+        cache.clear()
+        return Response({'id': str(project.id), 'name': project.name,
+                         'cold_storage': False})
 
     @extend_schema(request=ProjectSerializer, responses={201: ProjectSerializer})
     def create(self, request, *args, **kwargs):

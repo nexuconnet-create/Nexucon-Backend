@@ -112,7 +112,7 @@ class EmailService:
         )
 
     @classmethod
-    def send_invitation_email(cls, email: str, name: str, role: str, department: str = "Urban Planning", invite_token: str = None, invited_by=None, base_url: str = None, temp_password: str = None) -> dict:
+    def send_invitation_email(cls, email: str, name: str, role: str, department: str = "Urban Planning", invite_token: str = None, invited_by=None, base_url: str = None, temp_password: str = None, invite_code: str = None) -> dict:
         """
         Dispatch a tailored, role-specific HTML invitation email.
         """
@@ -126,12 +126,17 @@ class EmailService:
 
         # Choose template based on designated authority role
         role_lower = (role or '').lower()
+        is_inspector = any(keyword in role_lower for keyword in ['inspector', 'site officer', 'hse', 'surveillance'])
         if any(keyword in role_lower for keyword in ['director', 'commissioner', 'permanent secretary', 'executive', 'head']):
             template_name = 'emails/invite_director.html'
             subject = f"🏛️ Directorate Appointment & Onboarding: {role} - Nexucon"
-        elif any(keyword in role_lower for keyword in ['inspector', 'site officer', 'hse', 'surveillance']):
+        elif is_inspector:
             template_name = 'emails/invite_inspector.html'
             subject = f"🔍 Field Inspector Terminal Onboarding: {role} - Nexucon"
+            if token and token != 'invite-token-sample':
+                invite_url = f"https://inspector.nexucon.net/invite/{token}"
+            else:
+                invite_url = "https://inspector.nexucon.net/login"
         elif any(keyword in role_lower for keyword in ['reviewer', 'examiner', 'architect', 'structural', 'bim']):
             template_name = 'emails/invite_reviewer.html'
             subject = f"📐 Technical Plan Examination Board Invitation - Nexucon"
@@ -148,6 +153,7 @@ class EmailService:
             'role': role,
             'department': department,
             'temp_password': temp_password,
+            'invite_code': invite_code,
             'invite_url': invite_url,
             'invited_by': invited_by.get_full_name() if hasattr(invited_by, 'get_full_name') and invited_by.get_full_name() else str(invited_by) if invited_by else 'System Administrator',
             'current_year': timezone.now().year

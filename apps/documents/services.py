@@ -211,12 +211,14 @@ class DocumentService:
             raw_title = raw_title[0]
         title_val = raw_title or (f"{project.name} - Document" if project else "Project Document")
 
-        file_url = file_meta['file_url'] if file_meta else data.get('file_url') or f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}/documents/{uuid.uuid4().hex[:8]}_document.pdf"
-        file_size = file_meta['file_size'] if file_meta else data.get('file_size', '12.4 MB')
-        file_format = file_meta['file_format'] if file_meta else data.get('file_format', 'PDF')
+        # Honest fallbacks: values not provided by the uploader stay blank
+        # instead of being fabricated client- or server-side.
+        file_url = file_meta['file_url'] if file_meta else data.get('file_url') or None
+        file_size = file_meta['file_size'] if file_meta else data.get('file_size') or None
+        file_format = file_meta['file_format'] if file_meta else data.get('file_format') or ''
         sig_hash = file_meta['signature_hash'] if file_meta else data.get('signature_hash')
 
-        uploader_name = data.get('uploader_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else 'S. Jenkins')
+        uploader_name = data.get('uploader_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else None)
         if isinstance(uploader_name, list) and uploader_name:
             uploader_name = uploader_name[0]
 
@@ -228,12 +230,12 @@ class DocumentService:
         if isinstance(discipline, list) and discipline:
             discipline = discipline[0]
 
-        pages_count = 12
+        pages_count = None
         try:
-            raw_pages = data.get('pages_count', 12)
+            raw_pages = data.get('pages_count')
             pages_count = int(raw_pages[0] if isinstance(raw_pages, list) else raw_pages)
         except (ValueError, TypeError):
-            pages_count = 12
+            pages_count = None
 
         expiry_date = data.get('expiry_date')
         if isinstance(expiry_date, list) and expiry_date:
@@ -247,7 +249,7 @@ class DocumentService:
             title=title_val,
             document_type=doc_type,
             discipline=discipline,
-            status=data.get('status', 'APPROVED'),
+            status=data.get('status', 'PENDING_REVIEW'),
             current_version='v1.0',
             file_url=file_url,
             file_size=file_size,
@@ -266,9 +268,9 @@ class DocumentService:
             document=document,
             version_number=1,
             version_label='v1.0',
-            changes_summary=data.get('changes_summary', 'Initial document registration and statutory submission.'),
+            changes_summary=data.get('changes_summary') or 'Initial document registration.',
             author_name=document.uploader_name,
-            author_role=data.get('author_role', 'Review Team'),
+            author_role=data.get('author_role') or '',
             file_url=document.file_url,
             file_size=document.file_size,
             status='Current',
@@ -313,9 +315,9 @@ class DocumentService:
             document=document,
             version_number=version_count + 1,
             version_label=version_label,
-            changes_summary=data.get('changes_summary', 'Updated specifications, clauses, and engineering annotations.'),
-            author_name=data.get('author_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else 'Lead Reviewer'),
-            author_role=data.get('author_role', 'Review Team'),
+            changes_summary=data.get('changes_summary') or 'Document revision uploaded.',
+            author_name=data.get('author_name') or (user.get_full_name() or user.email if getattr(user, 'is_authenticated', False) else None),
+            author_role=data.get('author_role') or '',
             file_url=file_url,
             file_size=file_size,
             status='Current',
@@ -345,7 +347,7 @@ class DocumentService:
         signature_hash = f"0x3f8a{hashlib.sha256(hash_raw.encode()).hexdigest()[:16]}c91"
         stamp_ref = f"APP-DOC-{timezone.now().year}-{uuid.uuid4().hex[:4].upper()}"
 
-        stamped_by = actor.get_full_name() or actor.email if getattr(actor, 'is_authenticated', False) else 'Director General - LASBCA'
+        stamped_by = actor.get_full_name() or actor.email if getattr(actor, 'is_authenticated', False) else None
 
         document.is_digitally_stamped = True
         document.stamped_by_name = stamped_by
@@ -501,9 +503,9 @@ class DocumentService:
             title=data.get('title', 'Standard Document Template'),
             category=data.get('category', 'INSPECTION'),
             description=data.get('description', 'Standard regulatory document template for agency workflows.'),
-            file_format=data.get('file_format', 'PDF'),
-            file_url=data.get('file_url', f"{R2_ENDPOINT_URL}/{R2_BUCKET_NAME}/templates/template.pdf"),
-            file_size=data.get('file_size', '450 KB'),
+            file_format=data.get('file_format') or '',
+            file_url=data.get('file_url') or None,
+            file_size=data.get('file_size') or None,
             usage_count=0
         )
         return template

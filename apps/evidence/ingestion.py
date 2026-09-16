@@ -324,11 +324,29 @@ def survey_coordinates(survey):
 
 def pundit_confidence(test):
     """
-    Deterministic confidence for a PUNDIT velocity result: transit-time
-    measurements have no statistical uncertainty of their own, so confidence
-    reflects measurement completeness (path length + time present) — 1.0 when
-    both are recorded.
+    Deterministic confidence for a PUNDIT velocity result: reflects
+    measurement completeness and data richness.
+
+    - Base 0.90 for having path length + transit time (velocity computable)
+    - +0.03 for multi-reading tests (more data points = higher confidence)
+    - +0.02 for crack depth measurement present
+    - Capped at 0.95 (AI confidence never reaches 1.0)
+
+    Well-instrumented tests with multiple readings typically score 0.93–0.95.
     """
-    if test.path_length_mm and test.pulse_time_us:
-        return 1.0
-    return None
+    if not (test.path_length_mm and test.pulse_time_us):
+        return None
+
+    confidence = 0.90  # Base: velocity is computable
+
+    # Multi-reading tests contribute more data points
+    if test.readings.exists() and test.readings.count() > 1:
+        confidence += 0.03
+
+    # Crack depth measurement adds diagnostic depth
+    if test.crack_depth_mm is not None or (
+        test.crack_pulse_time_us and test.uncracked_pulse_time_us
+    ):
+        confidence += 0.02
+
+    return min(confidence, 0.95)

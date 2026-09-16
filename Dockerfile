@@ -16,4 +16,5 @@ COPY requirements /app/requirements
 RUN pip install --no-cache-dir -r requirements/production.txt
 
 COPY . /app/
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000"]
+RUN chmod +x /app/entrypoint.sh
+CMD ["/app/entrypoint.sh"]

@@ -59,6 +59,9 @@ class DocumentTestCase(TestCase):
         }, self.user)
 
         self.assertIsNotNone(doc.id)
+        # New uploads are not auto-approved: they await review until a
+        # reviewer explicitly decides.
+        self.assertEqual(doc.status, 'PENDING_REVIEW')
         self.assertEqual(doc.current_version, 'v1.0')
         self.assertEqual(doc.versions.count(), 1)
         self.assertEqual(doc.versions.first().status, 'Current')
@@ -181,11 +184,11 @@ class DocumentViewTestBase(APITestCase):
         self.doc_a = DocumentService.upload_document(
             {"project_id": str(self.project_a.id), "title": "Alpha Structural Drawings",
              "document_type": "SUBMITTED_DRAWING", "folder": "02_Structural",
-             "discipline": "Structural"}, self.client_a)
+             "discipline": "Structural", "status": "APPROVED"}, self.client_a)
         self.doc_b = DocumentService.upload_document(
             {"project_id": str(self.project_b.id), "title": "Beta Site Photos",
              "document_type": "SITE_PHOTO", "folder": "01_Architectural",
-             "discipline": "Architecture"}, self.client_b)
+             "discipline": "Architecture", "status": "APPROVED"}, self.client_b)
 
     def auth(self, user):
         refresh = RefreshToken.for_user(user)
@@ -333,7 +336,7 @@ class DocumentFilterSearchTestCase(DocumentViewTestBase):
              "status": "PENDING_REVIEW"}, self.officer)
         self.doc_compliance = DocumentService.upload_document(
             {"project_id": str(self.project_b.id), "title": "EPA Clearance Certificate",
-             "document_type": "COMPLIANCE_DOCUMENT"}, self.officer)
+             "document_type": "COMPLIANCE_DOCUMENT", "status": "APPROVED"}, self.officer)
         self.doc_inspection = DocumentService.upload_document(
             {"project_id": str(self.project_a.id), "title": "QA Inspection Report",
              "document_type": "INSPECTION_REPORT", "status": "UNDER_REVIEW"}, self.officer)

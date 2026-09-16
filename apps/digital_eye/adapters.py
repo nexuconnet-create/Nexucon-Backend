@@ -45,10 +45,42 @@ PUNDIT_GRADE_RISK = {
     'excellent': ('info', 0.05),
     'good': ('low', 0.20),
     'questionable': ('medium', 0.50),
-    'poor': ('high', 0.78),
+    'poor': ('high', 0.93),
     'very_poor': ('critical', 0.95),
     'pending': (None, None),
 }
+
+
+def _ecs_with_provenance(velocity_km_s, project=None, rebound_number=None,
+                         temperature_c=None, n_points=None):
+    """``(E.C.S, curve snapshot)`` through the project's active Nexucon Link
+    curve. The snapshot carries the curve's provenance — including the
+    standard-error adjustment disclosure, so a caller that prints a reasoning
+    trace can state how the figure was arrived at rather than only what it
+    is."""
+    from apps.digital_eye.strength_curves import apply_active_curve
+    return apply_active_curve(
+        project, velocity_km_s,
+        rebound_number=rebound_number, temperature_c=temperature_c,
+        n_points=n_points)
+
+
+def _ecs_of(velocity_km_s, project=None, rebound_number=None, temperature_c=None,
+            n_points=None):
+    """E.C.S (N/mm2) alone, for callers that do not print provenance — the
+    single f_cu path (apps.digital_eye.strength_curves). Without a project
+    (or curve) it resolves to the platform default / built-in fixed curve,
+    which is the documented laboratory calibration the report discloses.
+
+    ``n_points`` is how many test points were averaged into ``velocity_km_s``.
+    Every caller here passes an *element mean*, so the curve's confidence
+    margin narrows as sqrt(n) of those points; a single reading honestly
+    passes 1 and earns no averaging benefit.
+    """
+    strength, _snapshot = _ecs_with_provenance(
+        velocity_km_s, project=project, rebound_number=rebound_number,
+        temperature_c=temperature_c, n_points=n_points)
+    return strength
 
 
 class PUNDITAdapter:
@@ -90,63 +122,144 @@ class PUNDITAdapter:
         return (crack_path_length_mm / 2.0) * math.sqrt(ratio ** 2 - 1)
 
     @classmethod
-    def analyze(cls, test):
+    def analyze(cls, test, use_llm=True):
         """
         Run the deterministic analysis on a PUNDITTest, persist the computed
         fields on the test and create an AIAnalysisRecord in the Evidence
         Registry. Returns the AIAnalysisRecord.
+
+        Multi-reading tests (review meeting A1) are analysed over their
+        A/B/C… points: the element verdict is the mean pulse velocity and
+        mean E.C.S. An LLM narrative layer (D1) then contextualises the real
+        measurements when a provider is configured; on any provider failure
+        the deterministic record still stands — no fabricated narrative is
+        ever stored.
+
+        use_llm=False skips the narrative layer: used by analyze_project,
+        which runs per-test deterministic passes and then makes ONE
+        project-level LLM call — N tests must not fire N LLM requests
+        (provider rate limits killed the endpoint when it did).
         """
         from apps.evidence.models import AIAnalysisRecord
         from apps.evidence.ingestion import EvidenceIngestionService
 
         steps = []
-        velocity = cls.compute_velocity_km_s(test.path_length_mm, test.pulse_time_us)
-        crack_depth = cls.compute_crack_depth_mm(
-            test.crack_path_length_mm, test.crack_pulse_time_us, test.uncracked_pulse_time_us,
-        )
-
-        if velocity is not None:
-            steps.append(
-                f"Pulse velocity v = L / t = {test.path_length_mm} mm / {test.pulse_time_us} us "
-                f"= {velocity:.3f} km/s."
-            )
+        rows = test.reading_rows()
+        has_readings = test.readings.exists()
+        velocities = [r['velocity_km_s'] for r in rows if r['velocity_km_s'] is not None]
+        if len(rows) > 1:
+            crack_points = [r for r in rows if r['crack_depth_mm'] is not None]
+            if crack_points:
+                # Multi-point crack test: per-point depths (time-difference
+                # method); the element verdict is the mean depth.
+                steps.append(
+                    f"Element tested at {len(rows)} points "
+                    f"({', '.join(r['label'] for r in rows)}): "
+                    + '; '.join(
+                        f"{r['label']}: d = {r['crack_depth_mm']:.1f} mm "
+                        f"(t_c={r['transit_us']} us, t_0={r['uncracked_us']} us)"
+                        for r in crack_points)
+                    + '.'
+                )
+            else:
+                steps.append(
+                    f"Element tested at {len(rows)} points "
+                    f"({', '.join(r['label'] for r in rows)}): "
+                    + '; '.join(
+                        f"{r['label']}: v = {r['path_mm']} mm / {r['transit_us']} us"
+                        f" = {r['velocity_km_s']:.3f} km/s"
+                        for r in rows if r['velocity_km_s'] is not None)
+                    + '.'
+                )
+            velocity = (sum(velocities) / len(velocities)) if velocities else None
+            if velocity is not None:
+                mean_ecs = _ecs_of(velocity, project=test.project,
+                                   rebound_number=test.rebound_number,
+                                   temperature_c=test.surface_temperature_c,
+                                   n_points=len(velocities))
+                steps.append(
+                    f"Element mean pulse velocity = {velocity:.3f} km/s"
+                    + (f" (E.C.S of mean = {mean_ecs:.1f} N/mm2)." if mean_ecs is not None
+                       else " (E.C.S of mean: velocity outside the calibrated range)."))
+            else:
+                steps.append("Element mean pulse velocity not computable — no point yielded a velocity.")
         else:
-            steps.append("Pulse velocity not computable — path length and/or transit time missing.")
+            velocity = cls.compute_velocity_km_s(test.path_length_mm, test.pulse_time_us)
+            if velocity is not None:
+                steps.append(
+                    f"Pulse velocity v = L / t = {test.path_length_mm} mm / {test.pulse_time_us} us "
+                    f"= {velocity:.3f} km/s."
+                )
+            else:
+                steps.append("Pulse velocity not computable — path length and/or transit time missing.")
+        if has_readings:
+            # Multi-reading crack tests: the element verdict is the mean of
+            # the per-point depths (persisted by the serializer); the scalar
+            # columns hold only point A for legacy consumers.
+            crack_depth = test.element_mean_crack_depth_mm()
+        else:
+            crack_depth = cls.compute_crack_depth_mm(
+                test.crack_path_length_mm, test.crack_pulse_time_us, test.uncracked_pulse_time_us,
+            )
 
         grade = cls.grade_quality(velocity)
         if grade != 'pending':
             steps.append(f"Concrete quality graded '{grade}' per BS 1881-203 / ASTM C597 velocity bands.")
 
-        if crack_depth is not None:
+        if crack_depth is not None and not has_readings:
             steps.append(
                 f"Crack depth d = L/2 * sqrt((t_c/t_0)^2 - 1) = {crack_depth:.1f} mm "
                 f"(t_c={test.crack_pulse_time_us} us, t_0={test.uncracked_pulse_time_us} us)."
             )
 
+        if crack_depth is not None and has_readings and len(rows) > 1:
+            steps.append(
+                f"Element mean crack depth = {crack_depth:.1f} mm "
+                f"(mean of {len([r for r in rows if r['crack_depth_mm'] is not None])} "
+                f"measurable points)."
+            )
+
         risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
-        observations = []
+        deterministic_observations = []
         if grade != 'pending':
-            observations.append(
-                f"Element {test.structural_element or 'unspecified'}: pulse velocity "
-                f"{velocity:.2f} km/s — {grade} concrete quality."
+            deterministic_observations.append(
+                f"Element {test.structural_element or 'unspecified'}"
+                + (f" ({len(rows)} test points)" if len(rows) > 1 else '')
+                + f": pulse velocity {velocity:.2f} km/s — {grade} concrete quality."
             )
         if crack_depth is not None:
-            observations.append(f"Measured crack depth {crack_depth:.1f} mm (time-difference method).")
+            deterministic_observations.append(f"Measured crack depth {crack_depth:.1f} mm (time-difference method).")
             if crack_depth > 25:
-                observations.append("Crack depth exceeds 25 mm — structural review required.")
+                deterministic_observations.append("Crack depth exceeds 25 mm — structural review required.")
                 risk_level = 'high' if risk_level in (None, 'info', 'low', 'medium') else risk_level
                 risk_score = max(risk_score or 0.0, 0.70)
-        if not observations:
-            observations.append("Insufficient measurements to compute an NDT result.")
+        if not deterministic_observations:
+            deterministic_observations.append("Insufficient measurements to compute an NDT result.")
 
         # Persist computed values on the test record.
         test.velocity_km_s = velocity
         test.quality_grade = grade
         test.crack_depth_mm = crack_depth
-        test.save(update_fields=['velocity_km_s', 'quality_grade', 'crack_depth_mm', 'updated_at'])
+        test.estimated_crack_depth_mm = crack_depth
+        test.save(update_fields=['velocity_km_s', 'quality_grade', 'crack_depth_mm',
+                                 'estimated_crack_depth_mm', 'updated_at'])
 
         # Normalise into the Evidence Registry.
         evidence = EvidenceIngestionService.ingest_pundit_test(test, ingested_by=None)
+
+        # ---- LLM narrative layer (D1) --------------------------------
+        # Real providers only: when AIService is configured the observations
+        # are contextualised from the SAME measured numbers; on any failure
+        # the deterministic observations above stand — never fabricated.
+        observations = deterministic_observations
+        provider, model_version = 'deterministic', 'BS 1881-203 / ASTM C597 v1'
+        llm_result = (cls._llm_observations(test, rows, velocity, grade, crack_depth)
+                      if use_llm else None)
+        if llm_result is not None:
+            observations, provider, model_version = llm_result
+            steps.append(
+                f"Narrative synthesised by {provider} ({model_version}) from the "
+                "measurements above; deterministic grading unchanged.")
 
         record = AIAnalysisRecord.objects.create(
             project=test.project,
@@ -158,12 +271,434 @@ class PUNDITAdapter:
             recommendations=cls._recommendations(grade, crack_depth),
             reasoning_log="\n".join(steps),
             requires_human_review=True,
-            confidence=1.0 if velocity is not None else None,
-            model_provider='deterministic',
-            model_version='BS 1881-203 / ASTM C597 v1',
+            confidence=evidence.confidence if velocity is not None else None,
+            model_provider=provider,
+            model_version=model_version,
         )
         record.evidence.set([evidence])
         return record
+
+    # -------------------------------------------------- LLM narrative (D1)
+    @classmethod
+    def _fact_pack(cls, test, rows, velocity, grade, crack_depth):
+        """Compact, numbers-only description of the real measurements — the
+        ONLY data the LLM ever sees, so it cannot invent values. Velocities
+        are carried in m/s (client unit standard, 7 Sep 2026).
+
+        ``velocity`` is the element mean across ``rows``, so the curve's
+        confidence margin narrows as sqrt(n) of the rows that yielded a
+        velocity — computed once here, rounded like the per-point figures.
+        """
+        n_velocity_points = max(
+            1, len([r for r in rows if r['velocity_km_s'] is not None]))
+        element_mean_ecs = (
+            _ecs_of(velocity, project=test.project,
+                    rebound_number=test.rebound_number,
+                    temperature_c=test.surface_temperature_c,
+                    n_points=n_velocity_points)
+            if velocity is not None else None)
+        pack = {
+            'project': getattr(test.project, 'name', None),
+            'element': test.structural_element or None,
+            'floor': test.floor or None,
+            'grid_location': test.test_location or None,
+            'concrete_age_days': test.concrete_age_days,
+            'test_type': test.get_test_type_display(),
+            'path_length_mm': rows[0]['path_mm'] if rows else test.path_length_mm,
+            'transducer_frequency_khz': test.transducer_frequency_khz,
+            'transducer_type': test.get_transducer_type_display() if test.transducer_type else None,
+            'weather_condition': test.weather_condition or None,
+            'surface_temperature_c': test.surface_temperature_c,
+            'surface_condition': test.surface_condition or None,
+            'test_points': [
+                {'point': r['label'],
+                 'transit_time_us': r['transit_us'],
+                 'uncracked_transit_time_us': r['uncracked_us'],
+                 'velocity_m_s': None if r['velocity_km_s'] is None
+                 else round(r['velocity_km_s'] * 1000, 2),
+                 'ecs_n_mm2': None if r['ecs_mpa'] is None else round(r['ecs_mpa'], 1),
+                 'crack_depth_mm': None if r['crack_depth_mm'] is None else round(r['crack_depth_mm'], 1),
+                 'surface_condition': r['surface_condition'] or None}
+                for r in rows
+            ],
+            'element_mean_velocity_m_s': None if velocity is None else round(velocity * 1000, 2),
+            'element_mean_ecs_n_mm2': None if element_mean_ecs is None
+            else round(element_mean_ecs, 1),
+            'field_notes': test.notes or None,
+            'attachments': [
+                {'name': f.file_name, 'description': f.description or None}
+                for f in test.files.all()[:8]
+            ] or None,
+            'bs_1881_203_quality_grade': grade,
+            'crack_depth_mm': None if crack_depth is None else round(crack_depth, 1),
+        }
+        return {k: v for k, v in pack.items() if v is not None}
+
+    @classmethod
+    def _llm_observations(cls, test, rows, velocity, grade, crack_depth):
+        """
+        Ask the configured AI provider (OpenAI primary / Gemini fallback, or
+        the reverse per settings) to write the analysis narrative from the
+        real fact pack. Returns (observations, provider, model_version) or
+        None when no provider is available/fails — the caller then keeps the
+        deterministic observations.
+        """
+        from apps.common.ai_service import AIService
+        fact_pack = cls._fact_pack(test, rows, velocity, grade, crack_depth)
+        measured = (velocity
+                    or crack_depth is not None
+                    or any(r.get('velocity_m_s') or r.get('crack_depth_mm')
+                           or r.get('surface_condition')
+                           for r in fact_pack.get('test_points', [])))
+        if not measured:
+            # Nothing measured — no narrative to contextualise; the honest
+            # deterministic "insufficient measurements" record stands.
+            return None
+        try:
+            data = AIService.generate_structured_json(
+                "You are the Nexucon PUNDIT ultrasonic NDT analysis layer. "
+                "Based ONLY on the following real field measurements, write 2-4 concise "
+                "engineering observations about this structural element's concrete "
+                "condition (velocity bands, point-to-point variation, strength estimate, "
+                "any crack indication). Where field_notes, weather_condition or "
+                "attachment descriptions are present, weigh them as contributing "
+                "evidence in your observations. Do not invent facts, numbers, or "
+                "events that are not present in the data. Return JSON: "
+                '{"observations": ["..."]}\n\n'
+                f"Measured data: {fact_pack}"
+            )
+            observations = data.get('observations') if isinstance(data, dict) else None
+            if observations and isinstance(observations, list) and observations:
+                return (
+                    [str(o) for o in observations],
+                    AIService._get_provider(),
+                    str(AIService._get_gemini_model() if AIService._get_provider() == 'gemini'
+                        else AIService._get_openai_model()),
+                )
+        except Exception as e:  # noqa: BLE001 — provider down must never break analysis
+            logger.info("PUNDIT LLM narrative unavailable (%s) — deterministic record stands.", e)
+        return None
+
+    # ------------------------------------------------ project-level narrative
+    @classmethod
+    def analyze_project(cls, project, requested_by=None):
+        """
+        One project-level PUNDIT analysis (review meeting D1): aggregates the
+        per-element verdicts of every PUNDITTest on the project, writes the
+        deterministic project summary, and asks the configured LLM for a
+        project narrative from the same real numbers. Provider failure keeps
+        the deterministic record. Returns the AIAnalysisRecord.
+
+        7 Sep 2026 meeting: crack-depth findings lead the narrative (before
+        the velocity parameter tests), the story is structured floor-by-floor
+        and element-by-element with grid locations, and the stored confidence
+        is an evidence-based score (never a fixed marketing number).
+        """
+        from apps.evidence.models import AIAnalysisRecord
+        from apps.digital_eye.models import PUNDITTest  # noqa: F401 — imported late to avoid cycles
+
+        tests = list(PUNDITTest.objects.filter(project=project))
+
+        steps = [f"Project PUNDIT roll-up over {len(tests)} recorded element(s)."]
+        element_summaries = []
+        worst = ('info', 0.0)
+        rank = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
+        for test in tests:
+            rows = test.reading_rows()
+            velocity = test.element_mean_velocity_km_s()
+            # Grade from the real measurements, not the stored value — the
+            # stored grade may be stale if analyze() has not run since the
+            # last reading edit.
+            grade = cls.grade_quality(velocity) if velocity is not None \
+                else (test.quality_grade or 'pending')
+            risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
+            if risk_level and rank.get(risk_level, 0) > rank.get(worst[0], 0):
+                worst = (risk_level, risk_score or 0.0)
+            steps.append(
+                f"{test.structural_element or 'element'}"
+                + (f" ({test.floor})" if test.floor else '')
+                + (f": mean velocity {velocity * 1000:.0f} m/s, grade '{grade}'."
+                   if velocity is not None else ": no computable velocity.")
+            )
+            point_velocities = [r['velocity_km_s'] for r in rows
+                                if r['velocity_km_s'] is not None]
+            spread_pct = None
+            if len(point_velocities) > 1 and velocity:
+                spread_pct = round(
+                    (max(point_velocities) - min(point_velocities))
+                    / velocity * 100, 1)
+            crack_depth = (test.element_mean_crack_depth_mm()
+                           if test.readings.exists() else test.crack_depth_mm)
+            mean_ecs, ecs_snapshot = (
+                _ecs_with_provenance(
+                    velocity, project=project,
+                    rebound_number=test.rebound_number,
+                    temperature_c=test.surface_temperature_c,
+                    n_points=max(1, len(point_velocities)))
+                if velocity is not None else (None, None))
+            element_summaries.append({
+                'element': test.structural_element or None,
+                'floor': test.floor or None,
+                'grid_location': test.test_location or None,
+                'test_type': test.test_type,
+                'concrete_age_days': test.concrete_age_days,
+                'n_points': len(rows),
+                'point_velocities_m_s': [
+                    round(v * 1000, 2) for v in point_velocities],
+                'mean_velocity_m_s': None if velocity is None
+                else round(velocity * 1000, 2),
+                'point_spread_pct': spread_pct,
+                'mean_ecs_n_mm2': None if mean_ecs is None else round(mean_ecs, 1),
+                # Provenance of the figure above: the standard-error policy
+                # that moved it, so the reasoning trace can state it.
+                'se_adjustment': (ecs_snapshot or {}).get('se_adjustment'),
+                'grade': grade,
+                'crack_depth_mm': None if crack_depth is None
+                else round(crack_depth, 1),
+                # 8 Sep meeting: the AI must weigh the field context —
+                # operator notes, weather at test time and attached photos —
+                # not just the figures.
+                'field_notes': test.notes or None,
+                'weather_condition': test.weather_condition or None,
+                'attachments': [
+                    {'name': f.file_name, 'description': f.description or None}
+                    for f in test.files.all()[:8]
+                ] or None,
+            })
+
+        graded = [s['grade'] for s in element_summaries if s['grade'] != 'pending']
+        good = sum(1 for g in graded if g in ('excellent', 'good'))
+        poor = len(graded) - good
+        deterministic_observations = []
+        if graded:
+            deterministic_observations.append(
+                f"{len(tests)} element(s) tested: {good} graded good or better, "
+                f"{poor} below the good band (BS 1881-203)."
+            )
+        else:
+            deterministic_observations.append("No graded PUNDIT results for this project yet.")
+
+        # ---- Fact pack: crack findings FIRST, then floors -> elements
+        crack_elements = [
+            {k: v for k, v in s.items() if v is not None}
+            for s in element_summaries if (s['crack_depth_mm'] or 0) > 0
+        ]
+        floors = {}
+        for s in element_summaries:
+            if s['test_type'] == 'crack_depth' and not s['point_velocities_m_s']:
+                continue  # crack-only stations are summarised above
+            floors.setdefault(s['floor'] or 'Unspecified level', []).append(
+                {k: v for k, v in s.items() if v is not None})
+        fact_pack = {
+            'project': project.name,
+            'crack_depth_findings': crack_elements,
+            'floors': [
+                {'floor': name,
+                 'elements': [{k: v for k, v in e.items()
+                               if k not in ('floor', 'test_type')}
+                              for e in elements]}
+                for name, elements in sorted(floors.items())
+            ],
+            'velocity_units': 'm/s',
+            'counts': {'graded': len(graded), 'good_or_better': good, 'below_good': poor},
+        }
+        # 8 Sep meeting: weather recorded on any element is surfaced at
+        # project level so the model can discuss its impact on the dataset.
+        weather = sorted({test.weather_condition for test in tests
+                          if test.weather_condition})
+        if weather:
+            fact_pack['weather_conditions'] = weather
+
+        observations = deterministic_observations
+        provider, model_version = 'deterministic', 'BS 1881-203 / ASTM C597 v1'
+        try:
+            from apps.common.ai_service import AIService
+            data = AIService.generate_structured_json(
+                "You are the Nexucon PUNDIT ultrasonic NDT analysis layer, "
+                "writing for a structural engineering audience. Based ONLY on "
+                "the following real field measurements (velocities in m/s): "
+                "(1) FIRST assess any crack-depth findings (time-difference "
+                "method) — cracks bias pulse velocities and must be known "
+                "before strength is interpreted; (2) then analyse the pulse "
+                "velocity results floor-by-floor and element-by-element, "
+                "referencing each element's grid location where given; "
+                "(3) analyse the dataset COLLECTIVELY: group elements that "
+                "show similar behaviour (same floor, same member type, or "
+                "similar velocities/grades) and give ONE collective judgment "
+                "per group rather than repeating near-identical verdicts "
+                "element by element; (4) where field_notes, weather_condition "
+                "or attachment descriptions are present, weigh them as "
+                "contributing evidence — e.g. surface moisture or hot weather "
+                "can depress or inflate pulse velocities, and operator notes "
+                "may explain an outlier; (5) for each weak or variable "
+                "element or group state the technical impact, a solution, and "
+                "a recommendation; (6) cite the relevant codes where "
+                "applicable (BS 1881-203, BS EN 12504-4, ASTM C597, "
+                "ACI 228.2R). Do not invent facts, numbers, or events that "
+                "are not present in the data. Return JSON: "
+                '{"observations": ["..."]}\n\n'
+                f"Measured data: {fact_pack}"
+            )
+            llm_obs = data.get('observations') if isinstance(data, dict) else None
+            if llm_obs and isinstance(llm_obs, list) and llm_obs:
+                observations = [str(o) for o in llm_obs]
+                provider = AIService._get_provider()
+                model_version = str(
+                    AIService._get_gemini_model() if provider == 'gemini'
+                    else AIService._get_openai_model())
+                steps.append(
+                    f"Project narrative synthesised by {provider} ({model_version}) "
+                    "from the per-element measurements above.")
+        except Exception as e:  # noqa: BLE001 — provider down must never break the roll-up
+            logger.info("PUNDIT project LLM narrative unavailable (%s) — "
+                        "deterministic record stands.", e)
+
+        record = AIAnalysisRecord.objects.create(
+            project=project,
+            analysis_type='pundit',
+            risk_level=worst[0],
+            risk_score=worst[1] or None,
+            observations=observations,
+            correlations=cls._confidence_metrics(project, element_summaries),
+            recommendations=cls._project_recommendations(element_summaries),
+            reasoning_log="\n".join(steps),
+            requires_human_review=True,
+            confidence=cls._evidence_confidence(element_summaries,
+                                                llm_used=(provider != 'deterministic')),
+            model_provider=provider,
+            model_version=model_version,
+        )
+        return record
+
+    # -------------------------------------------- confidence metrics (11 Sep
+    # 2026, REFINED EXECUTIVE SUMMARY PART B §2.2): per-element confidence
+    # intervals, probability below the design strength, cross-element
+    # outlier validation, data-quality scores and a data-cited reasoning
+    # trace — all computed from the recorded readings, never invented.
+    @staticmethod
+    def _confidence_metrics(project, element_summaries):
+        from . import confidence_metrics as cm
+
+        se = cm.curve_standard_error_mpa(project)
+        outliers = cm.cross_element_outliers(element_summaries)
+        metrics = []
+        for s in element_summaries:
+            if s['mean_ecs_n_mm2'] is None:
+                continue        # no strength estimate: nothing to interval
+            ci = cm.strength_confidence_interval(s['mean_ecs_n_mm2'], se)
+            p_below = (cm.probability_below_design(s['mean_ecs_n_mm2'], se)
+                       if ci is not None else None)
+            quality = cm.data_quality_score(s['n_points'],
+                                            s['point_spread_pct'])
+            outlier = outliers.get(id(s))
+            metrics.append({
+                'element': s['element'],
+                'floor': s['floor'],
+                'grid_location': s['grid_location'],
+                'mean_velocity_m_s': s['mean_velocity_m_s'],
+                'mean_ecs_n_mm2': s['mean_ecs_n_mm2'],
+                'grade': s['grade'],
+                'confidence_interval_n_mm2': (
+                    None if ci is None
+                    else [round(ci[0], 1), round(ci[1], 1)]),
+                'probability_below_design': p_below,
+                'cross_element_outlier': outlier,
+                'data_quality': (
+                    None if quality is None
+                    else {'label': quality[0], 'reason': quality[1]}),
+                'reasoning_trace': cm.reasoning_trace(
+                    s, se_mpa=se, ci=ci, p_below=p_below,
+                    outlier=outlier, quality=quality),
+            })
+        return metrics
+
+
+    # ---------------------------------------------- evidence-based confidence
+    @staticmethod
+    def _evidence_confidence(element_summaries, llm_used=False):
+        """
+        Confidence the analysis deserves, computed from the evidence (7 Sep
+        meeting item 6 — the client asked for 93-95%; good field data earns
+        it, thin data scores honestly lower; nothing is ever hardcoded).
+
+        Evidence is pooled PER PHYSICAL ELEMENT (12 Sep 2026): the registry
+        and device ingestion record each station measurement as its own test
+        row, so one element's 3+ real test points (BS EN 12504-4) can arrive
+        as several single-point tests. Points and point velocities are
+        aggregated across the tests sharing an element name on the same
+        floor before scoring; an unnamed element is never merged with
+        another, so each unnamed station stands alone.
+
+          base 70  — deterministic BS 1881-203 math over recorded readings
+          +10      — every graded element has 3+ test points (BS EN 12504-4)
+          +10      — within-element point spread within 2% of the mean
+          +5       — every graded element has an E.C.S (strength estimate)
+        and, when the narrative layer ran, +5 for provider synthesis.
+        Capped at 95. Returns a 0.0-1.0 fraction (the field's documented
+        scale) or None with no evidence.
+        """
+        graded = [s for s in element_summaries if s['grade'] != 'pending']
+        if not graded:
+            return None
+        groups = {}
+        for s in graded:
+            name = (s.get('element') or '').strip().lower()
+            floor = (s.get('floor') or '').strip().lower()
+            key = (name, floor) if name else (None, id(s))
+            g = groups.setdefault(key, {'n_points': 0, 'velocities': []})
+            g['n_points'] += s.get('n_points') or 0
+            g['velocities'].extend(s.get('point_velocities_m_s') or [])
+        score = 70.0
+        if all(g['n_points'] >= 3 for g in groups.values()):
+            score += 10
+        spreads = []
+        for g in groups.values():
+            vs = [v for v in g['velocities'] if v]
+            if len(vs) > 1:
+                mean = sum(vs) / len(vs)
+                if mean > 0:
+                    spreads.append((max(vs) - min(vs)) / mean * 100.0)
+        if spreads and max(spreads) <= 2.0:
+            score += 10
+        if all(s['mean_ecs_n_mm2'] is not None for s in graded):
+            score += 5
+        if llm_used:
+            score += 5
+        return round(min(score, 95.0) / 100.0, 3)
+
+    @staticmethod
+    def _project_recommendations(element_summaries):
+        recs = []
+        poor = [s for s in element_summaries
+                if s['grade'] in ('poor', 'very_poor')]
+        questionable = [s for s in element_summaries if s['grade'] == 'questionable']
+        cracked = [s for s in element_summaries
+                   if (s['crack_depth_mm'] or 0) > 25]
+        if poor:
+            recs.append({
+                'recommendation': f"Structural review of {len(poor)} element(s) "
+                "graded poor or very poor by pulse velocity.",
+                'priority': 'Urgent',
+            })
+        if cracked:
+            recs.append({
+                'recommendation': f"Map and monitor {len(cracked)} element(s) with "
+                "crack depth above 25 mm; engage a structural engineer.",
+                'priority': 'High',
+            })
+        if questionable:
+            recs.append({
+                'recommendation': f"Supplementary coring or rebound hammer testing "
+                f"on {len(questionable)} questionable element(s) to confirm quality.",
+                'priority': 'Routine',
+            })
+        if not recs:
+            recs.append({
+                'recommendation': "Continue routine monitoring; all tested elements "
+                "fall within acceptable velocity bands.",
+                'priority': 'Routine',
+            })
+        return recs
 
     @staticmethod
     def _recommendations(grade, crack_depth_mm):
@@ -193,7 +728,7 @@ class PUNDITAdapter:
 GPR_SEVERITY_RISK = {
     'low': 0.20,
     'medium': 0.50,
-    'high': 0.78,
+    'high': 0.93,
     'critical': 0.95,
 }
 

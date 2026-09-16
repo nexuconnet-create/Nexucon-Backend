@@ -42,11 +42,27 @@ CORS_ALLOWED_ORIGINS = [
     "http://api.nexucon.net",
     "https://nexucon.net",
     "http://nexucon.net",
+    "https://www.nexucon.net",
+    "http://www.nexucon.net",
+    "https://inspector.nexucon.net",
+    "http://inspector.nexucon.net",
+    "https://inspector.nexucon.com",
+    "http://inspector.nexucon.com",
+    "https://client.nexucon.net",
     "http://187.7.20.123",
     "http://187.7.20.123:8000",
     "https://nexucon-backend.onrender.com",
     "https://nexucon-frontend-8x3a.vercel.app",
+    "https://www.nexucon.net",
+    "https://187.7.20.123",
 ]
+_extra_cors = os.getenv("CORS_ALLOWED_ORIGINS", "") or os.getenv("DJANGO_CORS_ALLOWED_ORIGINS", "")
+if _extra_cors:
+    for _orig in _extra_cors.split(","):
+        _orig = _orig.strip()
+        if _orig and _orig not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(_orig)
+
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -56,11 +72,47 @@ CSRF_TRUSTED_ORIGINS = [
     "http://api.nexucon.net",
     "https://nexucon.net",
     "http://nexucon.net",
+    "https://www.nexucon.net",
+    "http://www.nexucon.net",
+    "https://inspector.nexucon.net",
+    "http://inspector.nexucon.net",
+    "https://inspector.nexucon.com",
+    "http://inspector.nexucon.com",
+    "https://client.nexucon.net",
     "http://187.7.20.123",
     "http://187.7.20.123:8000",
     "https://*.vercel.app",
     "https://nexucon-backend.onrender.com",
+    "https://www.nexucon.net",
+    "https://187.7.20.123",
 ]
+_extra_csrf = os.getenv("CSRF_TRUSTED_ORIGINS", "") or os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "")
+if _extra_csrf:
+    for _orig in _extra_csrf.split(","):
+        _orig = _orig.strip()
+        if _orig and _orig not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(_orig)
+
+
+# Dynamically add any env-defined origins ensuring proper schemes
+for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS"):
+    _val = os.getenv(_env_key, "").strip()
+    if _val:
+        for _item in _val.split(","):
+            _cleaned = _item.strip().rstrip("/")
+            if _cleaned and _cleaned != "*":
+                if _cleaned.startswith("http://") or _cleaned.startswith("https://"):
+                    if _cleaned not in CORS_ALLOWED_ORIGINS:
+                        CORS_ALLOWED_ORIGINS.append(_cleaned)
+                    if _cleaned not in CSRF_TRUSTED_ORIGINS:
+                        CSRF_TRUSTED_ORIGINS.append(_cleaned)
+                else:
+                    for _scheme in ("https://", "http://"):
+                        _with_scheme = f"{_scheme}{_cleaned}"
+                        if _with_scheme not in CORS_ALLOWED_ORIGINS:
+                            CORS_ALLOWED_ORIGINS.append(_with_scheme)
+                        if _with_scheme not in CSRF_TRUSTED_ORIGINS:
+                            CSRF_TRUSTED_ORIGINS.append(_with_scheme)
 
 # Dynamically add any env-defined origins ensuring proper schemes
 for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS"):
@@ -195,6 +247,13 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    # Without a filter backend, every `filterset_fields = [...]` declaration
+    # in the viewsets is SILENTLY IGNORED — ?project=... etc. returned every
+    # row the user could see, leaking elements across projects (e.g.
+    # /digital-eye/bim-elements/?project=X returning other projects' rows).
+    'DEFAULT_FILTER_BACKENDS': (
+        'django_filters.rest_framework.DjangoFilterBackend',
+    ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'common.exceptions.handler.custom_exception_handler',
 }
@@ -218,6 +277,7 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Enterprise Building Collapse Prevention & Digital Regulatory Agency API',
     'VERSION': '1.0.0',
     'SERVERS': [
+        {'url': 'https://api.nexucon.net', 'description': 'Live Production (VPS)'},
         {'url': 'https://nexucon-backend.onrender.com', 'description': 'Live Production (Render)'},
         {'url': 'http://127.0.0.1:8000', 'description': 'Local Development'},
     ],
@@ -266,6 +326,12 @@ if STORAGE_PROVIDER == 'cloudflare_r2' and CLOUDFLARE_R2_ACCESS_KEY_ID and CLOUD
         },
     }
 MEDIA_URL = '/media/'
+
+# Google Maps Static API key for the NDT report's site location map (C6):
+# a 500 m radius map image around the project's recorded GNSS coordinates.
+# Empty/absent means the report honestly falls back to the operator's map
+# photo / BIM captures — no map is ever fabricated.
+GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Google Cloud Service Account & Translation / Calendar APIs
