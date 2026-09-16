@@ -42,6 +42,13 @@ CORS_ALLOWED_ORIGINS = [
     "http://api.nexucon.net",
     "https://nexucon.net",
     "http://nexucon.net",
+    "https://www.nexucon.net",
+    "http://www.nexucon.net",
+    "https://inspector.nexucon.net",
+    "http://inspector.nexucon.net",
+    "https://inspector.nexucon.com",
+    "http://inspector.nexucon.com",
+    "https://client.nexucon.net",
     "http://187.7.20.123",
     "http://187.7.20.123:8000",
     "https://nexucon-backend.onrender.com",
@@ -65,6 +72,13 @@ CSRF_TRUSTED_ORIGINS = [
     "http://api.nexucon.net",
     "https://nexucon.net",
     "http://nexucon.net",
+    "https://www.nexucon.net",
+    "http://www.nexucon.net",
+    "https://inspector.nexucon.net",
+    "http://inspector.nexucon.net",
+    "https://inspector.nexucon.com",
+    "http://inspector.nexucon.com",
+    "https://client.nexucon.net",
     "http://187.7.20.123",
     "http://187.7.20.123:8000",
     "https://*.vercel.app",
@@ -79,6 +93,26 @@ if _extra_csrf:
         if _orig and _orig not in CSRF_TRUSTED_ORIGINS:
             CSRF_TRUSTED_ORIGINS.append(_orig)
 
+
+# Dynamically add any env-defined origins ensuring proper schemes
+for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS"):
+    _val = os.getenv(_env_key, "").strip()
+    if _val:
+        for _item in _val.split(","):
+            _cleaned = _item.strip().rstrip("/")
+            if _cleaned and _cleaned != "*":
+                if _cleaned.startswith("http://") or _cleaned.startswith("https://"):
+                    if _cleaned not in CORS_ALLOWED_ORIGINS:
+                        CORS_ALLOWED_ORIGINS.append(_cleaned)
+                    if _cleaned not in CSRF_TRUSTED_ORIGINS:
+                        CSRF_TRUSTED_ORIGINS.append(_cleaned)
+                else:
+                    for _scheme in ("https://", "http://"):
+                        _with_scheme = f"{_scheme}{_cleaned}"
+                        if _with_scheme not in CORS_ALLOWED_ORIGINS:
+                            CORS_ALLOWED_ORIGINS.append(_with_scheme)
+                        if _with_scheme not in CSRF_TRUSTED_ORIGINS:
+                            CSRF_TRUSTED_ORIGINS.append(_with_scheme)
 
 # Dynamically add any env-defined origins ensuring proper schemes
 for _env_key in ("FRONTEND_URL", "NEXT_PUBLIC_API_URL", "CSRF_TRUSTED_ORIGINS"):

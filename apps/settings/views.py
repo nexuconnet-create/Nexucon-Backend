@@ -192,6 +192,11 @@ class IntegrationStatsViewSet(viewsets.ViewSet):
 class StaffUserViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
+    def get_permissions(self):
+        if self.action in ['validate_invite', 'accept_invite']:
+            return [permissions.AllowAny()]
+        return super().get_permissions()
+
     def list(self, request):
         search = request.query_params.get('search')
         department = request.query_params.get('department')
@@ -204,11 +209,25 @@ class StaffUserViewSet(viewsets.ViewSet):
         name = request.data.get('name', '')
         role = request.data.get('role', 'Reviewer')
         department = request.data.get('department', 'Urban Planning')
+        agency_id = request.data.get('agency_id') or request.data.get('agency')
+        district_id = request.data.get('district_id') or request.data.get('district')
+        assigned_projects = request.data.get('assigned_projects') or []
+        invite_code = request.data.get('invite_code')
 
         if not email or not name:
             return Response({"error": "Name and email are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        inv = SettingsService.invite_user(email, name, role, department, request.user)
+        inv = SettingsService.invite_user(
+            email=email,
+            name=name,
+            role=role,
+            department=department,
+            invited_by=request.user,
+            agency_id=agency_id,
+            district_id=district_id,
+            assigned_projects=assigned_projects,
+            invite_code=invite_code
+        )
         return Response(UserInvitationSerializer(inv).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='toggle-status')
@@ -216,21 +235,47 @@ class StaffUserViewSet(viewsets.ViewSet):
         u = SettingsService.toggle_user_status(pk, request.user)
         return Response({"id": str(u.id), "is_active": u.is_active, "message": f"User status toggled to {u.is_active}"}, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny], url_path='validate-invite')
+    def validate_invite(self, request):
+        token = request.data.get('token')
+        invite_code = request.data.get('invite_code') or request.data.get('code')
+        email = request.data.get('email')
+        temp_password = request.data.get('temp_password') or request.data.get('password')
+
+        if not token and not invite_code and not temp_password and not email:
+            return Response({
+                "valid": False,
+                "error_code": "MISSING_PARAMS",
+                "message": "Please provide your official email and Invite Code or Temporary Password."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        result = SettingsService.validate_inspector_invitation(
+            token=token,
+            invite_code=invite_code,
+            email=email,
+            temp_password=temp_password
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny], url_path='accept-invite')
     def accept_invite(self, request):
         email = request.data.get('email')
         token = request.data.get('token')
         password = request.data.get('password')
+        invite_code = request.data.get('invite_code') or request.data.get('code')
+        temp_password = request.data.get('temp_password')
         full_name = request.data.get('name') or request.data.get('full_name')
 
-        if not email:
-            return Response({"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not email and not token and not invite_code:
+            return Response({"error": "Email or invite code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         result = SettingsService.accept_invitation(
             email=email,
             token=token,
             password=password,
-            full_name=full_name
+            full_name=full_name,
+            invite_code=invite_code,
+            temp_password=temp_password
         )
 
         if not result.get('success'):

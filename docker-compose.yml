@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nexucon}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexucon_secure_pass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -35,7 +35,6 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
-      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-https://api.nexucon.net,http://api.nexucon.net,https://nexucon.net,https://www.nexucon.net,http://187.7.20.123,https://187.7.20.123,http://187.7.20.123:8000}
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}
@@ -46,7 +45,7 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - FRONTEND_URL=${FRONTEND_URL:-https://nexucon.net}
-      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,187.7.20.123,localhost,127.0.0.1}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,inspector.nexucon.com,inspector.nexucon.net,187.7.20.123,localhost,127.0.0.1}
 
   celery:
     build: .

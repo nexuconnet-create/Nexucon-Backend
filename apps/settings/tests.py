@@ -1044,6 +1044,40 @@ class StaffDirectoryServiceTestCase(TestCase):
         self.assertTrue(user.is_verified)
         self.assertTrue(user.check_password('Rotated123!'))
 
+    def test_validate_inspector_invitation_valid_and_invalid_code(self):
+        invitation = SettingsService.invite_user(
+            email='inspector.test@government.gov.ng',
+            name='Engr. Test Inspector',
+            role='Inspector',
+            department='Building Inspectorate',
+            invite_code='TEST-1234'
+        )
+
+        # 1. Successful validation with valid token and code
+        res = SettingsService.validate_inspector_invitation(token=str(invitation.id), invite_code='TEST-1234')
+        self.assertTrue(res['valid'])
+        self.assertEqual(res['email'], 'inspector.test@government.gov.ng')
+        self.assertEqual(res['role'], 'Inspector')
+        self.assertIsNotNone(res['temporary_password'])
+
+        # 2. Rejection with invalid code
+        bad_res = SettingsService.validate_inspector_invitation(token=str(invitation.id), invite_code='WRONG-CODE')
+        self.assertFalse(bad_res['valid'])
+        self.assertEqual(bad_res['error_code'], 'INVALID_CODE')
+
+        # 3. Accept invitation
+        accept_res = SettingsService.accept_invitation(
+            email='inspector.test@government.gov.ng',
+            token=str(invitation.id),
+            password='PermPassword123!'
+        )
+        self.assertTrue(accept_res['success'])
+
+        # 4. Rejection after acceptance (single-use token)
+        accepted_res = SettingsService.validate_inspector_invitation(token=str(invitation.id), invite_code='TEST-1234')
+        self.assertFalse(accepted_res['valid'])
+        self.assertEqual(accepted_res['error_code'], 'ALREADY_ACCEPTED')
+
 
 class SettingsServiceDomainTestCase(TestCase):
     """Roles, workflows, templates, standards, notifications, webhooks."""
