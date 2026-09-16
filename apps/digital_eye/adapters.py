@@ -51,15 +51,35 @@ PUNDIT_GRADE_RISK = {
 }
 
 
-def _ecs_of(velocity_km_s, project=None, rebound_number=None, temperature_c=None):
-    """E.C.S (N/mm2) through the project's active Nexucon Link curve — the
+def _ecs_with_provenance(velocity_km_s, project=None, rebound_number=None,
+                         temperature_c=None, n_points=None):
+    """``(E.C.S, curve snapshot)`` through the project's active Nexucon Link
+    curve. The snapshot carries the curve's provenance — including the
+    standard-error adjustment disclosure, so a caller that prints a reasoning
+    trace can state how the figure was arrived at rather than only what it
+    is."""
+    from apps.digital_eye.strength_curves import apply_active_curve
+    return apply_active_curve(
+        project, velocity_km_s,
+        rebound_number=rebound_number, temperature_c=temperature_c,
+        n_points=n_points)
+
+
+def _ecs_of(velocity_km_s, project=None, rebound_number=None, temperature_c=None,
+            n_points=None):
+    """E.C.S (N/mm2) alone, for callers that do not print provenance — the
     single f_cu path (apps.digital_eye.strength_curves). Without a project
     (or curve) it resolves to the platform default / built-in fixed curve,
-    which is the documented laboratory calibration the report discloses."""
-    from apps.digital_eye.strength_curves import apply_active_curve
-    strength, _snapshot = apply_active_curve(
-        project, velocity_km_s,
-        rebound_number=rebound_number, temperature_c=temperature_c)
+    which is the documented laboratory calibration the report discloses.
+
+    ``n_points`` is how many test points were averaged into ``velocity_km_s``.
+    Every caller here passes an *element mean*, so the curve's confidence
+    margin narrows as sqrt(n) of those points; a single reading honestly
+    passes 1 and earns no averaging benefit.
+    """
+    strength, _snapshot = _ecs_with_provenance(
+        velocity_km_s, project=project, rebound_number=rebound_number,
+        temperature_c=temperature_c, n_points=n_points)
     return strength
 
 
@@ -155,7 +175,8 @@ class PUNDITAdapter:
             if velocity is not None:
                 mean_ecs = _ecs_of(velocity, project=test.project,
                                    rebound_number=test.rebound_number,
-                                   temperature_c=test.surface_temperature_c)
+                                   temperature_c=test.surface_temperature_c,
+                                   n_points=len(velocities))
                 steps.append(
                     f"Element mean pulse velocity = {velocity:.3f} km/s"
                     + (f" (E.C.S of mean = {mean_ecs:.1f} N/mm2)." if mean_ecs is not None
@@ -262,7 +283,20 @@ class PUNDITAdapter:
     def _fact_pack(cls, test, rows, velocity, grade, crack_depth):
         """Compact, numbers-only description of the real measurements — the
         ONLY data the LLM ever sees, so it cannot invent values. Velocities
-        are carried in m/s (client unit standard, 7 Sep 2026)."""
+        are carried in m/s (client unit standard, 7 Sep 2026).
+
+        ``velocity`` is the element mean across ``rows``, so the curve's
+        confidence margin narrows as sqrt(n) of the rows that yielded a
+        velocity — computed once here, rounded like the per-point figures.
+        """
+        n_velocity_points = max(
+            1, len([r for r in rows if r['velocity_km_s'] is not None]))
+        element_mean_ecs = (
+            _ecs_of(velocity, project=test.project,
+                    rebound_number=test.rebound_number,
+                    temperature_c=test.surface_temperature_c,
+                    n_points=n_velocity_points)
+            if velocity is not None else None)
         pack = {
             'project': getattr(test.project, 'name', None),
             'element': test.structural_element or None,
@@ -288,13 +322,8 @@ class PUNDITAdapter:
                 for r in rows
             ],
             'element_mean_velocity_m_s': None if velocity is None else round(velocity * 1000, 2),
-            'element_mean_ecs_n_mm2': None if velocity is None else (
-                None if _ecs_of(velocity, project=test.project,
-                                rebound_number=test.rebound_number,
-                                temperature_c=test.surface_temperature_c) is None
-                else round(_ecs_of(velocity, project=test.project,
-                                   rebound_number=test.rebound_number,
-                                   temperature_c=test.surface_temperature_c), 1)),
+            'element_mean_ecs_n_mm2': None if element_mean_ecs is None
+            else round(element_mean_ecs, 1),
             'field_notes': test.notes or None,
             'attachments': [
                 {'name': f.file_name, 'description': f.description or None}
@@ -400,10 +429,13 @@ class PUNDITAdapter:
                     / velocity * 100, 1)
             crack_depth = (test.element_mean_crack_depth_mm()
                            if test.readings.exists() else test.crack_depth_mm)
-            mean_ecs = _ecs_of(velocity, project=project,
-                               rebound_number=test.rebound_number,
-                               temperature_c=test.surface_temperature_c) \
-                if velocity is not None else None
+            mean_ecs, ecs_snapshot = (
+                _ecs_with_provenance(
+                    velocity, project=project,
+                    rebound_number=test.rebound_number,
+                    temperature_c=test.surface_temperature_c,
+                    n_points=max(1, len(point_velocities)))
+                if velocity is not None else (None, None))
             element_summaries.append({
                 'element': test.structural_element or None,
                 'floor': test.floor or None,
@@ -417,6 +449,9 @@ class PUNDITAdapter:
                 else round(velocity * 1000, 2),
                 'point_spread_pct': spread_pct,
                 'mean_ecs_n_mm2': None if mean_ecs is None else round(mean_ecs, 1),
+                # Provenance of the figure above: the standard-error policy
+                # that moved it, so the reasoning trace can state it.
+                'se_adjustment': (ecs_snapshot or {}).get('se_adjustment'),
                 'grade': grade,
                 'crack_depth_mm': None if crack_depth is None
                 else round(crack_depth, 1),

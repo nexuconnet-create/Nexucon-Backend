@@ -12,11 +12,15 @@ Covers:
   * Sensor-data file upload validation and SHA-256 checksum computation.
 """
 import hashlib
+import json
+from datetime import date
+from io import StringIO
 from unittest import mock
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
@@ -32,7 +36,8 @@ from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
     BIMElementMapping, BIMModelGeometry, FieldDevice, GPRAnomaly, GPRSurvey,
     GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITReading,
-    PUNDITTest, RebarTest, SensorDataFile, TrimbleConnection, TrimbleProject,
+    PUNDITTest, RebarTest, SensorDataFile, StrengthCurve, TrimbleConnection,
+    TrimbleProject,
 )
 
 User = get_user_model()
@@ -540,6 +545,19 @@ class PUNDITConfidenceMetricsTestCase(DigitalEyeAPITestBase):
     engine the report uses, fed by the curve's regression standard error —
     never a fabricated uncertainty (the deleted ai_ensemble Monte Carlo)."""
 
+    def setUp(self):
+        super().setUp()
+        # Hermetic: _posted_and_analysed posts to the per-test analyze
+        # endpoint, which runs PUNDITAdapter.analyze(use_llm=True) and so
+        # reached a live AI provider on every run — four real Gemini/OpenAI
+        # calls per suite, each swallowed by the adapter's deterministic
+        # fallback. The tests passed either way; the free tier paid for it.
+        patcher = patch(
+            "apps.common.ai_service.AIService.generate_structured_json",
+            side_effect=AIProviderUnavailable("no provider configured"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _activate_regressed_curve(self):
         """A project-specific linear curve fitted from real calibration
         pairs, so curve_fit_stats derives a genuine standard error."""
@@ -916,6 +934,91 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
                                       'TRANSIT TIME T (US)': 31.2}])},
             format='multipart')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class PurgeExampleTemplateDataTestCase(DigitalEyeAPITestBase):
+    """`purge_example_template_data` — removes records that are the template's
+    EXAMPLE rows imported as field data, and leaves real measurements alone.
+
+    The 6 Sep 2026 registry held 21 such tests: the illustration's numbers
+    (120 mm at 30.1 / 29.8 / 30.3 us, and so on) written as if measured. Six
+    of them carried REAL BIM element names, because the template substitutes
+    project elements into its EXAMPLE sheet — so matching on the element name
+    would have missed exactly the rows that look most like field data.
+    """
+
+    # The template's own pulse-velocity illustration, point for point.
+    EXAMPLE_PULSE = [('A', 120.0, 30.1), ('B', 120.0, 29.8), ('C', 120.0, 30.3)]
+
+    def _test_with(self, element, readings=EXAMPLE_PULSE):
+        test = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element=element, floor='Ground Floor',
+            path_length_mm=120.0)
+        for point, path, transit in readings:
+            PUNDITReading.objects.create(
+                test=test, point_label=point, path_length_mm=path,
+                transit_time_us=transit)
+        return test
+
+    def _run(self, *args):
+        out = StringIO()
+        call_command('purge_example_template_data', *args, stdout=out)
+        return out.getvalue()
+
+    def test_a_dry_run_reports_the_row_and_deletes_nothing(self):
+        test = self._test_with('COL-A1')
+        output = self._run()
+
+        self.assertIn('COL-A1', output)
+        self.assertIn('Dry run', output)
+        self.assertTrue(PUNDITTest.objects.filter(pk=test.pk).exists())
+
+    def test_execute_removes_the_imported_example_row(self):
+        test = self._test_with('COL-A1')
+        self._run('--execute')
+
+        self.assertFalse(PUNDITTest.objects.filter(pk=test.pk).exists())
+        # The readings go with it — nothing is left orphaned in the registry.
+        self.assertEqual(PUNDITReading.objects.filter(test_id=test.pk).count(), 0)
+
+    def test_a_real_measurement_survives(self):
+        """Different numbers are a different thing — an actual reading."""
+        real = self._test_with(
+            'Floor:200THK RC SLAB:780904',
+            [('A', 120.0, 30.4), ('B', 120.0, 29.6), ('C', 120.0, 30.9)])
+        self._run('--execute')
+        self.assertTrue(PUNDITTest.objects.filter(pk=real.pk).exists())
+
+    def test_the_match_is_on_values_not_the_element_name(self):
+        """The BIM-named rows were the ones worth catching: an example wearing
+        a real element's name reads exactly like field data."""
+        disguised = self._test_with('M_Concrete-Rectangular Beam:225 x 600mm:801629')
+        self._run('--execute')
+        self.assertFalse(PUNDITTest.objects.filter(pk=disguised.pk).exists())
+
+    def test_a_partial_match_is_not_enough(self):
+        """Two of three illustration points is a real test that happens to
+        share two measurements — it stays."""
+        partial = self._test_with(
+            'COL-B7', [('A', 120.0, 30.1), ('B', 120.0, 29.8), ('C', 120.0, 31.7)])
+        self._run('--execute')
+        self.assertTrue(PUNDITTest.objects.filter(pk=partial.pk).exists())
+
+    def test_a_legacy_scalar_record_is_never_touched(self):
+        """No reading rows means it cannot be an imported example; the
+        command must not reach for the scalar columns instead."""
+        legacy = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='WALL-W1', path_length_mm=120.0,
+            pulse_time_us=30.1)
+        self._run('--execute')
+        self.assertTrue(PUNDITTest.objects.filter(pk=legacy.pk).exists())
+
+    def test_a_clean_registry_reports_clean(self):
+        self._test_with('COL-REAL', [('A', 120.0, 27.5)])
+        output = self._run()
+        self.assertIn('no illustration data', output)
 
 
 class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
@@ -3184,6 +3287,64 @@ class NexuconLinkEngineTestCase(TestCase):
                                  for i in range(9)])
         self.assertIsNone(result['advisory'])
 
+    def test_strength_plausibility_guard(self):
+        """One rule, applied by every calibration entry point (15 Sep 2026):
+        a strength above the ceiling is a mis-entry, not a measurement —
+        while a merely high real result, and the honest "no result yet",
+        both pass."""
+        from .strength_curves import (PLAUSIBLE_STRENGTH_MAX_MPA,
+                                      strength_plausibility_error)
+        # No result recorded yet is not an implausible result.
+        self.assertIsNone(strength_plausibility_error(None))
+        # Ordinary, high-strength and boundary values are all real data.
+        for value in (0.5, 27.4, 60.0, 85.0, PLAUSIBLE_STRENGTH_MAX_MPA):
+            self.assertIsNone(strength_plausibility_error(value),
+                              msg=f'{value} should be plausible')
+        # The mis-entry the client caught on 15 Sep.
+        reason = strength_plausibility_error(150.0)
+        self.assertIsNotNone(reason)
+        self.assertIn('150', reason)
+        self.assertIn(f'{PLAUSIBLE_STRENGTH_MAX_MPA:g}', reason)
+        # A non-numeric strength is a defect, not a plausible reading.
+        self.assertIsNotNone(strength_plausibility_error('strong'))
+
+    def test_curve_coefficients_follow_the_documented_decimal_standard(self):
+        """15 Sep 2026: the A/B/C coefficients were rendered with ":g" (six
+        SIGNIFICANT digits), so a small B could print as "1.2e-05" beside an
+        A of "0.0012". A certificate reader should not have to take in
+        scientific notation to read the curve that produced a strength."""
+        from .strength_curves import (CURVE_PARAM_DECIMALS, format_coefficient,
+                                      formula_display)
+        # The client's own example values round-trip exactly.
+        self.assertEqual(format_coefficient(0.0012), '0.0012')
+        self.assertEqual(format_coefficient(0.0018), '0.0018')
+        self.assertEqual(format_coefficient(0), '0')
+        self.assertEqual(format_coefficient(0.008961), '0.008961')
+        self.assertEqual(format_coefficient(-7.97), '-7.97')
+        # Fixed-point at the documented standard — a real coefficient is
+        # never rendered in scientific notation, and never with float noise
+        # past the standard either.
+        self.assertEqual(format_coefficient(1.23456789), '1.234568')
+        self.assertEqual(format_coefficient(0.0000012), '0.000001')
+        self.assertNotIn('e-', format_coefficient(0.0000012))
+        # The precision shown is the documented standard itself, not an
+        # accident of how Python happened to format the float.
+        self.assertEqual(len(format_coefficient(1.0 / 3).split('.')[1]),
+                         CURVE_PARAM_DECIMALS)
+        # Below the standard's resolution scientific notation is the honest
+        # exception — but the value must never be rounded to a "0" it is not.
+        for tiny in (1.2e-7, 1.2e-30):
+            self.assertNotEqual(format_coefficient(tiny), '0')
+        # The formula as a whole carries the same guarantees.
+        formula = formula_display('exponential',
+                                  {'a': 0.0012, 'b': 0.0018, 'c': 0})
+        self.assertEqual(formula, 'f_cu = 0.0012 x exp(0.0018 x V) + 0')
+        self.assertNotIn('e-', formula)
+        # A coefficient below the standard's resolution is disclosed as the
+        # value it is, not silently printed as zero.
+        self.assertNotIn(' x exp(0 x V)', formula_display(
+            'exponential', {'a': 1.2e-7, 'b': 0.0018, 'c': 0}))
+
 
 class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
     """The Nexucon Link API: curve CRUD (Director-only), activation,
@@ -3394,7 +3555,7 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
         self.assertEqual(len(response.data['data_points']), 2)
         self.assertFalse('r' in response.data['data_points'][0])
 
-    def test_upload_csv_rejects_thin_or_missing_files(self):
+    def test_upload_rejects_thin_or_missing_files(self):
         # No file at all.
         response = self.client.post(reverse('strength-curve-upload-csv'),
                                     {}, format='multipart')
@@ -3406,6 +3567,110 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
             reverse('strength-curve-upload-csv'), {'file': upload},
             format='multipart')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_upload_parses_a_json_calibration_file(self):
+        """The spec's upload takes CSV **or** JSON."""
+        import json as json_module
+        body = json_module.dumps([
+            {'v': 3000, 'f': 15.2, 'r': 30},
+            {'v': 3200, 'f': 18.1, 'r': 32},
+        ])
+        upload = SimpleUploadedFile(
+            'calibration.json', body.encode('utf-8'),
+            content_type='application/json')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['data_points'], [
+            {'v': 3000.0, 'f': 15.2, 'r': 30.0},
+            {'v': 3200.0, 'f': 18.1, 'r': 32.0},
+        ])
+
+    def test_upload_parses_json_that_nests_the_pairs(self):
+        """The object form this platform's own export produces."""
+        import json as json_module
+        body = json_module.dumps({'data_points': [
+            {'velocity': 3000, 'strength': 15.2},
+            {'velocity': 3200, 'strength': 18.1},
+        ]})
+        upload = SimpleUploadedFile(
+            'calibration.json', body.encode('utf-8'),
+            content_type='application/json')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['data_points']), 2)
+
+    def test_upload_decides_the_format_from_content_not_the_filename(self):
+        """A JSON export saved with a .csv extension is still JSON."""
+        import json as json_module
+        body = json_module.dumps([{'v': 3000, 'f': 15.2},
+                                  {'v': 3200, 'f': 18.1}])
+        upload = SimpleUploadedFile(
+            'calibration.csv', body.encode('utf-8'), content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['data_points']), 2)
+
+    def test_upload_rejects_unparseable_or_unsupported_json(self):
+        # Malformed JSON is a 400 naming the parse failure, not a crash.
+        upload = SimpleUploadedFile(
+            'broken.json', b'[{"v": 3000, "f": ', content_type='application/json')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Error parsing JSON', str(response.data['detail']))
+
+        # Valid JSON of the wrong shape says so rather than reading as empty.
+        upload = SimpleUploadedFile(
+            'wrong.json', b'{"curves": []}', content_type='application/json')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('data_points', str(response.data['detail']))
+
+    def test_upload_reports_rows_it_could_not_use(self):
+        """A file that quietly yields fewer pairs than it contains would let a
+        curve be fitted over data the uploader believes was included."""
+        csv_body = ('v,f\n'
+                    '3000,15.2\n'
+                    '3200,18.1\n'
+                    'not-a-number,20\n')   # unusable row
+        upload = SimpleUploadedFile(
+            'calibration.csv', csv_body.encode('utf-8'),
+            content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['data_points']), 2)
+        self.assertEqual(response.data['skipped_rows'], 1)
+
+    def test_upload_drops_a_strength_no_concrete_reaches(self):
+        """An uploaded pair is fitted into a curve exactly like a typed one,
+        so a 150 N/mm2 row is dropped and reported rather than allowed to
+        move the curve every later strength is read from (15 Sep 2026)."""
+        csv_body = ('v,f\n'
+                    '3000,15.2\n'
+                    '3200,18.1\n'
+                    '3900,150\n')          # the mis-entered dimension
+        upload = SimpleUploadedFile(
+            'calibration.csv', csv_body.encode('utf-8'),
+            content_type='text/csv')
+        response = self.client.post(
+            reverse('strength-curve-upload-csv'), {'file': upload},
+            format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([p['f'] for p in response.data['data_points']],
+                         [15.2, 18.1])
+        self.assertEqual(response.data['skipped_rows'], 1)
 
     def test_preview_computes_the_full_chain(self):
         url = reverse('strength-curve-preview')
@@ -3475,6 +3740,26 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
             reverse('strength-curve-detail', args=[default.id]))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(StrengthCurve.objects.filter(pk=default.id).exists())
+
+    def test_a_typed_calibration_pair_may_not_carry_an_impossible_strength(self):
+        """The manual curve form fits its pairs into the curve, so it is
+        guarded the same way a core sample and an upload are — one rule,
+        every entry point (15 Sep 2026)."""
+        from .models import StrengthCurve
+        response = self.client.post(self._curve_url(), {
+            'name': 'Mis-entered pair', 'curve_type': 'linear',
+            'project': str(self.project.id),
+            'formula_params': {'m': 0.012, 'c': -30.0},
+            'data_points': [{'v': 3000.0, 'f': 15.0},
+                            {'v': 4000.0, 'f': 150.0}],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('data_points', response.data['errors'])
+        # The refusal points at WHICH row, so a long calibration list can be
+        # corrected without hunting for the bad one.
+        self.assertIn('point 2', str(response.data['errors']['data_points']))
+        self.assertFalse(StrengthCurve.objects.filter(
+            name='Mis-entered pair').exists())
 
 
 class CoreSampleAPITestCase(DigitalEyeAPITestBase):
@@ -3649,6 +3934,49 @@ class CoreSampleAPITestCase(DigitalEyeAPITestBase):
         self.assertTrue(AuditEvent.objects.filter(
             action='digital_eye.core_sample.create').exists())
 
+    def test_implausible_lab_strength_is_refused(self):
+        """15 Sep 2026: a core was recorded at 150 N/mm2 — the 100 x 150 mm
+        dimensions had been typed into the strength field. A core pair is
+        ground truth fitted into the curve, so a strength no concrete
+        reaches must be refused at entry, not stored and fitted."""
+        from apps.digital_eye.models import CoreSample
+        from apps.digital_eye.strength_curves import PLAUSIBLE_STRENGTH_MAX_MPA
+        response = self._post_core(lab_strength_mpa=150.0)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('lab_strength_mpa', response.data['errors'])
+        self.assertFalse(CoreSample.objects.exists())
+
+        # The refusal names the value, the ceiling and the likely cause, so
+        # the field officer can correct the record rather than guess.
+        message = str(response.data['errors']['lab_strength_mpa'])
+        self.assertIn('150', message)
+        self.assertIn(f'{PLAUSIBLE_STRENGTH_MAX_MPA:g}', message)
+        self.assertIn('mis-entry', message)
+
+    def test_a_high_but_reachable_strength_is_still_accepted(self):
+        """The guard catches mis-entry, it is not a materials-science limit:
+        a genuine high-strength result below the ceiling is real data."""
+        response = self._post_core(lab_strength_mpa=85.0)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        self.assertEqual(response.data['lab_strength_mpa'], 85.0)
+
+    def test_the_ceiling_itself_is_accepted(self):
+        """The bound is inclusive — a certificate reading exactly the
+        ceiling is recorded, not refused by an off-by-one."""
+        from apps.digital_eye.strength_curves import PLAUSIBLE_STRENGTH_MAX_MPA
+        response = self._post_core(lab_strength_mpa=PLAUSIBLE_STRENGTH_MAX_MPA)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+
+    def test_a_core_with_no_lab_result_yet_is_never_implausible(self):
+        """No value recorded is not an implausible value — the honest
+        "awaiting the laboratory" state must stay recordable."""
+        response = self._post_core()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        self.assertIsNone(response.data['lab_strength_mpa'])
+
 
 class PunditAnalysisReviewTestCase(DigitalEyeAPITestBase):
     """
@@ -3660,12 +3988,25 @@ class PunditAnalysisReviewTestCase(DigitalEyeAPITestBase):
 
     def setUp(self):
         super().setUp()
-        # Hermetic: never reach a live AI provider from tests (same patch as
-        # PUNDITAPITestCase — the deterministic record is what is reviewed).
-        patcher = patch.object(
-            PUNDITAdapter, '_llm_observations', return_value=None)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Hermetic: never reach a live AI provider from tests.
+        #
+        # This class exercises analyze-project, whose narrative is built by
+        # PUNDITAdapter.analyze_project -> AIService.generate_structured_json.
+        # Patching only _llm_observations (the PER-TEST narrative) left the
+        # project path calling Gemini for real on every run. analyze_project
+        # swallows the provider error and falls back to the deterministic
+        # record, so the tests still passed while quietly burning the free
+        # tier — the quota-exhaustion trap the 10 Sep note describes. Both
+        # seams are patched here, so either narrative path is covered.
+        for patcher in (
+            patch.object(PUNDITAdapter, '_llm_observations', return_value=None),
+            patch(
+                "apps.common.ai_service.AIService.generate_structured_json",
+                side_effect=AIProviderUnavailable("no provider configured"),
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _make_analysis(self):
         """A real stored project-level PUNDIT analysis record (the
@@ -3746,3 +4087,572 @@ class PunditAnalysisReviewTestCase(DigitalEyeAPITestBase):
             format='json')
         self.assertTrue(AuditEvent.objects.filter(
             action='digital_eye.pundit_analysis.review').exists())
+
+
+# ======================================================================
+# Nexucon Link — the measurement browser (spec A5): its filters, and the
+# JSON export taken from the filtered view.
+# ======================================================================
+
+class PunditMeasurementBrowserTestCase(DigitalEyeAPITestBase):
+    """
+    The reporting browser's filters (?date_from / ?date_to / ?operator /
+    ?curve).
+
+    Every filter is opt-in, so the unfiltered cases are pinned here beside
+    the narrowing ones: a filter that cannot be absent without changing the
+    result would silently alter every existing caller.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.aug = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='SLAB-S1', test_location='Grid A-1',
+            operator_name='A. Onike', test_date=date(2026, 8, 1),
+            path_length_mm=250.0, pulse_time_us=62.5)          # 4.0 km/s
+        self.sep = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='COL-C24', test_location='Grid C-3',
+            operator_name='B. Adeyemi', test_date=date(2026, 9, 1),
+            path_length_mm=250.0, pulse_time_us=125.0)         # 2.0 km/s
+        # 1.0 km/s — below the default curve's 2000 m/s floor, so no strength
+        # is computable for it. Also carries NO operator and NO date: the row
+        # a filter can never match, and must never be made matchable by
+        # attributing it to someone.
+        self.unattributed = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='BEAM-B2', test_location='Grid B-2',
+            operator_name='', test_date=None,
+            path_length_mm=250.0, pulse_time_us=250.0)
+        for test in (self.aug, self.sep, self.unattributed):
+            PUNDITReading.objects.create(
+                test=test, point_label='A',
+                path_length_mm=test.path_length_mm,
+                transit_time_us=test.pulse_time_us)
+
+    def _get(self, **params):
+        return self.client.get(reverse('pundit-test-list'), params).data
+
+    def _elements(self, **params):
+        return {r['structural_element'] for r in self._get(**params)}
+
+    # --- the filters are opt-in -------------------------------------------
+
+    def test_no_params_returns_every_scoped_test(self):
+        self.assertEqual(self._elements(), {'SLAB-S1', 'COL-C24', 'BEAM-B2'})
+
+    def test_an_empty_param_is_not_a_filter(self):
+        self.assertEqual(self._elements(date_from='', operator='', curve=''),
+                         {'SLAB-S1', 'COL-C24', 'BEAM-B2'})
+
+    # --- date range -------------------------------------------------------
+
+    def test_date_from_narrows_to_later_tests(self):
+        self.assertEqual(self._elements(date_from='2026-08-15'), {'COL-C24'})
+
+    def test_date_to_narrows_to_earlier_tests(self):
+        self.assertEqual(self._elements(date_to='2026-08-15'), {'SLAB-S1'})
+
+    def test_date_range_bounds_are_inclusive(self):
+        self.assertEqual(
+            self._elements(date_from='2026-08-01', date_to='2026-08-01'),
+            {'SLAB-S1'})
+
+    def test_malformed_date_is_rejected_not_silently_ignored(self):
+        """Ignoring an unparseable date would return unfiltered rows that
+        look filtered — the one outcome worse than an error."""
+        response = self.client.get(reverse('pundit-test-list'),
+                                   {'date_from': '01/08/2026'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('date_from', response.data['errors'])
+
+    # --- operator ---------------------------------------------------------
+
+    def test_operator_filter_selects_that_operator(self):
+        self.assertEqual(self._elements(operator='A. Onike'), {'SLAB-S1'})
+
+    def test_unattributed_test_cannot_match_any_operator_filter(self):
+        """operator_name stays blank until a real operator is recorded, so
+        no operator filter can ever return this row."""
+        for operator in ('A. Onike', 'B. Adeyemi', ''):
+            if operator:
+                self.assertNotIn('BEAM-B2', self._elements(operator=operator))
+
+    def test_unattributed_test_is_still_visible_unfiltered(self):
+        # It is absent from a filtered view because it genuinely has no
+        # operator — not because it has been hidden from the register.
+        self.assertIn('BEAM-B2', self._elements())
+
+    # --- curve ------------------------------------------------------------
+
+    def test_curve_filter_selects_on_the_readings_own_snapshot(self):
+        """A reading keeps the snapshot of the curve that produced it, so
+        after a recalibration the old curve is still queryable in the data
+        it actually produced."""
+        old = StrengthCurve.objects.create(
+            name='Lekki 2025 calibration', curve_type='linear',
+            project=self.project, formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0)
+        # .update() bypasses compute(), which is exactly right: this is the
+        # stored provenance of an earlier computation, not a recomputation.
+        PUNDITReading.objects.filter(test=self.aug).update(
+            strength_curve_snapshot={'curve_id': str(old.id), 'name': old.name,
+                                     'curve_type': 'linear'})
+        self.assertEqual(self._elements(curve=str(old.id)), {'SLAB-S1'})
+
+    def test_curve_filter_does_not_duplicate_a_multi_point_test(self):
+        """The reading join emits one row per matching point; without the
+        .distinct() the browser would list a three-point element three
+        times."""
+        for label in ('B', 'C'):
+            PUNDITReading.objects.create(
+                test=self.aug, point_label=label, path_length_mm=250.0,
+                transit_time_us=62.5)
+        curve_id = self.aug.readings.first().strength_curve_snapshot['curve_id']
+        rows = self._get(curve=curve_id)
+        self.assertEqual(len(rows), len({r['id'] for r in rows}))
+        self.assertEqual(
+            len([r for r in rows if r['structural_element'] == 'SLAB-S1']), 1)
+
+    def test_unknown_curve_value_returns_empty_not_everything(self):
+        self.assertEqual(self._elements(curve=str(self.aug.id)), set())
+
+
+class PunditMeasurementExportTestCase(DigitalEyeAPITestBase):
+    """
+    Spec A5 — "Export JSON".
+
+    The file must mirror the filtered screen it was taken from, and must
+    record which filters produced it, so it can never be mistaken for a
+    whole-project dump.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Hermetic suite: the provenance-log tests create a test through the
+        # API, which runs the PUNDIT analysis. Unpatched that reaches a live AI
+        # provider — the same trap that exhausted the Gemini free-tier daily
+        # quota and stalled the suite in 60 s retry sleeps (10 Sep 2026).
+        patcher = patch.object(
+            PUNDITAdapter, '_llm_observations', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.attributed = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='SLAB-S1', test_location='Grid A-1',
+            operator_name='A. Onike', test_date=date(2026, 8, 1),
+            path_length_mm=250.0, pulse_time_us=62.5)          # 4.0 km/s
+        # 1.0 km/s, no operator, no date.
+        self.unattributed = PUNDITTest.objects.create(
+            project=self.project, test_type='pulse_velocity',
+            structural_element='BEAM-B2', test_location='Grid B-2',
+            operator_name='', test_date=None,
+            path_length_mm=250.0, pulse_time_us=250.0)
+        for test in (self.attributed, self.unattributed):
+            PUNDITReading.objects.create(
+                test=test, point_label='A',
+                path_length_mm=test.path_length_mm,
+                transit_time_us=test.pulse_time_us)
+
+    def _export(self, **params):
+        response = self.client.get(reverse('pundit-test-export-json'), params)
+        # The action streams the file itself (HttpResponse), so the payload is
+        # the response body — not a DRF-rendered `.data`.
+        if response.status_code == status.HTTP_200_OK:
+            response.payload = json.loads(response.content)
+        return response
+
+    def _rows(self, **params):
+        return self._export(**params).payload['rows']
+
+    def test_export_is_a_json_attachment(self):
+        response = self._export()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('application/json', response['Content-Type'])
+        self.assertIn('attachment', response['Content-Disposition'])
+        self.assertIn('nexucon_pundit_measurements_',
+                      response['Content-Disposition'])
+
+    def test_export_mirrors_the_filter_in_force(self):
+        payload = self._export(operator='A. Onike').payload
+        self.assertEqual(payload['meta']['filters'], {'operator': 'A. Onike'})
+        self.assertEqual({r['structural_element'] for r in payload['rows']},
+                         {'SLAB-S1'})
+
+    def test_export_applies_the_search_box_too(self):
+        """Free-text search runs through a filter backend rather than
+        get_queryset, so the export has to deliberately include it — else
+        the file would be wider than the screen it was taken from."""
+        payload = self._export(search='BEAM-B2').payload
+        self.assertEqual(payload['meta']['filters']['search'], 'BEAM-B2')
+        self.assertEqual({r['structural_element'] for r in payload['rows']},
+                         {'BEAM-B2'})
+
+    def test_unfiltered_export_records_that_no_filter_was_applied(self):
+        payload = self._export().payload
+        self.assertEqual(payload['meta']['filters'], {})
+        self.assertIn('filters_note', payload['meta'])
+
+    def test_row_count_matches_the_rows_emitted(self):
+        payload = self._export().payload
+        self.assertEqual(payload['meta']['row_count'], len(payload['rows']))
+        # One row per READING, not per test — the browser's table is per-point.
+        self.assertEqual(payload['meta']['row_count'], 2)
+
+    def test_export_carries_the_export_time(self):
+        self.assertIn('exported_at', self._export().payload['meta'])
+
+    def test_velocity_is_exported_in_metres_per_second(self):
+        row = self._rows(search='SLAB-S1')[0]
+        self.assertEqual(row['velocity_ms'], 4000)   # 250 mm / 62.5 us
+
+    def test_an_uncomputed_strength_is_null_never_zero(self):
+        """1.0 km/s is below the default curve's 2000 m/s floor, so no
+        strength exists for this point. Exporting 0 would print a real,
+        failing strength for a value that was never converted."""
+        row = self._rows(search='BEAM-B2')[0]
+        self.assertIsNone(row['estimated_strength_mpa'])
+        self.assertIsNotNone(row['velocity_ms'])
+
+    def test_an_unattributed_operator_is_null_not_a_name(self):
+        row = self._rows(search='BEAM-B2')[0]
+        self.assertIsNone(row['operator_name'])
+
+    def test_the_curve_that_produced_each_point_is_named(self):
+        row = self._rows(search='SLAB-S1')[0]
+        reading = self.attributed.readings.first()
+        self.assertEqual(row['curve_id'],
+                         reading.strength_curve_snapshot['curve_id'])
+        self.assertEqual(row['curve_name'],
+                         reading.strength_curve_snapshot['name'])
+        self.assertEqual(row['curve_type'], 'linear')
+
+    def test_a_test_with_no_date_exports_a_null_date(self):
+        row = self._rows(search='BEAM-B2')[0]
+        self.assertIsNone(row['test_date'])
+
+    def test_export_respects_project_scope(self):
+        """A project outside the caller's scope is an error, not an empty
+        file — an empty export would read as "no data recorded"."""
+        response = self._export(project=str(self.attributed.id))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ------------------------------------------------------------------
+    # curves_used (spec's ExportData.curvesUsed)
+    # ------------------------------------------------------------------
+
+    def test_curves_used_lists_the_curve_behind_the_rows(self):
+        payload = self._export().payload
+        reading = self.attributed.readings.first()
+        snapshot = reading.strength_curve_snapshot
+        self.assertEqual(len(payload['curves_used']), 1)
+        entry = payload['curves_used'][0]
+        self.assertEqual(entry['curve_id'], snapshot['curve_id'])
+        self.assertEqual(entry['curve_name'], snapshot['name'])
+        self.assertEqual(entry['curve_type'], 'linear')
+
+    def test_curves_used_is_empty_when_no_row_has_a_curve(self):
+        """Nothing recorded means an empty list, not a named curve."""
+        PUNDITReading.objects.all().update(strength_curve_snapshot=None)
+        PUNDITTest.objects.all().update(strength_curve_snapshot=None)
+        self.assertEqual(self._export().payload['curves_used'], [])
+
+    def test_curves_used_reports_each_curve_once_across_many_points(self):
+        """Two tests, each with several points, all on the same curve — the
+        list names that curve once."""
+        PUNDITReading.objects.create(
+            test=self.attributed, point_label='B',
+            path_length_mm=250.0, transit_time_us=62.5)
+        payload = self._export().payload
+        curve_ids = [c['curve_id'] for c in payload['curves_used']]
+        self.assertEqual(len(curve_ids), len(set(curve_ids)))
+
+    def test_curves_used_reflects_only_the_filtered_rows(self):
+        """The curve block describes the file's rows, so a filter that
+        excludes a test must not name the curve only that test used."""
+        snap = {
+            'curve_id': 'curve-b2-only',
+            'name': 'B2-only calibration',
+            'curve_type': 'linear',
+            'standard': None,
+            'formula': None,
+            'formula_params': None,
+            'valid_range_ms': [2000.0, 5000.0],
+        }
+        PUNDITTest.objects.filter(pk=self.unattributed.pk).update(
+            strength_curve_snapshot=snap)
+        PUNDITReading.objects.filter(test=self.unattributed).update(
+            strength_curve_snapshot=snap)
+
+        payload = self._export(search='BEAM-B2').payload
+        self.assertEqual([c['curve_name'] for c in payload['curves_used']],
+                         ['B2-only calibration'])
+
+        payload = self._export(search='SLAB-S1').payload
+        self.assertNotIn('B2-only calibration',
+                         [c['curve_name'] for c in payload['curves_used']])
+
+    def test_a_point_outside_the_curve_range_still_names_the_curve_in_force(self):
+        """A velocity outside the curve's range computes no strength, but the
+        curve was still the one in force — naming it is provenance, not a
+        claim that it produced the missing figure."""
+        payload = self._export(search='BEAM-B2').payload
+        row = payload['rows'][0]
+        self.assertIsNone(row['estimated_strength_mpa'])
+        self.assertIsNotNone(row['curve_id'])
+
+    # ------------------------------------------------------------------
+    # provenance_log (spec's ExportData.provenanceLog)
+    # ------------------------------------------------------------------
+
+    def test_provenance_log_holds_the_real_audit_events_for_the_export(self):
+        """Recorded through the API, so the event is written by the same
+        _record_audit path production uses."""
+        created = self.client.post(
+            reverse('pundit-test-list'),
+            {
+                'project': str(self.project.id),
+                'test_type': 'pulse_velocity',
+                'structural_element': 'WALL-W9',
+                'path_length_mm': 300.0,
+                'pulse_time_us': 75.0,
+            },
+            format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+
+        payload = self._export(search='WALL-W9').payload
+        actions = [e['action'] for e in payload['provenance_log']]
+        self.assertIn('digital_eye.pundit_test.create', actions)
+        entry = next(e for e in payload['provenance_log']
+                     if e['action'] == 'digital_eye.pundit_test.create')
+        self.assertEqual(entry['user_name'],
+                         self.user.get_full_name() or self.user.email)
+        self.assertIn('timestamp', entry)
+
+    def test_provenance_log_covers_only_the_exported_tests(self):
+        """A test outside the filter must not leak its history into the file."""
+        self.client.post(
+            reverse('pundit-test-list'),
+            {
+                'project': str(self.project.id),
+                'test_type': 'pulse_velocity',
+                'structural_element': 'WALL-W9',
+                'path_length_mm': 300.0,
+                'pulse_time_us': 75.0,
+            },
+            format='json')
+        payload = self._export(search='BEAM-B2').payload
+        self.assertEqual(payload['provenance_log'], [])
+
+    def test_provenance_log_is_empty_and_says_so_when_nothing_was_recorded(self):
+        """setUp creates its tests with the ORM, which writes no audit row —
+        so the log is genuinely empty and the note says 0, not nothing."""
+        payload = self._export().payload
+        self.assertEqual(payload['provenance_log'], [])
+        self.assertIn('0 recorded audit event', payload['meta']['provenance_note'])
+
+    def test_provenance_log_is_capped_and_discloses_the_cap(self):
+        cap = 500
+        for i in range(cap + 3):
+            AuditEvent.objects.create(
+                user=self.user, user_name='A. Onike', user_role='Inspector',
+                action='digital_eye.pundit_test.update',
+                resource_type='PUNDITTest',
+                resource_id=str(self.attributed.id),
+                metadata={'seq': i})
+        payload = self._export().payload
+        self.assertEqual(len(payload['provenance_log']), cap)
+        # Newest first, and the note states the true total.
+        self.assertIn('503 recorded audit event', payload['meta']['provenance_note'])
+        self.assertIn('newest 500', payload['meta']['provenance_note'])
+
+    def test_provenance_log_is_newest_first(self):
+        for seq in range(3):
+            AuditEvent.objects.create(
+                user=self.user, user_name='A. Onike', user_role='Inspector',
+                action='digital_eye.pundit_test.update',
+                resource_type='PUNDITTest',
+                resource_id=str(self.attributed.id),
+                metadata={'seq': seq})
+        log = self._export(search='SLAB-S1').payload['provenance_log']
+        stamps = [e['timestamp'] for e in log]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+
+
+# ======================================================================
+# Nexucon Link — returning a project to the platform default calibration.
+#
+# "Active" is not a property of a curve: there is no is_active flag.
+# ProjectCurveSetting.active_curve is a nullable FK, and the platform default
+# is what applies when it is unset. So choosing the default for a project is
+# clearing that FK — not pointing at a curve. Before this action existed the
+# platform-default row in the Curve Manager had no reachable action at all,
+# and a project that had once been given a curve could never be put back on
+# the default.
+# ======================================================================
+
+class NexuconLinkPlatformDefaultTestCase(DigitalEyeAPITestBase):
+    """The use-platform-default action: it clears the project's own curve,
+    reports honestly whether anything moved, is Director-only and audited,
+    and rewrites no stored reading."""
+
+    def setUp(self):
+        super().setUp()
+        self.curve = StrengthCurve.objects.create(
+            name='Lekki active calibration', curve_type='linear',
+            project=self.project,
+            formula_params={'m': 0.012, 'c': -30.0},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
+            created_by=self.user,
+        )
+
+    def _activate(self):
+        return self.client.post(
+            reverse('strength-curve-activate', args=[self.curve.id]),
+            {'project': str(self.project.id)}, format='json')
+
+    def _use_default(self, project_id=None):
+        return self.client.post(
+            reverse('strength-curve-use-platform-default'),
+            {'project': str(project_id if project_id is not None
+                            else self.project.id)},
+            format='json')
+
+    def _active_source(self):
+        return self.client.get(
+            reverse('strength-curve-active-curve')
+            + f'?project={self.project.id}').data
+
+    def _record_a_reading(self, transit_time_us=30.0):
+        response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-NL-01', 'floor': 'Ground Floor',
+            'path_length_mm': 120.0,
+            'readings': [{'transit_time_us': transit_time_us}],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        return response.data
+
+    def test_use_platform_default_clears_the_projects_own_curve(self):
+        from .models import ProjectCurveSetting
+
+        self.assertEqual(self._activate().status_code, status.HTTP_200_OK)
+        self.assertEqual(self._active_source()['source'], 'project_setting')
+
+        response = self._use_default()
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['changed'])
+        # The name of what was active, not an id — the caller reports it, so
+        # it has to be the label a person would recognise.
+        self.assertEqual(response.data['previous_active_curve'],
+                         'Lekki active calibration')
+        # The response carries the calibration now in force, so the caller
+        # never has to guess what the project fell back to. Compared against
+        # the seeded default row itself rather than against a hardcoded label,
+        # so the test cannot pass on a string the code also happens to hold.
+        default = StrengthCurve.objects.get(is_default=True)
+        self.assertEqual(response.data['curve_snapshot']['curve_id'],
+                         str(default.id))
+        self.assertEqual(response.data['curve_snapshot']['name'], default.name)
+
+        # The override is genuinely gone, not merely reported as gone.
+        setting = ProjectCurveSetting.objects.get(project=self.project)
+        self.assertIsNone(setting.active_curve)
+        self.assertEqual(self._active_source()['source'], 'platform_default')
+
+    def test_use_platform_default_reports_no_change_when_already_on_it(self):
+        """A project with no curve of its own is already on the default, and
+        the action says so rather than reporting a switch that did not
+        happen."""
+        response = self._use_default()
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertFalse(response.data['changed'])
+        self.assertIsNone(response.data['previous_active_curve'])
+        # Still the platform default it was already on — and the response says
+        # which record that is.
+        default = StrengthCurve.objects.get(is_default=True)
+        self.assertEqual(response.data['curve_snapshot']['curve_id'],
+                         str(default.id))
+
+        # And it stays honest once a curve has been set and dropped: True
+        # first, then False — a no-op is reported as a no-op.
+        self.assertEqual(self._activate().status_code, status.HTTP_200_OK)
+        self.assertTrue(self._use_default().data['changed'])
+        self.assertFalse(self._use_default().data['changed'])
+
+    def test_use_platform_default_audits_only_a_real_change(self):
+        """Nothing was switched, so nothing is logged as switched."""
+        self._use_default()
+        self.assertFalse(AuditEvent.objects.filter(
+            action='digital_eye.strength_curve.deactivate').exists())
+
+        self._activate()
+        self._use_default()
+        event = AuditEvent.objects.filter(
+            action='digital_eye.strength_curve.deactivate').first()
+        self.assertIsNotNone(event)
+        self.assertEqual(event.resource_id, str(self.project.id))
+        self.assertEqual(event.metadata['previous_curve'],
+                         'Lekki active calibration')
+
+    def test_use_platform_default_leaves_stored_readings_untouched(self):
+        """Provenance is immutable per record: a reading keeps the snapshot of
+        the curve that produced it, so returning the project to the default
+        rewrites no history."""
+        self._activate()
+        recorded = self._record_a_reading()
+        # 120 mm / 30 us = 4000 m/s -> 0.012 * 4000 - 30 = 18 MPa.
+        self.assertAlmostEqual(recorded['estimated_compressive_strength_mpa'],
+                               18.0, places=2)
+        self.assertEqual(recorded['strength_curve_snapshot']['curve_id'],
+                         str(self.curve.id))
+
+        self.assertEqual(self._use_default().status_code, status.HTTP_200_OK)
+        self.assertEqual(self._active_source()['source'], 'platform_default')
+
+        after = self.client.get(
+            reverse('pundit-test-detail', args=[recorded['id']])).data
+        self.assertEqual(after['strength_curve_snapshot']['curve_id'],
+                         str(self.curve.id))
+        self.assertEqual(after['strength_curve_snapshot']['name'],
+                         'Lekki active calibration')
+        self.assertAlmostEqual(after['estimated_compressive_strength_mpa'],
+                               18.0, places=2)
+        self.assertAlmostEqual(after['readings'][0]['ecs_mpa'], 18.0, places=2)
+
+    def test_use_platform_default_is_director_only(self):
+        from apps.government.models import Profile, Role
+        staff = User.objects.create_user(
+            username='nl_field@nexucon.com', email='nl_field@nexucon.com',
+            password='Password123!')
+        Profile.objects.create(user=staff, role=Role.objects.create(
+            name='Field Officer'))
+        refresh = RefreshToken.for_user(staff)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+        response = self._use_default()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(AuditEvent.objects.filter(
+            action='digital_eye.strength_curve.deactivate').exists())
+
+    def test_use_platform_default_rejects_an_unknown_project(self):
+        """The project is resolved through scoped_projects() exactly as
+        activation resolves it, so an id that resolves to nothing is a 404 —
+        not a silent success against some other project, and not a 500.
+
+        Note what this test does and does not pin: for a Director or Agency
+        Head the scope is every project, so the reachable form of the guard is
+        an id that does not exist. A narrower role never reaches the action at
+        all, which the Director-only test covers."""
+        import uuid
+        response = self._use_default(project_id=uuid.uuid4())
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('detail', response.data)
+
+

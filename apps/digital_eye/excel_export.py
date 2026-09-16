@@ -56,6 +56,32 @@ def _write_header(sheet, columns, title, subtitle=None):
     return header_row + 1
 
 
+def _policy_note(element_data):
+    """The standard-error policy statement to append to the sheet header, or
+    '' when no curve policy is in force.
+
+    The AVERAGE COMPRESSIVE STRENGTH column carries the same figure the report
+    prints, which the report also discloses the derivation of. The header
+    therefore has to carry that disclosure too: a spreadsheet whose header
+    claims parity with the report, while showing a strength the curve's own
+    arithmetic does not produce, would be the one deliverable that hides it.
+
+    The disclosure comes from ``_element_data``'s own ``se_adjustment``, so
+    the sheet states exactly what the report states.
+    """
+    for element in element_data:
+        disclosure = element.get('se_adjustment')
+        if not isinstance(disclosure, dict):
+            continue
+        if not (disclosure.get('applied')
+                or (disclosure.get('method') or 'none') != 'none'):
+            continue
+        if disclosure.get('detail'):
+            return (' Standard-error policy applied to the average strength '
+                    f"column — {disclosure['detail']}")
+    return ''
+
+
 def build_results_workbook(project):
     """
     .xlsx of the project's PUNDIT results, grouped floor -> member ->
@@ -86,7 +112,7 @@ def build_results_workbook(project):
         sheet, RESULT_COLUMNS,
         f'PUNDIT Test Results — {project.name}',
         'Values match the official NDT report Section 5.0 tables exactly '
-        '(velocities in m/s).')
+        '(velocities in m/s).' + _policy_note(element_data))
 
     floors_present = sorted({e['floor_label'] for e in element_data})
     for floor in floors_present:

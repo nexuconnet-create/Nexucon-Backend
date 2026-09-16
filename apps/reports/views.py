@@ -1438,11 +1438,26 @@ class ReportMapView(APIView):
             v_km_s = (t.velocity_km_s if t.velocity_km_s is not None
                       else (velocity / 1000.0 if velocity else None))
             strength = None
+            strength_note = None
             if v_km_s is not None:
                 strength, _snapshot = apply_active_curve(
                     project, v_km_s, rebound_number=t.rebound_number,
-                    temperature_c=t.surface_temperature_c)
+                    temperature_c=t.surface_temperature_c,
+                    # The element mean for a multi-reading test: the curve's
+                    # confidence margin narrows as sqrt(n) of its points.
+                    n_points=t.element_point_count())
+                # The marker's strength is the same figure the report prints,
+                # so the popup states the same standard-error policy rather
+                # than showing an adjusted number with no provenance.
+                disclosure = (_snapshot or {}).get('se_adjustment') \
+                    if isinstance(_snapshot, dict) else None
+                if (isinstance(disclosure, dict)
+                        and (disclosure.get('applied')
+                             or (disclosure.get('method') or 'none') != 'none')
+                        and disclosure.get('detail')):
+                    strength_note = disclosure['detail']
             props['strength_n_mm2'] = strength
+            props['strength_note'] = strength_note
             if strength is not None:
                 props['band'] = ('good' if strength >= 25.0 else 'poor')
             elif velocity is not None:

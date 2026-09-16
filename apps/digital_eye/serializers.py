@@ -8,9 +8,9 @@ from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CoreSample,
     DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice,
     GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
-    GnssSurvey, LiveStream, ProjectCurveSetting, PUNDITReading, PUNDITTest,
-    ProcessingQueueJob, SensorDataFile, StrengthCurve, TrimbleConnection,
-    TrimbleProject,
+    GnssSurvey, LiveStream, NexuconLinkSettings, ProjectCurveSetting,
+    PUNDITReading, PUNDITTest, ProcessingQueueJob, SensorDataFile,
+    StrengthCurve, TrimbleConnection, TrimbleProject,
 )
 
 
@@ -197,7 +197,10 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         strength, _snapshot = apply_active_curve(
             obj.project, obj.velocity_km_s,
             rebound_number=obj.rebound_number,
-            temperature_c=obj.surface_temperature_c)
+            temperature_c=obj.surface_temperature_c,
+            # obj.velocity_km_s is the element mean for a multi-reading test,
+            # so the confidence margin narrows as sqrt(n) of its points.
+            n_points=obj.element_point_count())
         return strength
 
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
@@ -290,7 +293,14 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         mean_ecs, curve_snap = apply_active_curve(
             test.project, mean_v,
             rebound_number=test.rebound_number,
-            temperature_c=test.surface_temperature_c)
+            temperature_c=test.surface_temperature_c,
+            # mean_v is the mean of the points that yielded a velocity, so the
+            # divisor is that same set — the readings are computed above, so
+            # the count is now accurate. Not len(readings_data): a submitted
+            # point missing its path length or transit time stores a row but
+            # contributes nothing to mean_v, and counting it would claim a
+            # tighter margin than the averaged data supports.
+            n_points=test.element_point_count())
         test.estimated_compressive_strength_mpa = mean_ecs
         test.strength_curve_snapshot = curve_snap
         test.quality_grade = PUNDITAdapter.grade_quality(mean_v)
@@ -589,6 +599,9 @@ class StrengthCurveSerializer(serializers.ModelSerializer):
     curve_type_display = serializers.CharField(
         source='get_curve_type_display', read_only=True)
     formula_display = serializers.SerializerMethodField()
+    se_adjustment_method_display = serializers.CharField(
+        source='get_se_adjustment_method_display', read_only=True)
+    se_analysis = serializers.SerializerMethodField()
 
     class Meta:
         model = StrengthCurve
@@ -597,6 +610,8 @@ class StrengthCurveSerializer(serializers.ModelSerializer):
             'project', 'velocity_unit', 'strength_unit', 'formula_params',
             'formula_display', 'data_points', 'valid_range_min_ms',
             'valid_range_max_ms', 'r2_score', 'standard_error', 'aic',
+            'se_adjustment_method', 'se_adjustment_method_display',
+            'se_adjustment_factor', 'se_analysis',
             'is_default', 'provenance', 'version', 'created_by',
             'created_at', 'updated_at',
         ]
@@ -608,6 +623,18 @@ class StrengthCurveSerializer(serializers.ModelSerializer):
         from .strength_curves import formula_display
         try:
             return formula_display(obj.curve_type, obj.formula_params or {})
+        except Exception:
+            return None
+
+    def get_se_analysis(self, obj):
+        """The curve's standard-error picture, derived from its own real
+        calibration pairs. Computed on read — never stored, so it can never
+        drift from the data it describes. A missing calibration set yields
+        the honest "no standard error available" payload rather than an
+        empty object."""
+        from .se_adjustment import analysis_payload
+        try:
+            return analysis_payload(obj)
         except Exception:
             return None
 
@@ -634,11 +661,98 @@ class StrengthCurveSerializer(serializers.ModelSerializer):
         except ValueError as exc:
             raise serializers.ValidationError({'formula_params': str(exc)})
 
+        # Every calibration pair is ground truth fitted into the curve, so an
+        # implausible strength is rejected at the door rather than allowed to
+        # move the curve every strength is later read from (15 Sep 2026).
+        # Only pairs actually SUBMITTED are judged: a PATCH that does not
+        # touch the calibration set must not become unsaveable because of a
+        # value already stored before this guard existed.
+        from .strength_curves import strength_plausibility_error
+        for index, pair in enumerate(attrs.get('data_points') or [], start=1):
+            if not isinstance(pair, dict):
+                continue
+            implausible = strength_plausibility_error(pair.get('f'))
+            if implausible:
+                raise serializers.ValidationError(
+                    {'data_points': f'Calibration point {index}: {implausible}'})
+
         # A curve may only be marked default by the platform (Directors
         # approve one fallback); anything else stays a project curve.
         if attrs.get('is_default'):
             attrs['is_default'] = False
+
+        # Standard-error policy: the method must be one the engine
+        # implements, and an adjustment may not be switched on for a curve
+        # whose own data cannot support an error estimate — otherwise the
+        # setting would silently do nothing while claiming to act.
+        from .se_adjustment import (ADJUSTMENT_METHODS, analysis_payload,
+                                    MIN_PAIRS_FOR_ADJUSTMENT)
+        method = attrs.get('se_adjustment_method') or (
+            self.instance.se_adjustment_method if self.instance else 'none')
+        if method not in ADJUSTMENT_METHODS:
+            raise serializers.ValidationError(
+                {'se_adjustment_method':
+                 f"Must be one of: {', '.join(ADJUSTMENT_METHODS)}."})
+        factor = attrs.get('se_adjustment_factor')
+        if factor is None and self.instance is not None:
+            factor = self.instance.se_adjustment_factor
+        if factor is not None:
+            if factor < 0:
+                raise serializers.ValidationError(
+                    {'se_adjustment_factor':
+                     'The confidence factor must be zero or greater.'})
+            if method == 'confidence_margin' and factor == 0:
+                raise serializers.ValidationError(
+                    {'se_adjustment_factor':
+                     'A confidence margin with factor 0 would change '
+                     'nothing. Use the "none" method instead.'})
+        if method != 'none':
+            pairs = attrs.get('data_points')
+            if pairs is None and self.instance is not None:
+                pairs = self.instance.data_points
+            n_pairs = len([p for p in (pairs or []) if isinstance(p, dict)])
+            if n_pairs < MIN_PAIRS_FOR_ADJUSTMENT:
+                raise serializers.ValidationError(
+                    {'se_adjustment_method':
+                     f'A standard-error adjustment needs at least '
+                     f'{MIN_PAIRS_FOR_ADJUSTMENT} real calibration pairs to '
+                     f'be computed from; this curve has {n_pairs}. Record '
+                     'more calibration pairs first, or leave the method as '
+                     '"none".'})
         return attrs
+
+
+class NexuconLinkSettingsSerializer(serializers.ModelSerializer):
+    """
+    The platform-wide Nexucon Link system settings (wireframe "System
+    Settings"). Writes are Director-only at the view; this serializer only
+    shape-checks.
+    """
+    preferred_curve_type_display = serializers.SerializerMethodField()
+    updated_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NexuconLinkSettings
+        fields = ['preferred_curve_type', 'preferred_curve_type_display',
+                  'default_standard', 'velocity_unit', 'strength_unit',
+                  'updated_by_name', 'updated_at']
+        read_only_fields = ['updated_by_name', 'updated_at']
+
+    def get_preferred_curve_type_display(self, obj):
+        return obj.get_preferred_curve_type_display()
+
+    def get_updated_by_name(self, obj):
+        user = obj.updated_by
+        if user is None:
+            return None
+        return user.get_full_name() or user.get_username()
+
+    def validate_preferred_curve_type(self, value):
+        from .strength_curves import CURVE_TYPES
+        if value not in CURVE_TYPES:
+            raise serializers.ValidationError(
+                f"Unknown curve type. Must be one of: {', '.join(CURVE_TYPES)}.")
+        return value
 
 
 class ProjectCurveSettingSerializer(serializers.ModelSerializer):
@@ -705,4 +819,11 @@ class CoreSampleSerializer(serializers.ModelSerializer):
         if strength is not None and strength <= 0:
             raise serializers.ValidationError(
                 {'lab_strength_mpa': 'Must be positive.'})
+        # A core is ground truth: its pair is fitted into the curve, and the
+        # curve is what every later strength is read from. A strength no
+        # concrete reaches is a mis-entry, not a measurement (15 Sep 2026).
+        from .strength_curves import strength_plausibility_error
+        implausible = strength_plausibility_error(strength)
+        if implausible:
+            raise serializers.ValidationError({'lab_strength_mpa': implausible})
         return attrs

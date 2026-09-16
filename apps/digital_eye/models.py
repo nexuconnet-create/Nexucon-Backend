@@ -474,6 +474,23 @@ class PUNDITTest(models.Model):
                       if row['velocity_km_s'] is not None]
         return (sum(velocities) / len(velocities)) if velocities else None
 
+    def element_point_count(self):
+        """
+        How many test points contributed a computable velocity to this
+        element's mean — the n in the curve's s/sqrt(n) confidence-margin
+        divisor (15 Sep 2026: "three test points averaged", with the
+        standard error factored into the post-velocity calculation).
+
+        The element verdict is the mean of these points, so its confidence
+        margin narrows as sqrt(n) of them — BS EN 13791 logic, where more
+        readings buy a tighter confidence on the in-situ estimate. A legacy
+        single-reading test, or one whose points yielded no velocity,
+        honestly counts as 1: the figure is then a single reading and earns
+        no averaging benefit.
+        """
+        return max(1, len([row for row in self.reading_rows()
+                           if row['velocity_km_s'] is not None]))
+
     def element_mean_crack_depth_mm(self):
         """Mean crack depth over this test's readings (the element verdict
         for multi-point crack tests); None when no point yields a depth."""
@@ -533,7 +550,10 @@ class PUNDITTest(models.Model):
             self.estimated_compressive_strength_mpa, snapshot = apply_active_curve(
                 self.project, mean_v,
                 rebound_number=self.rebound_number,
-                temperature_c=self.surface_temperature_c)
+                temperature_c=self.surface_temperature_c,
+                # mean_v is the mean of these points, so the curve's
+                # confidence margin narrows as sqrt(n) of them.
+                n_points=len(point_velocities))
             if not isinstance(self.strength_curve_snapshot, dict):
                 self.strength_curve_snapshot = snapshot
 
@@ -560,6 +580,10 @@ class PUNDITTest(models.Model):
             'mean_velocity_m_s': None if mean_v is None
             else round(mean_v * 1000, 2),
             'mean_ecs_n_mm2': None if ecs is None else round(ecs, 1),
+            # Provenance of the figure above, straight from the snapshot
+            # stored alongside it: the standard-error policy that moved it.
+            'se_adjustment': (snapshot or {}).get('se_adjustment')
+            if isinstance(snapshot, dict) else None,
         }
         self.ai_reasoning_traces = cm.reasoning_trace(
             element_summary, se_mpa=se, ci=ci, p_below=p_below,
@@ -778,6 +802,32 @@ class StrengthCurve(models.Model):
         null=True, blank=True, help_text="Coefficient of determination (regression-derived curves)")
     standard_error = models.FloatField(null=True, blank=True)
     aic = models.FloatField(null=True, blank=True)
+
+    # --- Standard-error policy (15 Sep 2026 client direction) -------------
+    # "factor standard errors into post-velocity calculations before
+    # converting them into FCU reports". Default 'none' so every existing
+    # curve keeps reporting exactly what it reported before; a Director
+    # opts in per curve. See apps/digital_eye/se_adjustment.py for the
+    # statistics and the honesty rules.
+    SE_ADJUSTMENT_CHOICES = [
+        ('none', 'No adjustment — report the curve estimate as fitted'),
+        ('bias_correction',
+         'Bias correction — add the measured mean residual (the "+2" '
+         'gap-closing convention, computed from real pairs)'),
+        ('confidence_margin',
+         'Confidence margin — subtract k x standard error (conservative '
+         'characteristic strength, BS EN 13791 logic)'),
+    ]
+    se_adjustment_method = models.CharField(
+        max_length=30, choices=SE_ADJUSTMENT_CHOICES, default='none',
+        help_text="How the curve's standard error is factored into the "
+                  "reported f_cu. 'none' until deliberately enabled.")
+    se_adjustment_factor = models.FloatField(
+        default=1.0,
+        help_text="k — the confidence factor for the confidence-margin "
+                  "method (1.0 ~ 84% one-sided, 1.645 ~ 95% one-sided). "
+                  "Unused by the other methods.")
+
     is_default = models.BooleanField(
         default=False,
         help_text="Exactly one platform-wide fallback curve should carry this")
@@ -814,6 +864,14 @@ class StrengthCurve(models.Model):
         from . import strength_curves
         return strength_curves.curve_snapshot(self, temperature_c=temperature_c)
 
+    def se_analysis(self):
+        """This curve's standard-error picture, computed from its own real
+        calibration pairs: n, standard error s, mean residual, R², AIC, and
+        whether an adjustment is supported by the data. Everything is
+        derived — nothing here is a stored constant."""
+        from .se_adjustment import analysis_payload
+        return analysis_payload(self)
+
     def save(self, *args, **kwargs):
         # Fit statistics are DERIVED, never client-supplied: recompute them
         # from the curve's real stored pairs on every save. Curves without
@@ -845,6 +903,65 @@ class ProjectCurveSetting(models.Model):
     def __str__(self):
         curve = self.active_curve.name if self.active_curve_id else '(platform default)'
         return f"{self.project.name}: {curve}"
+
+
+class NexuconLinkSettings(models.Model):
+    """
+    Platform-wide Nexucon Link system settings (the client wireframe's
+    "System Settings" panel, and the 15 Sep 2026 direction that the
+    exponential curve be "the default system setting for system
+    calculations").
+
+    Read carefully, that instruction is about WHICH MODEL the platform
+    offers by default — concrete behaviour is non-linear, so a linear fit
+    should not be the first thing an operator reaches for. It is NOT a
+    licence to seed an exponential curve with invented parameters: the
+    exponential curve in the client's specification PDF evaluates to about
+    1.5 N/mm2 at 4000 m/s, which is not a concrete strength, and shipping
+    it as an active default would make every uncalibrated project report
+    nonsense. So this model stores a PREFERENCE — the curve type the
+    calibration workflow pre-selects and recommends — while the ACTIVE
+    curve for any project remains whatever was really calibrated for it.
+
+    Singleton rows (exactly one, pk=1) edited only by Directors and
+    audit-logged, mirroring ReportCMSPassword-style platform settings.
+    """
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1,
+                                          editable=False)
+    preferred_curve_type = models.CharField(
+        max_length=20, choices=StrengthCurve.CURVE_TYPE_CHOICES,
+        default='exponential',
+        help_text="The curve type the calibration workflow pre-selects and "
+                  "recommends. Concrete behaviour is non-linear, so the "
+                  "default is exponential per the 15 Sep 2026 direction. "
+                  "This does not activate any curve by itself.")
+    default_standard = models.CharField(
+        max_length=100, blank=True, default='BS 1881-203:1986',
+        help_text="Standard the new curves are recorded against by default.")
+    velocity_unit = models.CharField(max_length=20, default='m/s')
+    strength_unit = models.CharField(max_length=20, default='MPa')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                   on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='nexucon_link_settings_updated')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Nexucon Link system settings'
+        verbose_name_plural = 'Nexucon Link system settings'
+
+    def __str__(self):
+        return f"Nexucon Link settings (preferred curve: {self.preferred_curve_type})"
+
+    def save(self, *args, **kwargs):
+        self.id = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        """The singleton, created on first access with its documented
+        defaults (no fabricated curve parameters anywhere in it)."""
+        obj, _ = cls.objects.get_or_create(id=1)
+        return obj
 
 
 class CoreSample(models.Model):

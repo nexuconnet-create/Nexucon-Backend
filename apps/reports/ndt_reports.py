@@ -230,6 +230,7 @@ def ecs_report_disclosure(project):
     if curve.standard_error is not None:
         parts.append(
             f"Standard error of estimate = {curve.standard_error:.2f} N/mm2.")
+    parts.extend(_se_adjustment_disclosure(curve))
     if curve.valid_range_min_ms is not None and curve.valid_range_max_ms is not None:
         parts.append(
             "The curve is valid over the calibrated velocity range "
@@ -239,14 +240,123 @@ def ecs_report_disclosure(project):
     source = (curve.provenance or {}).get('source')
     if source:
         parts.append(f"Source: {source}.")
-    parts.append(
-        "BS 1881-203:1999 notes that no unique velocity-strength relationship "
-        "exists for all concretes; the curve above is the project-specific "
-        "calibration applied to every result in Section 5.0.")
+    # The measurement-standard caveat is drawn from the standards registry so
+    # the report and the platform's Standards panel can never disagree.
+    parts.append(_measurement_standard_caveat())
     derivation = (
         f"the project-specific calibration above, {formula}, with V "
         "expressed in m/s")
     return ' '.join(parts), derivation
+
+
+def _measurement_standard_caveat():
+    """
+    The closing caveat naming the standard the velocity measurement follows,
+    taken from the standards registry (single source of truth).
+    """
+    from apps.digital_eye.strength_curves import STANDARDS
+    code = 'BS 1881-203:1986'
+    for entry in STANDARDS:
+        if entry.get('code') == code:
+            break
+    else:
+        # Registry changed shape: name the platform default measurement
+        # standard rather than printing a code nobody can trace.
+        measurement = [e for e in STANDARDS if e.get('role') == 'measurement']
+        code = measurement[0]['code'] if measurement else 'BS 1881-203:1986'
+    return (
+        f"{code} notes that no unique velocity-strength relationship exists "
+        "for all concretes; the curve above is the project-specific "
+        "calibration applied to every result in Section 5.0.")
+
+
+def _se_adjustment_disclosure(curve):
+    """
+    The standard-error policy paragraph for Section 3.0 (15 Sep 2026 client
+    direction: factor standard errors into post-velocity calculations before
+    converting them into FCU reports).
+
+    States what the curve's standard error is, what policy is configured, and
+    — when a policy is on — that the Section 5.0 figures are that adjusted
+    value and how it was arrived at. Returns [] when there is nothing honest
+    to say (no regression error estimate and no policy configured), so the
+    report never carries an empty or invented claim.
+    """
+    from apps.digital_eye.se_adjustment import (
+        ADJUSTMENT_METHOD_LABELS, MIN_PAIRS_FOR_ADJUSTMENT,
+        STAT_DEFINITIONS, standard_error_analysis)
+
+    try:
+        stats = standard_error_analysis(curve)
+    except Exception:
+        return []
+
+    method = getattr(curve, 'se_adjustment_method', 'none') or 'none'
+    factor = getattr(curve, 'se_adjustment_factor', None) or 1.0
+    parts = []
+
+    if stats.get('standard_error_mpa') is not None:
+        parts.append(
+            "The standard error above is the residual standard error of the "
+            "fit, s = sqrt(SSE / (n - k)); it describes the scatter of the "
+            "calibration pairs about the curve and is the denominator of "
+            "every confidence statement made from it.")
+        if stats.get('mean_residual_mpa') is not None:
+            bias = stats['mean_residual_mpa']
+            parts.append(
+                f"Mean(observed - predicted) across the {stats['n_pairs']} "
+                f"calibration pair(s) is {bias:+.2f} N/mm2 "
+                + ("(the curve under-predicts on this data)." if bias > 0
+                   else "(the curve over-predicts on this data)." if bias < 0
+                   else "(no systematic offset on this data)."))
+    else:
+        reason = stats.get('unavailable_reason')
+        if reason:
+            parts.append(f"No standard error is available for this curve: {reason}")
+
+    if method == 'none':
+        parts.append(
+            "No standard-error adjustment is applied to the E.C.S figures in "
+            "Section 5.0; each is the curve estimate as fitted.")
+    elif stats.get('adjustment_available'):
+        label = ADJUSTMENT_METHOD_LABELS.get(method, method)
+        if method == 'confidence_margin':
+            parts.append(
+                f"The E.C.S figures in Section 5.0 have the following "
+                f"adjustment applied before reporting: {label}, with "
+                f"k = {factor:g}. Each figure is therefore a conservative "
+                "characteristic strength (a lower confidence bound on the "
+                "true strength), not the central estimate. Where a figure "
+                "derives from the mean of several test points, the standard "
+                "error of that mean (s/sqrt(n)) is used, so the margin "
+                "narrows as more points are averaged.")
+        else:
+            parts.append(
+                f"The E.C.S figures in Section 5.0 have the following "
+                f"adjustment applied before reporting: {label}. The "
+                "correction is measured from this curve's own calibration "
+                "pairs, not assumed, and moves as further pairs are "
+                "recorded.")
+    else:
+        parts.append(
+            f"A standard-error adjustment ({ADJUSTMENT_METHOD_LABELS.get(method, method)}) "
+            "is configured on this curve but could not be applied, so the "
+            "Section 5.0 figures are the curve estimates as fitted. Reason: "
+            f"{stats.get('unavailable_reason') or 'insufficient calibration data'}. "
+            f"At least {MIN_PAIRS_FOR_ADJUSTMENT} calibration pairs with "
+            "residual degrees of freedom are required.")
+
+    parts.append(STAT_DEFINITIONS['aic'])
+    if method != 'none' and stats.get('adjustment_available'):
+        # WHERE the error is applied belongs in the method statement, not
+        # only in the per-element disclosure: Section 3.0 is the document's
+        # account of how f_cu was arrived at, and the client's direction was
+        # specifically that the standard error is folded into the pulse
+        # velocity before the conversion to strength. A curve with no policy
+        # in force (or one whose policy the data cannot support) gets no
+        # such claim, because it has no such step.
+        parts.append(STAT_DEFINITIONS['velocity_step'])
+    return parts
 
 
 def _wrap_lines(pdf, text, width):
@@ -1753,11 +1863,24 @@ class NDTReportService:
             from apps.digital_eye.strength_curves import apply_active_curve
             if mean_v is None:
                 mean_ecs = None
+                curve_snapshot = None
             else:
-                mean_ecs, _curve_snapshot = apply_active_curve(
+                mean_ecs, curve_snapshot = apply_active_curve(
                     t.project, mean_v,
                     rebound_number=t.rebound_number,
-                    temperature_c=t.surface_temperature_c)
+                    temperature_c=t.surface_temperature_c,
+                    # mean_v is the element mean of these points: the
+                    # curve's confidence margin narrows as sqrt(n) of them.
+                    n_points=len(velocities))
+            # The figure the curve arithmetic itself yields, before any
+            # standard-error policy moved it. The worked example prints THIS
+            # as the result of "f_cu = m x V + c" so the printed equation is
+            # arithmetically true, then states the policy step separately.
+            se_disclosure = ((curve_snapshot or {}).get('se_adjustment')
+                             if isinstance(curve_snapshot, dict) else None)
+            mean_ecs_unadjusted = (
+                se_disclosure.get('base_f_cu_mpa')
+                if isinstance(se_disclosure, dict) else None)
             remark = ('GOOD' if mean_ecs is not None and mean_ecs >= 25.0
                       else 'POOR' if mean_ecs is not None else 'NOT ASSESSED')
             # Within-element spread (7 Sep meeting: the client wants the
@@ -1775,6 +1898,10 @@ class NDTReportService:
                 'rows': rows,
                 'mean_v': mean_v,
                 'mean_ecs': mean_ecs,
+                # The curve's own arithmetic result (pre-policy), so the
+                # worked example can print a true equation.
+                'mean_ecs_unadjusted': mean_ecs_unadjusted,
+                'se_adjustment': se_disclosure,
                 'remark': remark,
                 'n_points': len(rows),
                 'spread_km_s': spread_km_s,
@@ -1818,6 +1945,16 @@ class NDTReportService:
                         f"{e0['mean_v'] * 1000:.2f} m/s "
                         f"({e0['mean_v']:.3f} km/s).")
             if e0['mean_ecs'] is not None:
+                # The curve arithmetic is shown against the PRE-policy figure
+                # so the printed equation is true; the policy step is then
+                # stated separately below. Without this a curve carrying a
+                # standard-error adjustment would print
+                # "f_cu = 0.01 x 4000 - 20 = 19.42", which does not compute
+                # — exactly the hand-recomputability the 7 Sep review asked
+                # every figure to have.
+                arithmetic_ecs = e0.get('mean_ecs_unadjusted')
+                if arithmetic_ecs is None:
+                    arithmetic_ecs = e0['mean_ecs']
                 if (active_curve is not None
                         and active_curve.project_id
                         and active_curve.curve_type == 'linear'):
@@ -1828,18 +1965,29 @@ class NDTReportService:
                     example += (f" f_cu = {p.get('m', 0):g} x "
                                 f"{e0['mean_v'] * 1000:.2f} {sign} "
                                 f"{abs(p.get('c', 0)):g} = "
-                                f"{e0['mean_ecs']:.2f} N/mm2 "
+                                f"{arithmetic_ecs:.2f} N/mm2 "
                                 "(V in m/s).")
                 elif (active_curve is not None
                       and active_curve.project_id):
                     example += (f" f_cu from the project calibration "
                                 f"above at V = "
                                 f"{e0['mean_v'] * 1000:.2f} m/s = "
-                                f"{e0['mean_ecs']:.2f} N/mm2.")
+                                f"{arithmetic_ecs:.2f} N/mm2.")
                 else:
                     example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
-                                f"- 7.97 = {e0['mean_ecs']:.2f} "
+                                f"- 7.97 = {arithmetic_ecs:.2f} "
                                 f"N/mm2.")
+                # The standard-error policy step, stated in the report's own
+                # words, so the reported Section 5.0 figure is reachable from
+                # the arithmetic above by hand.
+                disclosure = e0.get('se_adjustment')
+                if (isinstance(disclosure, dict)
+                        and (disclosure.get('applied')
+                             or (disclosure.get('method') or 'none') != 'none')
+                        and disclosure.get('detail')):
+                    example += (f" {disclosure['detail']} The element's "
+                                f"reported strength is therefore "
+                                f"{e0['mean_ecs']:.2f} N/mm2.")
         return example
 
     # ---------------------------------------------------------------
@@ -2175,7 +2323,10 @@ class NDTReportService:
             strength, _snapshot = apply_active_curve(
                 t.project, velocity,
                 rebound_number=t.rebound_number,
-                temperature_c=t.surface_temperature_c)
+                temperature_c=t.surface_temperature_c,
+                # t.velocity_km_s is the element mean for a multi-reading
+                # test, so the margin narrows as sqrt(n) of its points.
+                n_points=t.element_point_count())
             if strength is not None:
                 assessed += 1
                 if strength >= 25.0:

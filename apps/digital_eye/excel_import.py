@@ -292,6 +292,42 @@ def parse_readings_workbook(file_obj):
     return groups, []
 
 
+def example_rows(sample_elements=None):
+    """The EXAMPLE sheet's filled rows, in TEMPLATE_COLUMNS order.
+
+    Exposed as the single definition of "the template's illustration" so the
+    purge command can match registry records against the template's OWN
+    example values instead of a copied list that could drift from it.
+
+    ``sample_elements`` — optional ``(pulse_name, crack_name, surface_name)``
+    of REAL elements from the project's imported BIM model, so the
+    illustrations point at actual members; the fallback names are generic.
+    """
+    pulse_name, crack_name, surface_name = sample_elements or (
+        'COL-A1', 'BEAM-B2', 'WALL-W1')
+    return [
+        # Format illustration only — this sheet is never imported. Pulse
+        # velocity: consecutive rows -> ONE test with points A, B, C.
+        [pulse_name, 'Ground Floor', 'Pulse Velocity', 'A', 120, 30.1, None, None,
+         25, 'Direct', 'Grid B/4', 'Sunny',
+         'EXAMPLE ONLY — copy the shape into READINGS, not the numbers'],
+        [pulse_name, 'Ground Floor', 'Pulse Velocity', 'B', 120, 29.8, None, None,
+         25, 'Direct', 'Grid B/4', 'Sunny', None],
+        [pulse_name, 'Ground Floor', 'Pulse Velocity', 'C', 120, 30.3, None, None,
+         25, 'Direct', 'Grid B/4', 'Sunny', None],
+        # Crack depth: both the cracked AND uncracked transit times.
+        [crack_name, 'First Floor', 'Crack Depth', 'A', 200, 52.1, 50.1, None,
+         25, 'Direct', 'Grid D/2', 'Sunny', 'Hairline crack mid-span'],
+        [crack_name, 'First Floor', 'Crack Depth', 'B', 200, 53.0, 50.2, None,
+         25, 'Direct', 'Grid D/2', 'Sunny', None],
+        # Surface quality: written condition instead of times.
+        [surface_name, 'Ground Floor', 'Surface Quality', 'A', None, None, None,
+         'Smooth, no honeycombing', None, None, 'East elevation', 'Sunny', None],
+        [surface_name, 'Ground Floor', 'Surface Quality', 'B', None, None, None,
+         'Minor voids near base', None, None, 'East elevation', 'Sunny', None],
+    ]
+
+
 def build_template_bytes(sample_elements=None):
     """The downloadable .xlsx template. The READINGS sheet ships EMPTY
     (headers only) — it is the only sheet the importer reads, so example
@@ -315,40 +351,17 @@ def build_template_bytes(sample_elements=None):
         sheet.column_dimensions[get_column_letter(col)].width = COLUMN_WIDTHS[header]
     sheet.freeze_panes = 'A2'
 
-    pulse_name, crack_name, surface_name = sample_elements or ('COL-A1', 'BEAM-B2', 'WALL-W1')
-    example_rows = [
-        # Format illustration only — this sheet is never imported. Pulse
-        # velocity: consecutive rows -> ONE test with points A, B, C.
-        [pulse_name, 'Ground Floor', 'Pulse Velocity', 'A', 120, 30.1, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny',
-         'EXAMPLE ONLY — copy the shape into READINGS, not the numbers'],
-        [pulse_name, 'Ground Floor', 'Pulse Velocity', 'B', 120, 29.8, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny', None],
-        [pulse_name, 'Ground Floor', 'Pulse Velocity', 'C', 120, 30.3, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny', None],
-        # Crack depth: both the cracked AND uncracked transit times.
-        [crack_name, 'First Floor', 'Crack Depth', 'A', 200, 52.1, 50.1, None,
-         25, 'Direct', 'Grid D/2', 'Sunny', 'Hairline crack mid-span'],
-        [crack_name, 'First Floor', 'Crack Depth', 'B', 200, 53.0, 50.2, None,
-         25, 'Direct', 'Grid D/2', 'Sunny', None],
-        # Surface quality: written condition instead of times.
-        [surface_name, 'Ground Floor', 'Surface Quality', 'A', None, None, None,
-         'Smooth, no honeycombing', None, None, 'East elevation', 'Sunny', None],
-        [surface_name, 'Ground Floor', 'Surface Quality', 'B', None, None, None,
-         'Minor voids near base', None, None, 'East elevation', 'Sunny', None],
-    ]
-
     example = workbook.create_sheet('EXAMPLE')
     for col, header in enumerate(TEMPLATE_COLUMNS, start=1):
         cell = example.cell(row=1, column=col, value=header)
         cell.font = header_font
         example.column_dimensions[get_column_letter(col)].width = COLUMN_WIDTHS[header]
-    for row_number, row in enumerate(example_rows, start=2):
+    for row_number, row in enumerate(example_rows(sample_elements), start=2):
         for col, value in enumerate(row, start=1):
             if value is not None:
                 example.cell(row=row_number, column=col, value=value)
     example.cell(
-        row=len(example_rows) + 3, column=1,
+        row=len(example_rows(sample_elements)) + 3, column=1,
         value='EXAMPLE ONLY — this sheet is never imported. Only the READINGS '
               'sheet is read, so these rows can never reach the registry. '
               'Type your real readings into READINGS.')

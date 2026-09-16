@@ -35,12 +35,209 @@ logger = logging.getLogger(__name__)
 # Curve types supported by the engine (client spec §B.1 curve_type_enum).
 CURVE_TYPES = ('linear', 'polynomial', 'exponential', 'sonreb', 'lookup')
 
+# ---------------------------------------------------------------------------
+# Standards registry — WHICH documents the model actually rests on.
+#
+# Meeting action item (15 Sep 2026): "Verify Standard: Document the specific
+# building standards or codes used for the mathematical model. Confirm these
+# references with the project guidelines to ensure accuracy."
+#
+# The 15 Sep minutes record the team adopting "BS 1881-23" as the reference
+# for the mathematical model. No such standard exists. The document the team
+# is actually working to is BS 1881-203:1986 — "Testing concrete. Part 203:
+# Recommendations for measurement of velocity of ultrasonic pulses in
+# concrete" — which is what the platform's curve code has cited throughout
+# (see apps/reports/ndt_reports.py ECS_CALIBRATION_SOURCE). The record below
+# states that plainly rather than silently repeating a number that cannot be
+# checked, and lists the correlation standard that genuinely governs turning
+# a UPV reading into a strength (BS EN 13791), which the earlier build did
+# not cite at all.
+#
+# Each entry: code, title, scope, and the role it plays in this platform.
+# 'role' is what the UI groups by, so the registry reads as an answer to
+# "which standard covers which part of this number?".
+#
+# The 'statistics' role was added for the same review's other half: asked
+# what R2 / SE / AIC mean, the client asked twice over for a REFERENCE
+# ("show me a literature on this"; "let me share me a reference to it").
+# R2 and the standard error are genuinely governed by BS EN 13791, which
+# sets out the regression relationship and the treatment of its error. AIC
+# is not a concrete standard and has no BS/EN number — it is Akaike's 1974
+# paper, and citing anything else for it would be an invented reference.
+# se_adjustment.STAT_REFERENCES ties each statistic to a code in this list.
+# ---------------------------------------------------------------------------
+
+STANDARDS = [
+    {
+        'code': 'BS 1881-203:1986',
+        'title': ('Testing concrete — Part 203: Recommendations for '
+                  'measurement of velocity of ultrasonic pulses in concrete'),
+        'role': 'measurement',
+        'role_label': 'Test method',
+        'scope': (
+            'Apparatus, procedure and the three transducer arrangements '
+            '(direct / semi-direct / indirect) for measuring pulse velocity '
+            'through concrete, plus the factors that influence it. Section '
+            '11 covers correlation of pulse velocity with strength and '
+            'states that no unique relationship exists for all concretes.'),
+        'platform_use': (
+            'The measurement basis for every PUNDIT test recorded on the '
+            'platform, and the source of the caveat printed in report '
+            'Section 3.0 that the velocity-strength relationship must be '
+            'project-specific.'),
+        'note': ('This is the document minuted as "BS 1881-23" on 15 Sep '
+                 '2026 — no standard numbered BS 1881-23 exists. Confirm '
+                 'with the project guidelines.'),
+    },
+    {
+        'code': 'BS EN 13791:2019',
+        'title': ('Assessment of in-situ compressive strength in structures '
+                  'and precast concrete components'),
+        'role': 'correlation',
+        'role_label': 'In-situ strength from indirect tests',
+        'scope': (
+            'How to derive an in-situ compressive strength — including a '
+            'characteristic value — from indirect methods such as '
+            'ultrasonic pulse velocity and rebound number, calibrated '
+            'against cores. Sets out the regression relationship and the '
+            'confidence/tolerance treatment of its error.'),
+        'platform_use': (
+            'The basis for the calibration workflow itself: fitting a '
+            'project-specific curve from real core/cube pairs, and for the '
+            'confidence-margin standard-error adjustment (a lower-bound '
+            'characteristic strength rather than the central estimate).'),
+        'note': None,
+    },
+    {
+        'code': 'EN 12504-4:2021',
+        'title': ('Testing concrete in structures — Part 4: Determination of '
+                  'ultrasonic pulse velocity'),
+        'role': 'measurement',
+        'role_label': 'Test method (EU)',
+        'scope': ('The current European test method for ultrasonic pulse '
+                  'velocity in structures, and the practical rules for '
+                  'repeat readings at a test station.'),
+        'platform_use': (
+            'The basis for the platform\'s data-quality scoring: the '
+            'requirement for repeat points per element and the '
+            'within-element spread that grades HIGH / MEDIUM / LOW.'),
+        'note': None,
+    },
+    {
+        'code': 'ACI 228.2R-2018',
+        'title': ('Report on Nondestructive Test Methods for Evaluation of '
+                  'Concrete in Structures'),
+        'role': 'correlation',
+        'role_label': 'NDT strength correlation',
+        'scope': (
+            'NDT methods, the correlation models used to convert them to '
+            'strength (including the exponential form), and the '
+            'temperature correction for pulse velocity outside the 5-30 '
+            'degC band. Section 5 covers data management and provenance.'),
+        'platform_use': (
+            'The exponential correlation model the client designated as the '
+            'default curve type, the temperature correction applied before '
+            'a velocity produces a strength, and the audit/provenance '
+            'principle behind recording the curve snapshot on every '
+            'result.'),
+        'note': None,
+    },
+    {
+        'code': 'ASTM C597',
+        'title': ('Standard Test Method for Pulse Velocity Through Concrete'),
+        'role': 'measurement',
+        'role_label': 'Test method (US)',
+        'scope': ('The US test method for pulse velocity through concrete, '
+                  'covering apparatus, path length and transit-time '
+                  'measurement.'),
+        'platform_use': (
+            'The alternative measurement reference named in the Nexucon '
+            'Link specification alongside BS 1881-203.'),
+        'note': None,
+    },
+    {
+        'code': 'Akaike (1974)',
+        'title': ('A New Look at the Statistical Model Identification — '
+                  'IEEE Transactions on Automatic Control, 19(6), 716-723'),
+        'role': 'statistics',
+        'role_label': 'Model selection',
+        'scope': (
+            'The source of the Akaike Information Criterion. AIC scores how '
+            'well a model explains the data while charging it for the number '
+            'of parameters it uses, so a curve cannot buy a better fit simply '
+            'by adding terms. It is a RELATIVE score: it ranks the candidate '
+            'models it is given, and has no meaning on its own.'),
+        'platform_use': (
+            'Breaks R2 ties between the candidate curve types on the '
+            'Regression Fits panel, where several models are fitted to the '
+            'same calibration pairs and the closest R2 values need a '
+            'tie-break. Lower is the more efficient model. Which curve wins '
+            'is project-specific and is decided by that project\'s own '
+            'data, never by this registry entry.'),
+        'note': ('AIC only compares models fitted to the SAME calibration '
+                 'pairs, and says nothing about absolute accuracy — a low AIC '
+                 'on a poorly-conditioned fit is still a poor fit. Read it '
+                 'beside R2 and the standard error, never instead of them.'),
+    },
+]
+
+STANDARD_CODES = [s['code'] for s in STANDARDS]
+
+
+def standards_registry():
+    """The standards the model rests on, as an ordered list of dicts."""
+    return [dict(entry) for entry in STANDARDS]
+
 # Minimum calibration points per model (parameters + at least one residual
 # degree of freedom). The client's reliability guidance (8 Sep meeting) is
 # 9-15 points minimum, ~40+ for high reliability — that advisory is reported
 # by the regression engine, not enforced as a hard block.
 MIN_POINTS = {'linear': 2, 'polynomial': 3, 'exponential': 3, 'sonreb': 4}
 RELIABILITY_ADVISORY_MIN = 9
+
+
+# ---------------------------------------------------------------------------
+# Plausibility guard on a calibration strength (15 Sep 2026 review)
+# ---------------------------------------------------------------------------
+# The client caught a core sample recorded with a laboratory strength of
+# 150 N/mm2: the core's 100 x 150 mm dimensions had been typed into the
+# strength field. "150 MPa is crazy. Can't get that from concrete. The
+# highest I've heard about is 60."
+#
+# This matters more than a wrong figure on one screen. A calibration pair is
+# GROUND TRUTH: it is fed to the regression, and the fitted curve is what
+# every strength on the platform is then read from. A mis-entered pair does
+# not stay local — it moves the curve, and with it every reported strength.
+#
+# The ceiling exists to catch that transcription error, and is deliberately
+# a guard against mis-entry rather than a materials-science limit:
+# ultra-high-performance concrete (UHPC) does exceed it. A laboratory that
+# genuinely assesses UHPC raises this constant on purpose, rather than the
+# platform quietly accepting a typo as data.
+PLAUSIBLE_STRENGTH_MAX_MPA = 100.0
+
+
+def strength_plausibility_error(f_mpa):
+    """Why `f_mpa` cannot be a concrete strength, or None when it can.
+
+    The single place this judgement is made, so every calibration entry
+    point — a core sample, a manually typed pair, an uploaded file — applies
+    the same one and words it the same way. A None reading (no value
+    recorded) is never implausible; it simply is not a strength yet.
+    """
+    if f_mpa is None:
+        return None
+    try:
+        value = float(f_mpa)
+    except (TypeError, ValueError):
+        return 'Compressive strength must be a number.'
+    if math.isfinite(value) and value > PLAUSIBLE_STRENGTH_MAX_MPA:
+        return (f'{value:g} N/mm2 is above the {PLAUSIBLE_STRENGTH_MAX_MPA:g} '
+                'N/mm2 ceiling this platform accepts as a concrete strength. '
+                'That is almost always a mis-entry — a core dimension such as '
+                '100 x 150 typed into the strength field. Check the '
+                'laboratory certificate before recording the pair.')
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +281,7 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None):
         'standard_error': None,  # fixed curve: no regression, no error estimate
         'provenance_source': 'Laboratory fixed calibration curve (documented in report section 3.0)',
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
+        'se_adjustment': None,
     }
 
 
@@ -174,26 +372,133 @@ def apply_curve_params(curve_type, params, velocity_km_s,
     return None
 
 
+def curve_slope_mpa_per_ms(curve_type, params, velocity_km_s,
+                           rebound_number=None):
+    """
+    df/dV of the curve at this velocity, in N/mm2 per m/s.
+
+    This is the exchange rate between the two domains, and it is what makes
+    the 15 Sep 2026 client direction arithmetically possible: a standard
+    error is in N/mm2 and the pulse velocity is in m/s, so the error is
+    turned into the velocity increment that PRODUCES it through the curve's
+    own local slope. Abdulwahab's worked example is exactly this —
+    SE = 1.99 N/mm2 against his curve f = 0.01V - 20 gives
+    1.99 / 0.01 = 199 m/s, which is the 4,000 -> 4,199 m/s he derived.
+
+    On a linear curve moving the velocity by SE/m raises f by exactly SE,
+    so the result is identical to correcting the strength directly; on a
+    curved law it is the first-order equivalent, and the reported figure is
+    whatever the curve yields at the moved velocity.
+
+    Returns None when the curve has no single slope here (a lookup table
+    segment with zero width, a SonReb curve without its rebound value,
+    unusable parameters) — the caller must then decline to move the
+    velocity rather than guess a slope.
+    """
+    if velocity_km_s is None or velocity_km_s <= 0:
+        return None
+    try:
+        v_ms = velocity_km_s * 1000.0
+        if curve_type == 'linear':
+            slope = params['m']
+        elif curve_type == 'polynomial':
+            coeffs = params['coeffs']
+            slope = sum(float(c) * i * (v_ms ** (i - 1))
+                        for i, c in enumerate(coeffs) if i >= 1)
+        elif curve_type == 'exponential':
+            slope = params['a'] * params['b'] * math.exp(params['b'] * v_ms)
+        elif curve_type == 'sonreb':
+            if rebound_number is None or rebound_number <= 0:
+                return None
+            slope = (params['a'] * params['b'] * (v_ms ** (params['b'] - 1))
+                     * (rebound_number ** params['c']))
+        elif curve_type == 'lookup':
+            # Piecewise linear: the slope of the segment the velocity sits
+            # in, which is the curve's real slope everywhere it is defined.
+            points = sorted(params['points'], key=lambda p: p['v'])
+            if len(points) < 2 or v_ms < points[0]['v'] or v_ms > points[-1]['v']:
+                return None
+            slope = None
+            for i in range(len(points) - 1):
+                p1, p2 = points[i], points[i + 1]
+                if p1['v'] <= v_ms <= p2['v']:
+                    if p2['v'] == p1['v']:
+                        return None
+                    slope = (p2['f'] - p1['f']) / (p2['v'] - p1['v'])
+                    break
+            if slope is None:
+                return None
+        else:
+            return None
+        slope = float(slope)
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return None
+    return slope if math.isfinite(slope) else None
+
+
+# Curve coefficients have a documented decimal standard (15 Sep 2026
+# client direction: "we need to have those the minimum decimal point that
+# is allowable for the A, B, C ... let's make it a standard"). Before this,
+# the formula was rendered with Python's ":g", which prints a value at six
+# SIGNIFICANT digits — so the same curve could show A as "0.0012" beside a
+# B of "1.2e-05", and a certificate reader had to take in scientific
+# notation to read a coefficient. A curve's coefficients are the record of
+# what was applied, so they are shown at a fixed, comparable precision.
+CURVE_PARAM_DECIMALS = 6
+
+
+def format_coefficient(value):
+    """A curve coefficient at the platform's documented decimal standard.
+
+    Fixed-point at CURVE_PARAM_DECIMALS places, trailing zeros dropped, so
+    two coefficients on the same curve can be read and compared at one
+    precision. Every coefficient that resolution can express is shown
+    without scientific notation.
+
+    A coefficient below that resolution (|value| < 10 ** -CURVE_PARAM_DECIMALS)
+    cannot be written in the standard's places without rounding it to a "0"
+    it is not — which would be a false reading of the curve. Those keep their
+    significant digits, and for an extreme value that means engineering
+    notation. That is the honest exception, not the normal case: a real
+    calibration's A and B sit far above this threshold.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return str(value)
+    if number == 0:
+        return '0'
+    text = f'{number:.{CURVE_PARAM_DECIMALS}f}'
+    if float(text) == 0:
+        return f'{number:g}'
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return text or '0'
+
+
 def formula_display(curve_type, params):
     """Human-readable formula string for reports and UI — the exact formula
     applied, in the m/s parameter domain."""
+    c = format_coefficient
     try:
         if curve_type == 'linear':
             sign = '-' if params['c'] < 0 else '+'
-            return f"f_cu = {params['m']:g} x V {sign} {abs(params['c']):g}"
+            return f"f_cu = {c(params['m'])} x V {sign} {c(abs(params['c']))}"
         if curve_type == 'polynomial':
             terms = ' + '.join(
-                f"{float(c):g} x V^{i}" if i > 1
-                else (f"{float(c):g} x V" if i == 1 else f"{float(c):g}")
-                for i, c in enumerate(params['coeffs']))
+                f"{c(x)} x V^{i}" if i > 1
+                else (f"{c(x)} x V" if i == 1 else f"{c(x)}")
+                for i, x in enumerate(params['coeffs']))
             return f"f_cu = {terms}"
         if curve_type == 'exponential':
-            return (f"f_cu = {params['a']:g} x exp({params['b']:g} x V)"
-                    + (f" - {abs(params['c']):g}" if params['c'] < 0
-                       else f" + {params['c']:g}"))
+            return (f"f_cu = {c(params['a'])} x exp({c(params['b'])} x V)"
+                    + (f" - {c(abs(params['c']))}" if params['c'] < 0
+                       else f" + {c(params['c'])}"))
         if curve_type == 'sonreb':
-            return (f"f_cu = {params['a']:g} x V^{params['b']:g} "
-                    f"x R^{params['c']:g}  (R = rebound number)")
+            return (f"f_cu = {c(params['a'])} x V^{c(params['b'])} "
+                    f"x R^{c(params['c'])}  (R = rebound number)")
         if curve_type == 'lookup':
             return "f_cu = piecewise-linear lookup table"
     except (KeyError, TypeError, ValueError):
@@ -298,19 +603,118 @@ def curve_snapshot(curve, temperature_c=None):
         'standard_error': curve.standard_error,
         'provenance_source': (curve.provenance or {}).get('source'),
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
+        'se_adjustment': None,
     }
 
 
+def apply_se_adjustment_at_velocity(velocity_km_s, curve, n_points=None,
+                                    rebound_number=None):
+    """
+    The client's method, end to end: fold the curve's standard error into
+    the PULSE VELOCITY, then convert to f_cu — 15 Sep 2026, "consider the
+    standard error in the post velocity before we convert it to FCU",
+    illustrated as 4,000 + 199 = 4,199 m/s.
+
+    The two domains are not directly additive (a standard error is in N/mm2,
+    a velocity in m/s), so the error is converted through the curve's own
+    local slope into the velocity increment that PRODUCES it, the velocity
+    is moved by that increment, and the curve is re-applied. On a linear
+    curve this gives exactly the same strength as correcting the strength
+    directly, because f = mV + c is affine in V; on a curved law it is the
+    first-order equivalent.
+
+    The reported figure is always what the curve yields at the moved
+    velocity — never a separately invented number. When the velocity cannot
+    be moved honestly (no usable slope, or moving it would leave the
+    calibrated range, where this platform never extrapolates) the
+    correction is left on the strength and the disclosure says why.
+
+    Returns ``(f_cu_mpa_or_None, disclosure)``.
+    """
+    from .se_adjustment import apply_se_adjustment
+
+    base = curve.apply(velocity_km_s, rebound_number=rebound_number)
+    adjusted, disclosure = apply_se_adjustment(base, curve, n_points=n_points)
+    if base is None or not disclosure.get('applied'):
+        return adjusted, disclosure
+
+    delta_mpa = float(adjusted) - float(base)
+    if delta_mpa == 0:
+        return adjusted, disclosure
+
+    slope = curve_slope_mpa_per_ms(
+        getattr(curve, 'curve_type', None),
+        getattr(curve, 'formula_params', None) or {},
+        velocity_km_s, rebound_number=rebound_number)
+    if slope is None or slope == 0:
+        disclosure['velocity_step'] = None
+        disclosure['detail'] = (
+            f"{disclosure['summary']} "
+            f"({base:.2f} -> {adjusted:.2f} N/mm2). The curve has no usable "
+            'slope at this velocity, so the correction stays on the strength '
+            'rather than moving a pulse velocity by a slope that does not '
+            'exist.')
+        return adjusted, disclosure
+
+    delta_v_ms = delta_mpa / slope
+    moved_v_km_s = velocity_km_s + delta_v_ms / 1000.0
+    step = {
+        'slope_mpa_per_ms': round(slope, 6),
+        'delta_velocity_ms': round(delta_v_ms, 2),
+        'base_velocity_ms': round(velocity_km_s * 1000.0, 2),
+        'adjusted_velocity_ms': round(moved_v_km_s * 1000.0, 2),
+    }
+    final = curve.apply(moved_v_km_s, rebound_number=rebound_number)
+    if final is None:
+        # Moving the velocity left the calibrated range. Extrapolating to
+        # manufacture a figure here would be exactly the invention this
+        # platform refuses everywhere else.
+        disclosure['velocity_step'] = step
+        disclosure['detail'] = (
+            f"{disclosure['summary']} "
+            f"({base:.2f} -> {adjusted:.2f} N/mm2). Moving the pulse velocity "
+            f"by {delta_v_ms:+.1f} m/s would leave the curve's calibrated "
+            'range, where this platform never extrapolates, so the '
+            'correction is reported on the strength instead.')
+        return adjusted, disclosure
+
+    disclosure['velocity_step'] = step
+    disclosure['adjusted_f_cu_mpa'] = round(float(final), 4)
+    disclosure['detail'] = (
+        f"{disclosure['summary']}. Applied to the pulse velocity as "
+        f"directed: at this velocity the curve's slope is "
+        f"{slope:.4f} N/mm2 per m/s, so the correction is "
+        f"{delta_v_ms:+.1f} m/s — pulse velocity "
+        f"{velocity_km_s * 1000:,.0f} -> {moved_v_km_s * 1000:,.0f} m/s, "
+        f"giving {base:.2f} -> {final:.2f} N/mm2.")
+    return float(final), disclosure
+
+
 def apply_active_curve(project, velocity_km_s, rebound_number=None,
-                       temperature_c=None):
+                       temperature_c=None, n_points=None):
     """
     THE f_cu path: resolve the project's active curve, temperature-correct
-    the velocity (ACI 228.2R band) and apply the curve.
+    the velocity (ACI 228.2R band), apply the curve's standard-error policy
+    TO THE VELOCITY, then convert (15 Sep 2026 client direction — the
+    standard error is folded into the post-velocity before the f_cu
+    conversion).
+
+    ``n_points`` is how many test points were averaged into this velocity
+    (None for a single reading). The confidence-margin adjustment uses the
+    standard error of that mean rather than of a single measurement.
 
     Returns (strength_mpa_or_None, curve_snapshot). The snapshot is always
     returned so every stored strength carries its formula provenance —
-    including the honest built-in fallback when no curve is seeded.
+    including the honest built-in fallback when no curve is seeded — and it
+    now also carries the ``se_adjustment`` disclosure describing exactly
+    how the standard error moved the figure, or why it did not, including
+    the velocity increment it was applied as.
+
+    The adjustment is inert ('none') on every curve until a Director
+    deliberately enables one, so existing figures are unaffected.
     """
+    from .se_adjustment import apply_se_adjustment
+
     corrected_v = temperature_corrected_velocity_km_s(velocity_km_s, temperature_c)
     curve = resolve_active_curve(project)
     if curve is None:
@@ -319,9 +723,24 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
             p['curve_type'], p['formula_params'], corrected_v,
             rebound_number=rebound_number,
             valid_range_ms=p['valid_range_ms'])
-        return strength, builtin_curve_snapshot(temperature_c=temperature_c)
-    strength = curve.apply(corrected_v, rebound_number=rebound_number)
-    return strength, curve_snapshot(curve, temperature_c=temperature_c)
+        # The built-in laboratory curve carries no regression, so there is
+        # no standard error to adjust by — disclosed, never assumed away.
+        snapshot = builtin_curve_snapshot(temperature_c=temperature_c)
+        adjusted, disclosure = apply_se_adjustment(strength, None,
+                                                   n_points=n_points)
+        snapshot['se_adjustment'] = disclosure
+        return adjusted, snapshot
+
+    # The standard-error policy is applied IN THE VELOCITY DOMAIN, before
+    # this conversion — the client's method (15 Sep 2026, "consider the
+    # standard error in the post velocity before we convert it to FCU").
+    # apply_se_adjustment_at_velocity re-derives the figure from the moved
+    # velocity, so the strength is not computed here first.
+    adjusted, disclosure = apply_se_adjustment_at_velocity(
+        corrected_v, curve, n_points=n_points, rebound_number=rebound_number)
+    snapshot = curve_snapshot(curve, temperature_c=temperature_c)
+    snapshot['se_adjustment'] = disclosure
+    return adjusted, snapshot
 
 
 # ---------------------------------------------------------------------------

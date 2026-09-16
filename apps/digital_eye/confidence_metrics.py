@@ -165,7 +165,15 @@ def reasoning_trace(element_summary, se_mpa=None, ci=None, p_below=None,
                     outlier=None, quality=None):
     """The numbered, data-cited derivation chain for one element — the
     reasoning-trace transparency the client asked for. Every clause cites
-    the recorded figures; missing inputs are stated honestly."""
+    the recorded figures; missing inputs are stated honestly.
+
+    ``element_summary['se_adjustment']``, when the curve carries a
+    standard-error policy, is the disclosure returned by
+    apps.digital_eye.se_adjustment.apply_se_adjustment for the very figure
+    ``mean_ecs_n_mm2`` holds. It is stated as its own step so the chain
+    shows WHY the reported strength differs from the raw curve estimate
+    instead of leaving two numbers that appear to contradict each other.
+    """
     lines = []
     name = element_summary.get('element') or 'element'
     pts = element_summary.get('point_velocities_m_s') or []
@@ -215,4 +223,19 @@ def reasoning_trace(element_summary, se_mpa=None, ci=None, p_below=None,
     if quality:
         label, reason = quality
         lines.append(f'Data quality: {label} — {reason}.')
+    # The standard-error policy step sits AFTER the data-quality line so the
+    # chain reads: measurement -> curve -> policy -> interval -> probability.
+    # Stated only when it is material to the figure above: either a policy
+    # actually moved it, or one was requested and honestly refused (the
+    # client asked for it, so the refusal belongs in the record). A curve
+    # with no policy at all stays silent — 'none' is the default and
+    # printing it on every element would bury the chain in boilerplate.
+    adjustment = element_summary.get('se_adjustment')
+    if (ecs is not None and isinstance(adjustment, dict)
+            and (adjustment.get('applied')
+                 or (adjustment.get('method') or 'none') != 'none')
+            and adjustment.get('detail')):
+        lines.append(
+            f"Standard-error policy on this curve — "
+            f"{adjustment['detail']}")
     return lines

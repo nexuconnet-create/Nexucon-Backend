@@ -11,8 +11,10 @@ import uuid
 
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError as InvalidQueryParam
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -75,6 +77,38 @@ def _scoped_legacy_queryset(queryset, user):
     allowed = scoped_projects(user)
     allowed_ids = [str(pk) for pk in allowed.values_list('pk', flat=True)]
     return queryset.filter(Q(project__in=allowed) | Q(project_id_str__in=allowed_ids))
+
+
+def _nexucon_link_settings(request):
+    """
+    Read (GET) or update (PATCH) the Nexucon Link platform system settings.
+
+    Shared by the canonical 'nexucon-link/settings/' endpoint and the Curve
+    Manager's 'nexucon-link/curves/settings/' alias so the two can never
+    diverge. Reads are open to any authenticated user; a write is
+    Director-only and audit-logged — these settings choose the curve type
+    every project's strength workflow defaults to.
+    """
+    from .models import NexuconLinkSettings
+    from .serializers import NexuconLinkSettingsSerializer
+
+    settings_obj = NexuconLinkSettings.load()
+    if request.method in ('GET', 'HEAD'):
+        return Response(NexuconLinkSettingsSerializer(settings_obj).data)
+
+    if not IsDirector().has_permission(request, None):
+        return Response(
+            {'detail': 'Only a Director may change the platform Nexucon Link '
+                       'settings.'},
+            status=status.HTTP_403_FORBIDDEN)
+    serializer = NexuconLinkSettingsSerializer(
+        settings_obj, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    serializer.save(updated_by=request.user)
+    _record_audit(request.user, 'digital_eye.nexucon_link.settings.update',
+                  'NexuconLinkSettings', settings_obj.id,
+                  dict(serializer.validated_data))
+    return Response(serializer.data)
 
 
 # NOTE: this module previously contained a `_seed_defaults_if_empty()` helper
@@ -309,7 +343,53 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             value = self.request.query_params.get(param)
             if value:
                 queryset = queryset.filter(**{field: value})
+
+        # Reporting-browser filters (spec A5). Every one is opt-in: with no
+        # param supplied the queryset is byte-identical to what it was before
+        # these existed, so no existing caller changes behaviour.
+        params = self.request.query_params
+        date_from = self._query_date(params, 'date_from')
+        if date_from:
+            queryset = queryset.filter(test_date__gte=date_from)
+        date_to = self._query_date(params, 'date_to')
+        if date_to:
+            queryset = queryset.filter(test_date__lte=date_to)
+        operator = params.get('operator')
+        if operator:
+            # Exact match on the recorded operator. A test whose operator_name
+            # is blank (never attributed to a real person) cannot match any
+            # operator filter — the reports UI discloses this rather than
+            # silently backfilling the field.
+            queryset = queryset.filter(operator_name=operator)
+        curve = params.get('curve')
+        if curve:
+            # A test matches when ANY of its readings was computed under this
+            # curve. strength_curve_snapshot stores curve_id as a string, which
+            # is what the query param is. The join emits one row per matching
+            # reading, so collapse the duplicates.
+            queryset = queryset.filter(
+                readings__strength_curve_snapshot__curve_id=curve).distinct()
         return queryset
+
+    @staticmethod
+    def _query_date(params, name):
+        """Parse a YYYY-MM-DD query param. An unparseable date is a 400 —
+        silently ignoring it would return unfiltered rows that look filtered."""
+        raw = params.get(name)
+        if not raw:
+            return None
+        parsed = parse_date(raw)
+        if parsed is None:
+            raise InvalidQueryParam(
+                {name: f'Expected a YYYY-MM-DD date, got "{raw}".'})
+        return parsed
+
+    # The filters that `export_json` records in its meta block, mapped to the
+    # query param each one comes from. Kept beside get_queryset so a new filter
+    # cannot be added without the export's provenance block noticing.
+    EXPORT_FILTER_PARAMS = ('project', 'test_type', 'quality_grade',
+                            'structural_element', 'device', 'date_from',
+                            'date_to', 'operator', 'curve', 'search')
 
     def perform_create(self, serializer):
         test = serializer.save(created_by=self.request.user, operator=self.request.user)
@@ -423,6 +503,131 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = (
             'attachment; filename='
             f'"nexucon_pundit_results_{project.name[:40].replace(" ", "_")}.xlsx"')
+        return response
+
+    @action(detail=False, methods=['get'], url_path='export_json')
+    def export_json(self, request):
+        """
+        JSON export of exactly the measurements the reports browser is showing
+        (spec A5 "Export JSON").
+
+        It reuses get_queryset(), so every filter in force on screen is applied
+        to the file — the export can never be a wider dump than the view it was
+        taken from. The `meta` block records which filters produced the file, so
+        the JSON is self-describing and cannot be mistaken for a whole-project
+        export. Values are the stored ones: a strength that was never computed
+        is null, never 0.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        requested_project = request.query_params.get('project')
+        project = scoped_projects(request.user).filter(
+            pk=requested_project).first() if requested_project else None
+        if requested_project and project is None:
+            # An out-of-scope (or unknown) project id is an error, not an
+            # empty file — an empty export would read as "no data recorded".
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        filters = {name: request.query_params.get(name)
+                   for name in self.EXPORT_FILTER_PARAMS
+                   if request.query_params.get(name)}
+
+        rows = []
+        # The distinct curves behind the rows, with the parameters that were
+        # actually used — taken from each reading's stored snapshot, so this
+        # is a record of what was applied, not a re-read of today's curves.
+        curves_used: dict = {}
+        test_ids = []
+        for test in queryset:
+            test_ids.append(str(test.id))
+            for reading in test.readings.all():
+                # The reading's own snapshot is the formula that produced this
+                # point; fall back to the test's only when the reading has none.
+                snapshot = reading.strength_curve_snapshot or test.strength_curve_snapshot or None
+                velocity_km_s = reading.velocity_km_s
+                rows.append({
+                    'test_reference': test.test_reference,
+                    'test_date': test.test_date.isoformat() if test.test_date else None,
+                    'structural_element': test.structural_element or None,
+                    'point_label': reading.point_label,
+                    'operator_name': (test.operator_name or '').strip() or None,
+                    'path_length_mm': reading.path_length_mm,
+                    'transit_time_us': reading.transit_time_us,
+                    # Canonical storage is km/s; the report's unit is m/s.
+                    'velocity_ms': (round(velocity_km_s * 1000)
+                                    if velocity_km_s is not None else None),
+                    'estimated_strength_mpa': reading.ecs_mpa,
+                    'rebound_number': reading.rebound_number,
+                    'crack_depth_mm': reading.crack_depth_mm,
+                    'curve_id': (snapshot or {}).get('curve_id'),
+                    'curve_name': (snapshot or {}).get('name'),
+                    'curve_type': (snapshot or {}).get('curve_type'),
+                    'curve_standard': (snapshot or {}).get('standard') or None,
+                })
+                curve_id = (snapshot or {}).get('curve_id')
+                if curve_id and curve_id not in curves_used:
+                    curves_used[curve_id] = {
+                        'curve_id': curve_id,
+                        'curve_name': (snapshot or {}).get('name'),
+                        'curve_type': (snapshot or {}).get('curve_type'),
+                        'standard': (snapshot or {}).get('standard') or None,
+                        'formula': (snapshot or {}).get('formula'),
+                        'formula_params': (snapshot or {}).get('formula_params'),
+                        'valid_range_ms': (snapshot or {}).get('valid_range_ms'),
+                    }
+
+        # Provenance log (spec's provenanceLog): the audit trail of the tests
+        # this export covers. Capped, and says so — a silently truncated log
+        # would read as a complete history.
+        provenance_limit = 500
+        events = AuditEvent.objects.filter(
+            resource_type='PUNDITTest', resource_id__in=test_ids,
+        ).order_by('-timestamp')
+        event_count = events.count()
+        provenance_log = [{
+            'timestamp': e.timestamp.isoformat(),
+            'action': e.action,
+            'user_name': e.user_name,
+            'user_role': e.user_role,
+            'severity': e.severity,
+            'details': e.metadata or {},
+        } for e in events[:provenance_limit]]
+
+        payload = {
+            'meta': {
+                'exported_at': timezone.now().isoformat(),
+                'project': ({'id': str(project.id), 'name': project.name}
+                            if project else None),
+                'filters': filters,
+                'row_count': len(rows),
+                'test_count': len(test_ids),
+                # Stated so the file's scope is never inferred from its contents.
+                'filters_note': (
+                    'Only the filters listed in "filters" were applied. A test '
+                    'with no recorded operator, or with no test date, cannot '
+                    'match an operator or date-range filter and is absent here.'),
+                'unit_note': 'velocity_ms is metres per second; '
+                             'estimated_strength_mpa is null when no curve '
+                             'applied or the velocity fell outside the curve range.',
+                'provenance_note': (
+                    f'The provenance log holds the newest {len(provenance_log)} of '
+                    f'{event_count} recorded audit event(s) for the exported tests.'
+                    if event_count > provenance_limit else
+                    f'All {event_count} recorded audit event(s) for the exported tests.'),
+            },
+            'curves_used': list(curves_used.values()),
+            'rows': rows,
+            'provenance_log': provenance_log,
+        }
+        # HttpResponse, not a DRF Response: this is a file download, and it
+        # must stream the JSON itself rather than the browsable API's HTML.
+        import json
+        from django.http import HttpResponse
+        response = HttpResponse(
+            json.dumps(payload, indent=2), content_type='application/json')
+        scope = project.name[:40].replace(' ', '_') if project else 'all_projects'
+        response['Content-Disposition'] = (
+            f'attachment; filename="nexucon_pundit_measurements_{scope}.json"')
         return response
 
     @action(detail=False, methods=['get'], url_path='import_template')
@@ -1388,7 +1593,7 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'standard']
 
     WRITE_ACTIONS = ('create', 'update', 'partial_update', 'destroy',
-                     'activate')
+                     'activate', 'use_platform_default')
 
     def get_permissions(self):
         if self.action in self.WRITE_ACTIONS:
@@ -1469,6 +1674,50 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             'curve_snapshot': curve.snapshot(),
         })
 
+    @action(detail=False, methods=['post'], url_path='use-platform-default')
+    def use_platform_default(self, request):
+        """
+        Return a project to the platform default calibration by clearing its
+        own active curve. Body: {"project": id}.
+
+        There is no is_active flag on a curve — "active" is this project
+        setting, and the platform default is what applies when it is unset.
+        So choosing the default for a project is genuinely this: dropping the
+        project's own choice, not pointing at a curve. Without this the
+        platform default row had no reachable action, and a project that had
+        once been given a curve could never be put back on the default.
+
+        Readings already recorded keep the snapshot of the curve that produced
+        them — provenance is immutable per record, so this rewrites no history.
+        """
+        project = scoped_projects(request.user).filter(
+            pk=request.data.get('project')).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        from .strength_curves import builtin_curve_snapshot, resolve_active_curve
+        setting = ProjectCurveSetting.objects.filter(project=project).first()
+        previous = (setting.active_curve.name
+                    if setting is not None and setting.active_curve_id else None)
+        if previous is not None:
+            setting.active_curve = None
+            setting.updated_by = request.user
+            setting.save(update_fields=['active_curve', 'updated_by',
+                                        'updated_at'])
+            _record_audit(request.user, 'digital_eye.strength_curve.deactivate',
+                          'Project', project.id, {'previous_curve': previous})
+        # Reported either way, so a no-op is visible as a no-op rather than
+        # being reported as a change that did not happen.
+        curve = resolve_active_curve(project)
+        return Response({
+            'project': str(project.id),
+            'previous_active_curve': previous,
+            'changed': previous is not None,
+            'curve_snapshot': (curve.snapshot() if curve is not None
+                               else builtin_curve_snapshot()),
+        })
+
     @action(detail=False, methods=['get', 'post'], url_path='active-curve')
     def active_curve(self, request):
         """
@@ -1516,42 +1765,127 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='upload-csv')
     def upload_csv(self, request):
         """
-        Parse calibration points from an uploaded CSV (Nexucon Link spec).
-        Format: v (m/s), f (MPa), [r (rebound number)].
+        Parse calibration points from an uploaded calibration file. Nexucon
+        Link spec: "Upload a curve from CSV or JSON file".
+
+        CSV: columns v (m/s), f (MPa), optional r (rebound number).
+        JSON: a list of the same objects — [{"v": 4000, "f": 32.5}, …] — or an
+              object carrying them under "data_points".
+
+        Returns the parsed pairs; it does not itself create a curve. The caller
+        runs them through the regression engine and saves the fit it chooses.
+
+        The route keeps its original name so the existing caller is unaffected.
         """
         import csv
+        import json
+
         uploaded = request.FILES.get('file')
         if not uploaded:
-            return Response({'detail': 'A "file" upload is required (.csv).'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        
+            return Response(
+                {'detail': 'A "file" upload is required (.csv or .json).'},
+                status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            content = uploaded.read().decode('utf-8').splitlines()
-            reader = csv.DictReader(content)
-            data_points = []
-            for row in reader:
-                # normalize keys
-                row_lower = {k.strip().lower(): v for k, v in row.items() if k}
-                try:
-                    v = float(row_lower.get('v') or row_lower.get('velocity') or 0)
-                    f = float(row_lower.get('f') or row_lower.get('strength') or 0)
-                    if not v or not f:
-                        continue
-                    pt = {'v': v, 'f': f}
-                    r_raw = row_lower.get('r') or row_lower.get('rebound')
-                    if r_raw:
-                        pt['r'] = float(r_raw)
-                    data_points.append(pt)
-                except ValueError:
-                    continue
-            if len(data_points) < 2:
-                return Response(
-                    {'detail': 'The CSV must contain at least 2 valid rows with v (m/s) and f (MPa).'},
-                    status=status.HTTP_400_BAD_REQUEST)
-            return Response({'data_points': data_points})
-        except Exception as e:
-            return Response({'detail': f'Error parsing CSV: {str(e)}'},
+            text = uploaded.read().decode('utf-8')
+        except UnicodeDecodeError:
+            return Response(
+                {'detail': 'The file is not UTF-8 text — upload a .csv or '
+                           '.json calibration file.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        # The content decides the format, not the filename: a JSON export saved
+        # with a .csv extension still parses, and a CSV of numbers can never be
+        # mistaken for JSON.
+        try:
+            if text.lstrip()[:1] in ('[', '{'):
+                data_points, skipped, error = self._parse_calibration_json(text, json)
+            else:
+                data_points, skipped, error = self._parse_calibration_csv(text, csv)
+        except csv.Error as exc:
+            # A malformed file is a 400 naming the problem, never a 500.
+            return Response({'detail': f'Error parsing CSV: {exc}'},
                             status=status.HTTP_400_BAD_REQUEST)
+
+        if error:
+            return Response({'detail': error},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(data_points) < 2:
+            return Response(
+                {'detail': 'The calibration file must contain at least 2 valid '
+                           'rows with v (m/s) and f (MPa).'},
+                status=status.HTTP_400_BAD_REQUEST)
+        # skipped_rows is reported rather than swallowed: a 10-row file that
+        # quietly yields 7 pairs would let a curve be fitted over data the
+        # uploader believes was included.
+        return Response({'data_points': data_points, 'skipped_rows': skipped})
+
+    @staticmethod
+    def _calibration_point(raw):
+        """One calibration pair from a mapping, or None if it is unusable.
+
+        Keys are matched case-insensitively and by the spec's own synonyms, so
+        a file headed "Velocity,Strength" parses the same as one headed "v,f".
+        """
+        if not isinstance(raw, dict):
+            return None
+        row = {str(k).strip().lower(): v for k, v in raw.items() if k}
+        try:
+            v = float(row.get('v') or row.get('velocity') or 0)
+            f = float(row.get('f') or row.get('strength') or 0)
+        except (TypeError, ValueError):
+            return None
+        if not v or not f:
+            return None
+        # An uploaded pair is fitted into a curve exactly like a typed one, so
+        # a strength no concrete reaches is dropped here rather than allowed
+        # to move the curve (15 Sep 2026). It is counted in skipped_rows —
+        # the caller is told the row was not used.
+        from .strength_curves import strength_plausibility_error
+        if strength_plausibility_error(f):
+            return None
+        point = {'v': v, 'f': f}
+        r_raw = row.get('r') or row.get('rebound')
+        if r_raw not in (None, ''):
+            try:
+                point['r'] = float(r_raw)
+            except (TypeError, ValueError):
+                # A malformed rebound number does not invalidate the pair —
+                # v and f are what the regression fits.
+                pass
+        return point
+
+    @classmethod
+    def _parse_calibration_csv(cls, text, csv_module):
+        points, skipped = [], 0
+        for row in csv_module.DictReader(text.splitlines()):
+            point = cls._calibration_point(row)
+            if point:
+                points.append(point)
+            else:
+                skipped += 1
+        return points, skipped, None
+
+    @classmethod
+    def _parse_calibration_json(cls, text, json_module):
+        try:
+            payload = json_module.loads(text)
+        except ValueError as exc:
+            return None, 0, f'Error parsing JSON: {exc}'
+        if isinstance(payload, dict):
+            # The export this platform produces nests the pairs this way.
+            payload = payload.get('data_points')
+        if not isinstance(payload, list):
+            return None, 0, ('JSON must be a list of {"v": …, "f": …} objects, '
+                             'or an object with a "data_points" list.')
+        points, skipped = [], 0
+        for raw in payload:
+            point = cls._calibration_point(raw)
+            if point:
+                points.append(point)
+            else:
+                skipped += 1
+        return points, skipped, None
 
     @action(detail=False, methods=['post'])
     def preview(self, request):
@@ -1597,6 +1931,20 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
                 return Response({'detail': 'Project not found in your scope.'},
                                 status=status.HTTP_404_NOT_FOUND)
 
+        # How many test points this velocity averages (the client's
+        # three-point aggregation). Only the confidence-margin adjustment
+        # uses it — the standard error of a mean is s/sqrt(n).
+        n_points = None
+        if data.get('n_points') is not None:
+            try:
+                n_points = int(data.get('n_points'))
+            except (TypeError, ValueError):
+                return Response({'detail': 'n_points must be a whole number.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if n_points < 1:
+                return Response({'detail': 'n_points must be at least 1.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
         from .strength_curves import (apply_active_curve,
                                       temperature_correction_applied,
                                       temperature_corrected_velocity_km_s)
@@ -1607,7 +1955,8 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
         # pass the RAW velocity so it is never corrected twice.
         strength, snapshot = apply_active_curve(
             project, velocity_km_s,
-            rebound_number=rebound_number, temperature_c=temperature_c)
+            rebound_number=rebound_number, temperature_c=temperature_c,
+            n_points=n_points)
 
         v_ms = corrected_km_s * 1000.0
         range_ms = (snapshot or {}).get('valid_range_ms')
@@ -1622,6 +1971,7 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             strength_status = 'above_valid_range'
         else:
             strength_status = 'not_computable'
+        disclosure = (snapshot or {}).get('se_adjustment') or {}
         return Response({
             'project': str(project.id) if project else None,
             'path_length_mm': path_length_mm,
@@ -1631,9 +1981,114 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
                 temperature_correction_applied(temperature_c),
             'corrected_velocity_m_s': round(v_ms, 2),
             'f_cu_mpa': None if strength is None else round(strength, 2),
+            # The curve estimate before the standard-error policy moved it,
+            # so the UI can show both and the difference is never hidden.
+            'f_cu_unadjusted_mpa': disclosure.get('base_f_cu_mpa'),
+            'n_points': n_points,
+            'se_adjustment': disclosure,
             'status': strength_status,
             'curve_snapshot': snapshot,
         })
+
+    @action(detail=False, methods=['get'], url_path='standards')
+    def standards(self, request):
+        """
+        The standards registry — which documents the mathematical model
+        actually rests on, and what each one covers (15 Sep 2026 action
+        item: "Document the specific building standards or codes used for
+        the mathematical model").
+
+        Includes the honest note that the standard minuted as "BS 1881-23"
+        does not exist and corresponds to BS 1881-203:1986.
+        """
+        from .strength_curves import standards_registry
+        return Response({'standards': standards_registry()})
+
+    @action(detail=False, methods=['get'], url_path='se-analysis')
+    def se_analysis(self, request):
+        """
+        The standard-error analysis behind a project's active curve
+        (15 Sep 2026 client direction). Query: ?project=<id>.
+
+        Returns the standard error, the measured mean residual (the figure
+        behind the "+2 close the gap" convention), R², AIC, whether the
+        data supports an adjustment, and the definitions of each statistic.
+        Everything is computed from the curve's real calibration pairs.
+        """
+        from .strength_curves import resolve_active_curve, builtin_curve_snapshot
+        from .se_adjustment import (
+            MIN_PAIRS_FOR_ADJUSTMENT, STAT_DEFINITIONS, STAT_REFERENCES)
+
+        project = scoped_projects(request.user).filter(
+            pk=request.query_params.get('project')).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        curve = resolve_active_curve(project)
+        if curve is None:
+            # No stored curve at all: the built-in laboratory curve has no
+            # regression, so there is honestly nothing to analyse.
+            return Response({
+                'project': str(project.id),
+                'curve': None,
+                'curve_snapshot': builtin_curve_snapshot(),
+                'analysis': {
+                    'n_pairs': 0,
+                    'standard_error_mpa': None,
+                    'mean_residual_mpa': None,
+                    'r2_score': None,
+                    'aic': None,
+                    'adjustment_available': False,
+                    'unavailable_reason': (
+                        'No calibration curve is stored for this project; '
+                        'the built-in laboratory curve is a fixed '
+                        'correlation with no regression and therefore no '
+                        'standard error. Create and activate a calibrated '
+                        'curve to obtain one.'),
+                    'method': 'none',
+                    'factor': 1.0,
+                    'min_pairs_required': MIN_PAIRS_FOR_ADJUSTMENT,
+                    'recommendation': None,
+                    'definitions': dict(STAT_DEFINITIONS),
+                    'references': dict(STAT_REFERENCES),
+                },
+            })
+        return Response({
+            'project': str(project.id),
+            'curve': StrengthCurveSerializer(curve).data,
+            'curve_snapshot': curve.snapshot(),
+            'analysis': curve.se_analysis(),
+        })
+
+    @action(detail=False, methods=['get', 'patch'], url_path='settings')
+    def link_settings(self, request):
+        """
+        The Nexucon Link platform system settings, exposed on the Curve
+        Manager as well as at the canonical 'nexucon-link/settings/' path so
+        the workflow reads and writes them without a second round trip. The
+        handler is shared, so both paths behave identically.
+        """
+        return _nexucon_link_settings(request)
+
+
+class NexuconLinkSettingsView(APIView):
+    """
+    Nexucon Link platform system settings — the wireframe's "System
+    Settings" layer: the curve type the calibration workflow defaults to
+    (exponential, per the 15 Sep 2026 direction that concrete behaviour is
+    non-linear), the default standard, and the display units.
+
+    GET is available to any authenticated user. PATCH is Director-only and
+    audit-logged; it changes what every project's strength workflow
+    pre-selects, so it is not an ordinary preference.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return _nexucon_link_settings(request)
+
+    def patch(self, request):
+        return _nexucon_link_settings(request)
 
 
 class CoreSampleViewSet(viewsets.ModelViewSet):

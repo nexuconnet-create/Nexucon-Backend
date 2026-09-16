@@ -45,6 +45,10 @@ urlpatterns = [
     path('pundit-analysis-review/<uuid:analysis_id>/',
          views.PunditAnalysisReviewView.as_view(),
          name='pundit-analysis-review'),
+    # Nexucon Link platform system settings (wireframe "System Settings"):
+    # the default curve type, standard and display units.
+    path('nexucon-link/settings/', views.NexuconLinkSettingsView.as_view(),
+         name='nexucon-link-settings'),
 
     # Removed: 'stats/', 'trimble/status/', 'trimble/sync/' and
     # 'reports/download/pdf/' returned fabricated counters, a fake CONNECTED
