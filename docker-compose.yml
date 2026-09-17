@@ -38,7 +38,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}
-      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-nexucon_secure_pass}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
       - DATABASE_HOST=db
       - DATABASE_PORT=5432
       - DATABASE_ENGINE=django.contrib.gis.db.backends.postgis
@@ -65,7 +65,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-nexucon}
       - DATABASE_NAME=${DATABASE_NAME:-nexucon}
       - DATABASE_USER=${DATABASE_USER:-postgres}
-      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-nexucon_secure_pass}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
       - DATABASE_HOST=db
       - DATABASE_PORT=5432
       - DATABASE_ENGINE=django.contrib.gis.db.backends.postgis
