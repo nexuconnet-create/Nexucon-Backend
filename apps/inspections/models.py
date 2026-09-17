@@ -92,8 +92,44 @@ class Inspection(models.Model):
     checkin_time = models.DateTimeField(null=True, blank=True)
     gps_latitude = models.FloatField(null=True, blank=True)
     gps_longitude = models.FloatField(null=True, blank=True)
-    gps_verified = models.BooleanField(default=False)
-    
+    gps_verified = models.BooleanField(
+        default=False,
+        help_text=(
+            "True only when the project has recorded site coordinates AND the "
+            "check-in point is within the effective geofence radius AND the "
+            "device's reported accuracy does not exceed that radius. False in "
+            "every other case, including 'could not be verified'. Written only "
+            "by InspectionExecutionService.checkin()."
+        ),
+    )
+
+    # Geofence evaluation (Inspector PWA Module 2). All nullable/blank: no
+    # value is defaulted onto a pre-existing row, so an inspection that was
+    # never geofenced reports an honest absence rather than a fabricated pass.
+    gps_accuracy_m = models.FloatField(
+        null=True, blank=True,
+        help_text="Device-reported horizontal accuracy in metres; null if not sent.",
+    )
+    geofence_distance_m = models.FloatField(
+        null=True, blank=True,
+        help_text="Measured distance from the recorded site point; null if not measurable.",
+    )
+    geofence_state = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text="VERIFIED | OUTSIDE | UNVERIFIABLE. Empty string = never evaluated.",
+    )
+    geofence_reason = models.CharField(
+        max_length=40, blank=True, default='',
+        help_text="Why the state was reached, e.g. OUTSIDE_RADIUS.",
+    )
+
+    # Check-out (Inspector PWA Module 2). Records that the inspector left the
+    # site; it deliberately does not change `status`, because the spec defines
+    # no transition for it and inventing one would fabricate a workflow.
+    check_out_time = models.DateTimeField(null=True, blank=True)
+    checkout_latitude = models.FloatField(null=True, blank=True)
+    checkout_longitude = models.FloatField(null=True, blank=True)
+
     # Outcome & Findings
     outcome = models.CharField(max_length=50, choices=OUTCOME_CHOICES, default='PENDING')
     summary_notes = models.TextField(blank=True, null=True)

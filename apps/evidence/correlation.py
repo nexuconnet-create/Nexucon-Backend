@@ -381,12 +381,8 @@ class CorrelationEngine:
         return revision
 
 
-def haversine_m(point_a, point_b):
-    """Great-circle distance in metres between (lat, lon) pairs."""
-    import math
-    if None in (point_a + point_b):
-        return float('inf')
-    lat1, lon1, lat2, lon2 = map(math.radians, (point_a[0], point_a[1], point_b[0], point_b[1]))
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return 6371000.0 * 2 * math.asin(math.sqrt(a))
+# `haversine_m` now lives in common.geo. It is re-exported here so existing
+# call sites (and the tests that exercise them through this module) keep
+# working unchanged. Import the name from common.geo in new code.
+from common.geo import haversine_m  # noqa: F401  (re-export)
+

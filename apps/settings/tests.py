@@ -1003,28 +1003,42 @@ class StaffDirectoryServiceTestCase(TestCase):
             email='mailer.down@government.gov.ng').exists())
 
     def test_accept_invitation_unknown_email_fails(self):
+        """No invitation record means no account: activation is invite-only."""
         result = SettingsService.accept_invitation('nobody@nowhere.gov.ng')
+
         self.assertFalse(result['success'])
-        self.assertIn('No invitation found', result['message'])
+        self.assertIn('No invitation record found', result['message'])
+        self.assertFalse(
+            User.objects.filter(email='nobody@nowhere.gov.ng').exists())
 
     def test_accept_invitation_activates_user_and_returns_jwt(self):
         with mock.patch('apps.notifications.email_service.'
                         'EmailService.send_invitation_email'):
-            SettingsService.invite_user(
+            invitation = SettingsService.invite_user(
                 'activate.me@government.gov.ng', 'Activate Me',
                 role='City Planner', department='Transport',
                 invited_by=self.director)
 
+        # The token is the invitee's own credential — it is the UUID in the link
+        # the invitation email carries, so it is what a client sends. Without
+        # one of the three (token / invite code / temporary password) acceptance
+        # is refused, which is asserted separately below.
         result = SettingsService.accept_invitation(
-            'activate.me@government.gov.ng', password='BrandNewPass123!',
-            full_name='Activated Me')
+            'activate.me@government.gov.ng', token=str(invitation.id),
+            password='BrandNewPass123!', full_name='Activated Me')
 
         self.assertTrue(result['success'])
         self.assertIn('access', result)
         self.assertIn('refresh', result)
         self.assertEqual(result['user']['role_name'], 'City Planner')
-        self.assertEqual(result['user']['department'], 'Transport')
         self.assertTrue(result['user']['is_verified'])
+        # The department is recorded on the invitation, which is where the
+        # directorate's decision lives. `Profile` has no department column, so
+        # asserting one on the serialized user would assert a field that does
+        # not exist — the invite carried it, and this is where it is kept.
+        self.assertEqual(
+            UserInvitation.objects.get(
+                email='activate.me@government.gov.ng').department, 'Transport')
 
         user = User.objects.get(email='activate.me@government.gov.ng')
         self.assertTrue(user.is_active)
@@ -1033,16 +1047,51 @@ class StaffDirectoryServiceTestCase(TestCase):
         invitation = UserInvitation.objects.get(email='activate.me@government.gov.ng')
         self.assertEqual(invitation.status, 'Accepted')
 
-    def test_accept_invitation_without_invitation_record_creates_account(self):
-        User.objects.create_user(
+    def test_accept_invitation_without_a_credential_is_refused(self):
+        """An invitation record alone is not enough — one of its credentials is.
+
+        The record proves the directorate invited this address; the code, the
+        temporary password or the link's token proves the person accepting is
+        the one who received it. Holding only the email address proves neither.
+        """
+        with mock.patch('apps.notifications.email_service.'
+                        'EmailService.send_invitation_email'):
+            invitation = SettingsService.invite_user(
+                'no.credential@government.gov.ng', 'No Credential')
+        before = User.objects.get(email='no.credential@government.gov.ng')
+        original_password = before.password
+
+        result = SettingsService.accept_invitation(
+            'no.credential@government.gov.ng', password='Rotated123!')
+
+        self.assertFalse(result['success'])
+        self.assertIn('Invite Code or Temporary Password', result['message'])
+        before.refresh_from_db()
+        self.assertEqual(before.password, original_password)
+        self.assertFalse(before.is_verified)
+        invitation.refresh_from_db()
+        self.assertEqual(invitation.status, 'Pending')
+
+    def test_accept_invitation_without_invitation_record_is_refused(self):
+        """A pre-existing user cannot self-activate without an invitation.
+
+        Activation runs through the directorate's invitation flow. Without a
+        record there is no code to check and nothing saying this account was
+        ever accredited — and the refusal must not rotate the password anyway,
+        which would be worse than not refusing at all.
+        """
+        user = User.objects.create_user(
             username='plain.user@government.gov.ng',
             email='plain.user@government.gov.ng', password='Password123!')
+
         result = SettingsService.accept_invitation(
             'plain.user@government.gov.ng', password='Rotated123!')
-        self.assertTrue(result['success'])
-        user = User.objects.get(email='plain.user@government.gov.ng')
-        self.assertTrue(user.is_verified)
-        self.assertTrue(user.check_password('Rotated123!'))
+
+        self.assertFalse(result['success'])
+        self.assertIn('Government Directorate', result['message'])
+        user.refresh_from_db()
+        self.assertTrue(user.check_password('Password123!'))
+        self.assertFalse(user.is_verified)
 
     def test_validate_inspector_invitation_valid_and_invalid_code(self):
         invitation = SettingsService.invite_user(
@@ -1060,12 +1109,21 @@ class StaffDirectoryServiceTestCase(TestCase):
         self.assertEqual(res['role'], 'Inspector')
         self.assertIsNotNone(res['temporary_password'])
 
-        # 2. Rejection with invalid code
-        bad_res = SettingsService.validate_inspector_invitation(token=str(invitation.id), invite_code='WRONG-CODE')
+        # 2. Rejection with an invalid code and nothing else to go on. The code
+        #    doubles as the lookup key, so a wrong one names no invitation.
+        bad_res = SettingsService.validate_inspector_invitation(invite_code='WRONG-CODE')
         self.assertFalse(bad_res['valid'])
-        self.assertEqual(bad_res['error_code'], 'INVALID_CODE')
+        self.assertEqual(bad_res['error_code'], 'NOT_REGISTERED')
 
-        # 3. Accept invitation
+        # 3. The token is a credential in its own right — it is the UUID4 the
+        #    directorate issues and puts in the invitation link, so it validates
+        #    without a code being typed. Not a weakening: an unguessable bearer
+        #    token the recipient already holds.
+        token_only = SettingsService.validate_inspector_invitation(token=str(invitation.id))
+        self.assertTrue(token_only['valid'])
+        self.assertEqual(token_only['email'], 'inspector.test@government.gov.ng')
+
+        # 4. Accept invitation
         accept_res = SettingsService.accept_invitation(
             email='inspector.test@government.gov.ng',
             token=str(invitation.id),
@@ -1073,7 +1131,7 @@ class StaffDirectoryServiceTestCase(TestCase):
         )
         self.assertTrue(accept_res['success'])
 
-        # 4. Rejection after acceptance (single-use token)
+        # 5. Rejection after acceptance (single-use token)
         accepted_res = SettingsService.validate_inspector_invitation(token=str(invitation.id), invite_code='TEST-1234')
         self.assertFalse(accepted_res['valid'])
         self.assertEqual(accepted_res['error_code'], 'ALREADY_ACCEPTED')

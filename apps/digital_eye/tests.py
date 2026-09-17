@@ -34,10 +34,10 @@ from apps.projects.models import Project
 
 from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
-    BIMElementMapping, BIMModelGeometry, FieldDevice, GPRAnomaly, GPRSurvey,
-    GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITReading,
-    PUNDITTest, RebarTest, SensorDataFile, StrengthCurve, TrimbleConnection,
-    TrimbleProject,
+    BIMElementMapping, BIMModelGeometry, EvidenceSpatialPoint, FieldDevice,
+    GPRAnomaly, GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey,
+    LiveStream, PUNDITReading, PUNDITTest, RebarTest, SensorDataFile,
+    StrengthCurve, TrimbleConnection, TrimbleProject,
 )
 
 User = get_user_model()
@@ -2884,6 +2884,123 @@ class HonestModelDefaultsTestCase(DigitalEyeAPITestBase):
         scan = RebarTest.objects.create(project=self.project)
         self.assertEqual(scan.structural_element, '')
         self.assertEqual(scan.test_location, '')
+
+
+# ======================================================================
+# Spatial evidence register (the inspector frontend's Spatial Evidence Map)
+# ======================================================================
+
+class SpatialEvidencePointTestCase(DigitalEyeAPITestBase):
+    """
+    `GET /api/v1/digital-eye/spatial-map/` — what the Spatial Evidence Map reads.
+
+    The inspector frontend calls this endpoint with **no** filter and lets the
+    viewset's own project scoping decide what comes back, then positions each
+    point on a canvas from its `lat`/`lng`. Both halves of that are pinned here,
+    because the map was previously drawn from data of its own: pins placed by
+    array index and a fixed coordinate readout, on a canvas that was handed a
+    literal empty array. A frontend can only be honest about this register if
+    the register's contract holds, so the contract is asserted server-side.
+
+    The coordinate assertions are the load-bearing ones. `lat`, `lng`,
+    `elevation_m` and `accuracy_mm` are all `null=True` on the model, and the
+    canvas renders a recorded point with no measured position as exactly that
+    ("no measured position") rather than drawing it. A `null=False` or a
+    coordinate default added later would not fail loudly in Python — it would
+    silently plot an unsurveyed point, and the map would state a position
+    nobody measured.
+    """
+
+    LIST_URL = 'digital-eye-spatial-map-list'
+
+    def _point(self, name, **kwargs):
+        return EvidenceSpatialPoint.objects.create(name=name, **kwargs)
+
+    def _names(self, response):
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['success'])
+        return sorted(row['name'] for row in response.data['data'])
+
+    def test_an_unmeasured_point_is_returned_with_null_coordinates(self):
+        """A row recorded before it was surveyed stays null, and is not dropped.
+
+        Withholding it would be worse than returning it: the map reports the
+        count it holds, so a silently omitted row would read as a point that
+        was never recorded at all.
+        """
+        self._point('Beacon with no fix yet', project=self.project)
+
+        response = self.client.get(reverse(self.LIST_URL))
+        self.assertEqual(self._names(response), ['Beacon with no fix yet'])
+
+        row = response.data['data'][0]
+        self.assertIsNone(row['lat'])
+        self.assertIsNone(row['lng'])
+        self.assertIsNone(row['elevation_m'])
+        self.assertIsNone(row['accuracy_mm'])
+
+    def test_recorded_coordinates_and_precision_come_back_unchanged(self):
+        self._point(
+            'Beacon A',
+            project=self.project,
+            layer_type='GNSS_RTK_BEACON',
+            lat=6.4478,
+            lng=3.4723,
+            elevation_m=18.2,
+            accuracy_mm=14.0,
+        )
+
+        row = self.client.get(reverse(self.LIST_URL)).data['data'][0]
+        self.assertEqual(row['lat'], 6.4478)
+        self.assertEqual(row['lng'], 3.4723)
+        self.assertEqual(row['elevation_m'], 18.2)
+        self.assertEqual(row['accuracy_mm'], 14.0)
+
+    def test_unfiltered_read_withholds_a_point_that_names_no_project(self):
+        """An unattributable statutory record is not shown to anyone.
+
+        This is why the frontend can call the endpoint unfiltered: the viewset,
+        not the client, decides what is in scope. A point naming no project has
+        no scope to be checked against, so it is withheld rather than served to
+        every caller.
+        """
+        self._point('Scoped point', project=self.project)
+        self._point('Unattributable point')
+
+        self.assertEqual(self._names(self.client.get(reverse(self.LIST_URL))), ['Scoped point'])
+
+    def test_layer_type_filter_selects_only_that_layer(self):
+        self._point('Beacon A', project=self.project, layer_type='GNSS_RTK_BEACON')
+        self._point('Transect 1', project=self.project, layer_type='GPR_TRANSECT')
+
+        response = self.client.get(reverse(self.LIST_URL), {'layer_type': 'GPR_TRANSECT'})
+        self.assertEqual(self._names(response), ['Transect 1'])
+
+    def test_project_filter_matches_the_foreign_key_and_the_legacy_string(self):
+        """Both filters the frontend may send are honoured.
+
+        These rows carry a real `project` FK *and* a denormalised `project_id_str`
+        copy written by older import paths, so filtering on the FK alone would
+        hide rows imported under the string.
+        """
+        other = Project.objects.create(
+            name='Second Digital Eye Site', project_type='Commercial', status='ACTIVE',
+        )
+        self._point('On the FK', project=other)
+        self._point('On the legacy string', project_id_str=str(other.pk))
+        self._point('On another site', project=self.project)
+
+        response = self.client.get(reverse(self.LIST_URL), {'project': str(other.pk)})
+        self.assertEqual(self._names(response), ['On the FK', 'On the legacy string'])
+
+    def test_the_register_requires_authentication(self):
+        self.client.credentials()
+        # 401 rather than a redirect, so the frontend's axios interceptor sees
+        # an auth failure and not an HTML login page.
+        self.assertEqual(
+            self.client.get(reverse(self.LIST_URL)).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
 
 
 # ======================================================================

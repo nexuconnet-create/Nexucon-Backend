@@ -9,8 +9,10 @@ import logging
 
 from django.db import models
 from django.utils import timezone
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,11 +21,14 @@ from common.permissions import (
     IsDirector, scoped_projects, user_is_state_hq, user_district,
 )
 from .correlation import CorrelationEngine
+from .files import EvidenceFileError, EvidenceFileService
 from .intelligence import HQIntelligenceService, ProjectIntelligenceService
 from .models import AIAnalysisRecord, CorrelationFinding, EvidenceRecord
 from .review import HumanReviewService, ReviewError, record_audit
 from .serializers import (
-    AIAnalysisRecordSerializer, CorrelationFindingSerializer, EvidenceRecordSerializer,
+    AIAnalysisRecordSerializer, CorrelationFindingSerializer,
+    EvidenceFileUploadSerializer, EvidenceRecordDetailSerializer,
+    EvidenceRecordSerializer, EvidenceVerificationSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -629,3 +634,223 @@ class HQInspectorAnalyticsView(APIView):
 
     def get(self, request):
         return Response(HQIntelligenceService.inspector_analytics())
+
+
+# ----------------------------------------------------------------------
+# File evidence (Inspector PWA Part 3 — upload, and verify what was stored)
+#
+#   POST evidence/upload/                       store the bytes, attest to them
+#   GET  evidence/<uuid:pk>/                    one record and its file
+#   POST evidence/<uuid:pk>/verify/             re-read and re-hash
+#   GET  evidence/inspection/<uuid:inspection_id>/   everything from one visit
+#
+# All four are declared **before** ``path('', include(router.urls))`` in
+# ``urls.py``, for the reason written up there: the identical shadowing mistake
+# is already a fixed bug in ``scans/urls.py`` and ``inspections/urls.py``, and a
+# regression test asserts ``/evidence/records/`` still resolves.
+# ----------------------------------------------------------------------
+
+
+def _record_in_scope(user, record_id):
+    """The caller's own evidence record, or ``None``.
+
+    Scoped through ``scoped_projects`` like every other read in this app, and a
+    record outside the scope is a 404 rather than a 403 — a 403 would confirm
+    the record exists, which is a fact that belongs to the project that owns it.
+    """
+    return (
+        EvidenceRecord.objects
+        .select_related('project', 'file', 'inspection')
+        .filter(pk=record_id, project__in=scoped_projects(user))
+        .first()
+    )
+
+
+class EvidenceFileUploadView(APIView):
+    """`POST evidence/upload/` — store a file as evidence, and attest to it.
+
+    Creates the registry record *and* the file in one request, because a
+    ``uploaded_file`` record with no file would be a row that claims evidence it
+    does not hold. If the file is refused, the record is removed with it.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @extend_schema(request=EvidenceFileUploadSerializer,
+                   responses={201: EvidenceRecordDetailSerializer})
+    def post(self, request):
+        serializer = EvidenceFileUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        project = scoped_projects(request.user).filter(pk=data['project']).first()
+        if project is None:
+            return Response({'detail': 'That project is not in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        inspection = None
+        inspection_id = data.get('inspection')
+        if inspection_id:
+            from apps.inspections.models import Inspection
+            inspection = Inspection.objects.filter(
+                pk=inspection_id, project=project).first()
+            if inspection is None:
+                return Response(
+                    {'detail': 'That inspection was not found in this project.'},
+                    status=status.HTTP_404_NOT_FOUND)
+
+        context = {
+            'structural_element_id': data.get('structural_element_id') or '',
+            'bim_guid': data.get('bim_guid') or '',
+            'coordinates': data.get('coordinates'),
+            'captured_at': data.get('captured_at'),
+            'confidence': data.get('confidence'),
+        }
+        description = (data.get('description') or '').strip()
+        if description:
+            context['description'] = description
+
+        record = EvidenceFileService.file_backed_record(
+            project=project,
+            uploaded_file=data['file'],
+            request=request,
+            inspection=inspection,
+            **context,
+        )
+        try:
+            evidence_file = EvidenceFileService.store(
+                record=record,
+                uploaded_file=data['file'],
+                request=request,
+                expected_sha256=data.get('sha256') or '',
+                expected_size=data.get('file_size_bytes'),
+            )
+        except EvidenceFileError as exc:
+            # The record was created for a file that will not exist. Left
+            # behind it would be an evidence row with nothing behind it, which
+            # is exactly the false attestation this endpoint exists to prevent.
+            record.delete()
+            return Response({'detail': str(exc)}, status=exc.status_code)
+
+        record_audit(
+            request.user, 'evidence.file.upload', 'EvidenceRecord', record.id,
+            new_state='stored',
+            metadata={
+                'evidence_reference': record.evidence_reference,
+                'file_name': evidence_file.file_name,
+                'file_size_bytes': evidence_file.file_size_bytes,
+                'sha256_hash': evidence_file.sha256_hash,
+                'inspection_id': str(inspection.id) if inspection else None,
+            },
+        )
+        return Response(
+            EvidenceRecordDetailSerializer(record, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class EvidenceRecordDetailView(APIView):
+    """`GET evidence/<uuid:pk>/` — one record, its file, and its verify state."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: EvidenceRecordDetailSerializer})
+    def get(self, request, pk):
+        record = _record_in_scope(request.user, pk)
+        if record is None:
+            return Response({'detail': 'Evidence record not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(EvidenceRecordDetailSerializer(
+            record, context={'request': request}).data)
+
+
+class EvidenceVerifyView(APIView):
+    """`POST evidence/<uuid:pk>/verify/` — re-read the bytes and re-hash them.
+
+    A POST, not a GET, and deliberately: this reads the stored file back and
+    writes the outcome. A GET that re-hashes 25 MB and mutates a row is a GET a
+    cache or a prefetcher is entitled to run for you.
+
+    A mismatch is a 200 with ``file_bytes_ok: false``, not an error. The file
+    failing verification is the answer to the question that was asked.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=None, responses={200: EvidenceVerificationSerializer})
+    def post(self, request, pk):
+        record = _record_in_scope(request.user, pk)
+        if record is None:
+            return Response({'detail': 'Evidence record not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        result = EvidenceFileService.verify(record)
+        if result['file_bytes_ok'] is False or not result['payload_ok']:
+            record_audit(
+                request.user, 'evidence.file.verify_failed', 'EvidenceRecord',
+                record.id, severity='High', new_state='failed',
+                metadata={
+                    'evidence_reference': record.evidence_reference,
+                    'payload_ok': result['payload_ok'],
+                    'file_bytes_ok': result['file_bytes_ok'],
+                    'note': result['note'],
+                },
+            )
+        return Response(result)
+
+
+class EvidenceByInspectionView(APIView):
+    """`GET evidence/inspection/<uuid:inspection_id>/` — everything from one visit.
+
+    This is what the nullable ``inspection`` FK was added for. Before it, a
+    finding's evidence reached its inspection only by
+    ``source_model='inspections.Finding'`` plus a string match on ``source_id``,
+    which is not a relation a database can filter on.
+
+    Serialised *with* the file, unlike the registry list. The one consumer is a
+    visit's evidence panel, which has to show each artifact's own SHA-256 — the
+    digest that gets sealed into the submission — and that lives on
+    ``EvidenceFile``, not on the record. Serving the light serializer here would
+    force a detail request per row to answer the only question the endpoint is
+    asked. The cost is bounded by one visit's captures, and presigning a URL is
+    a local signature with no network round trip.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        parameters=[OpenApiParameter('source_type', str,
+                                     description='Filter to one source type.')],
+        responses={200: EvidenceRecordDetailSerializer(many=True)},
+    )
+    def get(self, request, inspection_id):
+        from apps.inspections.models import Inspection
+
+        inspection = (
+            Inspection.objects
+            .filter(pk=inspection_id, project__in=scoped_projects(request.user))
+            .first()
+        )
+        if inspection is None:
+            return Response({'detail': 'Inspection not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        queryset = (
+            EvidenceRecord.objects
+            .select_related('project', 'file')
+            .filter(inspection=inspection)
+            .order_by('-captured_at', '-created_at')
+        )
+
+        wanted = (request.query_params.get('source_type') or '').strip()
+        if wanted:
+            valid = {value for value, _ in EvidenceRecord.SOURCE_TYPES}
+            if wanted not in valid:
+                return Response(
+                    {'detail': f'source_type must be one of {", ".join(sorted(valid))}.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            queryset = queryset.filter(source_type=wanted)
+
+        return Response(
+            EvidenceRecordDetailSerializer(queryset, many=True).data)

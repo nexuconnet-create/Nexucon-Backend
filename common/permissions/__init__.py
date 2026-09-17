@@ -19,7 +19,8 @@ mirrored by apps/government/permissions.py):
 * Director     — State Headquarters Directorate: full visibility, full CRUD
                  except DELETE (apps.government.IsDirector).
 * Inspector    — field inspector: the projects they are assigned to
-                 (inspection FK or assigned_inspector) union their district;
+                 (the `assigned_inspector_user` foreign key, or a real
+                 inspection they conducted) union their district;
                  create/read/update, no DELETE.
 * Client Developer — external developer organisation: only the projects
                  linked to their developer organisation; no government
@@ -89,8 +90,8 @@ def scoped_projects(user):
     Projects visible to `user` under the hierarchy:
       State HQ / Director / Agency Head -> all projects
       District staff      -> projects in their district
-      Inspector           -> projects they are assigned to (inspector FK or
-                             assigned_inspector field), else their district
+      Inspector           -> projects they are assigned to (`assigned_inspector_user`,
+                             else a real inspection), else their district
       Client developer    -> projects linked to their developer organization
       Everyone else       -> none
     """
@@ -107,8 +108,18 @@ def scoped_projects(user):
 
     if role == ROLE_INSPECTOR:
         from django.db.models import Q
-        inspector_name = str(user.get_full_name() or user.email)
-        q = Q(inspections__inspector=user) | Q(assigned_inspector=inspector_name)
+        # The assignment is a foreign key, not a name match. Access follows the
+        # user, so it cannot be obtained by typing someone's name into a project
+        # and it does not move when a profile name is edited.
+        #
+        # `assigned_inspector` is deliberately NOT matched here, not even as a
+        # fallback. It is a display mirror of this very column
+        # (`Project.sync_assigned_inspector`), so matching it would restore the
+        # escalation for every row the mirror had not yet caught up with —
+        # exactly the rows an attacker would choose. Rows written before the
+        # backfill get their key from `manage.py
+        # backfill_project_assigned_inspector_user`.
+        q = Q(inspections__inspector=user) | Q(assigned_inspector_user=user)
         if district:
             q |= Q(district=district)
         return Project.objects.filter(q).distinct()

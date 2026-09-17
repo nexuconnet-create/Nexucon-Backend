@@ -14,6 +14,7 @@ from PIL import Image
 from apps.common.ai_service import (
     AIService, AIServiceError, AIQuotaExceeded, AIProviderUnavailable,
 )
+from common.geo import haversine_m
 
 
 def _png_bytes(color=(255, 0, 0), size=(10, 10), mode="RGB"):
@@ -1442,3 +1443,60 @@ class MLPipelineTorchPathTests(TestCase):
             self.assertEqual(item["severity"], "low")
             self.assertEqual(item["confidence_score"], 0.20)
             self.assertIn("False Positive", item["description"])
+
+
+# ==========================================================================
+# common.geo
+#
+# `haversine_m` lived in apps/evidence/correlation.py, which meant
+# apps.inspections had to import apps.evidence in order to measure a distance
+# between two points — evidence depending on nothing, inspections depending on
+# evidence for arithmetic. It now lives here, in the pure-helper layer, and
+# correlation.py re-exports it so no call site changed.
+# ==========================================================================
+
+class HaversineTests(TestCase):
+    """The distance primitive the site geofence is built on."""
+
+    def test_identical_points_are_zero_metres(self):
+        self.assertEqual(haversine_m((6.4281, 3.4219), (6.4281, 3.4219)), 0.0)
+
+    def test_no_coordinate_returns_infinity_not_a_number(self):
+        """An unknown position must never read as "0 m away" — that would
+        place an inspector at a site they never visited."""
+        self.assertEqual(haversine_m((None, None), (6.4281, 3.4219)), float('inf'))
+        self.assertEqual(haversine_m((6.4281, 3.4219), (None, None)), float('inf'))
+        self.assertEqual(haversine_m((6.4281, None), (6.4281, 3.4219)), float('inf'))
+
+    def test_one_degree_of_latitude_is_the_published_arc_length(self):
+        """One degree of latitude is pi*R/180 = 111.19 km everywhere on a
+        sphere. Derivable by hand, so it is a real check on the formula."""
+        distance_km = haversine_m((0.0, 0.0), (1.0, 0.0)) / 1000.0
+        self.assertAlmostEqual(distance_km, 111.19, delta=0.5)
+
+    def test_quarter_of_the_equator_matches_the_sphere(self):
+        """(0,0) to (0,90) is a quarter great circle = pi*R/2 = 10007.5 km."""
+        distance_km = haversine_m((0.0, 0.0), (0.0, 90.0)) / 1000.0
+        self.assertAlmostEqual(distance_km, 10007.5, delta=10.0)
+
+    def test_known_lagos_to_abuja_pair_within_one_percent(self):
+        """Lagos (6.5244, 3.3792) to Abuja (9.0765, 7.3986) is ~526 km."""
+        distance_km = haversine_m((6.5244, 3.3792), (9.0765, 7.3986)) / 1000.0
+        self.assertAlmostEqual(distance_km, 526.0, delta=526.0 * 0.01)
+
+    def test_short_offsets_match_the_local_scale(self):
+        """At this latitude one 0.00045 degree step of latitude is ~50 m —
+        the scale the geofence tests are written against."""
+        self.assertAlmostEqual(
+            haversine_m((6.4281, 3.4219), (6.4281 + 0.00045, 3.4219)),
+            50.0, delta=1.0)
+
+    def test_distance_is_symmetric(self):
+        a, b = (6.4281, 3.4219), (6.5000, 3.5000)
+        self.assertAlmostEqual(haversine_m(a, b), haversine_m(b, a), places=6)
+
+    def test_correlation_module_re_exports_the_same_function(self):
+        """The re-export is what keeps every existing call site and test
+        working; if it ever becomes a copy instead, this asserts it."""
+        from apps.evidence import correlation
+        self.assertIs(correlation.haversine_m, haversine_m)

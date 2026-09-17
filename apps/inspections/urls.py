@@ -27,6 +27,8 @@ urlpatterns = [
          name='inspection-execution'),
     path('<uuid:inspection_id>/execution/checkin/', execution_views.InspectionCheckinView.as_view(),
          name='inspection-checkin'),
+    path('<uuid:inspection_id>/execution/checkout/', execution_views.InspectionCheckoutView.as_view(),
+         name='inspection-checkout'),
     path('<uuid:inspection_id>/execution/submit/', execution_views.InspectionSubmitView.as_view(),
          name='inspection-submit'),
     path('<uuid:inspection_id>/execution/sign-off/', execution_views.InspectionSignOffView.as_view(),

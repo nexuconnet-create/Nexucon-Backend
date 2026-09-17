@@ -69,6 +69,19 @@ class EvidenceIngestionService:
     # ------------------------------------------------------------------
 
     @classmethod
+    def ingest_record(cls, **kwargs) -> EvidenceRecord:
+        """Public entry point for a caller that has already normalised.
+
+        Every producer method below this line knows how to read one instrument
+        and hands ``_ingest`` a shaped record. The offline sync queue is not a
+        producer: it replays a record the client already normalised, and its
+        only job is to land it idempotently. Exposing ``_ingest`` through a
+        named public method keeps that caller out of a private one without
+        pretending the queue knows anything about GPR or PUNDIT.
+        """
+        return cls._ingest(**kwargs)
+
+    @classmethod
     def ingest_defect(cls, defect, ingested_by=None):
         """Digital Eye visual defect (apps.scans.Defect)."""
         session = defect.session
