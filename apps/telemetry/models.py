@@ -26,10 +26,13 @@ table here, despite the spec listing columns for them:
     columns are all present; they are simply carried by the models that were
     already responsible for them.
 """
+import hashlib
+import secrets
 import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 def generate_session_ref():
@@ -71,6 +74,26 @@ class TelemetrySession(models.Model):
         (STATUS_ABORTED, 'Aborted — capture abandoned'),
     ]
 
+    # How the capture reached the platform. This is a property of the
+    # *capture*, not of the device: the same PUNDIT unit can be carried to a
+    # site with no signal and synced three days later, and the two arrivals
+    # are different claims about the same measurement. Empty means the
+    # transport was not recorded — which is the honest answer for every
+    # session captured before this field existed, and for any client that
+    # does not report one. It is deliberately never defaulted to a guess.
+    TRANSPORT_BLE = 'BLE'
+    TRANSPORT_WIFI = 'WIFI'
+    TRANSPORT_CLOUD = 'CLOUD'
+    TRANSPORT_FILE = 'FILE'
+    TRANSPORT_MANUAL = 'MANUAL'
+    TRANSPORT_CHOICES = [
+        (TRANSPORT_BLE, 'Bluetooth — instrument to app'),
+        (TRANSPORT_WIFI, 'Direct Wi-Fi — instrument to network'),
+        (TRANSPORT_CLOUD, 'Cloud push — gateway to platform'),
+        (TRANSPORT_FILE, 'Export file — instrument to file to app'),
+        (TRANSPORT_MANUAL, 'Manual entry'),
+    ]
+
     SYNC_PENDING = 'PENDING'
     SYNC_SYNCED = 'SYNCED'
     SYNC_FAILED = 'FAILED'
@@ -107,6 +130,11 @@ class TelemetrySession(models.Model):
     )
 
     data_type = models.CharField(max_length=30, choices=DATA_TYPE_CHOICES, db_index=True)
+    transport = models.CharField(
+        max_length=10, choices=TRANSPORT_CHOICES, blank=True, default='',
+        db_index=True,
+        help_text='How the capture arrived; blank means it was not recorded',
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES,
                               default=STATUS_OPEN, db_index=True)
     sync_status = models.CharField(max_length=20, choices=SYNC_STATUS_CHOICES,
@@ -140,6 +168,24 @@ class TelemetrySession(models.Model):
     # Empty until promotion — never a placeholder built at start.
     data_payload = models.JSONField(null=True, blank=True)
     sha256_hash = models.CharField(max_length=64, blank=True, default='')
+
+    # The raw instrument export, when the capture arrived as a file. Kept
+    # deliberately: the packets are a *derived interpretation* of these bytes,
+    # so if the parser is ever wrong the original is the only ground truth
+    # left. Blank for every session that did not come from a file — never a
+    # placeholder naming a file that does not exist.
+    source_file_name = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='Original filename of the imported export, as the operator chose it',
+    )
+    source_file_sha256 = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text='SHA-256 of the stored bytes, so the parse can be re-checked',
+    )
+    source_file_storage_name = models.CharField(
+        max_length=500, blank=True, default='',
+        help_text='Storage key of the retained export',
+    )
 
     sync_error = models.TextField(
         blank=True, default='',
@@ -231,3 +277,121 @@ class TelemetryPacket(models.Model):
 
     def __str__(self):
         return f"{self.session.session_reference} #{self.sequence}"
+
+
+# ----------------------------------------------------------------------
+# Device credentials — the machine legs (Wi-Fi / cloud gateway)
+# ----------------------------------------------------------------------
+
+#: Marks the credential as a device token rather than a platform API key
+#: (`nx_live_`), so a leaked string is identifiable from sight alone.
+DEVICE_TOKEN_PREFIX = 'nxdev_'
+
+
+def generate_device_token():
+    """A fresh device secret. Never stored — only its digest is."""
+    return f"{DEVICE_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+
+
+def hash_device_token(raw):
+    """SHA-256 of the token, hex. Same scheme ``APIKeyGateway`` uses.
+
+    A plain digest rather than a slow KDF is correct *here* and only here: the
+    secret is 256 bits of CSPRNG output, so there is no low-entropy guess to
+    slow down, and the digest is what makes lookup an indexed equality test
+    instead of a scan over every token comparing in Python.
+    """
+    return hashlib.sha256(str(raw).encode('utf-8')).hexdigest()
+
+
+class DeviceToken(models.Model):
+    """A credential one physical instrument uses to push to the platform.
+
+    Scoped to a single ``FieldDevice`` on purpose. A shared "site gateway" key
+    would make every capture on that site attributable to whichever device
+    happened to be named in the request body, which is the same as recording
+    no provenance at all — and the device serial is the one field a statutory
+    reading cannot be wrong about.
+
+    The plaintext is returned exactly once, at issue, and never stored; the
+    row keeps only the digest and a display prefix. Revocation is
+    ``revoked_at``, checked on every request rather than only at the door, so
+    revoking a token takes effect on the very next call.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # PROTECT, matching TelemetrySession.device: deleting the instrument must
+    # not silently leave live credentials pointing at nothing.
+    device = models.ForeignKey(
+        'digital_eye.FieldDevice', on_delete=models.PROTECT,
+        related_name='tokens',
+        help_text='The one instrument this credential may push as',
+    )
+    label = models.CharField(
+        max_length=255,
+        help_text='What this credential is for, in the issuer\'s words',
+    )
+    #: `nxdev_` plus the first characters of the secret, for recognising a
+    #: token in a list without holding anything that can be used to push.
+    key_prefix = models.CharField(max_length=20)
+    hashed_key = models.CharField(max_length=64, unique=True, db_index=True)
+
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='issued_device_tokens',
+        help_text='The officer who provisioned this device; the token acts as them',
+    )
+    issued_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Null means no expiry was set — not that it never expires',
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-issued_at']
+        indexes = [models.Index(fields=['device', 'revoked_at'])]
+
+    def __str__(self):
+        return f"{self.device.device_id} ({self.label})"
+
+    @property
+    def is_expired(self):
+        return self.expires_at is not None and self.expires_at <= timezone.now()
+
+    @property
+    def is_revoked(self):
+        return self.revoked_at is not None
+
+    @property
+    def is_active(self):
+        """Usable right now. Issuer status is checked separately, by the
+        authenticator, because deactivating a user must not require walking
+        every token they ever issued."""
+        return not self.is_revoked and not self.is_expired
+
+    @classmethod
+    def resolve(cls, raw):
+        """The active token matching ``raw``, or None.
+
+        None covers every rejection — unknown, revoked, expired — because the
+        caller must not be able to tell a mistyped token from a revoked one.
+        """
+        if not raw:
+            return None
+        token = (cls.objects
+                 .select_related('device', 'issued_by')
+                 .filter(hashed_key=hash_device_token(raw))
+                 .first())
+        if token is None or not token.is_active:
+            return None
+        return token
+
+    def note_use(self):
+        """Record that the credential was used, at most once a minute."""
+        now = timezone.now()
+        if not self.last_used_at or (now - self.last_used_at).total_seconds() > 60:
+            DeviceToken.objects.filter(pk=self.pk).update(last_used_at=now)
+            self.last_used_at = now

@@ -28,7 +28,10 @@ from django.utils import timezone
 from common.errors import describe_drf_error as _describe  # noqa: F401  (re-export)
 from common.hashing import canonical_json, chain_hash, sha256_hex
 
-from .models import TelemetryPacket, TelemetrySession
+from .models import (
+    DeviceToken, TelemetryPacket, TelemetrySession,
+    generate_device_token, hash_device_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,57 @@ class TelemetryError(Exception):
     def __init__(self, message, status_code=400):
         super().__init__(message)
         self.status_code = status_code
+
+
+class DeviceTokenService:
+    """Issuing and revoking the credentials instruments push with.
+
+    Separate from ``apps.settings.APIKeyGateway`` because the two answer
+    different questions. That gateway issues *platform* credentials — a key
+    that acts for an application across many endpoints. This issues a
+    credential bound to one ``FieldDevice``, which is what makes a pushed
+    reading's provenance checkable: the token names the instrument, so the
+    session's device is not a field the client can choose.
+    """
+
+    @classmethod
+    def issue(cls, *, device, label, issued_by, expires_at=None):
+        """Mint a credential for ``device``. Returns ``(token_row, plaintext)``.
+
+        The plaintext is returned here and nowhere else — it is never stored
+        and never recoverable, so a lost credential is replaced, not looked up.
+        """
+        label = (label or '').strip()
+        if not label:
+            raise TelemetryError(
+                'A label is required — "which credential is this?" has to be '
+                'answerable later, when one of several is being revoked.')
+
+        raw = generate_device_token()
+        token = DeviceToken.objects.create(
+            device=device,
+            label=label,
+            # The scheme marker plus eight characters of the secret, which is
+            # enough to recognise a credential in a list and not enough to use.
+            key_prefix=raw[:14],
+            hashed_key=hash_device_token(raw),
+            issued_by=issued_by if (issued_by and issued_by.is_authenticated) else None,
+            expires_at=expires_at,
+        )
+        logger.info('Device credential issued for %s by %s',
+                    device.device_id, getattr(issued_by, 'email', 'system'))
+        return token, raw
+
+    @classmethod
+    def revoke(cls, token, revoked_by=None):
+        """Revoke a credential. Idempotent, and effective on the next request."""
+        if token.revoked_at is not None:
+            return token
+        token.revoked_at = timezone.now()
+        token.save(update_fields=['revoked_at'])
+        logger.info('Device credential revoked for %s by %s',
+                    token.device.device_id, getattr(revoked_by, 'email', 'system'))
+        return token
 
 
 class _SessionPromotionContext:
@@ -61,13 +115,17 @@ class TelemetryService:
 
     @classmethod
     def start_session(cls, *, device, project, operator, data_type,
-                      session_config=None, session_start=None):
+                      session_config=None, session_start=None, transport=''):
         """Open a session for ``device`` on ``project``.
 
         Refuses a second OPEN session for the same device. Two open sessions
         would mean two packet sequences arriving from one instrument with no
         way to tell which capture a reading belongs to — the device serial is
         the provenance, and it can only be in one place at a time.
+
+        ``transport`` is stored as given, including empty: a caller that does
+        not know how it reached the platform records that it does not know,
+        rather than being assigned a plausible default.
         """
         existing = TelemetrySession.objects.filter(
             device=device, status=TelemetrySession.STATUS_OPEN).first()
@@ -87,6 +145,7 @@ class TelemetryService:
                 if (operator and operator.is_authenticated) else ''
             ),
             data_type=data_type,
+            transport=transport or '',
             session_config=session_config or {},
             session_start=session_start,
         )
@@ -161,22 +220,31 @@ class TelemetryService:
     def end_session(cls, session, request):
         """Close the session and promote its packets into the registry.
 
-        Re-runnable only while the previous attempt FAILED. A session that is
-        already SYNCED is refused with 409 — re-promoting it would duplicate
-        every row. A FAILED one is retried in place, because the alternative
-        would be to re-capture measurements the device has already sent.
+        Refused only when the session is already SYNCED — re-promoting it
+        would duplicate every row — or when it was aborted.
+
+        A session that is already ENDED but still PENDING is promoted
+        normally, and that is not a loophole: ``status`` and ``sync_status``
+        are independent axes, and ENDED+PENDING is precisely the state a
+        capture that has finished but not yet reached the registry is in. A
+        capture imported from an instrument export is born in it. Refusing
+        that combination would make the documented state unreachable from the
+        one endpoint that exists to leave it.
+
+        A FAILED promotion is likewise retried in place, because the
+        alternative would be to re-capture measurements the device has already
+        sent.
         """
         if session.status == TelemetrySession.STATUS_ABORTED:
             raise TelemetryError(
                 f'Session {session.session_reference} was aborted.', status_code=409)
-        if session.status == TelemetrySession.STATUS_ENDED:
-            if session.sync_status != TelemetrySession.SYNC_FAILED:
-                raise TelemetryError(
-                    f'Session {session.session_reference} has already been '
-                    f'ended and promoted ({session.sync_status}).',
-                    status_code=409,
-                )
-            # A failed promotion is retried in place — see the docstring.
+        if session.sync_status == TelemetrySession.SYNC_SYNCED:
+            raise TelemetryError(
+                f'Session {session.session_reference} has already been '
+                f'promoted. Promoting it again would write a second copy of '
+                f'every row into the registry.',
+                status_code=409,
+            )
 
         packets = list(session.packets.order_by('sequence'))
         if not packets:

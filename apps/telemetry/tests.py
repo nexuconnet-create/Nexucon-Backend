@@ -9,9 +9,19 @@ individual assertions that matter most:
     rows — never a partial survey describing only the rows that parsed
   * the packet chain detects a single edited row
   * a re-sent sequence number is refused rather than silently replacing a row
+  * a file the platform does not recognise is refused with nothing stored,
+    and an unrecognised column is never guessed at — see the file-import
+    section at the end of this module
 """
+import hashlib
+import os
+import shutil
+import tempfile
+
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.core.files.storage import default_storage
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -21,8 +31,12 @@ from apps.evidence.models import EvidenceRecord
 from apps.projects.models import Project
 from common.hashing import chain_hash
 
-from .models import TelemetryPacket, TelemetrySession
-from .services import TelemetryError, TelemetryService
+from .export_import import EXPORT_STORAGE_PREFIX
+from .models import (
+    DeviceToken, TelemetryPacket, TelemetrySession,
+    hash_device_token,
+)
+from .services import DeviceTokenService, TelemetryError, TelemetryService
 
 User = get_user_model()
 
@@ -522,3 +536,763 @@ class TelemetryRouteTests(TestCase):
                          'telemetry-session-list')
         self.assertEqual(resolve('/api/v1/telemetry/devices/').url_name,
                          'telemetry-device-list')
+
+    def test_the_transport_routes_resolve(self):
+        token_id = '11111111-1111-1111-1111-111111111111'
+        self.assertEqual(reverse('telemetry-session-from-file'),
+                         '/api/v1/telemetry/session/from-file/')
+        self.assertEqual(reverse('telemetry-device-token-list'),
+                         '/api/v1/telemetry/device-tokens/')
+        self.assertEqual(
+            reverse('telemetry-device-token-revoke', kwargs={'token_id': token_id}),
+            f'/api/v1/telemetry/device-tokens/{token_id}/revoke/')
+
+    def test_from_file_is_not_mistaken_for_a_session_id(self):
+        from django.urls import resolve
+        self.assertEqual(resolve('/api/v1/telemetry/session/from-file/').url_name,
+                         'telemetry-session-from-file')
+
+
+# ----------------------------------------------------------------------
+# Transport — how a capture reached the platform
+# ----------------------------------------------------------------------
+
+class TelemetryTransportTests(TelemetryTestBase):
+    """A session records how it arrived, or records that it did not."""
+
+    def test_an_undeclared_transport_is_recorded_as_not_recorded(self):
+        session = self._open()
+        self.assertEqual(session.transport, '')
+        self.assertIsNone(session.get_transport_display() or None)
+
+    def test_a_declared_transport_is_stored(self):
+        session = TelemetryService.start_session(
+            device=self.device, project=self.project, operator=self.user,
+            data_type='gpr', transport=TelemetrySession.TRANSPORT_WIFI)
+        self.assertEqual(session.transport, 'WIFI')
+        self.assertEqual(session.get_transport_display(),
+                         'Direct Wi-Fi — instrument to network')
+
+    def test_the_serializer_reports_null_rather_than_a_fallback_label(self):
+        """`transport_display` is null when nothing was recorded.
+
+        Null, not a plausible-looking default: naming a transport nobody
+        observed would be a claim about a measurement's provenance.
+        """
+        from .serializers import TelemetrySessionSerializer
+        session = self._open()
+        self.assertIsNone(
+            TelemetrySessionSerializer(session).data['transport_display'])
+
+
+class TelemetryTransportAPITests(APITestCase):
+    """A client may declare the transports it is actually responsible for."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username='transport_api@nexucon.com',
+            email='transport_api@nexucon.com', password='Password123!')
+        self.project = Project.objects.create(name='Transport Site', status='ACTIVE')
+        self.device = FieldDevice.objects.create(
+            device_id='GPR-TRANSPORT-001', device_type='gpr',
+            assigned_project=self.project, is_active=True)
+        self.client.force_authenticate(self.user)
+
+    def _start(self, **overrides):
+        body = {'device': str(self.device.id), 'data_type': 'gpr',
+                'project': str(self.project.id)}
+        body.update(overrides)
+        return self.client.post(reverse('telemetry-session-start'), body,
+                                format='json')
+
+    def test_a_client_may_declare_a_machine_transport(self):
+        response = self._start(transport='CLOUD')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['transport'], 'CLOUD')
+        self.assertEqual(response.data['transport_display'],
+                         'Cloud push — gateway to platform')
+
+    def test_a_client_may_not_declare_a_transport_the_server_owns(self):
+        """`FILE` and `MANUAL` are decided by which endpoint was called.
+
+        A client able to claim them could file a typed-in number as an
+        instrument export, which is the misreporting this field exists to
+        prevent.
+        """
+        for claimed in ('FILE', 'MANUAL'):
+            with self.subTest(transport=claimed):
+                response = self._start(transport=claimed)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+
+    def test_omitting_the_transport_omits_it_from_the_response(self):
+        response = self._start()
+        self.assertEqual(response.data['transport'], '')
+        self.assertIsNone(response.data['transport_display'])
+
+    def test_the_session_list_can_be_filtered_by_transport(self):
+        """Two captures on one device, arriving two different ways."""
+        self._start(transport='CLOUD')
+        TelemetrySession.objects.filter(device=self.device).update(
+            status=TelemetrySession.STATUS_ENDED)
+        self._start(transport='WIFI')
+
+        response = self.client.get(reverse('telemetry-session-list'),
+                                   {'transport': 'CLOUD'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([row['transport'] for row in response.data], ['CLOUD'])
+
+
+# ----------------------------------------------------------------------
+# Device credentials
+# ----------------------------------------------------------------------
+
+class DeviceTokenServiceTests(TelemetryTestBase):
+    """Issuing, resolving and revoking a device credential."""
+
+    def setUp(self):
+        super().setUp()
+        self.device.device_type = 'pundit'
+        self.device.save(update_fields=['device_type'])
+
+    def test_the_plaintext_is_returned_once_and_never_stored(self):
+        token, raw = DeviceTokenService.issue(
+            device=self.device, label='Site laptop bridge',
+            issued_by=self.user)
+
+        self.assertTrue(raw.startswith('nxdev_'))
+        self.assertEqual(token.hashed_key, hash_device_token(raw))
+        self.assertNotIn(raw, token.hashed_key)
+        # Nothing on the row holds the secret — re-reading it cannot recover it.
+        stored = DeviceToken.objects.get(pk=token.pk)
+        self.assertNotEqual(stored.hashed_key, raw)
+        self.assertEqual(stored.key_prefix, raw[:14])
+
+    def test_a_label_is_required(self):
+        with self.assertRaises(TelemetryError):
+            DeviceTokenService.issue(device=self.device, label='   ',
+                                     issued_by=self.user)
+
+    def test_resolve_finds_a_live_credential(self):
+        token, raw = DeviceTokenService.issue(
+            device=self.device, label='Gateway', issued_by=self.user)
+        self.assertEqual(DeviceToken.resolve(raw).pk, token.pk)
+
+    def test_resolve_refuses_an_unknown_secret(self):
+        DeviceTokenService.issue(device=self.device, label='Gateway',
+                                 issued_by=self.user)
+        self.assertIsNone(DeviceToken.resolve('nxdev_not-a-real-token'))
+        self.assertIsNone(DeviceToken.resolve(''))
+        self.assertIsNone(DeviceToken.resolve(None))
+
+    def test_resolve_refuses_a_revoked_credential(self):
+        token, raw = DeviceTokenService.issue(
+            device=self.device, label='Gateway', issued_by=self.user)
+        DeviceTokenService.revoke(token, revoked_by=self.user)
+        self.assertIsNone(DeviceToken.resolve(raw))
+
+    def test_resolve_refuses_an_expired_credential(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        _, raw = DeviceTokenService.issue(
+            device=self.device, label='Expired gateway', issued_by=self.user,
+            expires_at=timezone.now() - timedelta(minutes=1))
+        self.assertIsNone(DeviceToken.resolve(raw))
+
+    def test_revoking_twice_keeps_the_first_timestamp(self):
+        token, _ = DeviceTokenService.issue(
+            device=self.device, label='Gateway', issued_by=self.user)
+        DeviceTokenService.revoke(token)
+        first = token.revoked_at
+        DeviceTokenService.revoke(token)
+        self.assertEqual(token.revoked_at, first)
+
+    def test_the_device_relationship_is_protected(self):
+        """Deleting an instrument must not orphan a live credential."""
+        from django.db.models import ProtectedError
+        DeviceTokenService.issue(device=self.device, label='Gateway',
+                                 issued_by=self.user)
+        with self.assertRaises(ProtectedError):
+            self.device.delete()
+
+
+class DeviceTokenAPITests(APITestCase):
+    """The credential endpoints, including who may mint one for what."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username='token_api@nexucon.com',
+            email='token_api@nexucon.com', password='Password123!')
+        self.project = Project.objects.create(name='Token Site', status='ACTIVE')
+        self.device = FieldDevice.objects.create(
+            device_id='PUNDIT-TOKEN-001', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+        self.stranger = User.objects.create_user(
+            username='token_stranger@nexucon.com',
+            email='token_stranger@nexucon.com', password='Password123!')
+        self.client.force_authenticate(self.user)
+
+    def _issue(self, **overrides):
+        body = {'device': str(self.device.id), 'label': 'Field bridge'}
+        body.update(overrides)
+        return self.client.post(reverse('telemetry-device-token-list'), body,
+                                format='json')
+
+    def test_issuing_returns_the_secret_exactly_once(self):
+        response = self._issue()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        raw = response.data['token']
+        self.assertTrue(raw.startswith('nxdev_'))
+
+        # A second read of the same credential must not carry it again.
+        listed = self.client.get(reverse('telemetry-device-token-list'))
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listed.data), 1)
+        self.assertNotIn('token', listed.data[0])
+        self.assertNotIn('hashed_key', listed.data[0])
+
+    def test_an_empty_label_is_refused(self):
+        self.assertEqual(self._issue(label='   ').status_code,
+                         status.HTTP_400_BAD_REQUEST)
+
+    def test_a_device_outside_the_callers_scope_is_404(self):
+        other_project = Project.objects.create(name='Other Site', status='ACTIVE')
+        other_device = FieldDevice.objects.create(
+            device_id='PUNDIT-OTHER-001', device_type='pundit',
+            assigned_project=other_project, is_active=True)
+        self.client.force_authenticate(self.stranger)
+        response = self._issue(device=str(other_device.id))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(DeviceToken.objects.count(), 0)
+
+    def test_revoking_an_out_of_scope_credential_is_404(self):
+        raw = self._issue().data['token']
+        token = DeviceToken.objects.get(hashed_key=hash_device_token(raw))
+        self.client.force_authenticate(self.stranger)
+        response = self.client.post(
+            reverse('telemetry-device-token-revoke', kwargs={'token_id': token.id}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        token.refresh_from_db()
+        self.assertIsNone(token.revoked_at)
+
+    def test_revocation_stops_the_credential_immediately(self):
+        raw = self._issue().data['token']
+        token = DeviceToken.objects.get(hashed_key=hash_device_token(raw))
+
+        self.client.credentials(HTTP_AUTHORIZATION=f'Device {raw}')
+        live = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(live.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.user)
+        self.client.post(
+            reverse('telemetry-device-token-revoke', kwargs={'token_id': token.id}))
+
+        self.client.force_authenticate(None)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Device {raw}')
+        revoked = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(revoked.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_anonymous_access_is_refused(self):
+        self.client.force_authenticate(None)
+        self.assertEqual(
+            self.client.get(reverse('telemetry-device-token-list')).status_code,
+            status.HTTP_401_UNAUTHORIZED)
+
+    def test_a_credential_is_not_accepted_outside_telemetry(self):
+        """A device secret must not authenticate anywhere a device is not the
+        subject.
+
+        Asserted with a POST, because a read-only list may be open to
+        anonymous callers and would then prove nothing. If the credential
+        authenticated as its issuer, this write would reach validation and
+        return 400; refused, it stops at the permission check.
+        """
+        raw = self._issue().data['token']
+
+        self.client.force_authenticate(None)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Device {raw}')
+        refused = self.client.post('/api/v1/projects/', {}, format='json')
+        self.assertEqual(refused.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # The same write as an authenticated user does get past the door, which
+        # is what makes the 401 above a statement about the credential rather
+        # than about the endpoint.
+        self.client.credentials()
+        self.client.force_authenticate(self.user)
+        allowed = self.client.post('/api/v1/projects/', {}, format='json')
+        self.assertNotEqual(allowed.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class DeviceTokenSessionPinTests(APITestCase):
+    """A credential acts for one instrument, and only for that instrument."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username='pin_api@nexucon.com',
+            email='pin_api@nexucon.com', password='Password123!')
+        self.project = Project.objects.create(name='Pin Site', status='ACTIVE')
+        self.device_a = FieldDevice.objects.create(
+            device_id='PUNDIT-PIN-A', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+        self.device_b = FieldDevice.objects.create(
+            device_id='PUNDIT-PIN-B', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+        self.token_a, self.raw_a = DeviceTokenService.issue(
+            device=self.device_a, label='Unit A', issued_by=self.user)
+        self.token_b, self.raw_b = DeviceTokenService.issue(
+            device=self.device_b, label='Unit B', issued_by=self.user)
+
+        # A session that belongs to B, created the ordinary way.
+        self.session_b = TelemetryService.start_session(
+            device=self.device_b, project=self.project, operator=self.user,
+            data_type='pundit',
+            session_config={'test_type': 'pulse_velocity',
+                            'structural_element': 'Column B'})
+
+    def _as_device(self, raw):
+        self.client.force_authenticate(None)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Device {raw}')
+
+    def test_a_credential_can_start_and_fill_its_own_session(self):
+        self._as_device(self.raw_a)
+        started = self.client.post(reverse('telemetry-session-start'), {
+            'device': str(self.device_a.id), 'data_type': 'pundit',
+            'project': str(self.project.id), 'transport': 'CLOUD',
+            'session_config': {'test_type': 'pulse_velocity',
+                               'structural_element': 'Column A'},
+        }, format='json')
+        self.assertEqual(started.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(started.data['device_id'], 'PUNDIT-PIN-A')
+        self.assertEqual(started.data['transport'], 'CLOUD')
+
+        appended = self.client.post(
+            reverse('telemetry-session-data', kwargs={'session_id': started.data['id']}),
+            {'payload': {'path_length_mm': 300, 'transit_time_us': 70}},
+            format='json')
+        self.assertEqual(appended.status_code, status.HTTP_201_CREATED)
+
+        ended = self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': started.data['id']}),
+            {}, format='json')
+        self.assertEqual(ended.status_code, status.HTTP_200_OK)
+        self.assertEqual(ended.data['sync_status'], 'SYNCED')
+        # The promoted row carries the issuer as its operator, never a blank.
+        test = PUNDITTest.objects.get(pk=ended.data['promoted']['test_id'])
+        self.assertEqual(test.created_by_id, self.user.id)
+
+    def test_a_credential_cannot_open_a_session_as_another_instrument(self):
+        self._as_device(self.raw_a)
+        response = self.client.post(reverse('telemetry-session-start'), {
+            'device': str(self.device_b.id), 'data_type': 'pundit',
+            'project': str(self.project.id),
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(
+            TelemetrySession.objects.filter(device=self.device_a).count(), 0)
+
+    def test_a_credential_cannot_read_another_instruments_session(self):
+        self._as_device(self.raw_a)
+        response = self.client.get(
+            reverse('telemetry-session-status',
+                    kwargs={'session_id': self.session_b.id}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_credential_cannot_append_to_another_instruments_session(self):
+        self._as_device(self.raw_a)
+        response = self.client.post(
+            reverse('telemetry-session-data', kwargs={'session_id': self.session_b.id}),
+            {'payload': {'path_length_mm': 300, 'transit_time_us': 70}},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.session_b.packets.count(), 0)
+
+    def test_a_credential_cannot_end_another_instruments_session(self):
+        self._as_device(self.raw_a)
+        response = self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': self.session_b.id}),
+            {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.session_b.refresh_from_db()
+        self.assertEqual(self.session_b.sync_status, TelemetrySession.SYNC_PENDING)
+
+    def test_a_credential_cannot_reach_another_instruments_session_by_listing(self):
+        self._as_device(self.raw_a)
+        response = self.client.get(reverse('telemetry-session-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # B's session is the only one that exists, and it is not A's to see.
+        self.assertEqual(response.data, [])
+
+    def test_an_unknown_credential_is_401(self):
+        self._as_device('nxdev_forged')
+        response = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_a_deactivated_issuer_stops_the_credential(self):
+        self.user.is_active = False
+        self.user.save(update_fields=['is_active'])
+        self._as_device(self.raw_a)
+        response = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_touching_a_credential_updates_last_used(self):
+        self.assertIsNone(self.token_a.last_used_at)
+        self._as_device(self.raw_a)
+        self.client.get(reverse('telemetry-device-list'))
+        self.token_a.refresh_from_db()
+        self.assertIsNotNone(self.token_a.last_used_at)
+
+
+# ----------------------------------------------------------------------
+# Instrument export files — the leg a radio-less unit uses
+# ----------------------------------------------------------------------
+
+def _stored_exports():
+    """Every file currently held under the telemetry export prefix."""
+    root = os.path.join(default_storage.location, EXPORT_STORAGE_PREFIX)
+    if not os.path.isdir(root):
+        return []
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            found.append(os.path.relpath(os.path.join(dirpath, filename), root))
+    return found
+
+
+class FileImportTestBase(APITestCase):
+    """Shared fixtures, with file writes confined to a temporary MEDIA_ROOT.
+
+    The suite's `.env` points storage at R2, so without this an import test
+    would upload to the real bucket. A fresh directory is made per test rather
+    than per class or at import time: per class would let one test's stored
+    export satisfy the next test's "nothing was left behind" assertion, and at
+    import time would hold a path that a half-hour suite may well outlive.
+    """
+
+    def setUp(self):
+        super().setUp()
+        media_root = tempfile.mkdtemp(prefix='nexucon_telemetry_import_')
+        self._storage_override = override_settings(
+            STORAGES={
+                'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+                'staticfiles': {
+                    'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+            },
+            MEDIA_ROOT=media_root,
+        )
+        self._storage_override.enable()
+        self.addCleanup(self._storage_override.disable)
+        self.addCleanup(shutil.rmtree, media_root, True)
+
+        self.user = User.objects.create_superuser(
+            username='file_import@nexucon.com',
+            email='file_import@nexucon.com', password='Password123!')
+        self.project = Project.objects.create(name='Import Site', status='ACTIVE')
+        self.device = FieldDevice.objects.create(
+            device_id='PUNDIT-FILE-001', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+
+    def _upload(self, content, name='export.csv', **overrides):
+        body = {'device': str(self.device.id), 'project': str(self.project.id),
+                'file': SimpleUploadedFile(name, content)}
+        body.update(overrides)
+        return self.client.post(reverse('telemetry-session-from-file'), body,
+                                format='multipart')
+
+
+#: The platform's documented UPV template, as an instrument export might write
+#: it: element, test type and the measurements, all in the file.
+UPV_CSV = (
+    'STRUCTURAL ELEMENT,FLOOR,TEST TYPE,POINT,PATH LENGTH L (MM),'
+    'TRANSIT TIME T (US),TRANSDUCER FREQUENCY (KHZ),TRANSDUCER TYPE\n'
+    'Column C1,Ground Floor,Pulse Velocity,A,300,65.2,54,direct\n'
+    'Column C1,Ground Floor,Pulse Velocity,B,300,68.1,54,direct\n'
+    'Column C1,Ground Floor,Pulse Velocity,C,300,71.4,54,direct\n'
+).encode('utf-8')
+
+#: A bare measurement export — what a unit with no notion of a structural
+#: element actually writes. The app supplies the context.
+MEASUREMENTS_ONLY_CSV = (
+    'POINT,PATH LENGTH L (MM),TRANSIT TIME T (US)\n'
+    'A,300,65.2\n'
+    'B,300,68.1\n'
+).encode('utf-8')
+
+
+class FileImportParsingTests(FileImportTestBase):
+    """The file → session path, and everything it refuses."""
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def test_a_full_template_export_becomes_a_pending_session(self):
+        response = self._upload(UPV_CSV)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['transport'], 'FILE')
+        self.assertEqual(response.data['transport_display'],
+                         'Export file — instrument to file to app')
+        # The capture is complete on arrival, and nothing is promoted yet.
+        self.assertEqual(response.data['status'], 'ENDED')
+        self.assertEqual(response.data['sync_status'], 'PENDING')
+        self.assertEqual(response.data['packet_count'], 3)
+        self.assertEqual(response.data['import_stats']['readings'], 3)
+        self.assertEqual(response.data['source_file_name'], 'export.csv')
+        self.assertEqual(response.data['source_file_sha256'],
+                         hashlib.sha256(UPV_CSV).hexdigest())
+
+        # Nothing reached the statutory registry — promotion is still a human
+        # decision at /end.
+        self.assertEqual(PUNDITTest.objects.count(), 0)
+        self.assertEqual(EvidenceRecord.objects.count(), 0)
+
+    def test_the_retained_export_is_the_exact_bytes_uploaded(self):
+        """The packets are an interpretation of the file; the file is the
+        ground truth if that interpretation is ever questioned."""
+        response = self._upload(UPV_CSV)
+        session = TelemetrySession.objects.get(pk=response.data['id'])
+
+        self.assertTrue(session.source_file_storage_name)
+        with default_storage.open(session.source_file_storage_name) as handle:
+            stored = handle.read()
+        self.assertEqual(stored, UPV_CSV)
+        self.assertEqual(hashlib.sha256(stored).hexdigest(),
+                         session.source_file_sha256)
+
+    def test_the_imported_session_promotes_through_the_ordinary_end(self):
+        session_id = self._upload(UPV_CSV).data['id']
+
+        ended = self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': session_id}),
+            {}, format='json')
+
+        self.assertEqual(ended.status_code, status.HTTP_200_OK)
+        self.assertEqual(ended.data['sync_status'], 'SYNCED')
+        test = PUNDITTest.objects.get(pk=ended.data['promoted']['test_id'])
+        self.assertEqual(test.readings.count(), 3)
+        self.assertEqual(_reading_labels(test.readings.all()), ['A', 'B', 'C'])
+        self.assertEqual(test.structural_element, 'Column C1')
+        # The computed columns prove the real serializer ran, not a raw insert.
+        self.assertIsNotNone(test.velocity_km_s)
+        self.assertIsNotNone(test.estimated_compressive_strength_mpa)
+        self.assertEqual(EvidenceRecord.objects.count(), 1)
+
+    def test_the_packet_chain_is_intact_for_an_imported_session(self):
+        session_id = self._upload(UPV_CSV).data['id']
+        session = TelemetrySession.objects.get(pk=session_id)
+        self.assertTrue(session.verify_chain())
+        self.assertEqual(session.packets.order_by('sequence').first().sequence, 1)
+
+    def test_a_measurement_only_export_uses_the_context_from_the_upload(self):
+        response = self._upload(MEASUREMENTS_ONLY_CSV, name='unit-export.csv',
+                                test_type='Pulse Velocity',
+                                structural_element='Column C2', floor='First')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['packet_count'], 2)
+        session = TelemetrySession.objects.get(pk=response.data['id'])
+        self.assertEqual(session.session_config['test_type'], 'pulse_velocity')
+        self.assertEqual(session.session_config['structural_element'], 'Column C2')
+
+    def test_the_files_own_context_wins_over_the_uploads(self):
+        """Where the export states the element, that is the instrument's own
+        record of the capture and the form's value does not overwrite it."""
+        response = self._upload(UPV_CSV, structural_element='Wrong Column')
+        session = TelemetrySession.objects.get(pk=response.data['id'])
+        self.assertEqual(session.session_config['structural_element'], 'Column C1')
+
+    # -- refusals, each of which must leave nothing behind -----------------
+
+    def test_an_unrecognised_column_is_refused_and_never_guessed(self):
+        """`DISTANCE (MM)` is not `PATH LENGTH L (MM)`.
+
+        Assuming they are the same would record a number nobody measured
+        under a name that says it was measured.
+        """
+        content = (
+            'STRUCTURAL ELEMENT,TEST TYPE,DISTANCE (MM),TRANSIT TIME T (US)\n'
+            'Column C1,Pulse Velocity,300,65.2\n'
+        ).encode('utf-8')
+        response = self._upload(content, name='proprietary.csv')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('distance_mm', response.data['detail'])
+        self.assertIn('PATH LENGTH L (MM)', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(TelemetryPacket.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_file_with_no_test_type_is_refused(self):
+        content = ('STRUCTURAL ELEMENT,PATH LENGTH L (MM),TRANSIT TIME T (US)\n'
+                   'Column C3,300,65.2\n').encode('utf-8')
+        response = self._upload(content)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('TEST TYPE', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_pulse_velocity_row_with_no_transit_time_is_refused(self):
+        content = (
+            'STRUCTURAL ELEMENT,TEST TYPE,PATH LENGTH L (MM),TRANSIT TIME T (US)\n'
+            'Column C4,Pulse Velocity,300,65.2\n'
+            'Column C4,Pulse Velocity,300,\n'
+        ).encode('utf-8')
+        response = self._upload(content)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # The message names the physical line, so the inspector can open the
+        # file and look at it.
+        self.assertIn('Row 3', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(TelemetryPacket.objects.count(), 0)
+        self.assertEqual(PUNDITTest.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_an_empty_file_is_refused(self):
+        response = self._upload(b'', name='empty.csv')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('empty', response.data['detail'].lower())
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_file_of_only_blank_lines_is_refused(self):
+        response = self._upload(b'\n\n\n', name='blank.csv')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_pdf_is_refused_with_the_reason(self):
+        """A PDF has no column contract, so it cannot be validated — the same
+        refusal the data-import wizard gives."""
+        response = self._upload(b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\n', name='scan.pdf')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('PDF', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_data_type_with_no_file_contract_is_refused_honestly(self):
+        """A GPR export is survey headers, not the anomaly rows a session
+        captures — accepting it would promote a session with nothing in it,
+        so the refusal says why rather than importing under the wrong type."""
+        response = self._upload(UPV_CSV, data_type='gpr')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('GPR', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_gnss_file_is_refused_honestly(self):
+        response = self._upload(UPV_CSV, data_type='gnss')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('GNSS', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+
+    def test_an_out_of_scope_caller_cannot_import_onto_a_project(self):
+        """A caller with no scope at all cannot land a capture on a project.
+
+        Asserted as 400, matching `session/start/` — the device is resolved the
+        same way on both endpoints, so a device that exists but whose project
+        is out of scope is refused with the reason ("a project in your scope is
+        required"), not reported as missing.
+        """
+        outsider = User.objects.create_user(
+            username='file_outsider@nexucon.com',
+            email='file_outsider@nexucon.com', password='Password123!')
+        self.client.force_authenticate(outsider)
+        response = self._upload(UPV_CSV)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('scope', response.data['detail'])
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+        self.assertEqual(_stored_exports(), [])
+
+    def test_anonymous_access_is_refused(self):
+        self.client.force_authenticate(None)
+        self.assertEqual(self._upload(UPV_CSV).status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+
+    def test_a_missing_file_is_a_400_not_a_crash(self):
+        response = self.client.post(reverse('telemetry-session-from-file'), {
+            'device': str(self.device.id), 'project': str(self.project.id),
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_json_export_is_accepted(self):
+        import json as _json
+        content = _json.dumps([
+            {'STRUCTURAL ELEMENT': 'Column C5', 'TEST TYPE': 'Pulse Velocity',
+             'POINT': 'A', 'PATH LENGTH L (MM)': 300, 'TRANSIT TIME T (US)': 65.2},
+            {'STRUCTURAL ELEMENT': 'Column C5', 'TEST TYPE': 'Pulse Velocity',
+             'POINT': 'B', 'PATH LENGTH L (MM)': 300, 'TRANSIT TIME T (US)': 68.1},
+        ]).encode('utf-8')
+        response = self._upload(content, name='export.json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['packet_count'], 2)
+
+    def test_a_second_import_for_the_same_device_is_allowed(self):
+        """An import is not a live stream.
+
+        The one-open-session-per-device rule exists so two packet sequences
+        cannot arrive from one instrument at once. A file the unit exported
+        earlier is a separate, finished capture and does not contend for it.
+        """
+        first = self._upload(UPV_CSV)
+        second = self._upload(MEASUREMENTS_ONLY_CSV, name='second.csv',
+                              test_type='Pulse Velocity',
+                              structural_element='Column C2')
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(TelemetrySession.objects.count(), 2)
+        self.assertNotEqual(first.data['session_reference'],
+                            second.data['session_reference'])
+
+    def test_an_import_alongside_a_live_stream_is_allowed(self):
+        live = TelemetryService.start_session(
+            device=self.device, project=self.project, operator=self.user,
+            data_type='pundit', transport=TelemetrySession.TRANSPORT_WIFI,
+            session_config={'test_type': 'pulse_velocity',
+                            'structural_element': 'Live'})
+        response = self._upload(UPV_CSV)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        live.refresh_from_db()
+        # The live stream is untouched, and still open.
+        self.assertEqual(live.status, TelemetrySession.STATUS_OPEN)
+        self.assertEqual(live.packet_count, 0)
+
+    def test_the_imported_session_is_audited_with_the_file_hash(self):
+        from apps.audit.models import AuditEvent
+        session_id = self._upload(UPV_CSV).data['id']
+        session = TelemetrySession.objects.get(pk=session_id)
+
+        event = AuditEvent.objects.filter(
+            action='telemetry.session.file_import',
+            resource_id=str(session_id)).first()
+        self.assertIsNotNone(event)
+        self.assertEqual(event.metadata['sha256'], session.source_file_sha256)
+        self.assertEqual(event.metadata['file'], 'export.csv')
+
+    def test_a_refused_import_is_audited_too(self):
+        from apps.audit.models import AuditEvent
+        self._upload(b'%PDF-1.4\n', name='bad.pdf')
+        self.assertTrue(AuditEvent.objects.filter(
+            action='telemetry.session.file_import_failed').exists())
+
+
+class FileImportStorageTests(FileImportTestBase):
+    """A refused import leaves no bytes behind either."""
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def test_a_rejected_file_is_not_left_in_storage(self):
+        self._upload(b'%PDF-1.4\n', name='rejected.pdf')
+        self.assertEqual(_stored_exports(), [])
+
+    def test_a_successful_import_keeps_exactly_one_file(self):
+        self._upload(UPV_CSV)
+        self.assertEqual(len(_stored_exports()), 1)

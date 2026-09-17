@@ -300,7 +300,7 @@ queue. It is three apps, not one, and the split is deliberate:
 
 | App | Takes | URL prefix |
 | :--- | :--- | :--- |
-| `apps.telemetry` | A live instrument stream, packet by packet | `/api/v1/telemetry/` |
+| `apps.telemetry` | An instrument capture — a live stream packet by packet, or a whole export file ingested in one call | `/api/v1/telemetry/` |
 | `apps.data_import` | A file a person filled in | `/api/v1/import/` |
 | `apps.sync` | The replay journal a reconnecting PWA flushes | `/api/v1/sync/` |
 
@@ -345,9 +345,65 @@ the whole of it. Promotion is all-or-nothing: one invalid row fails the session
 and writes **nothing**, because a partly-promoted survey is a registry that
 disagrees with itself.
 
-Endpoints: `POST session/start/`, `POST session/<uuid:id>/data/`,
-`POST session/<uuid:id>/end/`, `GET session/<uuid:id>/status/`,
-`GET sessions/`, `GET devices/`.
+#### The transport axis — how a capture reached the platform
+
+A third, independent axis records the *leg* the capture arrived on. It is a
+property of the session, because "how this capture reached us" is a fact about
+the capture, and the same instrument's readings are a different claim
+depending on whether they streamed from site or arrived in a file three days
+later.
+
+| Code | Means | Who sets it |
+| :--- | :--- | :--- |
+| `BLE` | Bluetooth — instrument to app | The client, at `session/start/` |
+| `WIFI` | Direct Wi-Fi — instrument to network | The client, at `session/start/` |
+| `CLOUD` | Cloud push — gateway to platform | The client, at `session/start/` |
+| `FILE` | Export file — instrument to file to app | The server, at `session/from-file/` |
+| `MANUAL` | Manual entry | — |
+| `''` | **Not recorded** | The default, and the answer for every session captured before the field existed |
+
+A client may **not** declare `FILE` or `MANUAL`: those two are decided by which
+endpoint was called. A client that could claim them could file a typed-in
+number as an instrument export, which is the one mislabelling this whole axis
+exists to prevent. `BLE`/`WIFI`/`CLOUD` are declarable because they describe
+the client's *own* leg, which the server cannot see.
+
+**`''` is not a null to be filled.** Existing rows were not backfilled, and no
+read path invents a value: `transport_display` is `null` when nothing was
+recorded, and every consumer renders that as *"Not recorded"*. Naming a
+transport nobody observed would put a provenance claim on a statutory reading
+that no one made. For the same reason the UI never infers a transport from the
+device's `status` — a device being `online` says nothing about how its readings
+travelled.
+
+**The file leg** (`POST telemetry/session/from-file/`) is the path the current
+PUNDIT unit uses, because it has no radio. The upload is stored under
+`telemetry/exports/` and hashed (`source_file_name`, `source_file_sha256`,
+`source_file_storage_name`) — the packets are a *derived interpretation* of the
+bytes, so the original is retained as the only ground truth if the parse is
+ever questioned. Rows are parsed with `apps.data_import`'s readers and
+validated by the registry's own UPV builder, so a rule tightened for the CSV
+wizard is tightened here in the same edit; there is one definition of a valid
+PUNDIT row. The raw export is deliberately **not** auto-promoted: the session
+is produced `ENDED`+`PENDING`, and an inspector promotes it through the same
+all-or-nothing `/end`. A file whose columns the platform does not recognise is
+refused with the accepted column list rather than mapped by guesswork.
+
+**Device credentials.** A device that pushes authenticates with
+`Authorization: Device <token>` → `apps.telemetry.authentication.DeviceTokenAuthentication`,
+resolving to a `DeviceToken` row. Only a SHA-256 digest is stored; the
+plaintext exists once, in the issue response. The credential authenticates
+**as its issuer** — promotion writes `created_by=request.user`, and an
+anonymous principal would fail the FK or file a measurement under "nobody" —
+but it is pinned to its own device on every scoped read and write, so that
+authority cannot be widened to another instrument. The class is declared
+per-view on telemetry routes only, never in `DEFAULT_AUTHENTICATION_CLASSES`: a
+credential for pushing readings must not open a projects list.
+
+Endpoints: `POST session/start/`, `POST session/from-file/`,
+`POST session/<uuid:id>/data/`, `POST session/<uuid:id>/end/`,
+`GET session/<uuid:id>/status/`, `GET sessions/`, `GET devices/`,
+`GET|POST device-tokens/`, `POST device-tokens/<uuid:id>/revoke/`.
 
 `devices/` is a **read-only projection** over the existing
 `digital_eye.FieldDevice` — not a second device registry, and it adds nothing
@@ -573,7 +629,7 @@ and states what is deferred.
 | Geofence Check-in / Check-out      | Complete (Haversine)      | Awaiting frontend follow-up    |
 | Inspector Accreditation (badge)    | Complete, unseeded        | Needs frontend work (note 2)   |
 | Digital Eye Telemetry (6 Devices)  | Complete (Sensory Hub)    | Fully Integrated               |
-| Telemetry Ingestion Sessions       | Complete (Envelope)       | Built, not yet consumed        |
+| Telemetry Ingestion Sessions       | Complete (Envelope)       | Integrated — see note 3        |
 | Manual Import (CSV/JSON)           | Complete (3-stage)        | Built, not yet consumed        |
 | Offline-First PWA Sync Queue       | Complete (Journal)        | Built, not yet consumed        |
 | File Evidence Upload / Verify      | Complete (SHA-256)        | Built, not yet consumed        |
@@ -601,6 +657,18 @@ and `GET inspectors/me/` returns `404` rather than an empty object. The frontend
 render that absent state; until it does, it will show an error where it previously showed
 an invented badge.
 
+**Note 3 — Telemetry ingress and transport.** The receiving chain is complete and consumed
+by two frontends. The Inspector PWA's *Telemetry Status* page opens sessions, appends
+packets, **imports an instrument export file** and promotes; the government *data-collection*
+page reads the resulting sessions for a project and shows how each arrived. Only the **file**
+leg is reachable in the field today, because the current PUNDIT unit has no radio — the
+`BLE`/`WIFI`/`CLOUD` values and the device-credential auth class exist and are tested, but
+no adapter writes them yet. Two claims were removed rather than wired: the government tab's
+`ON-SITE HARDWARE GATEWAY LISTENER ACTIVE` banner (driven by a device `status` field that no
+listener ever set) and its "Ingest & Log Direct to Regulatory Registry" action, which wrote
+a typed-in measurement with the note *"Ingested via PUNDIT Cloud Telemetry Receiver."* A
+receiver that can author the reading it claims to have received is not a receiver.
+
 ### Key Architectural Strengths
 1. **No fabricated values.** Where a fact is not recorded, the API returns `null`, an empty
    collection, or a `404` with a reason — never a placeholder, a random number, or a
@@ -618,9 +686,10 @@ an invented badge.
    servers (`localhost:8000`), staging and production.
 
 ### Recommendations for Future Sprints
-1. **Consume the ingestion layer from the PWA.** The three ingestion apps are built, tested
-   and documented; the field client does not call them yet. This is now the largest
-   remaining piece of work in the Inspector PWA.
+1. **Consume the rest of the ingestion layer from the PWA.** `apps.telemetry` is now called
+   by both frontends (see note 3). `apps.data_import` and `apps.sync` are built, tested and
+   documented but still unreachable from the field client; the offline replay queue in
+   particular remains the largest unbuilt piece of the Inspector PWA.
 2. **Automated schema contract testing.** Validate the drf-spectacular document
    (`/api/v1/schema/`) against the frontend TypeScript interfaces at PR time. Note that the
    schema's `ApiKeyAuth` and `JWTCookieAuth` security schemes are declared
