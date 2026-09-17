@@ -39,9 +39,29 @@ urlpatterns = [
     path('api/v1/', include('apps.reports.urls')),
     path('api/v1/processing/', include('apps.processing.urls')),
 
-    # Digital Eye & Evidence Intelligence
-    path('api/v1/digital-eye/', include('apps.digital_eye.urls')),
+    # Evidence Intelligence
+    # NOTE: apps.digital_eye.urls is included once, above, under "Migrated Apps".
+    # It was previously included a second time here, which registered every
+    # digital-eye route name twice and emitted duplicate drf-spectacular
+    # operations. The first registration always won resolution, so removing the
+    # duplicate changes no response — only the schema and the route table.
     path('api/v1/evidence/', include('apps.evidence.urls')),
+
+    # Inspector PWA — dual-path ingestion (live telemetry sessions).
+    # The manual-import path (apps.data_import) registers under /import/.
+    path('api/v1/telemetry/', include('apps.telemetry.urls')),
+
+    # Inspector PWA — the offline replay queue. Its own app rather than a
+    # module of telemetry: `entity_type` spans inspections, findings, stop
+    # work orders, evidence and telemetry, so telemetry is a peer here and not
+    # a parent, and the two have opposite dependency directions.
+    path('api/v1/sync/', include('apps.sync.urls')),
+
+    # Inspector PWA — manual import (CSV/JSON/PDF upload, validate, commit).
+    # The app is `data_import` because a module named `import` is a syntax
+    # error; the URL prefix stays `import/`, because a URL string is not a
+    # Python identifier and the spec's contract is the URL.
+    path('api/v1/import/', include('apps.data_import.urls')),
 ]
 
 from django.conf import settings

@@ -9,6 +9,18 @@ router.register(r'analyses', views.AIAnalysisRecordViewSet, basename='ai-analysi
 router.register(r'findings', views.CorrelationFindingViewSet, basename='correlation-finding')
 
 urlpatterns = [
+    # File evidence — declared before the router include. The converters differ
+    # (`uuid` here, `str` inside the router) so a literal could not be swallowed
+    # by these, but the ordering is kept explicit because the identical mistake
+    # is already recorded as a fixed bug in `scans/urls.py` and
+    # `inspections/urls.py`, and a regression test asserts `/records/` still
+    # resolves.
+    path('upload/', views.EvidenceFileUploadView.as_view(), name='evidence-upload'),
+    path('inspection/<uuid:inspection_id>/', views.EvidenceByInspectionView.as_view(),
+         name='evidence-by-inspection'),
+    path('<uuid:pk>/verify/', views.EvidenceVerifyView.as_view(), name='evidence-verify'),
+    path('<uuid:pk>/', views.EvidenceRecordDetailView.as_view(), name='evidence-detail'),
+
     # Project-Level AI Intelligence
     path('intelligence/projects/<uuid:project_id>/',
          views.ProjectIntelligenceView.as_view(), name='project-intelligence'),

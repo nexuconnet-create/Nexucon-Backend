@@ -14,6 +14,7 @@ store `null` analysis fields rather than placeholder values.
 """
 import hashlib
 import json
+import os
 import uuid
 from datetime import datetime
 
@@ -61,6 +62,7 @@ class EvidenceRecord(models.Model):
         ('document', 'Approved Document'),
         ('live_stream', 'Live Stream Observation'),
         ('corrective_action', 'Corrective Action'),
+        ('uploaded_file', 'Uploaded File'),
         ('other', 'Other Source'),
     ]
 
@@ -95,6 +97,21 @@ class EvidenceRecord(models.Model):
     # registry decoupled from every producer app's model set).
     source_model = models.CharField(max_length=100, blank=True, default='')
     source_id = models.CharField(max_length=100, blank=True, default='')
+
+    #: The site visit this evidence was filed under, when there was one.
+    #:
+    #: Added because a finding's evidence otherwise reaches its inspection only
+    #: by `source_model='inspections.Finding'` plus a string match on
+    #: `source_id` — which is not a queryable relation, so "show me everything
+    #: from this inspection" was a Python-side join. Nullable and `SET_NULL`:
+    #: most evidence (a GPR survey, a scan defect) belongs to a project and to
+    #: no inspection, and deleting an inspection must not delete the physical
+    #: measurements taken during it.
+    inspection = models.ForeignKey(
+        'inspections.Inspection', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='evidence_records',
+        help_text='The inspection this evidence was gathered for, when there was one',
+    )
 
     # Normalised payload — the canonical structured representation of the
     # evidence used by the correlation engine.
@@ -133,6 +150,108 @@ class EvidenceRecord(models.Model):
 
     def compute_hash(self) -> str:
         return hashlib.sha256(self.canonical_payload().encode('utf-8')).hexdigest()
+
+
+def evidence_file_upload_to(instance, filename):
+    """``evidence/<project>/<evidence reference>/<filename>``.
+
+    Keyed on the record's own reference rather than on the uploaded name: two
+    inspectors uploading ``photo.jpg`` from the same site must not collide, and
+    the stored path must not let a client's filename decide where bytes land.
+    """
+    safe = os.path.basename(str(filename or '')).replace('\\', '_').strip() or 'file'
+    record = getattr(instance, 'record', None)
+    if record is None:
+        return f'evidence/unfiled/{uuid.uuid4().hex[:12]}_{safe}'
+    return f'evidence/{record.project_id}/{record.evidence_reference}/{safe}'
+
+
+class EvidenceFile(models.Model):
+    """The bytes behind an evidence record.
+
+    A separate table rather than a ``FileField`` on ``EvidenceRecord``, and the
+    reason is ``compute_hash()``. That method is defined as SHA-256 over the
+    record's canonical JSON payload, so ``/verify/`` answers "is this payload
+    what was ingested?". Putting the file in the same row would make the word
+    ambiguous — verify the payload, or the bytes? — and a record with no payload
+    would hash ``{}`` and verify cleanly, which is a false attestation rather
+    than an honest absence. Two hashes, two questions, two answers.
+
+    ``last_verify_ok`` is **nullable on purpose**. ``default=False`` would assert
+    that a file failed verification before anything had verified it, which is
+    indistinguishable from a real mismatch in every downstream report.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    record = models.OneToOneField(
+        EvidenceRecord, on_delete=models.CASCADE, related_name='file',
+    )
+
+    file = models.FileField(upload_to=evidence_file_upload_to, max_length=500)
+    file_name = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='The name as uploaded — kept even if storage renames it',
+    )
+    content_type = models.CharField(
+        max_length=120, blank=True, default='',
+        help_text="The client's declared type. Not trusted, and not verified",
+    )
+    file_size_bytes = models.BigIntegerField(default=0)
+    sha256_hash = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text=(
+            'SHA-256 over the stored bytes, taken by reading them back from '
+            'storage — so the hash attests the file that exists, not the one '
+            'the client said it sent.'
+        ),
+    )
+    storage_name = models.CharField(
+        max_length=1000, blank=True, default='',
+        help_text='The storage backend key, kept so the bytes can be re-read',
+    )
+
+    last_verify_ok = models.BooleanField(
+        null=True, blank=True,
+        help_text=(
+            'None until a verification has run. True only when the stored '
+            'bytes re-hash to the recorded digest; False when they do not; '
+            'None with a note when the file was too large to re-hash.'
+        ),
+    )
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    last_verify_note = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='Why verification did not pass, or why it could not be run',
+    )
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='uploaded_evidence_files',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Evidence file'
+        verbose_name_plural = 'Evidence files'
+        indexes = [
+            models.Index(fields=['sha256_hash']),
+        ]
+
+    def __str__(self):
+        return f'{self.file_name or self.storage_name} ({self.record_id})'
+
+    def compute_stored_hash(self):
+        """SHA-256 of the bytes currently in storage.
+
+        Read in chunks: this runs on a request, and a 20 MB file read whole
+        would be 20 MB of memory held for a hash.
+        """
+        digest = hashlib.sha256()
+        with self.file.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(64 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
 
 
 class AIAnalysisRecord(models.Model):

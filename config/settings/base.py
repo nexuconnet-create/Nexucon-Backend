@@ -179,6 +179,9 @@ INSTALLED_APPS += [
     'apps.processing',
     'apps.reports',
     'apps.scans',
+    'apps.sync',
+    'apps.telemetry',
+    'apps.data_import',
     'apps.storage',
 ]
 
@@ -281,6 +284,13 @@ SPECTACULAR_SETTINGS = {
         {'url': 'https://nexucon-backend.onrender.com', 'description': 'Live Production (Render)'},
         {'url': 'http://127.0.0.1:8000', 'description': 'Local Development'},
     ],
+    # Routes registered under two spellings (see `apps/data_import/urls.py`)
+    # would otherwise appear twice in the schema under numeral-suffixed
+    # operationIds. The hook drops the alias entries; runtime routing is not
+    # affected. See `common/schema_hooks.py`.
+    'POSTPROCESSING_HOOKS': [
+        'common.schema_hooks.drop_trailing_slash_aliases',
+    ],
 }
 
 AUTH_USER_MODEL = 'accounts.User'
@@ -333,6 +343,86 @@ MEDIA_URL = '/media/'
 # photo / BIM captures — no map is ever fabricated.
 GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# ======================================================================
+# Site geofencing (Inspector PWA Module 2 — "you must be within 50 m of the
+# site to check in"). See apps/inspections/geofence.py for the full contract.
+#
+# DEFAULT_GEOFENCE_RADIUS_M is a platform *policy* fallback, not a recorded
+# attribute of any project. It applies only when the project does not record
+# its own `geofence_radius_m`; every check-in reports which of the two applied
+# so the platform default is never presented as though the project had set it.
+#
+# GEOFENCE_ENFORCEMENT is the rollout switch:
+#   'off'    — evaluate nothing; gps_verified is always False.
+#   'warn'   — measure and record, return the distance, but allow check-in.
+#              The default, so the platform ships before every project's site
+#              coordinates are backfilled, without the flag claiming more than
+#              it knows.
+#   'strict' — refuse a check-in that is outside the radius or that cannot be
+#              verified (no site coordinates, missing or too-wide accuracy).
+#              Flip to this once the coordinate backfill is complete.
+# ======================================================================
+DEFAULT_GEOFENCE_RADIUS_M = int(os.getenv('DEFAULT_GEOFENCE_RADIUS_M', '50'))
+GEOFENCE_ENFORCEMENT = os.getenv('GEOFENCE_ENFORCEMENT', 'warn').lower()
+
+# ======================================================================
+# Offline sync queue (Inspector PWA Part 3).
+#
+# SYNC_MAX_RETRIES is the number of times a queued item may fail before it is
+# reported as `exhausted`. It is a *reporting* threshold, not a disposal one:
+# an exhausted item stays in the queue and stays visible in `GET sync/status/`
+# with `exhausted: true`. A queue that silently drops items after N attempts
+# is a data-loss bug wearing a retry policy.
+# ======================================================================
+SYNC_MAX_RETRIES = int(os.getenv('SYNC_MAX_RETRIES', '5'))
+
+#: How long a `PROCESSING` claim may stand before another caller may reclaim
+#: it. A worker that dies mid-apply leaves its claim behind; without a timeout
+#: that item would be stuck forever, which is the same data loss as dropping
+#: it, only quieter.
+SYNC_CLAIM_TIMEOUT_SECONDS = int(os.getenv('SYNC_CLAIM_TIMEOUT_SECONDS', '300'))
+
+# ======================================================================
+# Manual import (Inspector PWA Part 3.3).
+#
+# Three bounds, each protecting the *response* rather than the write: an
+# import is synchronous, so an unbounded file turns one request into a worker
+# held for as long as the file is long, and an unbounded error list turns a
+# rejection into a response nobody can read.
+# ======================================================================
+
+#: Upload ceiling. 25 MiB is far above any CSV of readings a person fills in
+#: by hand, and far below the size at which one upload stops being one request.
+IMPORT_MAX_UPLOAD_BYTES = int(
+    os.getenv('IMPORT_MAX_UPLOAD_BYTES', str(25 * 1024 * 1024)))
+
+#: Row ceiling for one file. Reported as a refusal naming the count, never as a
+#: silent truncation — a partial import of a file the uploader believes was
+#: taken whole is the failure this bound exists to prevent.
+IMPORT_MAX_ROWS = int(os.getenv('IMPORT_MAX_ROWS', '20000'))
+
+#: Errors returned and stored per batch. A 50,000-row bad file must not produce
+#: a 50,000-entry response; `errors_truncated` says the list was capped, so a
+#: client can never mistake "these are all the problems" for "these are the
+#: first 200 of them".
+IMPORT_MAX_ERRORS = int(os.getenv('IMPORT_MAX_ERRORS', '200'))
+
+# ======================================================================
+# File evidence (Inspector PWA Part 3 — evidence upload and verification).
+#
+# Verification re-reads the stored bytes and hashes them. That is the only way
+# to answer "is this still the file that was uploaded?", and it costs a read of
+# the whole file. Above this ceiling the endpoint reports `file_bytes_ok: None`
+# with the reason rather than claiming a `True` it did not check or a `False`
+# it did not find.
+# ======================================================================
+EVIDENCE_VERIFY_MAX_BYTES = int(
+    os.getenv('EVIDENCE_VERIFY_MAX_BYTES', str(25 * 1024 * 1024)))
+
+#: Upload ceiling for one evidence file.
+EVIDENCE_MAX_UPLOAD_BYTES = int(
+    os.getenv('EVIDENCE_MAX_UPLOAD_BYTES', str(25 * 1024 * 1024)))
 
 # Google Cloud Service Account & Translation / Calendar APIs
 _google_sa_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', str(BASE_DIR / 'config' / 'google_service_account.json'))

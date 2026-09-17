@@ -34,7 +34,8 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             'device_type_display', 'model', 'manufacturer', 'firmware_version',
             'status', 'status_display', 'assigned_project', 'battery_level',
             'latitude', 'longitude', 'last_seen', 'calibration_date',
-            'calibration_certificate_url', 'notes', 'is_active', 'registered_by',
+            'calibration_expiry', 'calibration_certificate_url', 'notes', 'is_active',
+            'registered_by',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'device_reference', 'status', 'battery_level',

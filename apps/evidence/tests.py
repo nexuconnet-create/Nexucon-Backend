@@ -11,11 +11,17 @@ All fixtures are created inside the test classes (users, projects, source
 records) — no external fixture files.
 """
 import datetime
+import hashlib
+import os
+import tempfile
+import uuid
 from io import StringIO
+from unittest import mock
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -28,9 +34,14 @@ from apps.digital_eye.models import (
     PUNDITTest,
 )
 from apps.evidence.correlation import CorrelationEngine
+from apps.evidence.files import (
+    EvidenceFileError, EvidenceFileService,
+)
 from apps.evidence.ingestion import EvidenceIngestionService
 from apps.evidence.intelligence import ProjectIntelligenceService
-from apps.evidence.models import AIAnalysisRecord, CorrelationFinding, EvidenceRecord
+from apps.evidence.models import (
+    AIAnalysisRecord, CorrelationFinding, EvidenceFile, EvidenceRecord,
+)
 from apps.evidence.review import HumanReviewService, ReviewError
 from apps.evidence.tasks import correlate_projects, detect_recurring_anomalies
 from apps.government.models import District, Profile
@@ -1515,3 +1526,688 @@ class BackfillEvidenceConfidenceTestCase(TestCase):
 
         # Integrity hash re-computed for the changed rows.
         self.assertNotEqual(self.generic_high.evidence_hash, "")
+
+
+# ======================================================================
+# File evidence (Inspector PWA Part 3 — upload, and verify what was stored)
+#
+# The tests below run against a temporary MEDIA_ROOT so no capture is left
+# behind in the repository's media directory.
+# ======================================================================
+
+_TEST_MEDIA_ROOT = tempfile.mkdtemp(prefix='nexucon_evidence_tests_media_')
+
+local_storage_settings = override_settings(
+    STORAGES={
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+    },
+    MEDIA_ROOT=_TEST_MEDIA_ROOT,
+    MEDIA_URL='/media/',
+)
+
+
+class _Bytes:
+    """A minimal stand-in for a Django ``UploadedFile``.
+
+    ``chunks()`` is what Django's storage reads, ``name`` is what it stores
+    under, and ``size`` is what the service checks the ceiling against. Using
+    the real class would drag in a request for no gain.
+    """
+
+    def __init__(self, content, name, content_type='image/jpeg'):
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+        self._content = content
+        self.name = name
+        self.size = len(content)
+        self.content_type = content_type
+
+    def chunks(self, chunk_size=8192):
+        for start in range(0, len(self._content), chunk_size):
+            yield self._content[start:start + chunk_size]
+
+    def read(self, size=-1):
+        return self._content
+
+
+def _sha256(content):
+    if isinstance(content, str):
+        content = content.encode('utf-8')
+    return hashlib.sha256(content).hexdigest()
+
+
+def _stored_files():
+    """Every file currently under the test MEDIA_ROOT, as relative paths."""
+    found = []
+    for root, _dirs, files in os.walk(_TEST_MEDIA_ROOT):
+        for name in files:
+            found.append(
+                os.path.relpath(os.path.join(root, name), _TEST_MEDIA_ROOT)
+                .replace('\\', '/'))
+    return sorted(found)
+
+
+def _purge_media_root():
+    for root, dirs, files in os.walk(_TEST_MEDIA_ROOT, topdown=False):
+        for name in files:
+            os.remove(os.path.join(root, name))
+        for name in dirs:
+            try:
+                os.rmdir(os.path.join(root, name))
+            except OSError:
+                pass
+
+
+class _CleanMediaMixin:
+    """A clean MEDIA_ROOT for every test.
+
+    The root itself is module-level so the storage override can be a class
+    decorator, but the files inside it are not shared: several tests assert on
+    exactly what was written, and a capture left by the previous test would make
+    "nothing was stored" pass or fail for the wrong reason.
+    """
+
+    def setUp(self):
+        super().setUp()
+        _purge_media_root()
+        self.addCleanup(_purge_media_root)
+
+
+@local_storage_settings
+class EvidenceFileServiceTestCase(_CleanMediaMixin, TestCase):
+    """Storing bytes, and re-reading them later to answer honestly."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = Project.objects.create(name='File Evidence Project')
+        self.user = User.objects.create_user(
+            username='file_uploader@nexucon.com',
+            email='file_uploader@nexucon.com',
+            password='Password123!',
+        )
+
+    def _record(self, **payload):
+        return EvidenceRecord.objects.create(
+            project=self.project, source_type='uploaded_file',
+            payload=payload or {'file_name': 'cover.jpg'},
+        )
+
+    def _store(self, content=b'\x89PNG cover photo bytes', name='cover.jpg', **kwargs):
+        record = kwargs.pop('record', None) or self._record()
+        return record, EvidenceFileService.store(
+            record=record, uploaded_file=_Bytes(content, name), **kwargs)
+
+    # -- storing -------------------------------------------------------
+
+    def test_the_stored_hash_is_the_hash_of_the_bytes_on_disk(self):
+        content = b'\x89PNG real capture bytes'
+        _record, evidence_file = self._store(content)
+
+        self.assertEqual(evidence_file.sha256_hash, _sha256(content))
+        self.assertEqual(evidence_file.file_size_bytes, len(content))
+        self.assertEqual(evidence_file.file_name, 'cover.jpg')
+
+        # And the same again, read back off the disk rather than trusted.
+        with open(evidence_file.file.path, 'rb') as handle:
+            self.assertEqual(hashlib.sha256(handle.read()).hexdigest(),
+                             evidence_file.sha256_hash)
+
+    def test_the_stored_path_is_keyed_on_the_record_not_the_client_name(self):
+        record, evidence_file = self._store()
+
+        self.assertEqual(
+            evidence_file.storage_name,
+            f'evidence/{self.project.id}/{record.evidence_reference}/cover.jpg')
+        self.assertEqual(_stored_files(), [evidence_file.storage_name])
+
+    def test_a_path_in_the_filename_is_reduced_to_a_name(self):
+        _record, evidence_file = self._store(name='../../etc/passwd')
+
+        self.assertEqual(evidence_file.file_name, 'passwd')
+        self.assertTrue(evidence_file.storage_name.endswith('/passwd'))
+        self.assertNotIn('..', evidence_file.storage_name)
+
+    def test_a_second_file_for_one_record_is_refused(self):
+        record, first = self._store()
+        before = _stored_files()
+
+        with self.assertRaises(EvidenceFileError) as caught:
+            EvidenceFileService.store(
+                record=record, uploaded_file=_Bytes(b'other', 'other.jpg'))
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(_stored_files(), before)
+        self.assertEqual(EvidenceFile.objects.filter(record=record).count(), 1)
+        self.assertEqual(EvidenceFile.objects.get(record=record).id, first.id)
+
+    def test_an_empty_file_is_refused_and_leaves_nothing(self):
+        with self.assertRaises(EvidenceFileError) as caught:
+            self._store(b'', name='empty.jpg')
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn('empty', str(caught.exception).lower())
+        self.assertEqual(_stored_files(), [])
+        self.assertFalse(EvidenceFile.objects.exists())
+
+    def test_a_file_above_the_upload_ceiling_is_refused(self):
+        with override_settings(EVIDENCE_MAX_UPLOAD_BYTES=8):
+            with self.assertRaises(EvidenceFileError) as caught:
+                self._store(b'x' * 9)
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn('9 bytes', str(caught.exception))
+        self.assertEqual(_stored_files(), [])
+
+    def test_a_client_hash_that_disagrees_with_storage_is_refused(self):
+        with self.assertRaises(EvidenceFileError) as caught:
+            self._store(b'real bytes', expected_sha256='a' * 64)
+
+        message = str(caught.exception)
+        self.assertEqual(caught.exception.status_code, 400)
+        # The message names both digests, so the caller can see which end is wrong.
+        self.assertIn('a' * 64, message)
+        self.assertIn(_sha256(b'real bytes'), message)
+        self.assertEqual(_stored_files(), [])
+        self.assertFalse(EvidenceFile.objects.exists())
+
+    def test_a_matching_client_hash_is_accepted(self):
+        content = b'verified capture'
+        _record, evidence_file = self._store(
+            content, expected_sha256=_sha256(content).upper())
+
+        self.assertEqual(evidence_file.sha256_hash, _sha256(content))
+
+    def test_a_client_size_that_disagrees_with_storage_is_refused(self):
+        with self.assertRaises(EvidenceFileError) as caught:
+            self._store(b'twelve bytes', expected_size=99)
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn('99', str(caught.exception))
+        self.assertEqual(_stored_files(), [])
+
+    def test_nothing_is_recorded_when_the_file_cannot_be_stored(self):
+        with mock.patch(
+            'django.core.files.storage.FileSystemStorage.size',
+            side_effect=OSError('storage unavailable'),
+        ):
+            with self.assertRaises(EvidenceFileError):
+                self._store()
+
+        # The bytes written before the failure are cleaned up, not orphaned.
+        self.assertEqual(_stored_files(), [])
+        self.assertFalse(EvidenceFile.objects.exists())
+
+    # -- verifying -----------------------------------------------------
+
+    def test_verify_reports_both_hashes_when_everything_is_intact(self):
+        record, evidence_file = self._store()
+        record.evidence_hash = record.compute_hash()
+        record.save(update_fields=['evidence_hash'])
+
+        result = EvidenceFileService.verify(record)
+
+        self.assertTrue(result['payload_ok'])
+        self.assertTrue(result['file_bytes_ok'])
+        self.assertTrue(result['file_present'])
+        self.assertEqual(result['file_sha256'], evidence_file.sha256_hash)
+        self.assertEqual(result['note'], '')
+        self.assertEqual(result['evidence_reference'], record.evidence_reference)
+
+    def test_verify_records_its_outcome_on_the_file(self):
+        record, evidence_file = self._store()
+
+        self.assertIsNone(evidence_file.last_verify_ok)  # nothing has run yet
+
+        EvidenceFileService.verify(record)
+
+        evidence_file.refresh_from_db()
+        self.assertTrue(evidence_file.last_verify_ok)
+        self.assertIsNotNone(evidence_file.last_verified_at)
+        self.assertEqual(evidence_file.last_verify_note, '')
+
+    def test_a_changed_payload_is_reported_without_touching_the_file_result(self):
+        record, _file = self._store()
+        record.evidence_hash = record.compute_hash()
+        record.save(update_fields=['evidence_hash'])
+
+        record.payload = {'file_name': 'cover.jpg', 'added': 'after ingest'}
+        record.save(update_fields=['payload'])
+
+        result = EvidenceFileService.verify(record)
+
+        self.assertFalse(result['payload_ok'])
+        # The bytes are untouched, and saying otherwise would be the false
+        # negative that makes the whole endpoint useless.
+        self.assertTrue(result['file_bytes_ok'])
+
+    def test_bytes_replaced_in_storage_are_reported(self):
+        record, evidence_file = self._store(b'original capture bytes')
+
+        with open(evidence_file.file.path, 'wb') as handle:
+            handle.write(b'a different file entirely')
+
+        result = EvidenceFileService.verify(record)
+
+        self.assertFalse(result['file_bytes_ok'])
+        self.assertEqual(result['file_sha256'], _sha256(b'original capture bytes'))
+        self.assertIn('changed or replaced', result['note'])
+
+        evidence_file.refresh_from_db()
+        self.assertFalse(evidence_file.last_verify_ok)
+        self.assertIn('changed or replaced', evidence_file.last_verify_note)
+
+    def test_a_record_with_no_file_says_so_rather_than_failing(self):
+        record = self._record()
+        record.evidence_hash = record.compute_hash()
+        record.save(update_fields=['evidence_hash'])
+
+        result = EvidenceFileService.verify(record)
+
+        self.assertFalse(result['file_present'])
+        # Not False: nothing was checked, so nothing failed.
+        self.assertIsNone(result['file_bytes_ok'])
+        self.assertIsNone(result['file_sha256'])
+        self.assertTrue(result['payload_ok'])
+        self.assertIn('No file is attached', result['note'])
+
+    def test_a_file_too_large_to_re_read_reports_none_not_true(self):
+        record, evidence_file = self._store(b'x' * 64, name='big.jpg')
+
+        with override_settings(EVIDENCE_VERIFY_MAX_BYTES=8):
+            result = EvidenceFileService.verify(record)
+
+        self.assertIsNone(result['file_bytes_ok'])
+        self.assertTrue(result['file_present'])
+        self.assertIn('not checked', result['note'])
+
+        evidence_file.refresh_from_db()
+        self.assertIsNone(evidence_file.last_verify_ok)
+        self.assertIsNotNone(evidence_file.last_verified_at)
+
+    def test_unreadable_storage_reports_none_with_the_reason(self):
+        record, _file = self._store()
+
+        with mock.patch.object(
+            EvidenceFile, 'compute_stored_hash',
+            side_effect=OSError('the bucket is gone'),
+        ):
+            result = EvidenceFileService.verify(record)
+
+        self.assertIsNone(result['file_bytes_ok'])
+        self.assertIn('OSError', result['note'])
+
+    def test_the_file_backed_record_carries_only_what_was_recorded(self):
+        record = EvidenceFileService.file_backed_record(
+            project=self.project,
+            uploaded_file=_Bytes(b'bytes', 'crack.jpg', content_type='image/jpeg'),
+            structural_element_id='COL-C24',
+            description='Spalling on the north face',
+        )
+
+        self.assertEqual(record.source_type, 'uploaded_file')
+        self.assertEqual(record.structural_element_id, 'COL-C24')
+        # Blank source identity: the uniqueness constraint is conditional on
+        # source_model, so filling it in would block a second upload.
+        self.assertEqual(record.source_model, '')
+        self.assertEqual(record.source_id, '')
+        self.assertEqual(record.payload['file_name'], 'crack.jpg')
+        self.assertEqual(record.payload['declared_content_type'], 'image/jpeg')
+        self.assertEqual(record.payload['description'], 'Spalling on the north face')
+        # Not recorded, so absent — not present as a placeholder.
+        self.assertNotIn('coordinates', record.payload)
+        self.assertIsNone(record.coordinates)
+        self.assertIsNone(record.confidence)
+        # Ingested records carry their hash from the start.
+        self.assertEqual(record.evidence_hash, record.compute_hash())
+
+
+@local_storage_settings
+class EvidenceFileAPITestCase(_CleanMediaMixin, APITestCase):
+    """The four routes, their scoping, and the shadowing regression."""
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_superuser(
+            username='evidence_uploader@nexucon.com',
+            email='evidence_uploader@nexucon.com',
+            password='Password123!',
+        )
+        self.project = Project.objects.create(name='Upload API Project')
+        self.other_project = Project.objects.create(name='Someone Else Project')
+        self.inspection = Inspection.objects.create(
+            project=self.project, inspection_reference='INS-FILE-1',
+        )
+        self.other_inspection = Inspection.objects.create(
+            project=self.other_project, inspection_reference='INS-FILE-2',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.upload_url = reverse('evidence-upload')
+
+    def _upload(self, *, content=b'field capture bytes', name='cover.jpg',
+                project=None, **extra):
+        # `str(project)` would be the project's *name* — Project.__str__ returns
+        # the name, and a name is not a UUID. So take the id explicitly.
+        target = self.project if project is None else project
+        payload = {
+            'file': SimpleUploadedFile(name, content, content_type='image/jpeg'),
+            'project': str(target.id),
+        }
+        payload.update(extra)
+        return self.client.post(self.upload_url, payload, format='multipart')
+
+    # -- upload --------------------------------------------------------
+
+    def test_upload_stores_a_record_and_its_bytes(self):
+        response = self._upload(
+            content=b'the real capture bytes',
+            structural_element_id='COL-C24',
+            description='Delaminated render',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        record = EvidenceRecord.objects.get(pk=response.data['id'])
+        self.assertEqual(record.source_type, 'uploaded_file')
+        self.assertEqual(record.ingested_by, self.user)
+
+        self.assertEqual(response.data['file']['sha256_hash'],
+                         _sha256(b'the real capture bytes'))
+        self.assertEqual(response.data['file']['file_size_bytes'],
+                         len(b'the real capture bytes'))
+        self.assertIsNone(response.data['file']['last_verify_ok'])
+        self.assertEqual(_stored_files(), [record.file.storage_name])
+
+    def test_upload_attaches_the_file_to_the_inspection(self):
+        response = self._upload(inspection=str(self.inspection.id))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(EvidenceRecord.objects.get(pk=response.data['id']).inspection,
+                         self.inspection)
+
+    def test_upload_into_a_project_outside_the_scope_is_a_404(self):
+        # A district officer, not the superuser: a superuser sees every project,
+        # so "out of scope" has to be tested with someone who has a scope.
+        district_a = District.objects.create(name='Upload District A', code='UPA')
+        district_b = District.objects.create(name='Upload District B', code='UPB')
+        self.project.district = district_a
+        self.project.save(update_fields=['district'])
+        self.other_project.district = district_b
+        self.other_project.save(update_fields=['district'])
+        officer = User.objects.create_user(
+            username='upload_officer@nexucon.com',
+            email='upload_officer@nexucon.com',
+            password='Password123!',
+        )
+        Profile.objects.create(user=officer, district=district_a)
+        self.client.force_authenticate(user=officer)
+
+        # The same request into their own project is accepted, so the 404 below
+        # is the scope and not a route that never worked.
+        self.assertEqual(self._upload().status_code, status.HTTP_201_CREATED)
+
+        response = self._upload(project=self.other_project, name='other.jpg')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND,
+                         msg=response.data)
+        self.assertFalse(EvidenceRecord.objects.filter(
+            project=self.other_project).exists())
+
+    def test_upload_naming_another_projects_inspection_is_a_404(self):
+        response = self._upload(inspection=str(self.other_inspection.id))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(EvidenceRecord.objects.filter(
+            project=self.project).exists())
+        self.assertEqual(_stored_files(), [])
+
+    def test_upload_with_a_matching_client_hash_is_accepted(self):
+        content = b'hash-checked capture'
+        response = self._upload(content=content, sha256=_sha256(content))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['file']['sha256_hash'], _sha256(content))
+
+    def test_upload_with_a_wrong_client_hash_leaves_nothing_behind(self):
+        response = self._upload(content=b'real bytes', sha256='b' * 64)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('b' * 64, response.data['detail'])
+        # The record created for the refused file is removed with it: a row
+        # claiming evidence it does not hold is the defect this prevents.
+        self.assertFalse(EvidenceRecord.objects.filter(
+            project=self.project).exists())
+        self.assertFalse(EvidenceFile.objects.exists())
+        self.assertEqual(_stored_files(), [])
+
+    def test_upload_with_a_malformed_client_hash_is_rejected_before_storage(self):
+        response = self._upload(sha256='not-a-hash')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(_stored_files(), [])
+
+    def test_upload_with_non_object_coordinates_is_rejected(self):
+        response = self._upload(coordinates='[1, 2, 3]')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(EvidenceRecord.objects.exists())
+
+    def test_upload_records_the_coordinates_the_device_reported(self):
+        response = self._upload(
+            coordinates='{"latitude": 6.4281, "longitude": 3.4219}')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        record = EvidenceRecord.objects.get(pk=response.data['id'])
+        self.assertEqual(record.coordinates['latitude'], 6.4281)
+
+    def test_upload_writes_an_audit_event(self):
+        response = self._upload()
+
+        event = AuditEvent.objects.filter(action='evidence.file.upload').first()
+        self.assertIsNotNone(event)
+        self.assertEqual(event.resource_id, str(response.data['id']))
+        self.assertEqual(event.metadata['sha256_hash'],
+                         _sha256(b'field capture bytes'))
+
+    def test_upload_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        response = self._upload()
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(_stored_files(), [])
+
+    # -- detail, verify, by-inspection ---------------------------------
+
+    def _stored_record(self, **extra):
+        response = self._upload(**extra)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return EvidenceRecord.objects.get(pk=response.data['id'])
+
+    def test_detail_returns_the_record_with_its_file(self):
+        record = self._stored_record()
+
+        response = self.client.get(
+            reverse('evidence-detail', kwargs={'pk': record.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['evidence_reference'],
+                         record.evidence_reference)
+        self.assertEqual(response.data['file']['file_name'], 'cover.jpg')
+
+    def test_verify_returns_all_three_answers_for_an_intact_file(self):
+        record = self._stored_record()
+
+        response = self.client.post(
+            reverse('evidence-verify', kwargs={'pk': record.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['payload_ok'])
+        self.assertTrue(response.data['file_present'])
+        self.assertTrue(response.data['file_bytes_ok'])
+        self.assertEqual(response.data['evidence_reference'],
+                         record.evidence_reference)
+        # The outcome is persisted for a caller that only reads the record.
+        self.assertTrue(EvidenceFile.objects.get(record=record).last_verify_ok)
+
+    def test_verify_reports_replaced_bytes_as_a_200_not_an_error(self):
+        record = self._stored_record()
+        with open(record.file.file.path, 'wb') as handle:
+            handle.write(b'something else')
+
+        response = self.client.post(
+            reverse('evidence-verify', kwargs={'pk': record.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['file_bytes_ok'])
+        self.assertTrue(response.data['payload_ok'])
+
+    def test_verify_audits_a_failed_verification(self):
+        record = self._stored_record()
+        with open(record.file.file.path, 'wb') as handle:
+            handle.write(b'something else')
+
+        self.client.post(reverse('evidence-verify', kwargs={'pk': record.id}))
+
+        event = AuditEvent.objects.filter(
+            action='evidence.file.verify_failed').first()
+        self.assertIsNotNone(event)
+        self.assertEqual(event.severity, 'High')
+        self.assertEqual(event.resource_id, str(record.id))
+
+    def test_verify_does_not_audit_a_pass(self):
+        record = self._stored_record()
+
+        self.client.post(reverse('evidence-verify', kwargs={'pk': record.id}))
+
+        self.assertFalse(AuditEvent.objects.filter(
+            action='evidence.file.verify_failed').exists())
+
+    def test_another_projects_record_is_a_404_on_every_route(self):
+        outsider = User.objects.create_user(
+            username='other_inspector@nexucon.com',
+            email='other_inspector@nexucon.com',
+            password='Password123!',
+        )
+        record = self._stored_record()
+        self.client.force_authenticate(user=outsider)
+
+        for name in ('evidence-detail', 'evidence-verify'):
+            url = reverse(name, kwargs={'pk': record.id})
+            response = (self.client.post(url) if name == 'evidence-verify'
+                        else self.client.get(url))
+            self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND,
+                             f'{name} leaked another project\'s evidence')
+
+    def test_by_inspection_returns_only_that_visits_evidence(self):
+        mine = self._stored_record(inspection=str(self.inspection.id))
+        self._stored_record()  # same project, no inspection
+
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': self.inspection.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([row['id'] for row in response.data], [str(mine.id)])
+
+    def test_by_inspection_can_filter_to_one_source_type(self):
+        self._stored_record(inspection=str(self.inspection.id))
+
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': self.inspection.id}),
+            {'source_type': 'gpr'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': self.inspection.id}),
+            {'source_type': 'uploaded_file'})
+        self.assertEqual(len(response.data), 1)
+
+    def test_by_inspection_serves_each_records_file_digest(self):
+        """The visit's evidence panel needs each artifact's own SHA-256.
+
+        That digest lives on ``EvidenceFile``, not on the record, and it is what
+        the submission seals. If this endpoint ever drops back to the light
+        registry serializer the field disappears and the panel can no longer say
+        what it is attesting — which is the false-attestation shape, arrived at
+        by omission rather than by fabrication.
+        """
+        record = self._stored_record(inspection=str(self.inspection.id))
+
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': self.inspection.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = response.data[0]
+        self.assertEqual(row['id'], str(record.id))
+        self.assertIsNotNone(row['file'])
+        self.assertEqual(row['file']['file_name'], 'cover.jpg')
+        self.assertEqual(row['file']['sha256_hash'],
+                         EvidenceFile.objects.get(record=record).sha256_hash)
+
+    def test_by_inspection_serves_a_record_that_has_no_file(self):
+        """A record with no bytes behind it still lists, with ``file`` null.
+
+        Instrument rows (a GPR survey, a PUNDIT test) are evidence records with
+        no uploaded file. The panel has to be able to show them beside captures
+        without their file field rendering as an error.
+        """
+        EvidenceRecord.objects.create(
+            project=self.project, inspection=self.inspection,
+            source_type='inspection', payload={'note': 'no bytes behind this one'},
+        )
+
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': self.inspection.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertIsNone(response.data[0]['file'])
+
+    def test_by_inspection_rejects_an_unknown_source_type(self):
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': self.inspection.id}),
+            {'source_type': 'telepathy'})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('source_type', response.data['detail'])
+
+    def test_an_unknown_inspection_is_a_404(self):
+        response = self.client.get(reverse(
+            'evidence-by-inspection', kwargs={'inspection_id': uuid.uuid4()}))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_the_files_payload_hashes_the_same_before_and_after_storing(self):
+        """The upload recomputes nothing, so the hash the client holds is the
+        hash of the record it can re-read."""
+        record = self._stored_record(structural_element_id='COL-C24')
+
+        self.assertEqual(record.evidence_hash, record.compute_hash())
+
+
+class EvidenceRouteRegistrationTestCase(TestCase):
+    """The new literal paths must not shadow the router's `/records/`.
+
+    `scans/urls.py` and `inspections/urls.py` both carry the fixed-bug note for
+    exactly this mistake, so it is asserted here rather than trusted.
+    """
+
+    def test_records_list_still_resolves(self):
+        self.assertEqual(
+            reverse('evidence-record-list'), '/api/v1/evidence/records/')
+
+    def test_the_new_routes_resolve_under_their_own_names(self):
+        self.assertEqual(reverse('evidence-upload'), '/api/v1/evidence/upload/')
+        record_id = uuid.uuid4()
+        self.assertEqual(
+            reverse('evidence-verify', kwargs={'pk': record_id}),
+            f'/api/v1/evidence/{record_id}/verify/')
+
+    def test_records_detail_and_the_new_detail_are_different_routes(self):
+        record_id = uuid.uuid4()
+        self.assertEqual(
+            reverse('evidence-record-detail', kwargs={'pk': record_id}),
+            f'/api/v1/evidence/records/{record_id}/')
+        self.assertEqual(
+            reverse('evidence-detail', kwargs={'pk': record_id}),
+            f'/api/v1/evidence/{record_id}/')

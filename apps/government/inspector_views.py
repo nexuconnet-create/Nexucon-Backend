@@ -13,8 +13,10 @@ from datetime import timedelta
 from common.permissions import scoped_projects, get_profile, user_role_name
 from apps.projects.models import Project
 from apps.inspections.models import Inspection, Finding, StopWorkOrder
+from apps.compliance.models import ComplianceCertificate
 from apps.evidence.models import EvidenceRecord
 from apps.audit.models import AuditEvent
+from apps.sync.services import SyncService
 
 
 class InspectorDashboardView(APIView):
@@ -30,12 +32,26 @@ class InspectorDashboardView(APIView):
         profile = get_profile(user)
         projects = scoped_projects(user)
 
-        # Scoped inspector profile details
-        full_name = f"{user.first_name} {user.last_name}".strip() or user.email.split('@')[0].capitalize()
-        badge_number = f"LAG-INS-{str(user.id).replace('-', '')[:4].upper()}"
-        agency_name = profile.agency.name if (profile and profile.agency) else "Lagos State Building Control Agency (LASBCA)"
-        district_name = profile.district.name if (profile and profile.district) else "Lekki-Epe Zonal Directorate"
-        role_name = (profile.role.name if (profile and profile.role) else '') or "Field Building Inspector"
+        # Scoped inspector profile details.
+        #
+        # Every value here is either recorded or None. Nothing is defaulted to a
+        # plausible-looking string: a dashboard that shows "LASBCA" to an
+        # inspector whose agency was never recorded is asserting a fact the
+        # platform does not hold, and a badge number synthesised from a UUID
+        # slice is not a badge number — it is a decoration that would be read as
+        # an accreditation. `badge_number` comes from government.Inspector and is
+        # None until a Director records a real accreditation.
+        full_name = user.get_full_name() or None
+        accreditation = getattr(user, 'inspector_accreditation', None)
+        badge_number = accreditation.badge_number if accreditation else None
+        # `effective_status` applies the expiry date on read, so a badge that
+        # lapsed overnight shows as EXPIRED without anything having written to
+        # the row. Both the stored and the effective value are returned: the
+        # first is what an administrator decided, the second is the truth now.
+        accreditation_status = accreditation.effective_status if accreditation else None
+        agency_name = profile.agency.name if (profile and profile.agency) else None
+        district_name = profile.district.name if (profile and profile.district) else None
+        role_name = profile.role.name if (profile and profile.role) else None
 
         # KPIs
         assigned_projects_count = projects.count()
@@ -64,7 +80,21 @@ class InspectorDashboardView(APIView):
 
         evidence_qs = EvidenceRecord.objects.filter(project__in=projects)
         total_evidence_count = evidence_qs.count()
-        pending_evidence_count = open_inspections.filter(photos_and_evidence__isnull=False).count()
+
+        # "Pending sync" is the depth of this inspector's own offline write
+        # queue — work captured in the field that has not yet been promoted into
+        # the statutory registries. It is read from the service the sync API
+        # itself reports through, so this dashboard and `GET sync/status/`
+        # cannot disagree about the queue.
+        #
+        # The previous implementation counted
+        # `open_inspections.filter(photos_and_evidence__isnull=False)` against a
+        # JSONField(default=list): SQL NULL never occurs on that column, so it
+        # matched every open inspection and the KPI was silently a duplicate of
+        # the open-inspection count. It was then hardcoded to None while no
+        # queue existed — honest at the time, and stale once `apps.sync` landed.
+        sync_status = SyncService.status(user=user)
+        pending_evidence_count = sync_status['pending']
 
         # Today's Inspections
         now = timezone.now()
@@ -98,20 +128,35 @@ class InspectorDashboardView(APIView):
             })
 
         # Assigned Projects Summary (Top 6)
+        top_projects = list(projects.order_by('-updated_at')[:6])
+
+        # Compliance status is reported from the project's most recent recorded
+        # certificate. It is NOT inferred from the open-findings count: "no open
+        # findings" is not the same fact as "certified compliant", and the
+        # previous implementation asserted "COMPLIANT" on that basis. A project
+        # with no certificate recorded reports None.
+        cert_status_by_project = {}
+        if top_projects:
+            for cert in (ComplianceCertificate.objects
+                         .filter(project__in=top_projects)
+                         .order_by('project_id', '-issue_date', '-created_at')):
+                cert_status_by_project.setdefault(cert.project_id, cert.status)
+
         assigned_projects_list = []
-        for p in projects.order_by('-updated_at')[:6]:
+        for p in top_projects:
             next_insp = p.inspections.filter(status__in=['SCHEDULED', 'REQUESTED']).order_by('scheduled_date').first()
             p_findings_count = p.findings.filter(is_resolved=False).count()
+            location = p.site_address or f"{p.lga or ''}, {p.state or ''}".strip(', ')
             assigned_projects_list.append({
                 "id": str(p.id),
                 "name": p.name,
                 "reference_number": p.reference_number,
-                "location": p.site_address or f"{p.lga or ''}, {p.state or ''}".strip(', '),
+                "location": location or None,
                 "current_phase": p.status,
-                "compliance_status": "FLAGGED" if p_findings_count > 0 else "COMPLIANT",
+                "compliance_status": cert_status_by_project.get(p.id),
                 "open_findings": p_findings_count,
                 "next_inspection": next_insp.scheduled_date.isoformat() if (next_insp and next_insp.scheduled_date) else None,
-                "project_type": p.project_type or "Residential"
+                "project_type": p.project_type or None
             })
 
         # Critical Findings (Top 5)
@@ -122,46 +167,78 @@ class InspectorDashboardView(APIView):
                 "finding_reference": f.finding_reference,
                 "title": f.title,
                 "severity": f.severity,
-                "project_id": str(f.project.id) if f.project else "",
-                "project_name": f.project.name if f.project else "General Assignment",
+                "project_id": str(f.project.id) if f.project else None,
+                "project_name": f.project.name if f.project else None,
                 "category": f.category,
                 "created_at": f.created_at.isoformat(),
                 "status": "OPEN" if not f.is_resolved else "RESOLVED"
             })
 
-        # Evidence Synchronization Status
+        # Evidence Synchronization Status.
+        #
+        # `failed` counts queued writes the platform could not apply and
+        # `last_synced_at` is the most recent successful promotion into the
+        # registry. Both are read from the queue rather than asserted — the
+        # previous implementation hardcoded `failed: 0` (which reads as "nothing
+        # has ever failed") and `last_synced_at: now()` (which reads as "synced
+        # just now", on every request, forever). A sync indicator that can never
+        # report a problem is worse than no indicator at all.
+        #
+        # `last_synced_at` stays None until something has actually synced, so
+        # the "Never" the UI renders is a statement about the record rather than
+        # a default standing in for one.
+        last_synced_at = sync_status['last_synced_at']
         evidence_sync = {
             "uploaded": total_evidence_count,
             "pending": pending_evidence_count,
-            "failed": 0,
-            "last_synced_at": now.isoformat()
+            "failed": sync_status['failed'],
+            "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
         }
 
-        # Recent Activity Feed
+        # Recent Activity Feed.
+        #
+        # AuditEvent carries a denormalised `project_name` string and no project
+        # FK, so scoping to this user's projects has to match on that name. The
+        # previous implementation matched against only the first 10 projects
+        # (`projects[:10]`), so an inspector with more than 10 projects saw an
+        # activity feed that silently ignored most of their work.
         recent_activity = []
+        project_names = list(projects.values_list('name', flat=True))
         recent_audits = AuditEvent.objects.filter(
-            project_name__in=[p.name for p in projects[:10]]
+            project_name__in=project_names
         ).order_by('-timestamp')[:8]
 
         for audit in recent_audits:
             recent_activity.append({
                 "id": str(audit.id),
                 "event": audit.action.replace('_', ' ').title(),
-                "project": audit.project_name or "Project Assignment",
+                # None rather than an invented label: "Project Assignment" read
+                # as a real project.
+                "project": audit.project_name or None,
+                # The recorded actor (`user_name` defaults to the literal
+                # 'System' when no user was attached). The previous fallback,
+                # "Field System", named a thing that does not exist.
+                "actor": audit.user_name or None,
                 "timestamp": audit.timestamp.isoformat(),
-                "actor": audit.user_name or "Field System",
-                "status": "COMPLETED"
+                "severity": audit.severity,
+                # An audit entry is an immutable log record; it has no
+                # completion state. `"COMPLETED"` was hardcoded on every row.
+                "status": None
             })
 
         if not recent_activity:
-            # Fallback recent inspections
+            # No audit trail yet — fall back to the user's recent inspections.
             for insp in Inspection.objects.filter(project__in=projects).order_by('-updated_at')[:5]:
                 recent_activity.append({
                     "id": str(insp.id),
                     "event": f"{insp.inspection_type} - {insp.status}",
                     "project": insp.project.name,
                     "timestamp": insp.updated_at.isoformat(),
-                    "actor": insp.inspector_name or full_name,
+                    # The inspector who performed it, or None. Attributing an
+                    # unrecorded inspection to the *viewing* user would credit
+                    # them with work they may not have done.
+                    "actor": insp.inspector_name or None,
+                    "severity": None,
                     "status": insp.status
                 })
 
@@ -174,6 +251,7 @@ class InspectorDashboardView(APIView):
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "badge_number": badge_number,
+                "accreditation_status": accreditation_status,
                 "role": role_name,
                 "agency": agency_name,
                 "district": district_name

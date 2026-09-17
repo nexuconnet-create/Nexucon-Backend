@@ -1282,8 +1282,13 @@ class SettingsService:
             for proj_id in invitation.assigned_projects:
                 proj = Project.objects.filter(id=proj_id).first()
                 if proj:
-                    proj.assigned_inspector = user.get_full_name() or user.email
-                    proj.save(update_fields=['assigned_inspector'])
+                    # The key, not the name. This flow knows exactly which user
+                    # accepted the invitation, so there is nothing to resolve
+                    # and no name ambiguity to inherit. `Project.save()` writes
+                    # `assigned_inspector` from the key, so the display mirror
+                    # stays in step without being the thing access depends on.
+                    proj.assigned_inspector_user = user
+                    proj.save(update_fields=['assigned_inspector_user'])
                     Inspection.objects.filter(
                         project=proj,
                         status__in=['REQUESTED', 'SCHEDULED'],

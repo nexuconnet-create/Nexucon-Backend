@@ -61,6 +61,12 @@ class FieldDevice(models.Model):
         ('gpr', 'Ground Penetrating Radar'),
         ('pundit', 'PUNDIT Ultrasonic NDT'),
         ('scanner', '3D Laser Scanner'),
+        # SLAM and thermal are added alongside 'scanner' rather than replacing
+        # it: the existing value is referenced by live rows, and a capture
+        # from a handheld SLAM rig is a different instrument from a tripod
+        # laser scanner even though both produce a point cloud.
+        ('slam', 'SLAM Handheld Scanner'),
+        ('thermal', 'Thermal Imaging Camera'),
         ('other', 'Other Sensor'),
     ]
     STATUS_CHOICES = [
@@ -91,6 +97,15 @@ class FieldDevice(models.Model):
 
     calibration_date = models.DateField(null=True, blank=True)
     calibration_certificate_url = models.URLField(max_length=500, blank=True, default='')
+    calibration_expiry = models.DateField(
+        null=True, blank=True,
+        help_text=(
+            "Date the calibration certificate lapses. Null means no expiry has "
+            "been recorded — never defaulted to a computed date, because an "
+            "instrument with no certificate on file must not appear calibrated "
+            "until some assumed point."
+        ),
+    )
     notes = models.TextField(blank=True, default='')
     is_active = models.BooleanField(default=True)
 

@@ -1,0 +1,421 @@
+"""
+Telemetry ingestion service.
+
+The contract this module implements:
+
+  start  → a session exists, OPEN and PENDING, holding no interpretation of
+           anything. Nothing is written to any statutory registry yet.
+  append → packets accumulate, each one chained to the last. Still nothing
+           interpreted.
+  end    → every packet is replayed through the SAME serializer the manual
+           entry form uses. All valid → the real rows and their Evidence
+           Registry records are written in one transaction, and the session
+           becomes SYNCED. Any invalid → nothing at all is written, and the
+           session becomes FAILED carrying the reason.
+
+That last rule is the important one. A partial promotion would leave a GPR
+survey in the registry describing only the anomalies that happened to parse,
+with no indication that rows were dropped — a statutory record that under-
+reports what was found. All-or-nothing is the only defensible failure mode,
+and the packet log is what makes it possible: the operator can see which
+sequence number was rejected and re-capture that row.
+"""
+import logging
+
+from django.db import transaction
+from django.utils import timezone
+
+from common.errors import describe_drf_error as _describe  # noqa: F401  (re-export)
+from common.hashing import canonical_json, chain_hash, sha256_hex
+
+from .models import TelemetryPacket, TelemetrySession
+
+logger = logging.getLogger(__name__)
+
+
+class TelemetryError(Exception):
+    """Invalid telemetry operation. Carries an HTTP status for the view."""
+
+    def __init__(self, message, status_code=400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _SessionPromotionContext:
+    """Minimal request stand-in for a promotion with no HTTP request.
+
+    Exists only so ``ScopedProjectField`` can read ``.user``. See
+    ``TelemetryService._context`` for why this grants nothing extra.
+    """
+
+    def __init__(self, user):
+        self.user = user
+
+
+class TelemetryService:
+    """Session lifecycle and promotion into the statutory registries."""
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def start_session(cls, *, device, project, operator, data_type,
+                      session_config=None, session_start=None):
+        """Open a session for ``device`` on ``project``.
+
+        Refuses a second OPEN session for the same device. Two open sessions
+        would mean two packet sequences arriving from one instrument with no
+        way to tell which capture a reading belongs to — the device serial is
+        the provenance, and it can only be in one place at a time.
+        """
+        existing = TelemetrySession.objects.filter(
+            device=device, status=TelemetrySession.STATUS_OPEN).first()
+        if existing:
+            raise TelemetryError(
+                f'Device {device.device_id} already has an open session '
+                f'({existing.session_reference}). End it before starting another.',
+                status_code=409,
+            )
+
+        return TelemetrySession.objects.create(
+            device=device,
+            project=project,
+            operator=operator if (operator and operator.is_authenticated) else None,
+            operator_name=(
+                (operator.get_full_name() or operator.email)
+                if (operator and operator.is_authenticated) else ''
+            ),
+            data_type=data_type,
+            session_config=session_config or {},
+            session_start=session_start,
+        )
+
+    @classmethod
+    def append_packet(cls, session, payload, sequence=None, recorded_at=None):
+        """Append one reading to an open session, chained to the previous one.
+
+        ``sequence`` defaults to the next free position. When the device sends
+        its own, a repeat is refused rather than overwritten: the packet log is
+        append-only, so a re-sent sequence number is a client bug that must
+        surface, not a row to silently replace.
+        """
+        if not session.is_open:
+            raise TelemetryError(
+                f'Session {session.session_reference} is {session.status} and '
+                'cannot accept more packets.',
+                status_code=409,
+            )
+        if payload is None:
+            raise TelemetryError('A packet payload is required.')
+
+        if sequence is None:
+            last = session.packets.order_by('-sequence').values_list(
+                'sequence', flat=True).first()
+            sequence = (last or 0) + 1
+        else:
+            try:
+                sequence = int(sequence)
+            except (TypeError, ValueError):
+                raise TelemetryError('sequence must be an integer.')
+            if sequence < 1:
+                raise TelemetryError('sequence starts at 1.')
+
+        previous = session.packets.order_by('-sequence').values_list(
+            'chain_hash', flat=True).first() or ''
+
+        with transaction.atomic():
+            if session.packets.filter(sequence=sequence).exists():
+                raise TelemetryError(
+                    f'Packet {sequence} has already been received for this '
+                    'session. Packets are append-only — start a new session to '
+                    're-capture this row.',
+                    status_code=409,
+                )
+            packet = TelemetryPacket.objects.create(
+                session=session,
+                sequence=sequence,
+                payload=payload,
+                previous_hash=previous,
+                chain_hash=chain_hash(previous, sequence, payload),
+                recorded_at=recorded_at,
+            )
+            TelemetrySession.objects.filter(pk=session.pk).update(
+                packet_count=session.packets.count())
+        session.refresh_from_db(fields=['packet_count'])
+        return packet
+
+    # ------------------------------------------------------------------
+    # Promotion
+    # ------------------------------------------------------------------
+
+    #: data_type -> the applier that writes it into the real registry.
+    APPLIERS = {
+        'gpr': '_promote_gpr',
+        'pundit': '_promote_pundit',
+        'gnss': '_promote_gnss',
+        'scan': '_promote_scan',
+    }
+
+    @classmethod
+    def end_session(cls, session, request):
+        """Close the session and promote its packets into the registry.
+
+        Re-runnable only while the previous attempt FAILED. A session that is
+        already SYNCED is refused with 409 — re-promoting it would duplicate
+        every row. A FAILED one is retried in place, because the alternative
+        would be to re-capture measurements the device has already sent.
+        """
+        if session.status == TelemetrySession.STATUS_ABORTED:
+            raise TelemetryError(
+                f'Session {session.session_reference} was aborted.', status_code=409)
+        if session.status == TelemetrySession.STATUS_ENDED:
+            if session.sync_status != TelemetrySession.SYNC_FAILED:
+                raise TelemetryError(
+                    f'Session {session.session_reference} has already been '
+                    f'ended and promoted ({session.sync_status}).',
+                    status_code=409,
+                )
+            # A failed promotion is retried in place — see the docstring.
+
+        packets = list(session.packets.order_by('sequence'))
+        if not packets:
+            raise TelemetryError(
+                'This session received no packets, so there is nothing to '
+                'promote. Abort it instead if the capture was abandoned.')
+
+        applier = getattr(cls, cls.APPLIERS[session.data_type])
+
+        envelope = {
+            'session_reference': session.session_reference,
+            'device': session.device.device_id,
+            'project': str(session.project_id),
+            'data_type': session.data_type,
+            'session_config': session.session_config,
+            'packets': [
+                {
+                    'sequence': p.sequence,
+                    'payload': p.payload,
+                    'recorded_at': p.recorded_at.isoformat() if p.recorded_at else None,
+                }
+                for p in packets
+            ],
+        }
+
+        try:
+            with transaction.atomic():
+                promoted = applier(session, packets, request)
+                session.status = TelemetrySession.STATUS_ENDED
+                session.session_end = session.session_end or timezone.now()
+                session.data_payload = envelope
+                session.sha256_hash = sha256_hex(canonical_json(envelope))
+                session.sync_status = TelemetrySession.SYNC_SYNCED
+                session.sync_error = ''
+                session.promoted_at = timezone.now()
+                session.save(update_fields=[
+                    'status', 'session_end', 'data_payload', 'sha256_hash',
+                    'sync_status', 'sync_error', 'promoted_at', 'updated_at',
+                ])
+        except Exception as exc:  # noqa: BLE001 — every failure is recorded
+            # Nothing above survives: the transaction rolled back, so no survey,
+            # no anomalies and no evidence records exist. The session records
+            # what happened so the operator can act on it.
+            reason = _describe(exc)
+            TelemetrySession.objects.filter(pk=session.pk).update(
+                status=TelemetrySession.STATUS_ENDED,
+                session_end=session.session_end or timezone.now(),
+                sync_status=TelemetrySession.SYNC_FAILED,
+                sync_error=reason[:2000],
+                updated_at=timezone.now(),
+            )
+            session.refresh_from_db()
+            logger.warning('Telemetry promotion failed for %s: %s',
+                           session.session_reference, reason)
+            raise TelemetryError(
+                f'Promotion failed — nothing was written to the registry. {reason}')
+
+        session.refresh_from_db()
+        return promoted
+
+    # ------------------------------------------------------------------
+    # Per-sensor appliers
+    #
+    # Each one runs inside the caller's transaction and writes through the
+    # real serializers, so a telemetry capture is validated exactly as a
+    # manual entry is — there is no second, looser write path.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _context(cls, session, request):
+        """Serializer context for a promotion.
+
+        The digital_eye serializers scope their project FK through
+        ``ScopedProjectField``, which reads ``context['request'].user``. A
+        promotion triggered from a retry sweep has no HTTP request, so the
+        session's own operator stands in. That is not a widening of
+        authority: the project still comes from the session row, which was
+        scope-checked when the session was opened, and this shim can only
+        ever admit a project that row already names.
+        """
+        if request is not None:
+            return {'request': request}
+        return {'request': _SessionPromotionContext(session.operator)}
+
+    @classmethod
+    def _run(cls, serializer_class, data, session, request, **save_kwargs):
+        serializer = serializer_class(data=data,
+                                      context=cls._context(session, request))
+        serializer.is_valid(raise_exception=True)
+        return serializer.save(**save_kwargs)
+
+    @classmethod
+    def _promote_gpr(cls, session, packets, request):
+        """One GPR survey plus one anomaly row per packet."""
+        from apps.digital_eye.serializers import (
+            GPRAnomalySerializer, GPRSurveySerializer,
+        )
+        from apps.evidence.ingestion import EvidenceIngestionService
+
+        config = dict(session.session_config or {})
+        config.setdefault('title', f'Telemetry capture {session.session_reference}')
+
+        survey = cls._run(
+            GPRSurveySerializer,
+            {**config, 'project': session.project_id, 'device': session.device_id},
+            session, request,
+            created_by=request.user if request else None,
+            operator=request.user if request else None,
+            operator_name=session.operator_name,
+            status='completed',
+            completed_at=timezone.now(),
+        )
+
+        anomalies = []
+        for packet in packets:
+            anomaly = cls._run(
+                GPRAnomalySerializer,
+                {**packet.payload, 'survey': survey.id},
+                session, request,
+            )
+            anomalies.append(anomaly)
+            # Normalise into the Evidence Registry, exactly as the manual
+            # create path does.
+            EvidenceIngestionService.ingest_gpr_anomaly(
+                anomaly, ingested_by=request.user if request else None)
+
+        return {'survey_id': str(survey.id),
+                'survey_reference': survey.survey_reference,
+                'anomalies': len(anomalies)}
+
+    @classmethod
+    def _promote_pundit(cls, session, packets, request):
+        """One PUNDIT test whose readings are the packets.
+
+        The readings are handed to the serializer as its own ``readings`` list
+        rather than written directly, so the per-point velocity, the element
+        mean, the quality grade, the E.C.S through the project's active curve
+        and the point-count threading all happen in the one place that already
+        implements them.
+        """
+        from apps.digital_eye.serializers import PUNDITTestSerializer
+        from apps.evidence.ingestion import EvidenceIngestionService
+
+        config = dict(session.session_config or {})
+        config.setdefault('structural_element',
+                          f'Telemetry capture {session.session_reference}')
+        readings = []
+        for packet in packets:
+            reading = dict(packet.payload)
+            # Point labels are left to the serializer's own A, B, C... rule
+            # when the device did not assign one — the same rule the manual
+            # multi-point form uses.
+            reading.setdefault('point_label', '')
+            readings.append(reading)
+
+        test = cls._run(
+            PUNDITTestSerializer,
+            {**config,
+             'project': session.project_id,
+             'device': session.device_id,
+             'readings': readings},
+            session, request,
+            created_by=request.user if request else None,
+            operator=request.user if request else None,
+            operator_name=session.operator_name,
+        )
+        EvidenceIngestionService.ingest_pundit_test(
+            test, ingested_by=request.user if request else None)
+
+        return {'test_id': str(test.id),
+                'test_reference': test.test_reference,
+                'readings': test.readings.count()}
+
+    @classmethod
+    def _promote_gnss(cls, session, packets, request):
+        """One GNSS survey whose boundary points are the packets."""
+        from apps.digital_eye.serializers import (
+            GnssBoundaryPointSerializer, GnssSurveySerializer,
+        )
+        from apps.evidence.ingestion import EvidenceIngestionService
+
+        config = dict(session.session_config or {})
+        config.setdefault('title', f'Telemetry capture {session.session_reference}')
+
+        survey = cls._run(
+            GnssSurveySerializer,
+            {**config, 'project': session.project_id, 'device': session.device_id},
+            session, request,
+            created_by=request.user if request else None,
+            operator=request.user if request else None,
+            operator_name=session.operator_name,
+            status='completed',
+            completed_at=timezone.now(),
+        )
+
+        points = []
+        for packet in packets:
+            row = dict(packet.payload)
+            row.setdefault('sequence', packet.sequence)
+            if packet.recorded_at and not row.get('captured_at'):
+                row['captured_at'] = packet.recorded_at
+            points.append(cls._run(
+                GnssBoundaryPointSerializer, {**row, 'survey': survey.id},
+                session, request))
+
+        EvidenceIngestionService.ingest_gnss_survey(
+            survey, ingested_by=request.user if request else None)
+
+        return {'survey_id': str(survey.id),
+                'survey_reference': survey.survey_reference,
+                'boundary_points': len(points)}
+
+    @classmethod
+    def _promote_scan(cls, session, packets, request):
+        """One scan session whose defects are the packets."""
+        from apps.scans.models import Defect
+        from apps.scans.serializers import DefectSerializer
+        from apps.scans.services import ScanService
+        from apps.evidence.ingestion import EvidenceIngestionService
+
+        scanner_id = (session.session_config or {}).get(
+            'scanner_id') or session.device.device_id
+        scan_session = ScanService.start_session({
+            'project_id': session.project_id,
+            'scanner_id': scanner_id,
+            'timestamp': session.session_start,
+        })
+
+        defects = []
+        for packet in packets:
+            # `session` is read-only on DefectSerializer (the API derives it
+            # from the URL), so it is supplied at save() rather than in data.
+            defect = cls._run(
+                DefectSerializer, dict(packet.payload), session, request,
+                session=scan_session)
+            defects.append(defect)
+            EvidenceIngestionService.ingest_defect(
+                defect, ingested_by=request.user if request else None)
+
+        return {'scan_session_id': str(scan_session.id),
+                'scanner_id': scanner_id,
+                'defects': len(defects)}
