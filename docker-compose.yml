@@ -24,6 +24,17 @@ services:
     command: /app/entrypoint.sh
     volumes:
       - .:/app
+      # Where the platform writes each instrument's gateway config, for the
+      # `gateway` service to read. Mounted at a path *outside* /app on purpose:
+      # the bind mount above puts this directory inside the container's view of
+      # the repository, so a config written there would be one `git add -A` —
+      # or one backup of the working tree — away from committing a live
+      # credential. Here it lives on a volume and nowhere else.
+      - gateway_config:/srv/gateway-config
+      # The same host directory the gateway watches. Mounted here so that
+      # provisioning can create the instrument's own folder, and the path the
+      # panel tells an officer to point their sync client at is one that exists.
+      - ./gateway-inbox:/inbox
     ports:
       - "8000:8000"
     depends_on:
@@ -45,6 +56,13 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - FRONTEND_URL=${FRONTEND_URL:-https://nexucon.net}
+      # Platform gateway provisioning: where the written configs go, where the
+      # instrument folders are created, and the address the gateway reaches
+      # this API on. `web` is in DJANGO_ALLOWED_HOSTS below, which is what
+      # makes the third one work.
+      - GATEWAY_CONFIG_DIR=/srv/gateway-config
+      - GATEWAY_INBOX_DIR=/inbox
+      - GATEWAY_API_URL=${GATEWAY_API_URL:-http://web:8000}
       - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,inspector.nexucon.com,inspector.nexucon.net,187.7.20.123,localhost,127.0.0.1,web}
 
   gateway:
@@ -63,21 +81,34 @@ services:
     #   docker compose up -d --build
     #
     # The site's exports land in ./gateway-inbox on the host, put there by
-    # whatever the site syncs with (rclone, OneDrive, a share). The config
-    # directory is mounted rather than the single file so that a missing
-    # `gateway.json` — which Docker would otherwise helpfully create as an
-    # empty *directory* — fails as "No gateway config at ..." instead of an
-    # IsADirectoryError traceback.
+    # whatever the site syncs with (rclone, OneDrive, a share) — one folder per
+    # instrument, named after the instrument's reference.
     #
-    # `api_url` in gateway.json should be http://web:8000 — the hostname `web`
+    # The config directory is a *volume*, not a bind mount into the repo, and
+    # its files are written by the platform when an officer turns gateway sync
+    # on for an instrument — see apps/telemetry/gateway_config.py. Nobody
+    # writes one by hand, and nobody ever sees the credential inside it.
+    #
+    # Mounted read-only here, read-write in `web`. This process has no reason
+    # to write a config, and a compromised gateway that can rewrite the file
+    # naming its own instrument is a privilege it should not have. `--ledger-dir`
+    # is separate for the same reason: the config directory cannot be written
+    # to, so the ledgers live on a volume of their own.
+    #
+    # No `--config`: directory mode serves every instrument provisioned on this
+    # deployment. An empty config directory is the healthy idle state — a
+    # deployment with no instruments set up yet — while an *absent* one is
+    # fatal, because that means the volume is not mounted.
+    #
+    # `api_url` in each written config is http://web:8000 — the hostname `web`
     # is in the web service's DJANGO_ALLOWED_HOSTS above. If that list is ever
     # overridden with a DJANGO_ALLOWED_HOSTS in .env, `web` must be in it too,
     # or every push is refused with a 400.
     build: .
     restart: always
-    command: python manage.py run_gateway --config /app/gateway-config/gateway.json
+    command: python manage.py run_gateway --config-dir /app/gateway-config --ledger-dir /state
     volumes:
-      - ./gateway-config:/app/gateway-config:ro
+      - gateway_config:/app/gateway-config:ro
       - ./gateway-inbox:/inbox
       - gateway_state:/state
     depends_on:
@@ -119,6 +150,13 @@ services:
 
 volumes:
   postgres_data:
+  # One JSON file per provisioned instrument, holding that instrument's device
+  # credential. Written read-write by `web`, read read-only by `gateway`.
+  #
+  # A volume rather than a directory in the repository for one reason: these
+  # files hold live secrets, and the working tree is the one place a secret
+  # gets committed by accident.
+  gateway_config:
   # The gateway's ledger — which files it has already sent, keyed by digest.
   # A named volume rather than a path in the repo, because it is per-deployment
   # state: it must survive a rebuild, and it must never be shared between two

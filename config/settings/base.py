@@ -344,6 +344,36 @@ MEDIA_URL = '/media/'
 GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Where the platform writes one field-gateway config per instrument, for the
+# gateway process to read. It holds live `nxdev_` credentials, so it is a
+# volume rather than a directory in the repository: a secret in the working
+# tree is one `git add -A` from being committed.
+#
+# The default is for local development and tests, where both the API and the
+# gateway run from this checkout. In the container the setting is overridden
+# to /srv/gateway-config, which is a named volume mounted read-write here and
+# read-only into the gateway.
+#
+# Setting it empty disables platform provisioning: the action refuses and says
+# so, rather than writing a config nothing will ever read — a gateway that is
+# configured in the UI and silent on the site is the exact failure this
+# feature exists to remove.
+GATEWAY_CONFIG_DIR = os.getenv('GATEWAY_CONFIG_DIR', str(BASE_DIR / 'gateway-config'))
+
+# Where each instrument's exports are synced into, **as the gateway process
+# sees it** — the value goes into the written config verbatim, and the gateway
+# is what has to find the folder. In this deployment both the API and the
+# gateway mount the same host directory at /inbox, so one setting describes
+# both sides; a deployment that mounted them differently would need this set
+# to the gateway's path, not the API's.
+GATEWAY_INBOX_DIR = os.getenv('GATEWAY_INBOX_DIR', str(BASE_DIR / 'gateway-inbox'))
+
+# The platform's address as the gateway must reach it. Inside the deployment
+# that is the compose service rather than the public hostname: one less network
+# hop, and no dependency on public DNS or on TLS terminating correctly for a
+# site's captures to be able to arrive.
+GATEWAY_API_URL = os.getenv('GATEWAY_API_URL', 'http://127.0.0.1:8000')
+
 # ======================================================================
 # Site geofencing (Inspector PWA Module 2 — "you must be within 50 m of the
 # site to check in"). See apps/inspections/geofence.py for the full contract.

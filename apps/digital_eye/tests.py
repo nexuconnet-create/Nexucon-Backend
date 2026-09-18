@@ -13,6 +13,9 @@ Covers:
 """
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 from datetime import date
 from io import StringIO
 from unittest import mock
@@ -31,6 +34,7 @@ from apps.audit.models import AuditEvent
 from apps.common.ai_service import AIProviderUnavailable
 from apps.evidence.models import AIAnalysisRecord, EvidenceRecord
 from apps.projects.models import Project
+from apps.telemetry.models import DeviceToken
 
 from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
@@ -1766,6 +1770,202 @@ class FieldDeviceRegistryTestCase(DigitalEyeAPITestBase):
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('assigned_project', response.data['errors'])
+
+
+# ======================================================================
+# Gateway provisioning from the panel
+# ======================================================================
+
+class FieldDeviceGatewayActionTestCase(DigitalEyeAPITestBase):
+    """`POST digital-eye/devices/<uuid>/gateway/` — turning sync on and off.
+
+    The officer presses a button; the platform mints the credential and writes
+    the gateway's config. The thing under test as much as anything is what does
+    *not* come back: the secret is never in a response, so no screen and no
+    client ever holds it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.config_dir = tempfile.mkdtemp(prefix='nexucon_de_gw_cfg_')
+        self.inbox_dir = tempfile.mkdtemp(prefix='nexucon_de_gw_inbox_')
+        self.addCleanup(shutil.rmtree, self.config_dir, True)
+        self.addCleanup(shutil.rmtree, self.inbox_dir, True)
+        self._settings = override_settings(
+            GATEWAY_CONFIG_DIR=self.config_dir,
+            GATEWAY_INBOX_DIR=self.inbox_dir,
+            GATEWAY_API_URL='http://web:8000',
+        )
+        self._settings.enable()
+        self.addCleanup(self._settings.disable)
+        self.device = FieldDevice.objects.create(
+            device_id='PUNDIT-PL200-01', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+        self.url = reverse('field-device-gateway', kwargs={'pk': self.device.id})
+
+    def _set(self, enabled):
+        return self.client.post(self.url, {'enabled': enabled}, format='json')
+
+    def test_enabling_writes_the_config_and_reports_the_state(self):
+        response = self._set(True)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['gateway_enabled'])
+        self.assertTrue(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+        self.device.refresh_from_db()
+        self.assertTrue(self.device.gateway_enabled)
+
+    def test_the_response_never_carries_the_credential(self):
+        """The whole point of provisioning here rather than by hand.
+
+        A token in a response is a token in a browser's memory, in the network
+        tab, in anything that logs a body. It goes from the mint into the file
+        and nowhere else.
+        """
+        response = self._set(True)
+
+        # The serialised body, not the parsed dict: this is the assertion about
+        # what actually crossed the wire.
+        body = response.content.decode()
+        self.assertNotIn('nxdev_', body)
+        self.assertNotIn('device_token', body)
+        with open(os.path.join(self.config_dir, f'{self.device.id}.json'),
+                  encoding='utf-8') as handle:
+            self.assertTrue(json.load(handle)['device_token'].startswith('nxdev_'))
+
+    def test_disabling_revokes_the_credential_and_removes_the_config(self):
+        self._set(True)
+
+        response = self._set(False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gateway_enabled'])
+        self.assertFalse(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       revoked_at__isnull=True).count(), 0)
+
+    def test_enabling_is_audited(self):
+        self._set(True)
+
+        event = AuditEvent.objects.filter(
+            action='digital_eye.device.gateway.enable',
+            resource_id=str(self.device.id)).first()
+        self.assertIsNotNone(event, 'provisioning was not recorded')
+        self.assertEqual(event.metadata.get('device_id'), 'PUNDIT-PL200-01')
+        # The path is recorded; the credential inside it is not.
+        self.assertNotIn('nxdev_', json.dumps(event.metadata))
+
+    def test_disabling_is_audited(self):
+        self._set(True)
+
+        self._set(False)
+
+        self.assertTrue(AuditEvent.objects.filter(
+            action='digital_eye.device.gateway.disable',
+            resource_id=str(self.device.id)).exists())
+
+    def test_an_instrument_outside_the_callers_scope_is_not_found(self):
+        """Scoped through the device helper, not the viewset's queryset.
+
+        ``FieldDeviceViewSet.get_queryset`` returns every device in the system
+        to any authenticated user, and this action mints a credential — so
+        provisioning would be a way round the hole rather than a victim of it.
+        404 rather than 403, matching the credentials endpoint: a 403 would
+        confirm the instrument exists.
+        """
+        outsider = User.objects.create_user(
+            username='unscoped_gateway@nexucon.com',
+            email='unscoped_gateway@nexucon.com', password='Password123!')
+        self.client.credentials(
+            HTTP_AUTHORIZATION=
+            f'Bearer {RefreshToken.for_user(outsider).access_token}')
+
+        response = self._set(True)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device).count(), 0)
+
+    def test_a_body_that_is_not_a_boolean_is_refused(self):
+        """``"false"`` is a truthy string, and this action mints credentials."""
+        for value in ('true', 1, None):
+            with self.subTest(value=value):
+                response = self._set(value)
+
+                self.assertEqual(response.status_code,
+                                 status.HTTP_400_BAD_REQUEST)
+                self.device.refresh_from_db()
+                self.assertFalse(self.device.gateway_enabled)
+
+    def test_an_instrument_with_no_file_contract_is_refused_with_a_reason(self):
+        device = FieldDevice.objects.create(
+            device_id='GPR-CART-GW-01', device_type='gpr',
+            assigned_project=self.project, is_active=True)
+
+        response = self.client.post(
+            reverse('field-device-gateway', kwargs={'pk': device.id}),
+            {'enabled': True}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('GPR file contract', response.data['detail'])
+
+    def test_the_flag_cannot_be_set_by_a_plain_patch(self):
+        """It is read-only, and it has to be.
+
+        A writable boolean would let a client say "sync is on" with no config
+        behind it, and the panel would then be telling the officer something
+        untrue — the failure this whole feature exists to remove.
+        """
+        response = self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': self.device.id}),
+            {'gateway_enabled': True}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+
+    def test_provisioning_is_refused_when_the_deployment_has_no_config_dir(self):
+        with override_settings(GATEWAY_CONFIG_DIR=''):
+            response = self._set(True)
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('GATEWAY_CONFIG_DIR', response.data['detail'])
+
+    def test_the_card_is_told_where_the_site_must_sync_to(self):
+        """The folder is the gateway container's path, which only we know.
+
+        The site's sync client is pointed at a directory that is a deployment
+        setting on this server; nobody at the site can derive it. So it is
+        stated by the platform, on the device itself, so the panel can show it
+        after any reload rather than only in the response to enabling.
+        """
+        response = self.client.get(
+            reverse('field-device-detail', kwargs={'pk': self.device.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data['gateway_inbox'],
+            os.path.join(self.inbox_dir, self.device.device_reference))
+
+    def test_the_folder_is_not_invented_when_the_deployment_cannot_say(self):
+        """``None``, not a plausible-looking path.
+
+        A guessed folder is worse than no folder: the officer would point a
+        sync client at it and the gateway would never see a file.
+        """
+        with override_settings(GATEWAY_INBOX_DIR=''):
+            response = self.client.get(
+                reverse('field-device-detail', kwargs={'pk': self.device.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['gateway_inbox'])
 
 
 # ======================================================================

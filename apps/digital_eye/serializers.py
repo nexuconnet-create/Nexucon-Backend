@@ -28,6 +28,7 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
     assigned_project = ScopedProjectField(required=False, allow_null=True)
     device_type_display = serializers.CharField(source='get_device_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    gateway_inbox = serializers.SerializerMethodField()
 
     class Meta:
         model = FieldDevice
@@ -38,11 +39,44 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'last_seen', 'calibration_date',
             'calibration_expiry', 'calibration_certificate_url', 'notes', 'is_active',
             'registered_by', 'column_mapping',
+            # Read-only: it is set by the gateway action, which mints a
+            # credential and writes the config in the same step. A writable
+            # boolean here would let a client say "sync is on" with no config
+            # behind it, and the panel would then claim something untrue.
+            'gateway_enabled',
+            # Derived from a deployment setting, never from a request, so it is
+            # not a field anyone can write either.
+            'gateway_inbox',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'device_reference', 'status', 'battery_level',
                             'latitude', 'longitude', 'last_seen', 'registered_by',
+                            'gateway_enabled', 'gateway_inbox',
                             'created_at', 'updated_at']
+
+    def get_gateway_inbox(self, obj):
+        """The folder this instrument's exports are watched in, or ``None``.
+
+        The **gateway container's** path (``/inbox/DE-XXXXXXXX``), which the
+        site cannot derive and which the panel shows so a gateway log can be
+        read against it. It is deliberately not presented as the path the site
+        syncs to: that is a host path this deployment is never told, and the
+        actionable half for the site is the folder *name*.
+
+        ``None`` means this deployment cannot say — provisioning is switched
+        off, or the inbox root is unset. That is a different claim from a path,
+        and the panel says so rather than showing a folder that does not exist.
+        Imported here rather than at module level because
+        ``apps.telemetry.services`` reaches back into this module, and the
+        house way out of that cycle is a local import.
+        """
+        from apps.telemetry.gateway_config import (
+            GatewayConfigError, inbox_dir_for)
+
+        try:
+            return inbox_dir_for(obj)
+        except GatewayConfigError:
+            return None
 
     def validate_column_mapping(self, value):
         """Refuse a mapping the importer could never honour.

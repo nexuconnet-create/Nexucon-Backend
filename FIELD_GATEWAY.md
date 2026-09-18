@@ -186,33 +186,63 @@ synced there by whatever the site already uses (rclone, OneDrive, a share).
 reliable link is still better served by the PC, and the two can run at once:
 both push to the same endpoint and the platform deduplicates by content.
 
-Three settings are specific to this shape, and each fails in its own way if
-missed:
+**Nothing is configured by hand on the server.** An inspector turns sync on for
+an instrument in the browser — *Instruments* → the instrument → **Gateway sync**
+→ *Set up* — and the platform writes that instrument's config itself, into a
+directory the gateway watches. The credential is minted for that instrument and
+goes straight into the file; **it is never displayed**, on any screen, so there
+is nothing to copy and nothing to carry between two systems.
 
-| Key | Value | If you get it wrong |
-|---|---|---|
-| `watch_dir` | `/inbox` — the container's view of `./gateway-inbox`, **not** a Windows path | The gateway waits or stops, depending on `wait_for_watch_dir`. |
-| `ledger_path` | `/state/gateway-ledger.json` | It defaults to *beside the config*, and that directory is mounted read-only, so the gateway refuses to start. |
-| `api_url` | `http://web:8000` — the compose service name, straight to gunicorn | See the `ALLOWED_HOSTS` note below. |
+The directory is one named volume, `gateway_config`, mounted
+`/srv/gateway-config` in `web` (read-write, where the platform writes) and
+`/app/gateway-config` in `gateway` (read-only, where it is read). It is a
+volume rather than a directory in the repository because these files hold live
+credentials, and the working tree is the one place a secret gets committed by
+accident.
 
-```json
-{
-  "api_url": "http://web:8000",
-  "device_token": "nxdev_…",
-  "device": "4d1f…",
-  "watch_dir": "/inbox",
-  "ledger_path": "/state/gateway-ledger.json"
-}
+| Directory state | What it means |
+|---|---|
+| **Empty** | Healthy idle. Nothing is provisioned yet; the gateway says so and waits. |
+| **A file per instrument** | Each is one instrument's config, written by the platform. Adding one is picked up on the next sweep, with no restart. |
+| **Absent** | The volume is not mounted. The gateway **refuses to run** rather than idling, and the restart loop is the signal — because an unmatched volume that looked like an idle gateway would send nothing and say nothing. |
+
+The command that serves it:
+
+```bash
+python manage.py run_gateway --config-dir /app/gateway-config --ledger-dir /state
 ```
 
-`api_url` never leaves the host — it is the compose network, not the public
-API. It relies on `web` being in the `web` service's `DJANGO_ALLOWED_HOSTS`.
-The compose default includes it, but a `DJANGO_ALLOWED_HOSTS` set in `.env`
-**replaces** that default, and if `web` is not in it every push is refused
-with a 400 that says `Invalid HTTP_HOST header`.
+`--config-dir` and `--config` are separate flags and exactly one is required.
+Not one overloaded flag: `--config /some/folder` is the natural slip, and a
+directory handed to the file mode would enter directory mode, find no configs,
+and idle healthily forever — the silent failure the *Telling whether it is
+working* section exists to prevent. If you meant directory mode, you say so.
 
-Create `gateway-config/gateway.json` on the server, put it in `.gitignore`'s
-shadow like every other `*.json`, then:
+`--ledger-dir` is required with it and cannot be omitted: the config directory
+is mounted read-only, so each instrument's ledger is written to `/state` as
+`/state/<device-uuid>.json`.
+
+**What the platform writes into each file** — every value below is derived from
+the instrument's own record, so a wrong one is a wrong device record, not a
+typing mistake at a terminal:
+
+| Key | Value | If it is wrong |
+|---|---|---|
+| `device` | the instrument's UUID | The platform refuses the push as an unknown device. |
+| `project` | the instrument's assigned project, or `""` | Empty means "not on a project yet". A capture arriving then is refused **with that stated** rather than being filed against a project chosen on the instrument's behalf. |
+| `watch_dir` | `/inbox/DE-XXXXXXXX` — that instrument's own folder, as the container sees it | Every instrument gets its own folder, so two never share a ledger. |
+| `data_type` | `pundit` for a PL-200 | An instrument whose captures have no file contract cannot be provisioned at all — the panel refuses with the reason. |
+| `wait_for_watch_dir` | `true` | The site may not have pointed its sync client at the folder yet. Under a restart policy the alternative is a process that exits every minute over a folder nobody has created. |
+| `device_token` | a credential minted for that instrument | Written, never shown. Turning sync off revokes it. |
+
+`api_url` is written as `http://web:8000` — the compose service name, straight
+to gunicorn. It never leaves the host. It relies on `web` being in the `web`
+service's `DJANGO_ALLOWED_HOSTS`; the compose default includes it, but a
+`DJANGO_ALLOWED_HOSTS` set in `.env` **replaces** that default, and if `web` is
+not in it every push is refused with a 400 that says
+`Invalid HTTP_HOST header`.
+
+To deploy a change to this code:
 
 ```bash
 docker compose up -d --build
@@ -238,9 +268,35 @@ enforced. Its `SECRET_KEY` is set to a string of its own for the same reason:
 this process serves no HTTP and signs nothing, so a compromise of this
 container should not yield the platform's signing key.
 
-**If the container restarts in a loop**, it is almost always the config: the
-first line of the log says `No gateway config at /app/gateway-config/gateway.json.`
-until that file exists.
+**If the container restarts in a loop**, the first line of the log names the
+config directory and says it does not exist — that is the volume, not the
+code. A single *bad* config never restarts anything: it stops that one
+instrument, is reported by name in the log and in the summary line, and leaves
+the others sweeping.
+
+---
+
+## Running it on a site PC
+
+A site PC uses the other mode — one hand-written config, one instrument:
+
+```bash
+python manage.py run_gateway --config gateway.json
+```
+
+Everything above still applies except the directory. The two modes are the
+same program with the same ledger format, so a site that starts on a PC and
+moves to the server (or the reverse) carries its ledger across with a `cp`:
+in both modes the ledger is named from the `device` **inside** the config, so
+a config that changed which instrument it describes can never inherit the
+wrong one.
+
+A config for a PC can still be provisioned from the panel — the panel writes
+to the server's config directory, not to the PC — so on a PC the file is
+written by hand from `gateway.example.json`, with a credential minted on the
+device's card (*Credentials* → *Mint credential*). That is the one path where
+a credential is displayed: it is shown once, and the screen says so. Prefer
+the server shape where the site has a link worth relying on.
 
 ---
 
@@ -412,19 +468,56 @@ refused by name. If a file carries both `Distance (mm)` and `PATH LENGTH L
 - **It does not run as a Celery task.** `config/celery.py` declares a beat
   schedule, but no beat service is deployed, so nothing scheduled there has
   ever run. The gateway is a command on the site machine instead.
+- **It does not report back to the officer who provisioned it.** Once sync is
+  on, the panel says the platform has written the config — it cannot say the
+  gateway picked it up, or that the instrument's folder exists. Whether a
+  site is actually sending is read from `docker compose logs gateway` and from
+  the captures that arrive. The panel is honest about this and claims only
+  what it knows.
+
+---
+
+## The blast radius of the server shape
+
+On a site PC, compromising that machine yields **one instrument's credential**.
+On the server, the `gateway` container holds the credential of **every
+instrument provisioned on that deployment**, because that is what serving a
+directory means. Two habits keep that bounded:
+
+- **Provision only instruments actually deployed at a site.** An instrument
+  that is not sending does not need sync on, and turning it on "just in case"
+  is what puts a second credential in the container for nothing.
+- **Turn sync off when an instrument is decommissioned.** It revokes the
+  credential and removes the config in one step, from the same panel.
+
+What a stolen credential cannot do is the reason this stays contained: it can
+only push as its own instrument, it cannot read anything, it cannot promote a
+capture, and it cannot reach the registry. It is individually revocable, and
+the audit trail names the device on every push.
 
 ---
 
 ## The one thing that can go wrong quietly
 
-The gateway's ledger (`gateway-ledger.json`) remembers which bytes have been
-sent, keyed by SHA-256 — so a sync client re-downloading a file under a new
-name does not get it uploaded twice. **It is a convenience, not the
-guarantee.** The platform checks the same digest independently and answers a
-resend with the session the first import created, which is why a laptop with a
-deleted ledger re-uploads a file but never files it twice.
+The gateway's ledger remembers which bytes have been sent, keyed by SHA-256 —
+so a sync client re-downloading a file under a new name does not get it
+uploaded twice. **It is a convenience, not the guarantee.** The platform checks
+the same digest independently and answers a resend with the session the first
+import created, which is why a laptop with a deleted ledger re-uploads a file
+but never files it twice.
 
-If the ledger is ever unreadable, the gateway **refuses to start** rather than
+There is **one ledger per instrument**, at `/state/<device-uuid>.json` in
+directory mode and beside the config in single-config mode, and it is named
+from the `device` **inside** the config file — never from the file's own name.
+That is not tidiness. The platform's duplicate check is scoped to a device, so
+nothing downstream would catch a gateway that skipped a file: if a config were
+rewritten to describe a different instrument and inherited the old ledger, the
+new instrument's first capture would be **silently dropped, with no error
+anywhere**. A ledger whose stored device disagrees with the config's is
+refused by name instead.
+
+If a ledger is ever unreadable, that instrument is **stopped** rather than
 beginning with an empty one — starting empty would silently re-send every file
-in the folder. The error says to move it aside; the platform will refuse
-anything it already holds, so nothing is recorded twice.
+in the folder. The error says which file to move aside, and the other
+instruments keep sweeping. The platform will refuse anything it already holds,
+so nothing is recorded twice.

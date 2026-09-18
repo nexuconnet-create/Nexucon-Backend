@@ -129,6 +129,23 @@ class FieldDevice(models.Model):
             "contract keys. Empty means the export already speaks the template."
         ),
     )
+    # Whether the field gateway holds this instrument's config, so its exports
+    # are pushed without anyone opening an upload form.
+    #
+    # Set only through the gateway action on the device, never by a plain
+    # PATCH: turning it on mints a credential and writes it into the gateway's
+    # config directory in one step, and a boolean that could be flipped on its
+    # own would say "sync is on" while no config existed — the failure this
+    # whole feature is built to remove. It is also why this field is read-only
+    # in the serializer.
+    gateway_enabled = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when the platform has written this instrument's config for "
+            "the field gateway. False means sync was never set up, not that it "
+            "was set up and is idle."
+        ),
+    )
     is_active = models.BooleanField(default=True)
 
     registered_by = models.ForeignKey(

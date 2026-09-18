@@ -14,6 +14,7 @@ individual assertions that matter most:
     section at the end of this module
 """
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -31,9 +32,14 @@ from apps.evidence.models import EvidenceRecord
 from apps.projects.models import Project
 from common.hashing import chain_hash
 
+from apps.telemetry import gateway
+
 from .export_import import EXPORT_STORAGE_PREFIX
+from .gateway_config import (
+    PROVISIONED_LABEL, GatewayConfigError, GatewayConfigService,
+)
 from .models import (
-    DeviceToken, TelemetryPacket, TelemetrySession,
+    DEVICE_TOKEN_PREFIX, DeviceToken, TelemetryPacket, TelemetrySession,
     hash_device_token,
 )
 from .services import DeviceTokenService, TelemetryError, TelemetryService
@@ -714,6 +720,334 @@ class DeviceTokenServiceTests(TelemetryTestBase):
                                  issued_by=self.user)
         with self.assertRaises(ProtectedError):
             self.device.delete()
+
+
+class GatewayConfigServiceTests(TelemetryTestBase):
+    """Provisioning an instrument for the field gateway.
+
+    The claim this whole feature rests on is a negative one: the credential is
+    never displayed, returned or logged. It goes from the mint straight into the
+    file the gateway reads, so no person and no screen ever holds it — which is
+    what removes the step that gets skipped, done wrong or leaked.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.config_dir = tempfile.mkdtemp(prefix='nexucon_gw_cfg_')
+        self.inbox_dir = tempfile.mkdtemp(prefix='nexucon_gw_inbox_')
+        self.addCleanup(shutil.rmtree, self.config_dir, True)
+        self.addCleanup(shutil.rmtree, self.inbox_dir, True)
+        self._settings = override_settings(
+            GATEWAY_CONFIG_DIR=self.config_dir,
+            GATEWAY_INBOX_DIR=self.inbox_dir,
+            GATEWAY_API_URL='http://web:8000',
+        )
+        self._settings.enable()
+        self.addCleanup(self._settings.disable)
+        # PUNDIT because it is the one instrument with a whole-capture file
+        # contract; the refusals for the others are tested below.
+        self.device.device_type = 'pundit'
+        self.device.save(update_fields=['device_type'])
+
+    # -- helpers -------------------------------------------------------
+
+    def _path(self, device=None):
+        return os.path.join(self.config_dir, f'{(device or self.device).id}.json')
+
+    def _config(self, device=None):
+        return gateway.GatewayConfig.from_file(
+            self._path(device), ledger_dir=self.config_dir)
+
+    def _token_in_file(self, path=None):
+        with open(path or self._path(), encoding='utf-8') as handle:
+            return json.load(handle)['device_token']
+
+    # -- what gets written ---------------------------------------------
+
+    def test_enabling_writes_a_config_the_gateway_can_read(self):
+        """The written file has to load through the gateway's own validator.
+
+        Not a shape assertion: the config is only useful if the code that reads
+        it accepts it, and every one of these fields is something the platform
+        decides and the gateway would otherwise be told by hand.
+        """
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        config = self._config()
+
+        self.assertEqual(config.device, str(self.device.id))
+        self.assertEqual(config.project, str(self.project.id))
+        self.assertEqual(config.data_type, 'pundit')
+        self.assertEqual(config.api_url, 'http://web:8000')
+        self.assertEqual(
+            config.watch_dir,
+            os.path.join(self.inbox_dir, self.device.device_reference))
+        # True, so a site that has not set its sync client up yet gets a
+        # gateway that waits rather than one that exits every minute.
+        self.assertTrue(config.wait_for_watch_dir)
+
+    def test_the_config_file_is_named_after_the_device(self):
+        """The gateway names each ledger from the config's ``device`` field.
+
+        The filename is the device's id too, so the two agree — but only the
+        field is load-bearing, and the naming test in ``tests_gateway`` is what
+        pins that down.
+        """
+        path = GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(os.path.basename(path), f'{self.device.id}.json')
+
+    def test_the_inbox_folder_is_created_for_the_site_to_sync_into(self):
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.inbox_dir, self.device.device_reference)))
+
+    def test_an_instrument_with_no_project_yet_gets_an_empty_project(self):
+        """Empty, not absent, and not a project chosen on its behalf.
+
+        The endpoint needs a project to open a session. Sending the capture to
+        a guess would file a measurement against the wrong job, which is worse
+        than a refusal that says so.
+        """
+        self.device.assigned_project = None
+        self.device.save(update_fields=['assigned_project'])
+
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(self._config().project, '')
+
+    # -- the secret ----------------------------------------------------
+
+    def test_the_credential_goes_into_the_file_and_nowhere_else(self):
+        path = GatewayConfigService.enable(self.device, actor=self.user)
+
+        raw = self._token_in_file(path)
+
+        self.assertTrue(raw.startswith(DEVICE_TOKEN_PREFIX))
+        # The return value is a path, not a secret, so a caller cannot
+        # accidentally put one in a response or a log line.
+        self.assertNotIn(raw, path)
+        token = DeviceToken.resolve(raw)
+        self.assertIsNotNone(token)
+        self.assertEqual(token.device_id, self.device.id)
+        # And the row holds a digest, so re-reading the database cannot
+        # recover what was written.
+        self.assertNotEqual(token.hashed_key, raw)
+
+    def test_the_secret_is_never_logged(self):
+        """A credential in a log is a credential on every machine that ships
+        logs, and this module's whole purpose is that nobody sees it."""
+        with self.assertLogs('apps.telemetry.gateway_config',
+                             level='INFO') as captured:
+            path = GatewayConfigService.enable(self.device, actor=self.user)
+        raw = self._token_in_file(path)
+
+        output = '\n'.join(captured.output)
+        self.assertNotIn(raw, output)
+        self.assertNotIn(raw[6:], output)
+        self.assertIn('Gateway sync enabled', output)
+
+    def test_every_credential_written_carries_the_provisioned_label(self):
+        """So the next write can find the one it is replacing."""
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       label=PROVISIONED_LABEL).count(), 1)
+
+    # -- repeat writes -------------------------------------------------
+
+    def test_an_unchanged_enable_keeps_the_credential_already_written(self):
+        """Re-minting would revoke a credential the gateway is still using.
+
+        Its very next sweep would be refused with a 401, and nothing at the
+        site could account for it — the officer only pressed the same button
+        twice.
+        """
+        first = GatewayConfigService.enable(self.device, actor=self.user)
+        before = self._token_in_file(first)
+
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(self._token_in_file(first), before)
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       label=PROVISIONED_LABEL).count(), 1)
+
+    def test_reassigning_the_instrument_rewrites_the_config(self):
+        """The project is in the config, so a stale one sends to the old job.
+
+        The panel would say sync was on and nothing anywhere would say it was
+        pointed at the wrong project — which is exactly the silent wrongness
+        this feature is built to remove.
+        """
+        first = GatewayConfigService.enable(self.device, actor=self.user)
+        other = Project.objects.create(name='Second Site', status='ACTIVE')
+        self.device.assigned_project = other
+        self.device.save(update_fields=['assigned_project'])
+
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(self._config().project, str(other.id))
+
+    def test_rewriting_replaces_the_credential_and_revokes_the_old_one(self):
+        """Every write mints a new one, because the old plaintext is gone.
+
+        There is no earlier secret left to reuse: the row keeps only a digest.
+        """
+        first = GatewayConfigService.enable(self.device, actor=self.user)
+        old = self._token_in_file(first)
+        other = Project.objects.create(name='Second Site', status='ACTIVE')
+        self.device.assigned_project = other
+        self.device.save(update_fields=['assigned_project'])
+
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        new = self._token_in_file(first)
+        self.assertNotEqual(new, old)
+        self.assertIsNone(DeviceToken.resolve(old),
+                          'the superseded credential is still live')
+        self.assertEqual(DeviceToken.resolve(new).device_id, self.device.id)
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       label=PROVISIONED_LABEL,
+                                       revoked_at__isnull=True).count(), 1)
+
+    def test_a_config_that_will_not_parse_is_replaced_rather_than_trusted(self):
+        """Self-healing, and safe: the worst case is a fresh credential."""
+        path = self._path()
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('{"api_url": "http://web:8000",')
+
+        GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(self._config().device, str(self.device.id))
+
+    # -- turning it off ------------------------------------------------
+
+    def test_disabling_revokes_the_credential_and_removes_the_config(self):
+        path = GatewayConfigService.enable(self.device, actor=self.user)
+        raw = self._token_in_file(path)
+
+        GatewayConfigService.disable(self.device, actor=self.user)
+
+        self.assertFalse(os.path.exists(path))
+        self.assertIsNone(DeviceToken.resolve(raw))
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+
+    def test_disabling_clears_a_config_that_was_deleted_by_hand(self):
+        """The state this has to be able to clear: file gone, flag still on."""
+        GatewayConfigService.enable(self.device, actor=self.user)
+        os.remove(self._path())
+
+        GatewayConfigService.disable(self.device, actor=self.user)
+
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       label=PROVISIONED_LABEL,
+                                       revoked_at__isnull=True).count(), 0)
+
+    def test_disabling_twice_is_not_an_error(self):
+        GatewayConfigService.enable(self.device, actor=self.user)
+        GatewayConfigService.disable(self.device, actor=self.user)
+
+        GatewayConfigService.disable(self.device, actor=self.user)
+
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+
+    # -- what it refuses -----------------------------------------------
+
+    def test_an_instrument_with_no_file_contract_is_refused_by_name(self):
+        """Only PUNDIT has a contract describing a whole capture.
+
+        Refused at provisioning rather than at the first file: a refused file
+        is never offered again, so a mis-provisioned instrument would fill its
+        folder with refusals and look, from the site, exactly like a gateway
+        that is not running.
+        """
+        self.device.device_type = 'gpr'
+        self.device.save(update_fields=['device_type'])
+
+        with self.assertRaises(GatewayConfigError) as ctx:
+            GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertIn('GPR file contract', str(ctx.exception))
+        self.assertFalse(os.path.exists(self._path()))
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+
+    def test_an_instrument_kind_with_no_file_story_says_so(self):
+        self.device.device_type = 'thermal'
+        self.device.save(update_fields=['device_type'])
+
+        with self.assertRaises(GatewayConfigError) as ctx:
+            GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertIn('no file contract', str(ctx.exception))
+
+    def test_a_refusal_mints_no_credential(self):
+        """Nothing is created before the refusal, so nothing has to be undone."""
+        self.device.device_type = 'gpr'
+        self.device.save(update_fields=['device_type'])
+
+        with self.assertRaises(GatewayConfigError):
+            GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertEqual(DeviceToken.objects.filter(device=self.device).count(),
+                         0)
+
+    def test_provisioning_is_refused_when_nowhere_is_configured(self):
+        with override_settings(GATEWAY_CONFIG_DIR=''):
+            with self.assertRaises(GatewayConfigError) as ctx:
+                GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertIn('GATEWAY_CONFIG_DIR', str(ctx.exception))
+
+    def test_a_missing_config_directory_is_refused_not_created(self):
+        """An absent directory means the volume is not mounted.
+
+        Creating it would write the config to the container's own ephemeral
+        filesystem, where the gateway never sees it — the panel would report
+        success and the site would send nothing.
+        """
+        shutil.rmtree(self.config_dir)
+
+        with self.assertRaises(GatewayConfigError) as ctx:
+            GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertIn(self.config_dir, str(ctx.exception))
+        self.assertFalse(os.path.exists(self.config_dir))
+
+    def test_a_write_that_fails_leaves_no_live_credential(self):
+        """The credential was minted a moment earlier and nothing holds it.
+
+        Leaving it live would mean a secret nobody can see and nobody can use,
+        which is one more thing to find and revoke later. A directory sitting
+        where the config file belongs is the failure that gets past every check
+        before the write: the config directory is real, the path is not
+        readable as a config, and ``os.replace`` cannot land on it.
+        """
+        blocker = self._path()
+        os.makedirs(blocker)
+
+        with self.assertRaises(GatewayConfigError) as ctx:
+            GatewayConfigService.enable(self.device, actor=self.user)
+
+        self.assertIn('could not be written', str(ctx.exception))
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       label=PROVISIONED_LABEL,
+                                       revoked_at__isnull=True).count(), 0)
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+        # And nothing was left half-written beside it.
+        self.assertEqual(
+            [n for n in os.listdir(self.config_dir) if n.endswith('.tmp')], [])
 
 
 class DeviceTokenAPITests(APITestCase):

@@ -26,9 +26,11 @@ import shutil
 import tempfile
 import time
 from io import StringIO
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import LiveServerTestCase, SimpleTestCase, override_settings
 
 from apps.digital_eye.models import FieldDevice, PUNDITReading
@@ -868,6 +870,573 @@ class GatewayWatchDirTests(GatewayTestBase):
 
 
 # ----------------------------------------------------------------------
+# Serving a directory of configs
+# ----------------------------------------------------------------------
+
+class GatewayDirectoryTestBase(GatewayTestBase):
+    """A config directory and a ledger directory, beside the watch folder.
+
+    The two are separate here for the same reason they are separate in the
+    deployment: the config directory is written by the platform and mounted
+    read-only into the gateway, so the ledgers cannot live in it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.config_dir = os.path.join(self.dir, 'configs')
+        self.ledger_dir = os.path.join(self.dir, 'state')
+        os.makedirs(self.config_dir)
+        os.makedirs(self.ledger_dir)
+
+    def write_config(self, name='gateway.json', **overrides):
+        """Write one config file. A value of ``None`` removes the key."""
+        values = dict(
+            api_url='http://localhost:8000',
+            device_token='nxdev_' + 'x' * 32,
+            device=DEVICE_UUID,
+            watch_dir=self.watch_dir,
+            data_type='pundit',
+        )
+        values.update(overrides)
+        for key in [k for k, v in values.items() if v is None]:
+            del values[key]
+        path = os.path.join(self.config_dir, name)
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(values, handle)
+        return path
+
+    def supervisor(self, transport=None, **kwargs):
+        return gateway.GatewaySupervisor(
+            self.config_dir, self.ledger_dir,
+            transport=transport if transport is not None else FakeTransport(),
+            **kwargs)
+
+    def ledger_file(self, device=DEVICE_UUID):
+        return os.path.join(self.ledger_dir, f'{device}.json')
+
+
+class GatewayLedgerNamingTests(GatewayDirectoryTestBase):
+    """A ledger belongs to an instrument, and says so in the file."""
+
+    def test_the_ledger_is_named_from_the_device_not_the_config_file(self):
+        """Directory mode names each ledger after the device inside the config.
+
+        The platform's resend check is scoped to the device, so nothing
+        downstream catches a gateway that skipped a file. A ledger named from
+        the config's own filename would follow the file if the platform ever
+        rewrote it for a different instrument, and that instrument's capture
+        would read "already sent" and be dropped with no error anywhere.
+        """
+        self.write_config(name='anything-at-all.json')
+
+        config = gateway.GatewayConfig.from_file(
+            os.path.join(self.config_dir, 'anything-at-all.json'),
+            ledger_dir=self.ledger_dir)
+
+        self.assertEqual(config.ledger_path, self.ledger_file())
+        self.assertNotIn('anything-at-all', config.ledger_path)
+
+    def test_a_config_that_names_its_own_ledger_still_wins(self):
+        own = os.path.join(self.dir, 'hand-placed.json')
+        self.write_config(ledger_path=own)
+
+        config = gateway.GatewayConfig.from_file(
+            os.path.join(self.config_dir, 'gateway.json'),
+            ledger_dir=self.ledger_dir)
+
+        self.assertEqual(config.ledger_path, own)
+
+    def test_a_directory_where_a_config_file_was_expected_says_so(self):
+        """``--config <the config directory>`` is a natural slip.
+
+        Without this it is an uncaught ``IsADirectoryError`` on POSIX and a
+        ``PermissionError`` on Windows — neither of which names the flag that
+        would have worked.
+        """
+        with self.assertRaises(gateway.GatewayError) as ctx:
+            gateway.GatewayConfig.from_file(self.config_dir)
+
+        self.assertIn('--config-dir', str(ctx.exception))
+
+    def test_a_ledger_recording_another_device_is_refused_by_name(self):
+        """The one way a capture is lost with nothing to show for it."""
+        self.write_config()
+        config = gateway.GatewayConfig.from_file(
+            os.path.join(self.config_dir, 'gateway.json'),
+            ledger_dir=self.ledger_dir)
+        ledger = gateway.Ledger.load(config.ledger_path, device=config.device)
+        ledger.record_sent('a' * 64, name='export.csv',
+                           session_reference='TMS-1', status=201)
+        ledger.save()
+
+        other = '33333333-3333-3333-3333-333333333333'
+        with self.assertRaises(gateway.GatewayError) as ctx:
+            gateway.Ledger.load(config.ledger_path, device=other)
+
+        message = str(ctx.exception)
+        self.assertIn(DEVICE_UUID, message)
+        self.assertIn(other, message)
+
+    def test_a_ledger_written_before_the_device_stamp_still_loads(self):
+        """A v1 ledger has no ``device`` key, which is what makes migration a copy.
+
+        Refusing it would stop a gateway mid-upgrade over a field it never
+        wrote; accepting it is honest, because a v1 file could only ever have
+        belonged to the one device whose config sat beside it.
+        """
+        self.write_config()
+        path = self.ledger_file()
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump({'version': 1, 'sent': {'b' * 64: {'name': 'old.csv'}},
+                       'rejected': {}}, handle)
+
+        ledger = gateway.Ledger.load(path, device=DEVICE_UUID)
+
+        self.assertEqual(ledger.device, DEVICE_UUID)
+        self.assertTrue(ledger.knows('b' * 64))
+
+    def test_a_replaced_credential_clears_only_credential_refusals(self):
+        """A 400 is fixed on the device; a 401 is fixed by a new token.
+
+        Re-offering a 400 on every config write would undo the thing that
+        stopped it being retried forever, which is the whole reason a refusal
+        is a verdict and not a retry.
+        """
+        ledger = gateway.Ledger.load(self.ledger_file(), device=DEVICE_UUID)
+        ledger.record_rejected('a' * 64, name='mapping.csv', status=400,
+                               detail='unknown column')
+        ledger.record_rejected('b' * 64, name='auth.csv', status=401,
+                               detail='invalid credential')
+        ledger.record_rejected('c' * 64, name='forbidden.csv', status=403,
+                               detail='wrong instrument')
+
+        cleared = ledger.clear_rejected(statuses=(401, 403))
+
+        self.assertEqual(cleared, 2)
+        self.assertTrue(ledger.rejection('a' * 64))
+        self.assertFalse(ledger.rejection('b' * 64))
+        self.assertFalse(ledger.rejection('c' * 64))
+
+
+class GatewaySupervisorTests(GatewayDirectoryTestBase):
+    """One process, many instruments, and one device's failure is its own."""
+
+    def test_a_config_written_after_startup_is_picked_up_without_a_restart(self):
+        """The headline. Nobody restarts the gateway when they add an instrument.
+
+        The platform writes a config file; the running process has to notice.
+        Requiring a restart would put the deployment's terminal step back in a
+        different place, which is the thing this whole change removes.
+        """
+        transport = FakeTransport()
+        supervisor = self.supervisor(transport=transport)
+        self.assertEqual(supervisor.tick(), {})
+
+        self.write_config()
+        self.drop(age=60)
+
+        swept = supervisor.tick()
+
+        self.assertEqual(swept[DEVICE_UUID][0].action, gateway.SENT)
+        self.assertEqual(transport.sent_filenames, ['export.csv'])
+
+    def test_an_empty_config_directory_is_a_healthy_idle(self):
+        """A deployment with no instruments set up yet is not a broken one.
+
+        It must not be the same state as a missing volume — see the next test.
+        """
+        supervisor = self.supervisor()
+
+        self.assertEqual(supervisor.tick(), {})
+        self.assertEqual(supervisor.served, {})
+        self.assertEqual(supervisor.failures, {})
+
+    def test_a_missing_config_directory_refuses_to_run(self):
+        """Absent is a deployment error; empty is idle. Never made the same.
+
+        Docker creates a mount point for an empty volume, so a directory that
+        is genuinely missing means the volume is not mounted. Calling
+        ``makedirs`` here would turn that into a gateway that looks healthy and
+        sends nothing, which is the failure this module is written against.
+        """
+        shutil.rmtree(self.config_dir)
+
+        with self.assertRaises(gateway.GatewayError) as ctx:
+            self.supervisor()
+
+        self.assertIn('does not exist', str(ctx.exception))
+
+    def test_one_bad_config_does_not_stop_the_others(self):
+        """One instrument's misconfiguration is not a site-wide outage."""
+        other = '44444444-4444-4444-4444-444444444444'
+        watch = os.path.join(self.dir, 'watch-two')
+        os.makedirs(watch)
+        self.write_config(name='good.json', device=other, watch_dir=watch)
+        with open(os.path.join(self.config_dir, 'broken.json'), 'w',
+                  encoding='utf-8') as handle:
+            handle.write('{"api_url": "http://localhost:8000",')
+
+        supervisor = self.supervisor()
+        swept = supervisor.tick()
+
+        self.assertEqual(list(swept), [other])
+        self.assertEqual(list(supervisor.failures),
+                         [os.path.join(self.config_dir, 'broken.json')])
+        self.assertIn('not valid JSON', supervisor.failures[
+            os.path.join(self.config_dir, 'broken.json')])
+
+    def test_two_configs_naming_one_device_serve_neither_of_them_twice(self):
+        """One instrument cannot be swept from two files.
+
+        Both would watch the same folder and send the same exports — the
+        platform's digest check would swallow the second, so the site's log
+        would say nothing and its folder would empty. Refused instead, and the
+        message names both files so the fix is obvious.
+        """
+        first = self.write_config(name='a.json')
+        second = self.write_config(name='b.json')
+
+        supervisor = self.supervisor()
+        supervisor.tick()
+
+        self.assertEqual(len(supervisor.served), 1)
+        self.assertEqual(list(supervisor.failures), [second])
+        message = supervisor.failures[second]
+        self.assertIn(first, message)
+        self.assertIn(second, message)
+
+    def test_a_config_that_disappears_is_withdrawn_and_its_ledger_kept(self):
+        """If the instrument comes back, its memory of the platform must too."""
+        path = self.write_config()
+        self.drop(age=60)
+        supervisor = self.supervisor()
+        supervisor.tick()
+        self.assertTrue(os.path.exists(self.ledger_file()))
+
+        os.remove(path)
+        self.assertEqual(supervisor.tick(), {})
+        self.assertEqual(supervisor.served, {})
+
+        self.assertTrue(os.path.exists(self.ledger_file()))
+        self.write_config()
+        # The same bytes are not offered a second time: the ledger came back
+        # with the instrument, which is the whole point of leaving it alone.
+        results = supervisor.tick()[DEVICE_UUID]
+        self.assertEqual([r.action for r in results], [gateway.SKIPPED])
+
+    def test_a_byte_identical_rewrite_does_not_restart_the_settle_clock(self):
+        """The platform rewrites every config on a deploy, unchanged.
+
+        A rebuilt runner would re-observe a file that is mid-write and restart
+        its settle window — delaying a send by a whole window over a config
+        change the file has nothing to do with. The observable difference is
+        which of the two waiting messages the gateway gives: one means "first
+        look", the other "I have been watching it".
+        """
+        self.write_config(settle_seconds=60.0)
+        self.drop()
+        supervisor = self.supervisor()
+
+        first = supervisor.tick()[DEVICE_UUID][0]
+        self.assertEqual(first.action, gateway.DEFERRED)
+        self.assertIn('old, needs', first.detail)
+
+        self.write_config(settle_seconds=60.0)
+
+        second = supervisor.tick(now=time.time() + 10)[DEVICE_UUID][0]
+        self.assertEqual(second.action, gateway.DEFERRED)
+        self.assertIn('of 60s', second.detail)
+
+    def test_a_config_that_changed_the_settle_window_does_restart_it(self):
+        """The carry-over is conditional on the window, and must be.
+
+        A verdict reached under a one-minute rule is not a verdict under a
+        five-minute one — the file may still be being written. The window here
+        is shortened, not lengthened, so the file is still inside it either
+        way: the observable difference is again which waiting message the
+        gateway gives, "first look" or "I have been watching it".
+        """
+        self.write_config(settle_seconds=60.0)
+        self.drop()
+        supervisor = self.supervisor()
+        supervisor.tick()
+
+        self.write_config(settle_seconds=30.0)
+
+        result = supervisor.tick(now=time.time() + 10)[DEVICE_UUID][0]
+        self.assertEqual(result.action, gateway.DEFERRED)
+        self.assertIn('old, needs', result.detail)
+
+    def test_a_rewrite_keeps_the_ledger_even_if_the_file_is_gone(self):
+        """The in-memory ledger is the authority, not the file on disk.
+
+        A config rewrite rebuilds the runner. Re-reading the ledger from disk
+        would be the obvious thing to do and would quietly lose the record of
+        everything the platform holds if the file had been removed — and the
+        gateway would then re-send captures the platform already has.
+        """
+        self.write_config()
+        self.drop(age=60)
+        supervisor = self.supervisor()
+        supervisor.tick()
+
+        os.remove(self.ledger_file())
+        self.write_config(data_type='pundit')
+
+        results = supervisor.tick()[DEVICE_UUID]
+
+        self.assertEqual([r.action for r in results], [gateway.SKIPPED],
+                         f'the ledger was not carried over: {results}')
+
+    def test_a_config_that_changes_device_gets_a_different_ledger(self):
+        """Two instruments, two ledgers, even from one config file."""
+        other = '55555555-5555-5555-5555-555555555555'
+        self.write_config()
+        self.drop(age=60)
+        supervisor = self.supervisor()
+        supervisor.tick()
+
+        self.write_config(device=other, device_token='nxdev_' + 'y' * 32)
+
+        results = supervisor.tick()[other]
+
+        self.assertEqual([r.action for r in results], [gateway.SENT],
+                         f'the new instrument inherited a ledger: {results}')
+        self.assertTrue(os.path.exists(self.ledger_file()))
+        self.assertTrue(os.path.exists(self.ledger_file(other)))
+
+    def test_a_replaced_credential_re_offers_what_a_401_refused(self):
+        """Nobody runs ``--retry-rejected`` on a deployment.
+
+        A 401 is recorded as a verdict and a verdict is never retried, which is
+        right when a person is watching. Here the platform replaces the token
+        and expects the files it refused during the outage to go through — and
+        without this they would stay refused forever, with the site seeing only
+        a folder that never empties.
+        """
+        self.write_config(device_token='nxdev_' + 'a' * 32)
+        self.drop(age=60)
+        transport = FakeTransport(
+            FakeResponse(401, {'detail': 'Invalid, revoked or expired device credential.'}),
+            FakeResponse(201, {'session_reference': 'TMS-AFTER-ROTATION'}))
+        supervisor = self.supervisor(transport=transport)
+
+        refused = supervisor.tick()[DEVICE_UUID]
+        self.assertEqual([r.action for r in refused], [gateway.REJECTED])
+
+        self.write_config(device_token='nxdev_' + 'b' * 32)
+
+        after = supervisor.tick()[DEVICE_UUID]
+        self.assertEqual([r.action for r in after], [gateway.SENT],
+                         f'the file was not re-offered: {after}')
+        self.assertEqual(after[0].detail, 'imported as TMS-AFTER-ROTATION')
+
+    def test_a_replaced_credential_does_not_re_offer_a_column_refusal(self):
+        """The narrowing is the point: not every refusal is a credential problem."""
+        self.write_config(device_token='nxdev_' + 'a' * 32)
+        self.drop(age=60)
+        transport = FakeTransport(
+            FakeResponse(400, {'detail': 'raw.csv has column(s) this platform '
+                                         'does not recognise: distance_mm.'}),
+            FakeResponse(201, {'session_reference': 'TMS-SHOULD-NOT-HAPPEN'}))
+        supervisor = self.supervisor(transport=transport)
+
+        supervisor.tick()
+        self.write_config(device_token='nxdev_' + 'b' * 32)
+
+        after = supervisor.tick()[DEVICE_UUID]
+
+        self.assertEqual([r.action for r in after], [gateway.REJECTED],
+                         f'a column refusal was re-offered: {after}')
+        self.assertEqual(len(transport.calls), 1,
+                         'the refused file was pushed a second time')
+
+    def test_a_failure_stops_one_device_and_leaves_the_others_running(self):
+        """The ``GatewayError`` boundary, seen from the served set."""
+        other = '66666666-6666-6666-6666-666666666666'
+        watch = os.path.join(self.dir, 'watch-two')
+        os.makedirs(watch)
+        self.write_config(name='a.json')
+        self.write_config(name='b.json', device=other, watch_dir=watch)
+        supervisor = self.supervisor()
+        supervisor.tick()
+        self.assertEqual(len(supervisor.served), 2)
+
+        # The folder under a.json goes away with no ``wait_for_watch_dir`` to
+        # excuse it — a mistyped path, which is what must stop that instrument.
+        shutil.rmtree(self.watch_dir)
+
+        swept = supervisor.tick()
+
+        self.assertEqual(list(swept), [other])
+        self.assertEqual(list(supervisor.served.values())[0].device, other)
+        self.assertIn(os.path.join(self.config_dir, 'a.json'),
+                      supervisor.failures)
+
+    def test_a_defect_is_not_swallowed(self):
+        """Only ``GatewayError`` is a per-device problem.
+
+        Every other exception is a bug in this program, and catching it would
+        leave a gateway that is quietly wrong. This test exists so a later
+        "catch everything so one device can't take the process down" edit fails
+        here rather than in the field.
+        """
+        class ExplodingRunner(gateway.GatewayRunner):
+            def sweep(self, now=None):
+                raise RuntimeError('a defect, not a config problem')
+
+        self.write_config()
+        self.drop(age=60)
+        supervisor = self.supervisor()
+
+        with mock.patch.object(gateway, 'GatewayRunner', ExplodingRunner):
+            with self.assertRaises(RuntimeError):
+                supervisor.tick()
+
+    def test_the_cadence_is_the_quickest_interval_and_never_a_hot_loop(self):
+        """A sweep is idempotent, so being early costs a listdir and a stat."""
+        other = '77777777-7777-7777-7777-777777777777'
+        watch = os.path.join(self.dir, 'watch-two')
+        os.makedirs(watch)
+
+        supervisor = self.supervisor()
+        self.assertEqual(supervisor.cadence(), gateway.DEFAULT_INTERVAL)
+
+        self.write_config(name='a.json', interval_seconds=300)
+        self.write_config(name='b.json', device=other, watch_dir=watch,
+                          interval_seconds=15)
+        supervisor.tick()
+        self.assertEqual(supervisor.cadence(), 15)
+
+        self.write_config(name='c.json', device='88888888-8888-8888-8888-888888888888',
+                          watch_dir=self.dir, interval_seconds=0.1)
+        supervisor.tick()
+        self.assertEqual(supervisor.cadence(), gateway.MIN_INTERVAL)
+
+    def test_the_loop_runs_a_bounded_number_of_ticks(self):
+        """``--once`` generalised, exercised without a real sleep."""
+        self.write_config()
+        self.drop(age=60)
+        slept = []
+        supervisor = self.supervisor()
+
+        supervisor.run(max_ticks=3, sleep=slept.append, clock=lambda: 1000.0)
+
+        self.assertEqual(len(slept), 2,
+                         'the loop slept after its final tick')
+
+        slept.clear()
+        supervisor.run(once=True, sleep=slept.append, clock=lambda: 1000.0)
+        self.assertEqual(slept, [])
+
+
+class GatewayCommandModeTests(GatewayDirectoryTestBase):
+    """The command line, and the mistakes it has to name."""
+
+    def setUp(self):
+        super().setUp()
+        self._restore_command_logging()
+
+    def _restore_command_logging(self):
+        logger = logging.getLogger('apps.telemetry.gateway')
+        handlers = list(logger.handlers)
+        propagate, level = logger.propagate, logger.level
+
+        def restore():
+            logger.handlers[:] = handlers
+            logger.propagate = propagate
+            logger.setLevel(level)
+
+        self.addCleanup(restore)
+
+    def test_a_config_directory_without_a_ledger_directory_is_refused(self):
+        self.write_config()
+
+        with self.assertRaises(CommandError) as ctx:
+            call_command('run_gateway', config_dir=self.config_dir, once=True)
+
+        self.assertIn('--ledger-dir', str(ctx.exception))
+
+    def test_a_ledger_directory_without_a_config_directory_is_refused(self):
+        """It would be ignored, which is worse than being refused."""
+        with self.assertRaises(CommandError) as ctx:
+            call_command('run_gateway', config=self.write_config(),
+                         ledger_dir=self.ledger_dir, once=True)
+
+        self.assertIn('--config-dir', str(ctx.exception))
+
+    def test_both_modes_at_once_are_refused(self):
+        """Argparse refuses this, and ``handle`` refuses it again.
+
+        ``call_command`` builds the parser, so the first check is the one this
+        reaches. The second exists for a caller that invokes ``handle``
+        directly, and so that the rule is stated where the modes are.
+        """
+        with self.assertRaises(CommandError) as ctx:
+            call_command('run_gateway', config=self.write_config(),
+                         config_dir=self.config_dir,
+                         ledger_dir=self.ledger_dir, once=True)
+
+        message = str(ctx.exception)
+        self.assertIn('--config', message)
+        self.assertIn('--config-dir', message)
+
+    def test_neither_mode_is_refused(self):
+        with self.assertRaises(CommandError) as ctx:
+            call_command('run_gateway', once=True)
+
+        self.assertIn('--config-dir', str(ctx.exception))
+
+    def test_an_absent_config_directory_is_refused_by_name(self):
+        shutil.rmtree(self.config_dir)
+
+        with self.assertRaises(CommandError) as ctx:
+            call_command('run_gateway', config_dir=self.config_dir,
+                         ledger_dir=self.ledger_dir, once=True)
+
+        self.assertIn(self.config_dir, str(ctx.exception))
+
+    def test_a_single_config_that_is_a_directory_points_at_the_other_flag(self):
+        with self.assertRaises(CommandError) as ctx:
+            call_command('run_gateway', config=self.config_dir, once=True)
+
+        self.assertIn('--config-dir', str(ctx.exception))
+
+    def test_the_summary_reports_an_instrument_that_could_not_be_served(self):
+        """A config that did not load must not be silently absent from the run.
+
+        Reported per instrument rather than per result, because a config that
+        never loaded produces no results at all — and a summary built from
+        results alone would leave it out, which reads as "not provisioned
+        here". That is a different and more comfortable claim than the truth.
+        """
+        missing = os.path.join(self.dir, 'nowhere')
+        self.write_config(name='good.json', watch_dir=missing,
+                          wait_for_watch_dir=True)
+        broken = os.path.join(self.config_dir, 'broken.json')
+        with open(broken, 'w', encoding='utf-8') as handle:
+            handle.write('{}')
+
+        out = StringIO()
+        call_command('run_gateway', config_dir=self.config_dir,
+                     ledger_dir=self.ledger_dir, once=True, stdout=out)
+        text = out.getvalue()
+
+        self.assertIn('Serving 1 instrument(s).', text)
+        self.assertIn(DEVICE_UUID, text)
+        self.assertIn('the folder is not there at the moment', text)
+        self.assertIn('NOT SERVED', text)
+        self.assertIn(broken, text)
+
+    def test_an_empty_config_directory_says_so_rather_than_nothing(self):
+        out = StringIO()
+        call_command('run_gateway', config_dir=self.config_dir,
+                     ledger_dir=self.ledger_dir, once=True, stdout=out)
+
+        self.assertIn('No instruments are provisioned', out.getvalue())
+
+
+# ----------------------------------------------------------------------
 # The whole leg, over real HTTP
 # ----------------------------------------------------------------------
 
@@ -1097,3 +1666,51 @@ class GatewayEndToEndTests(LiveServerTestCase):
         session = TelemetrySession.objects.get()
         self.assertEqual(session.session_config.get('structural_element'),
                          'Column C1')
+
+    def test_the_supervisor_serves_a_provisioned_instrument_end_to_end(self):
+        """Directory mode with nothing stubbed — the shape the deployment uses.
+
+        The config here is what ``GatewayConfigService`` writes, minus the
+        minting: the platform's own writer is tested in ``apps.telemetry.tests``.
+        What this proves is the leg after it — a config file appearing in a
+        directory, picked up by a supervisor that has never seen it, swept over
+        real HTTP, and landing as an un-promoted FILE session.
+        """
+        config_dir = tempfile.mkdtemp(prefix='nexucon_gateway_e2e_cfg_')
+        self.addCleanup(shutil.rmtree, config_dir, True)
+        ledger_dir = tempfile.mkdtemp(prefix='nexucon_gateway_e2e_state_')
+        self.addCleanup(shutil.rmtree, ledger_dir, True)
+        config_path = os.path.join(config_dir, f'{self.device.id}.json')
+        with open(config_path, 'w', encoding='utf-8') as handle:
+            json.dump({
+                'api_url': self.live_server_url,
+                'device_token': self.token,
+                'device': str(self.device.id),
+                'project': str(self.project.id),
+                'watch_dir': self.watch_dir,
+                'data_type': 'pundit',
+                'wait_for_watch_dir': True,
+                'settle_seconds': 1.0,
+                'context': {'test_type': 'Pulse Velocity'},
+            }, handle)
+        self.drop(name='site-export.csv', content=(
+            'POINT,PATH LENGTH L (MM),TRANSIT TIME T (US)\n'
+            'A,300,65.2\n'
+        ).encode('utf-8'))
+
+        supervisor = gateway.GatewaySupervisor(config_dir, ledger_dir)
+        swept = supervisor.tick()
+
+        results = swept[str(self.device.id)]
+        self.assertEqual([r.action for r in results], [gateway.SENT],
+                         f'gateway did not send: {results}')
+        self.assertEqual(results[0].device, str(self.device.id))
+        session = TelemetrySession.objects.get()
+        self.assertEqual(session.transport, TelemetrySession.TRANSPORT_FILE)
+        self.assertEqual(session.sync_status, TelemetrySession.SYNC_PENDING)
+        self.assertIsNone(session.promoted_at)
+        self.assertEqual(PUNDITReading.objects.count(), 0)
+        # The ledger is named from the device, so a rewritten config cannot
+        # hand this instrument's memory to another one.
+        self.assertTrue(os.path.exists(
+            os.path.join(ledger_dir, f'{self.device.id}.json')))

@@ -7,15 +7,14 @@ what closes the last metre: it notices a new export, sends it to
 ``telemetry/session/from-file/``, and the capture appears on the platform as a
 reviewable, un-promoted session. Nobody opens an upload form.
 
-**This module imports no Django models, on purpose.** It runs on a laptop in a
-site office, under ``config.settings.gateway``, which carries no database
-configuration and therefore no production credentials. If this file imported a
-model, that stripped settings module could not load it and the laptop would
-need the platform's database password to push a CSV. Everything here is
-stdlib plus ``requests``; the platform is reached over HTTP like any other
-client.
+**This module imports no Django models, on purpose.** It runs in a container
+that carries no database configuration and therefore no production
+credentials. If this file imported a model, that stripped settings module
+could not load it and the site would need the platform's database password to
+push a CSV. Everything here is stdlib plus ``requests``; the platform is
+reached over HTTP like any other client.
 
-Four rules shape the behaviour, and each exists because of a specific way a
+Five rules shape the behaviour, and each exists because of a specific way a
 folder watcher goes wrong.
 
 **A file is only sent once it has stopped changing.** A file appearing in a
@@ -53,6 +52,18 @@ ENDED and PENDING. Registry rows are written only at ``/end/``, by a person,
 after review. A gateway that promoted would put an unreviewed parse straight
 into a statutory record, which is the one thing the whole ingestion path is
 built to prevent.
+
+**One process serves many instruments, and one device's failure is that
+device's failure.** A site has more than one instrument, and a process per
+instrument would mean a container per instrument. So directory mode reads a
+directory holding one config per device — written by the platform, never by
+hand — and sweeps each. The failure boundary is ``GatewayError``, the class
+that means *a person fixes this by changing a config or a disk*: a bad config,
+an absent watched folder, a corrupt ledger, two configs naming one device.
+Such a condition stops that one device and leaves the others running, because
+one instrument's misconfiguration is not a reason to stop a site's other
+instruments. Anything that is not a ``GatewayError`` is a defect in this
+program, is caught nowhere, and takes the process down where it is unmissable.
 """
 import fnmatch
 import hashlib
@@ -62,7 +73,7 @@ import os
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -73,7 +84,7 @@ USER_AGENT = 'nexucon-field-gateway/1.0'
 
 #: Mirrors ``apps.telemetry.models.DEVICE_TOKEN_PREFIX``. Duplicated rather
 #: than imported because importing the model is what this module must not do;
-#: ``test_gateway.py`` asserts the two agree, so the copy cannot drift.
+#: ``tests_gateway.py`` asserts the two agree, so the copy cannot drift.
 DEVICE_TOKEN_PREFIX = 'nxdev_'
 
 #: The route this gateway pushes to, appended to ``api_url``.
@@ -113,6 +124,28 @@ REJECTED = 'rejected'
 DEFERRED = 'deferred'
 FAILED = 'failed'
 SKIPPED = 'skipped'
+
+#: What counts as a config in the config directory. Every config is a file the
+#: platform wrote, so the suffix is fixed rather than configurable — a setting
+#: here would only be a way to make the directory mode find nothing.
+CONFIG_SUFFIX = '.json'
+
+#: The cadence when nothing is being served. Nothing is waiting on it, so it is
+#: deliberately unhurried.
+DEFAULT_INTERVAL = 30.0
+
+#: A config asking for a faster sweep than this cannot hot-loop the process.
+MIN_INTERVAL = 1.0
+
+#: Ticks between repeats of a failure that has not changed. At the default
+#: cadence that is about ten minutes: an instrument whose folder was renamed
+#: must not write the same ERROR every thirty seconds for a year, and must not
+#: go quiet either.
+FAILURE_HEARTBEAT_TICKS = 20
+
+#: HTTP verdicts that mean *that credential did not work*. The only ones a
+#: replaced token can be expected to fix — see ``GatewaySupervisor._reoffer``.
+CREDENTIAL_STATUSES = (401, 403)
 
 
 class GatewayError(Exception):
@@ -159,18 +192,33 @@ class GatewayConfig:
         return self.api_url.rstrip('/') + SEND_PATH
 
     @classmethod
-    def from_file(cls, path):
-        """Read and validate ``gateway.json``.
+    def from_file(cls, path, *, ledger_dir=None):
+        """Read and validate one gateway config.
 
-        Every problem raises here, at startup, naming the key — a gateway
-        that starts with a bad config and then does nothing is far worse than
-        one that refuses to start, because the site believes it is working.
+        Every problem raises here, naming the key — a gateway that starts with
+        a bad config and then does nothing is far worse than one that refuses
+        to start, because the site believes it is working.
+
+        ``ledger_dir`` names the directory a per-device ledger is written to
+        when the config does not name its own ``ledger_path``. Directory mode
+        passes it, because that mode's config directory is mounted read-only
+        and a ledger cannot live beside a config there. It is a keyword rather
+        than a field on the dataclass on purpose: the ledger path is fully
+        resolved here, so nothing downstream needs to know how it was chosen.
         """
         try:
             with open(path, 'r', encoding='utf-8') as handle:
                 raw = json.load(handle)
         except FileNotFoundError:
             raise GatewayError(f'No gateway config at {path}.')
+        except (IsADirectoryError, PermissionError):
+            # A directory where a config file was expected. Windows raises
+            # PermissionError where POSIX raises IsADirectoryError, and
+            # neither is a JSON problem, so the branch below cannot reach it.
+            raise GatewayError(
+                f'{path} is a directory, not a config file. To serve a '
+                f'directory of configs — one JSON file per instrument, written '
+                f'for you by the platform — pass --config-dir {path}.')
         except json.JSONDecodeError as exc:
             raise GatewayError(
                 f'{path} is not valid JSON: {exc.msg} (line {exc.lineno}). '
@@ -233,6 +281,17 @@ class GatewayConfig:
         ledger_path = raw.get('ledger_path')
         if ledger_path:
             ledger_path = os.path.abspath(os.path.expanduser(str(ledger_path)))
+        elif ledger_dir:
+            # Named from the *device*, never from the config's own filename.
+            # The platform's resend check is scoped to the device, so nothing
+            # downstream catches a gateway that skipped a file: a config whose
+            # filename stayed put while its "device" changed would hand the new
+            # instrument a ledger reading "already sent", and its capture would
+            # be dropped with no error anywhere. Deriving the name from the
+            # device makes that impossible rather than merely unlikely.
+            # "device" was validated as a UUID above, so it is safe here.
+            ledger_path = os.path.join(os.path.abspath(ledger_dir),
+                                       f'{device}.json')
         else:
             # Beside the config, not inside the watched folder — a ledger in
             # the watched folder is one sync client away from being uploaded,
@@ -312,16 +371,22 @@ class Ledger:
     once it has been fixed.
     """
 
-    VERSION = 1
+    VERSION = 2
 
-    def __init__(self, path):
+    def __init__(self, path, device=''):
         self.path = path
+        #: The instrument this ledger records for. Written into the file and
+        #: checked on load, because a ledger that silently changed hands is
+        #: the one way a capture gets lost with nothing to show for it: the
+        #: platform's own resend check is scoped to the device, so a gateway
+        #: that skipped a file is not contradicted by anything downstream.
+        self.device = device
         self.sent = {}
         self.rejected = {}
 
     @classmethod
-    def load(cls, path):
-        ledger = cls(path)
+    def load(cls, path, device=''):
+        ledger = cls(path, device=device)
         try:
             with open(path, 'r', encoding='utf-8') as handle:
                 data = json.load(handle)
@@ -336,6 +401,15 @@ class Ledger:
                 f'aside to start a fresh one — the platform will refuse any '
                 f'file it already holds, so nothing is recorded twice.')
         if isinstance(data, dict):
+            stored = str(data.get('device') or '')
+            if stored and device and stored != device:
+                raise GatewayError(
+                    f'The ledger at {path} records for device {stored}, but '
+                    f'this config names {device}. Refusing to use it: it holds '
+                    f'what the platform confirmed for another instrument, so '
+                    f'trusting it would skip files this one has never sent. '
+                    f'Move it aside — the platform refuses any file it already '
+                    f'holds, so nothing is recorded twice.')
             ledger.sent = data.get('sent') or {}
             ledger.rejected = data.get('rejected') or {}
         return ledger
@@ -402,10 +476,24 @@ class Ledger:
             'detail': detail,
         }
 
-    def clear_rejected(self):
-        """Forget every refusal, so those files are offered again."""
-        count = len(self.rejected)
-        self.rejected = {}
+    def clear_rejected(self, statuses=None):
+        """Forget refusals, so those files are offered again.
+
+        ``statuses`` narrows it to particular HTTP verdicts. Directory mode
+        uses that to clear only the credential refusals when a config's token
+        is replaced: a 400 about an unknown column is fixed on the device
+        record, never in the config, so re-offering it on every config write
+        would undo the very thing that stopped it being retried forever.
+        """
+        if statuses is None:
+            count = len(self.rejected)
+            self.rejected = {}
+            return count
+        wanted = set(statuses)
+        kept = {digest: entry for digest, entry in self.rejected.items()
+                if entry.get('status') not in wanted}
+        count = len(self.rejected) - len(kept)
+        self.rejected = kept
         return count
 
     def save(self):
@@ -419,6 +507,7 @@ class Ledger:
         payload = {
             'version': self.VERSION,
             'updated_at': _now_iso(),
+            'device': self.device,
             'sent': self.sent,
             'rejected': self.rejected,
         }
@@ -467,6 +556,11 @@ class SweepResult:
     action: str
     detail: str = ''
     status: int = None
+    #: The instrument this file was considered for. Left empty in single-config
+    #: mode, where there is only one and naming it on every line adds nothing.
+    #: Directory mode stamps it, because a log line naming a file but not the
+    #: instrument it belonged to cannot be read when several are served.
+    device: str = ''
 
 
 class GatewayRunner:
@@ -477,10 +571,17 @@ class GatewayRunner:
     the interesting failures live.
     """
 
-    def __init__(self, config, transport=None, dry_run=False):
+    def __init__(self, config, transport=None, dry_run=False, ledger=None):
         self.config = config
         self.dry_run = dry_run
-        self.ledger = Ledger.load(config.ledger_path)
+        #: Handed in by the supervisor when it rebuilds one device's runner
+        #: after a config change and the ledger path has not moved. Every
+        #: mutation is saved as it happens, so the in-memory copy is the
+        #: authoritative one; re-reading the file here would only re-run the
+        #: writability probe and discard anything recorded since it was last
+        #: written.
+        self.ledger = ledger if ledger is not None else Ledger.load(
+            config.ledger_path, device=config.device)
         # Before any file is sent, not when the first one has been. See
         # Ledger.verify_writable — discovering this after a successful send is
         # the one ordering that loses the record of a capture that arrived.
@@ -494,6 +595,21 @@ class GatewayRunner:
         #: reachable when ``wait_for_watch_dir`` is set; kept as state so the
         #: absence is logged on the transition rather than every sweep.
         self.watch_dir_missing = False
+
+    def adopt_state_from(self, other):
+        """Carry over what a config change does not invalidate.
+
+        A settle verdict belongs to ``(path, size, mtime)`` and to
+        ``settle_seconds``. If neither the watched folder nor the window
+        changed, those verdicts are still true, and dropping them would restart
+        the clock on a file that is being written right now — delaying a send
+        by a whole settle window over a config change the file has nothing to
+        do with. Called by the supervisor when it rebuilds a runner.
+        """
+        if (self.config.watch_dir == other.config.watch_dir
+                and self.config.settle_seconds == other.config.settle_seconds):
+            self._observed = dict(other._observed)
+            self.watch_dir_missing = other.watch_dir_missing
 
     # -- one pass ------------------------------------------------------
 
@@ -843,19 +959,348 @@ def run(config, *, once=False, dry_run=False, retry_rejected=False,
 
 def _log_result(result):
     name = os.path.basename(result.path)
+    # Directory mode serves several instruments, and a line naming only the
+    # file cannot be read there: two sites' exports are called the same thing.
+    # Single-config mode leaves this empty, so its lines are unchanged.
+    who = f'device {result.device} ' if result.device else ''
     if result.action == SENT:
-        logger.info('gateway: %s %s', name, result.detail)
+        logger.info('gateway: %s%s %s', who, name, result.detail)
     elif result.action == DUPLICATE:
-        logger.info('gateway: %s already on the platform — %s', name, result.detail)
+        logger.info('gateway: %s%s already on the platform — %s', who, name,
+                    result.detail)
     elif result.action == WOULD_SEND:
-        logger.info('gateway: %s would be sent (%s)', name, result.detail)
+        logger.info('gateway: %s%s would be sent (%s)', who, name, result.detail)
     elif result.action == REJECTED:
-        logger.error('gateway: %s REFUSED — %s', name, result.detail)
+        logger.error('gateway: %s%s REFUSED — %s', who, name, result.detail)
     elif result.action == FAILED:
-        logger.warning('gateway: %s %s', name, result.detail)
+        logger.warning('gateway: %s%s %s', who, name, result.detail)
     else:
-        logger.info('gateway: %s %s (%s)', name, result.action, result.detail)
+        logger.info('gateway: %s%s %s (%s)', who, name, result.action,
+                    result.detail)
 
 
 def _sleep(seconds):
     time.sleep(seconds)
+
+
+# ----------------------------------------------------------------------
+# Serving a directory of configs
+# ----------------------------------------------------------------------
+
+def _credential_changed(old, new):
+    """Whether a config rewrite replaced the credential it pushes with.
+
+    Named rather than inlined because the comparison is the whole reason a
+    refusal is re-offered, and an inlined ``!=`` beside a ``==`` for the device
+    is the kind of thing a later edit gets backwards.
+    """
+    return old.device_token != new.device_token
+
+
+@dataclass
+class ServedConfig:
+    """One live config file, the runner built from it, and where it came from.
+
+    ``path`` is kept because it, not the device, is the identity of a served
+    slot: two files naming one device is an error to report, and a file that
+    was deleted is withdrawn by path.
+    """
+
+    path: str
+    config: GatewayConfig
+    runner: GatewayRunner
+
+    @property
+    def device(self):
+        return self.config.device
+
+
+class GatewaySupervisor:
+    """Serves one instrument per config file in a directory.
+
+    The platform writes one JSON file per instrument into a directory this
+    process reads but cannot write; this picks them up, sweeps each device, and
+    keeps one device's failure from touching another's.
+
+    **Reloading re-parses every config, every tick, and lets the dataclass
+    compare.** An ``(size, mtime)`` fingerprint would be cheaper and would lie:
+    a coarse-mtime filesystem, or an ``os.replace`` that preserves mtime, both
+    produce a file that changed while its fingerprint did not. Parsed equality
+    is the authority, and a byte-identical rewrite — the platform rewriting
+    every config on a deploy — is correctly a no-op.
+
+    **Single-threaded, deliberately.** A thread per device buys only latency
+    when the platform is unreachable, and costs concurrent writes into one
+    ledger directory plus a shutdown path for a POST that is blocked. Nothing
+    is lost by being slow: files stay in the folder.
+    """
+
+    def __init__(self, config_dir, ledger_dir, *, transport=None,
+                 dry_run=False, retry_rejected=False, on_result=None,
+                 on_sweep=None):
+        if not os.path.isdir(config_dir):
+            # Fatal, and deliberately not repaired. An *empty* config
+            # directory is the healthy idle state; an *absent* one means the
+            # volume is not mounted or the path is a typo. Docker creates a
+            # mount point for an empty volume, so those two are distinguishable
+            # — and calling makedirs here would make them the same, turning a
+            # broken mount into a gateway that looks healthy and sends nothing.
+            raise GatewayError(
+                f'The gateway config directory {config_dir} does not exist. '
+                f'It holds one JSON file per instrument, written for you by '
+                f'the platform. If it is missing, its volume is not mounted.')
+        self.config_dir = config_dir
+        self.ledger_dir = ledger_dir
+        self.dry_run = dry_run
+        self.retry_rejected = retry_rejected
+        self._transport = transport
+        self._on_result = on_result
+        self._on_sweep = on_sweep
+        #: config path → ServedConfig. Keyed by path so a deleted file is
+        #: withdrawn by the same name it arrived under.
+        self._served = {}
+        #: config path → (reason, tick it was last logged). Bounded by the
+        #: number of files in the directory, all of which exist on disk.
+        self._failure = {}
+        self._ticks = 0
+        #: The cadence last announced, so it is logged when it changes rather
+        #: than on every tick.
+        self._cadence = None
+
+    @property
+    def served(self):
+        """The live configs, keyed by config path."""
+        return dict(self._served)
+
+    @property
+    def failures(self):
+        """Config path → why it is not being served.
+
+        Read by the command, which reports one line per instrument: a config
+        that would not load produced no sweep results, so a summary built from
+        results alone would leave it out and read as "not provisioned here".
+        """
+        return {path: reason for path, (reason, _tick) in self._failure.items()}
+
+    # -- discovery -----------------------------------------------------
+
+    def _config_paths(self):
+        """Every candidate config, in a stable order.
+
+        A file whose name begins with a dot is skipped, as are the partial
+        suffixes: a sync client materialising a config must not be read
+        half-written, and a config written by ``os.replace`` never appears
+        under one of those names anyway.
+        """
+        try:
+            names = os.listdir(self.config_dir)
+        except OSError as exc:
+            raise GatewayError(
+                f'The gateway config directory {self.config_dir} could not be '
+                f'read ({exc}). If its volume was unmounted, this process '
+                f'cannot serve anything, and says so rather than idling.')
+        found = []
+        for name in sorted(names):
+            if name.startswith('.'):
+                continue
+            if name.lower().endswith(PARTIAL_SUFFIXES):
+                continue
+            if not name.lower().endswith(CONFIG_SUFFIX):
+                continue
+            path = os.path.join(self.config_dir, name)
+            if os.path.isfile(path):
+                found.append(path)
+        return found
+
+    def _reload(self):
+        """Reconcile the served set with the config directory.
+
+        Every ``GatewayError`` raised here is one device's problem, so it is
+        caught and recorded per path. A non-``GatewayError`` is not caught —
+        see the class docstring.
+        """
+        seen = set()
+        for path in self._config_paths():
+            seen.add(path)
+            try:
+                config = GatewayConfig.from_file(path,
+                                                 ledger_dir=self.ledger_dir)
+                self._adopt(path, config)
+            except GatewayError as exc:
+                self._withdraw(path)
+                self._failed(path, str(exc))
+                continue
+            self._recovered(path)
+        for path in sorted(set(self._served) - seen):
+            self._withdraw(path)
+            logger.info('gateway: %s is gone; that instrument is no longer '
+                        'served here', path)
+
+    def _adopt(self, path, config):
+        """Serve ``config`` at ``path``, rebuilding only if it changed."""
+        served = self._served.get(path)
+        if served is not None and served.config == config:
+            return
+
+        clash = sorted(p for p, s in self._served.items()
+                       if p != path and s.device == config.device)
+        if clash:
+            raise GatewayError(
+                f'{path} and {", ".join(clash)} both name device '
+                f'{config.device}. One instrument cannot be served twice — '
+                f'the two would each send the same files. Remove one.')
+
+        if served is None:
+            runner = GatewayRunner(config, transport=self._transport,
+                                   dry_run=self.dry_run)
+            self._served[path] = ServedConfig(path, config, runner)
+            if self.retry_rejected:
+                self._reoffer(runner, config, everything=True)
+            logger.info('gateway: serving device %s from %s (%s)',
+                        config.device, config.watch_dir, path)
+            return
+
+        # A material change. The same instrument keeps its ledger and its
+        # settle verdicts; a different one gets neither, because both are
+        # facts about a device and not about a file.
+        same_device = served.config.device == config.device
+        reuse = served.runner.ledger if (
+            same_device and served.runner.ledger.path == config.ledger_path
+        ) else None
+        runner = GatewayRunner(config, transport=self._transport,
+                               dry_run=self.dry_run, ledger=reuse)
+        runner.adopt_state_from(served.runner)
+        self._served[path] = ServedConfig(path, config, runner)
+        if same_device and _credential_changed(served.config, config):
+            self._reoffer(runner, config)
+        logger.info('gateway: %s was re-read; now serving device %s from %s',
+                    path, config.device, config.watch_dir)
+
+    def _reoffer(self, runner, config, everything=False):
+        """Forget refusals this config write has just made obsolete.
+
+        A 401 or 403 is recorded as a *verdict*, and a verdict is never
+        retried. That is right when a person is watching: they fix the
+        credential, then run ``--retry-rejected``. Here nobody runs anything,
+        so a token replaced *because* it had stopped working would leave every
+        file refused during the outage refused forever.
+
+        Only the credential verdicts are cleared. A 400 about an unknown column
+        is fixed on the device record, never in the config, so re-offering it
+        on every config write would undo the very thing that stopped it being
+        retried forever.
+        """
+        statuses = None if everything else CREDENTIAL_STATUSES
+        cleared = runner.ledger.clear_rejected(statuses=statuses)
+        if not cleared:
+            return
+        runner.ledger.save()
+        if everything:
+            logger.info('gateway: device %s — %s previously refused file(s) '
+                        'will be offered again', config.device, cleared)
+        else:
+            logger.info('gateway: device %s has a new credential; %s file(s) '
+                        'it could not push before will be offered again',
+                        config.device, cleared)
+
+    def _withdraw(self, path):
+        self._served.pop(path, None)
+
+    def _failed(self, path, reason):
+        """Record one device's failure without repeating it every tick."""
+        previous = self._failure.get(path)
+        if previous is None or previous[0] != reason:
+            logger.error('gateway: %s cannot be served — %s', path, reason)
+            self._failure[path] = (reason, self._ticks)
+        elif self._ticks - previous[1] >= FAILURE_HEARTBEAT_TICKS:
+            logger.warning('gateway: %s still cannot be served — %s',
+                           path, reason)
+            self._failure[path] = (reason, self._ticks)
+
+    def _recovered(self, path):
+        if self._failure.pop(path, None) is not None:
+            logger.info('gateway: %s is being served again', path)
+
+    # -- sweeping ------------------------------------------------------
+
+    def _sweep_one(self, served, now):
+        """Sweep one device, or stop it and only it.
+
+        Returns ``None`` when the device was stopped, which is distinct from
+        ``[]`` — an empty list is a device that was swept and whose folder held
+        nothing. The two are different claims about the same instrument and
+        ``tick`` reports them differently.
+        """
+        try:
+            results = served.runner.sweep(now)
+        except GatewayError as exc:
+            self._withdraw(served.path)
+            self._failed(served.path, str(exc))
+            return None
+        return [replace(result, device=served.device) for result in results]
+
+    def tick(self, now=None):
+        """Re-read the config directory, then sweep every served device once.
+
+        Returns ``{device: [SweepResult, ...]}`` — the device dimension the
+        single-config runner has no way to express. A device stopped during
+        this tick is absent from it rather than present with no results:
+        nothing was swept, and an empty list would say otherwise.
+        """
+        self._ticks += 1
+        now = time.time() if now is None else now
+        self._reload()
+        swept = {}
+        for served in sorted(self._served.values(), key=lambda s: s.path):
+            results = self._sweep_one(served, now)
+            if results is None:
+                continue
+            for result in results:
+                (self._on_result or _log_result)(result)
+            if self._on_sweep is not None:
+                self._on_sweep(served.device, served.runner)
+            swept[served.device] = results
+        return swept
+
+    def cadence(self):
+        """Seconds until the next tick: the fastest live interval.
+
+        This makes a config's ``interval_seconds`` a floor on the process
+        rather than an exact schedule — an instrument asking to be swept every
+        five minutes is swept at whatever the quickest one asks for. That is
+        safe because a sweep is idempotent: the settle rule is time-based and
+        the ledger is keyed by content, so an extra pass costs a listdir and a
+        stat. With nothing served there is nothing to be impatient about.
+        """
+        live = [s.config.interval_seconds for s in self._served.values()]
+        return max(MIN_INTERVAL, min(live)) if live else DEFAULT_INTERVAL
+
+    def run(self, *, once=False, max_ticks=None, sleep=None, clock=None):
+        """Tick until interrupted, or for a bounded number of ticks.
+
+        ``max_ticks`` is ``--once`` generalised: one tick is a single pass for
+        a cron-like deployment, a larger number is the loop without a real
+        sleep. It earns its place beyond testing — a wrapper that wants to
+        restart the gateway periodically has no other way to ask for it.
+
+        ``sleep`` and ``clock`` are injectable so the loop can be exercised
+        without waiting, which is the only way its cadence logic gets tested at
+        all.
+        """
+        sleep = sleep or _sleep
+        clock = clock or time.time
+        remaining = 1 if once else max_ticks
+        while True:
+            self.tick(now=clock())
+            if remaining is not None:
+                remaining -= 1
+                if remaining <= 0:
+                    return
+            cadence = self.cadence()
+            if cadence != self._cadence:
+                # The operator set an interval per instrument and this process
+                # honours the quickest; the number actually used is worth one
+                # line, once, rather than something to be inferred.
+                self._cadence = cadence
+                logger.info('gateway: sweeping every %.0fs', cadence)
+            sleep(cadence)

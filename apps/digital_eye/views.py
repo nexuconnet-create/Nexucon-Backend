@@ -182,6 +182,58 @@ class FieldDeviceViewSet(viewsets.ModelViewSet):
         device.save(update_fields=updates)
         return Response(FieldDeviceSerializer(device, context={'request': request}).data)
 
+    @action(detail=True, methods=['post'])
+    def gateway(self, request, pk=None):
+        """`POST digital-eye/devices/<uuid>/gateway/` — turn sync on or off.
+
+        Body: ``{"enabled": true}``. Turning it on mints a credential for this
+        instrument and writes the field gateway's config for it, in one step —
+        see ``apps.telemetry.gateway_config``. **The credential is never
+        returned.** It goes from the mint into the config file the gateway
+        reads, and no client, log or response ever holds it, which is the whole
+        point of provisioning from here rather than by hand.
+
+        Resolved through ``_scoped_devices`` rather than ``self.get_queryset``
+        on purpose. That viewset's queryset returns every device in the system
+        to any authenticated user — a known hole left alone for now — and this
+        action mints a credential. Scoping it here means the hole cannot be
+        reached through provisioning: a device outside the caller's projects is
+        404, the same answer the credentials endpoint gives.
+        """
+        from apps.telemetry.gateway_config import (
+            GatewayConfigError, GatewayConfigService)
+        from apps.telemetry.views import _scoped_devices
+
+        device = _scoped_devices(request.user).filter(pk=pk).first()
+        if device is None:
+            return Response(
+                {'detail': 'Device not found among the devices you can see.'},
+                status=status.HTTP_404_NOT_FOUND)
+
+        enabled = request.data.get('enabled')
+        if not isinstance(enabled, bool):
+            return Response(
+                {'detail': 'Send {"enabled": true} or {"enabled": false}.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            if enabled:
+                path = GatewayConfigService.enable(device, actor=request.user)
+                action_name = 'digital_eye.device.gateway.enable'
+                detail = {'config_path': path}
+            else:
+                path = GatewayConfigService.disable(device, actor=request.user)
+                action_name = 'digital_eye.device.gateway.disable'
+                detail = {'config_path': path}
+        except GatewayConfigError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+
+        _record_audit(request.user, action_name, 'FieldDevice', device.id,
+                      {'device_id': device.device_id, **detail})
+        device.refresh_from_db(fields=['gateway_enabled'])
+        return Response(
+            FieldDeviceSerializer(device, context={'request': request}).data)
+
 
 class SensorDataFileViewSet(viewsets.ModelViewSet):
     """
