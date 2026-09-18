@@ -77,6 +77,10 @@ services:
     # `config.settings.gateway` sets `DATABASES = {}` so Django could not reach
     # the registry even with credentials in hand, but not mounting them means
     # the claim in that settings module stays true rather than merely enforced.
+    #
+    # That claim rests on `.env` being in `.dockerignore` as well. The mount is
+    # only half of it: `COPY . /app/` would otherwise put `.env` in the image
+    # itself, where a missing bind mount does not help.
     # The code comes from the image itself, so a change here needs a rebuild:
     #   docker compose up -d --build
     #
