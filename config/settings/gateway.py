@@ -50,3 +50,44 @@ DATABASES = {}
 
 #: No routing. Nothing is served under these settings.
 ROOT_URLCONF = None
+
+#: The gateway's log is its entire operator interface.
+#:
+#: There is no UI, no metrics endpoint and no status page — `docker compose
+#: logs gateway` is the whole of it. A line that does not print is therefore a
+#: fact nobody can learn. Django applies no logging configuration of its own
+#: when a project defines none, which leaves Python's ``lastResort`` handler:
+#: stderr, pinned at WARNING. So every ``logger.info`` — including the one in
+#: ``_adopt`` announcing that an instrument was picked up — was dropped, and
+#: the process looked byte-for-byte identical whether it was serving an
+#: instrument or had never noticed one. Only ``logger.error`` and
+#: ``logger.warning`` got through, which is why a *refused* config was visible
+#: while a *healthy* one was silent: the deployment showed you its problems
+#: and hid its successes.
+#:
+#: Configured here rather than in ``base.py`` because it is this process that
+#: has nothing but a log. ``web`` and ``celery`` carry the same blindness for
+#: ``apps.*`` INFO, and that is a separate change to a running API.
+LOGGING = {
+    'version': 1,
+    # Django's own ``django.*`` loggers are configured by DEFAULT_LOGGING
+    # before this is applied; disabling them here would silence the framework
+    # on the one machine least able to diagnose it.
+    'disable_existing_loggers': False,
+    'formatters': {
+        # Messages already carry their own ``gateway:`` prefix, so the logger
+        # name would only repeat it.
+        'gateway': {'format': '%(levelname)s %(message)s'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'gateway'},
+    },
+    'loggers': {
+        'apps': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+
