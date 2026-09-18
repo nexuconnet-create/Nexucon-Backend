@@ -13,6 +13,10 @@ db.sqlite3.bak*
 .DS_Store
 cookies.txt
 *.json
+# The gateway's example config is a template with no secret in it, so it is
+# committed on purpose. The real gateway.json holds a device credential and
+# stays ignored by the *.json rule above, exactly as it should.
+!gateway.example.json
 *.log
 _tmp_runserver.log
 runserver.log

@@ -1053,7 +1053,20 @@ class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
     def test_search_matches_test_reference_substring(self):
         ref = PUNDITTest.objects.filter(structural_element='COL-C24').first().test_reference
         # Use a distinctive middle slice of the real reference.
-        needle = ref[4:-4]
+        #
+        # The slice is longer than it looks like it needs to be, and that is
+        # the point. A reference is ``PND-<year>-<6 random hex>`` — fifteen
+        # characters — so slicing four off each end yields only *two* of those
+        # random characters (``2026-XX``). Two of the three references built in
+        # setUp then collide on that slice about once in eighty-five runs, and
+        # when they do, ``len(rows) == 1`` fails on a search that is working
+        # correctly: both references genuinely contain the needle. Taking one
+        # character off the back instead keeps five random characters, which
+        # two references share about once in a million runs. The slice still
+        # drops the prefix and the final character, so it neither starts at the
+        # beginning nor ends at the end — which is what makes it a test that
+        # the search is a substring match rather than an anchored one.
+        needle = ref[4:-1]
         rows = self.client.get(reverse('pundit-test-list'),
                                {'search': needle}).data
         self.assertEqual(len(rows), 1)
@@ -1592,6 +1605,99 @@ class PUNDITProjectAnalysisTestCase(TestCase):
 # ======================================================================
 # Field device registry CRUD + project-scoped listing
 # ======================================================================
+
+class FieldDeviceColumnMappingTestCase(DigitalEyeAPITestBase):
+    """A device's declared export-column mapping, validated where it is written.
+
+    The mapping is read on every file import from this device. A value that is
+    not a platform column would not fail on this form — it would fail weeks
+    later, on a laptop at a site, as a refusal naming a column nobody present
+    had written. So it is refused here instead.
+    """
+
+    def _patch(self, device_id, mapping):
+        return self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': device_id}),
+            {'column_mapping': mapping}, format='json')
+
+    def _device(self, **overrides):
+        payload = {'device_id': 'PUNDIT-MAP-01', 'device_type': 'pundit'}
+        payload.update(overrides)
+        response = self.client.post(reverse('field-device-list'), payload,
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return response.data['id']
+
+    def test_a_mapping_of_contract_keys_is_accepted(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance (mm)': 'path_length_l_mm',
+            'Time (us)': 'transit_time_t_us',
+            'Location': 'point',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['column_mapping'],
+                         {'Distance (mm)': 'path_length_l_mm',
+                          'Time (us)': 'transit_time_t_us',
+                          'Location': 'point'})
+
+    def test_a_value_that_is_not_a_platform_column_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'Distance (mm)': 'distance_mm'})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('distance_mm', str(response.data['errors']))
+        # And nothing was stored, so the device is not left half-configured.
+        device = FieldDevice.objects.get(pk=device_id)
+        self.assertEqual(device.column_mapping, {})
+
+    def test_the_refusal_lists_the_columns_that_would_have_worked(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'Distance (mm)': 'nonsense'})
+
+        self.assertIn('path_length_l_mm', str(response.data['errors']))
+
+    def test_a_mapping_written_in_the_template_s_spelling_is_accepted(self):
+        # Folded the same way the reader folds it, so this resolves to the same
+        # contract key. Refusing it would reject a mapping that works.
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance (mm)': 'PATH LENGTH L (MM)',
+            'Time (us)': 'TRANSIT TIME T (US)',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_a_blank_source_column_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'  ': 'path_length_l_mm'})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('blank', str(response.data['errors']).lower())
+
+    def test_a_mapping_that_is_not_an_object_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, ['path_length_l_mm'])
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_clearing_a_mapping_is_allowed(self):
+        """The honest default: the export speaks the template."""
+        device_id = self._device()
+        self._patch(device_id, {'Distance (mm)': 'path_length_l_mm'})
+
+        response = self._patch(device_id, {})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['column_mapping'], {})
+
 
 class FieldDeviceRegistryTestCase(DigitalEyeAPITestBase):
     def test_device_create_requires_serial_device_id(self):

@@ -45,7 +45,52 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - FRONTEND_URL=${FRONTEND_URL:-https://nexucon.net}
-      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,inspector.nexucon.com,inspector.nexucon.net,187.7.20.123,localhost,127.0.0.1}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.nexucon.net,nexucon.net,inspector.nexucon.com,inspector.nexucon.net,187.7.20.123,localhost,127.0.0.1,web}
+
+  gateway:
+    # The field gateway: watches a folder that site exports are synced into,
+    # and pushes each settled file to the platform. Same image as `web` with a
+    # different entry point — it is an HTTP client with a watched folder, not
+    # a server. It listens on nothing and serves nothing.
+    #
+    # NOTE: no `.:/app` bind mount, unlike every other service here. That mount
+    # is what puts `.env` — and with it the database password — inside the
+    # container's filesystem, and this process has no business holding one.
+    # `config.settings.gateway` sets `DATABASES = {}` so Django could not reach
+    # the registry even with credentials in hand, but not mounting them means
+    # the claim in that settings module stays true rather than merely enforced.
+    # The code comes from the image itself, so a change here needs a rebuild:
+    #   docker compose up -d --build
+    #
+    # The site's exports land in ./gateway-inbox on the host, put there by
+    # whatever the site syncs with (rclone, OneDrive, a share). The config
+    # directory is mounted rather than the single file so that a missing
+    # `gateway.json` — which Docker would otherwise helpfully create as an
+    # empty *directory* — fails as "No gateway config at ..." instead of an
+    # IsADirectoryError traceback.
+    #
+    # `api_url` in gateway.json should be http://web:8000 — the hostname `web`
+    # is in the web service's DJANGO_ALLOWED_HOSTS above. If that list is ever
+    # overridden with a DJANGO_ALLOWED_HOSTS in .env, `web` must be in it too,
+    # or every push is refused with a 400.
+    build: .
+    restart: always
+    command: python manage.py run_gateway --config /app/gateway-config/gateway.json
+    volumes:
+      - ./gateway-config:/app/gateway-config:ro
+      - ./gateway-inbox:/inbox
+      - gateway_state:/state
+    depends_on:
+      - web
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.gateway
+      - DJANGO_DEBUG=False
+      # A secret this process has no use for. It serves no HTTP, signs no
+      # session and issues no token — SECRET_KEY is here only because Django
+      # insists on one. Setting it to something of its own, rather than
+      # letting the container inherit the platform's signing key, means a
+      # compromise of this container yields a string that signs nothing.
+      - DJANGO_SECRET_KEY=${GATEWAY_SECRET_KEY:-gateway-signs-nothing}
 
   celery:
     build: .
@@ -74,3 +119,8 @@ services:
 
 volumes:
   postgres_data:
+  # The gateway's ledger — which files it has already sent, keyed by digest.
+  # A named volume rather than a path in the repo, because it is per-deployment
+  # state: it must survive a rebuild, and it must never be shared between two
+  # gateways, since two ledgers disagreeing is how a file gets filed twice.
+  gateway_state:

@@ -185,6 +185,30 @@ UPV_COLUMNS = (
 )
 UPV_REQUIRED = ('STRUCTURAL ELEMENT', 'TEST TYPE')
 
+#: The same contract in its folded key form — what ``readers.normalise_key``
+#: produces from a header, which is what the registry actually sees.
+#: ``UPV_COLUMNS`` is what a person writes in a spreadsheet; these are the keys
+#: those columns become. Split by what they mean, because the two are not
+#: interchangeable in the import path:
+#:
+#:   * a **measurement** is a number only the instrument knows, and a file
+#:     without any of them is not a capture;
+#:   * a **context** value is the inspector's judgement, which a full-template
+#:     export may carry or which the app may supply instead.
+#:
+#: A device's column mapping may target any key in either set, and nothing
+#: else — which is why this lives here beside the columns rather than in the
+#: one importer that happened to need it first.
+UPV_MEASUREMENT_KEYS = frozenset({
+    'point', 'path_length_l_mm', 'transit_time_t_us', 't_uncracked_us',
+    'surface_condition', 'rebound_number', 'notes',
+})
+UPV_CONTEXT_KEYS = frozenset({
+    'structural_element', 'floor', 'test_type', 'test_location',
+    'weather_condition', 'transducer_type', 'transducer_frequency_khz',
+})
+UPV_ACCEPTED_KEYS = UPV_MEASUREMENT_KEYS | UPV_CONTEXT_KEYS
+
 
 def _build_upv(rows, ctx):
     """One test from consecutive readings of one element.

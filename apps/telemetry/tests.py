@@ -823,6 +823,103 @@ class DeviceTokenAPITests(APITestCase):
         self.assertNotEqual(allowed.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
+class DeviceSetupOrderTests(APITestCase):
+    """Registering an instrument, then issuing the credential it sends with.
+
+    This is the order `FIELD_GATEWAY.md` documents and the Instruments screen
+    exists to perform, and it is the order sites actually work in: the
+    instrument arrives and is registered before anyone knows which project its
+    first job is on, but its gateway cannot send a single file until it holds a
+    credential.
+
+    It is tested here because the two halves live in different apps — the
+    registry is `digital_eye`, the credential is `telemetry` — and the seam
+    between them is exactly where a newly registered instrument went missing.
+    `_scoped_devices` reached a device through its assigned project or through
+    a session it had already captured, and a device that has just been
+    registered has neither. ``assigned_project__in=...`` does not match NULL,
+    so this held even for a superuser: no role could issue a credential for an
+    instrument that had not yet been put on a project.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username='device_setup@nexucon.com',
+            email='device_setup@nexucon.com', password='Password123!')
+        self.client.force_authenticate(self.user)
+
+    def _register(self, **overrides):
+        body = {'device_id': 'PUNDIT-SETUP-001', 'device_type': 'pundit'}
+        body.update(overrides)
+        return self.client.post('/api/v1/digital-eye/devices/', body,
+                                format='json')
+
+    def test_an_instrument_is_registered_with_no_project(self):
+        """The state the rest of this class depends on being reachable."""
+        created = self._register()
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(created.data['assigned_project'])
+        self.assertEqual(created.data['status'], 'registered')
+
+    def test_a_freshly_registered_instrument_is_visible_to_whoever_registered_it(self):
+        created = self._register()
+
+        listed = self.client.get(reverse('telemetry-device-list'))
+
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertIn(str(created.data['id']),
+                      [str(row['id']) for row in listed.data])
+
+    def test_a_credential_can_be_issued_for_an_unassigned_instrument(self):
+        created = self._register()
+
+        response = self.client.post(
+            reverse('telemetry-device-token-list'),
+            {'device': created.data['id'], 'label': 'site laptop gateway'},
+            format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['token'].startswith('nxdev_'))
+
+    def test_the_new_credential_is_listed_against_its_instrument(self):
+        created = self._register()
+        self.client.post(
+            reverse('telemetry-device-token-list'),
+            {'device': created.data['id'], 'label': 'site laptop gateway'},
+            format='json')
+
+        listed = self.client.get(reverse('telemetry-device-token-list'),
+                                 {'device': created.data['id']})
+
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listed.data), 1)
+        self.assertEqual(listed.data[0]['label'], 'site laptop gateway')
+
+    def test_registering_does_not_widen_anyone_elses_view(self):
+        """The added relationship is "I registered it", not "anyone may see it"."""
+        created = self._register()
+
+        # A plain account with no government Profile, which `scoped_projects`
+        # scopes to nothing by design. It is not the registrar, so the new
+        # relationship must not reach it — that is the whole difference between
+        # "its registrar can see it" and "everyone can".
+        stranger = User.objects.create_user(
+            username='stranger_devices@nexucon.com',
+            email='stranger_devices@nexucon.com', password='Password123!')
+        self.client.force_authenticate(stranger)
+
+        listed = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(listed.data), [])
+
+        refused = self.client.post(
+            reverse('telemetry-device-token-list'),
+            {'device': created.data['id'], 'label': 'not mine'}, format='json')
+        self.assertEqual(refused.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(DeviceToken.objects.count(), 0)
+
+
 class DeviceTokenSessionPinTests(APITestCase):
     """A credential acts for one instrument, and only for that instrument."""
 
@@ -1016,6 +1113,24 @@ MEASUREMENTS_ONLY_CSV = (
     'A,300,65.2\n'
     'B,300,68.1\n'
 ).encode('utf-8')
+
+#: The same two readings as `MEASUREMENTS_ONLY_CSV`, written in one real
+#: instrument's own words. Nothing about these headers says "path length" to
+#: the platform, which is the whole point: they are only readable once the
+#: device carries a mapping that says so.
+INSTRUMENT_WORDED_CSV = (
+    'Location,Distance (mm),Time (us)\n'
+    'A,300,65.2\n'
+    'B,300,68.1\n'
+).encode('utf-8')
+
+#: The mapping that makes the file above readable. Keys are the instrument's
+#: headers verbatim; values are contract keys.
+INSTRUMENT_MAPPING = {
+    'Location': 'point',
+    'Distance (mm)': 'path_length_l_mm',
+    'Time (us)': 'transit_time_t_us',
+}
 
 
 class FileImportParsingTests(FileImportTestBase):
@@ -1296,3 +1411,160 @@ class FileImportStorageTests(FileImportTestBase):
     def test_a_successful_import_keeps_exactly_one_file(self):
         self._upload(UPV_CSV)
         self.assertEqual(len(_stored_exports()), 1)
+
+
+class FileImportColumnMappingTests(FileImportTestBase):
+    """A device's declared column mapping, and the guard it must not remove.
+
+    Two directions matter equally. A mapping has to make a real instrument's
+    export readable — that is why it exists, and without the first test here
+    the whole feature could be inert. But it must not become a licence to
+    guess: a column the mapping does not name is still refused by name, and
+    that refusal is the property the statutory registry depends on. The
+    second test is the regression guard for it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def _map_the_device(self, mapping):
+        self.device.column_mapping = mapping
+        self.device.save(update_fields=['column_mapping'])
+
+    # -- the mapping is what makes the file readable --------------------
+
+    def test_the_instrument_s_own_column_names_are_refused_without_a_mapping(self):
+        response = self._upload(INSTRUMENT_WORDED_CSV, test_type='Pulse Velocity')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        detail = response.data['detail']
+        # Refused by name, and told what it could have been.
+        self.assertIn('location', detail)
+        self.assertIn('distance_mm', detail)
+        self.assertIn('no column mapping recorded', detail)
+        self.assertEqual(TelemetrySession.objects.count(), 0)
+
+    def test_the_same_file_imports_once_the_device_carries_the_mapping(self):
+        self._map_the_device(INSTRUMENT_MAPPING)
+
+        response = self._upload(INSTRUMENT_WORDED_CSV, test_type='Pulse Velocity')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['import_stats']['readings'], 2)
+        # The mapped columns arrived as the readings they name. Nothing is
+        # promoted yet — the session is ENDED/PENDING, and the registry is
+        # written only at /end.
+        self.assertEqual(response.data['packet_count'], 2)
+        self.assertEqual(PUNDITReading.objects.count(), 0)
+        session = TelemetrySession.objects.get()
+        payloads = [p.payload for p in session.packets.order_by('sequence')]
+        self.assertEqual([p['point_label'] for p in payloads], ['A', 'B'])
+        self.assertEqual([p['path_length_mm'] for p in payloads], [300, 300])
+        self.assertEqual([p['transit_time_us'] for p in payloads], [65.2, 68.1])
+
+    def test_a_column_the_mapping_does_not_cover_is_still_refused_by_name(self):
+        # 'Location' and 'Distance (mm)' are covered; 'Time (us)' is not, and
+        # the rows cannot be read without it. Extending the mapping is named as
+        # the fix because that is the actual next step at a site.
+        self._map_the_device({'Location': 'point',
+                              'Distance (mm)': 'path_length_l_mm'})
+
+        response = self._upload(INSTRUMENT_WORDED_CSV, test_type='Pulse Velocity')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('time_us', response.data['detail'])
+        self.assertIn('does not cover', response.data['detail'])
+
+    def test_a_mapped_column_and_its_contract_twin_together_are_ambiguous(self):
+        # Both columns resolve to `path_length_l_mm`. The platform cannot know
+        # which value is the real one, so it refuses rather than picking.
+        self._map_the_device({'Distance (mm)': 'path_length_l_mm'})
+        content = (
+            'POINT,PATH LENGTH L (MM),Distance (mm),TRANSIT TIME T (US)\n'
+            'A,300,999,65.2\n'
+        ).encode('utf-8')
+
+        response = self._upload(content, test_type='Pulse Velocity')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('both mean', response.data['detail'])
+
+    def test_a_mapping_written_in_the_template_s_own_spelling_still_works(self):
+        # The mapping's values are folded exactly as headers are, so someone
+        # who writes the template's spelling has written a working mapping.
+        self._map_the_device({'Location': 'POINT',
+                              'Distance (mm)': 'PATH LENGTH L (MM)',
+                              'Time (us)': 'TRANSIT TIME T (US)'})
+
+        response = self._upload(INSTRUMENT_WORDED_CSV, test_type='Pulse Velocity')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['import_stats']['readings'], 2)
+
+
+class FileImportResendTests(FileImportTestBase):
+    """The same bytes arriving twice is a resend, not a second capture.
+
+    A field gateway whose response was lost in transit retries, and an
+    inspector unsure whether an upload went through tries again. Both must
+    land on the session that already exists.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def test_the_same_bytes_twice_returns_the_first_session(self):
+        first = self._upload(UPV_CSV)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        reference = first.data['session_reference']
+
+        second = self._upload(UPV_CSV, name='export-again.csv')
+
+        # 200, not 201: nothing was created this time. A gateway can treat
+        # either as "the file is in", which is what stops it retrying forever.
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data['session_reference'], reference)
+        self.assertTrue(second.data['import_stats']['duplicate'])
+        self.assertEqual(TelemetrySession.objects.count(), 1)
+        # Three packets, not six: the second upload added nothing.
+        self.assertEqual(TelemetryPacket.objects.count(), 3)
+
+    def test_only_one_copy_of_the_bytes_is_kept(self):
+        self._upload(UPV_CSV)
+        self._upload(UPV_CSV, name='export-again.csv')
+        self.assertEqual(len(_stored_exports()), 1)
+
+    def test_a_resend_is_audited_apart_from_a_fresh_import(self):
+        from apps.audit.models import AuditEvent
+        self._upload(UPV_CSV)
+        self._upload(UPV_CSV)
+        self.assertTrue(AuditEvent.objects.filter(
+            action='telemetry.session.file_import_resend').exists())
+
+    def test_different_bytes_from_the_same_device_are_a_second_session(self):
+        self._upload(UPV_CSV)
+        changed = UPV_CSV.replace(b'65.2', b'70.9')
+
+        response = self._upload(changed, name='second.csv')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(TelemetrySession.objects.count(), 2)
+
+    def test_identical_bytes_from_another_device_are_not_swallowed(self):
+        # The same export on two instruments would be a coincidence worth
+        # looking at, not a resend. The check is scoped to the device.
+        other = FieldDevice.objects.create(
+            device_id='PUNDIT-FILE-002', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+        self._upload(UPV_CSV)
+        body = {'device': str(other.id), 'project': str(self.project.id),
+                'file': SimpleUploadedFile('export.csv', UPV_CSV),
+                'test_type': 'Pulse Velocity'}
+
+        response = self.client.post(
+            reverse('telemetry-session-from-file'), body, format='multipart')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(TelemetrySession.objects.count(), 2)

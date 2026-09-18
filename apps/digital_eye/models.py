@@ -107,6 +107,28 @@ class FieldDevice(models.Model):
         ),
     )
     notes = models.TextField(blank=True, default='')
+    # How this instrument's export names the platform's columns. Keys are the
+    # header text as it appears in the file the unit writes; values are the
+    # contract keys the importer accepts (`path_length_l_mm` and friends).
+    #
+    # Held here rather than in a field gateway's config on purpose. A gateway
+    # that rewrote the file before sending it would mean the retained export
+    # was no longer the instrument's own output — and that retained bytes are
+    # the only ground truth left if a parse is ever found to be wrong. Keeping
+    # the mapping server-side also means a mis-mapped column is corrected once,
+    # for every site, rather than on each laptop that happens to send a file.
+    #
+    # Empty is the honest default: it means the export already speaks the
+    # documented template. It is never seeded with a guess at what a unit
+    # "probably" writes, because a wrong mapping is indistinguishable from a
+    # right one once rows have been written from it.
+    column_mapping = models.JSONField(
+        default=dict, blank=True,
+        help_text=(
+            "Maps this instrument's own export headers to the platform's "
+            "contract keys. Empty means the export already speaks the template."
+        ),
+    )
     is_active = models.BooleanField(default=True)
 
     registered_by = models.ForeignKey(

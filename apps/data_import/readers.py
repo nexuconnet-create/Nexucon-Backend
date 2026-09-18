@@ -23,6 +23,12 @@ support cost.
 a quoted field containing a newline does not shift every subsequent row number
 by one — the number in the error is the number the inspector can open the file
 and look at.
+
+**Renaming a column is declared, never inferred.** A caller may pass a
+``header_map`` naming which of its instrument's columns mean which contract
+keys. Columns it does not name keep their own names and are refused for being
+unknown, which is the point: the platform must be able to say *why* it did not
+read a column, and "we guessed" is not an answer that belongs on a record.
 """
 import csv
 import io
@@ -56,6 +62,30 @@ def normalise_key(key) -> str:
     return _KEY_FOLD.sub('_', str(key).strip().lower()).strip('_')
 
 
+def _fold_map(header_map):
+    """Fold a caller's column mapping the same way headers are folded.
+
+    A mapping is written by a person naming the columns of *their* instrument,
+    so it gets the same tolerance a header gets: ``Distance (mm)`` and
+    ``distance_mm`` are one declaration. Targets are folded too, which is
+    harmless when they are already contract keys and helpful when someone
+    writes the template's own spelling instead.
+
+    Returns ``{}`` for ``None``, so a caller with no mapping — the CSV import
+    wizard, every existing test — takes exactly the path it took before.
+    """
+    if not header_map:
+        return {}
+    return {normalise_key(source): normalise_key(target)
+            for source, target in header_map.items() if source}
+
+
+def _apply(folded, raw_key) -> str:
+    """The contract key a source column maps to, or itself when unmapped."""
+    key = normalise_key(raw_key)
+    return folded.get(key, key)
+
+
 def detect_import_type(content: bytes) -> str:
     """What this file *is*, from its bytes.
 
@@ -74,14 +104,24 @@ def detect_import_type(content: bytes) -> str:
     return 'CSV'
 
 
-def read_rows(content: bytes, import_type: str):
+def read_rows(content: bytes, import_type: str, header_map=None):
     """Parse a file into ``(rows, skipped_blank_rows)``.
 
     Raises ``ImportReadError`` when the file cannot be read at all. A *row*
     that cannot be read is not an error here — it becomes a row whose values
     fail validation later, so the inspector gets a line number and a reason
     instead of a rejection with no location.
+
+    ``header_map`` optionally renames the file's own columns to the platform's
+    contract keys before they are folded — ``{'Distance (mm)':
+    'path_length_l_mm'}``. It is a *declaration* made by whoever knows the
+    instrument, not a guess: a column the caller did not name still arrives
+    under its own name and is refused by the registry for being unknown. That
+    distinction is the whole reason this is a parameter rather than a fuzzy
+    header matcher — a mapping that silently accepted anything would put an
+    unverified number into a statutory registry.
     """
+    folded = _fold_map(header_map)
     if import_type == 'PDF':
         raise ImportReadError(
             'A PDF cannot be validated for import. A PDF has no column contract '
@@ -92,9 +132,9 @@ def read_rows(content: bytes, import_type: str):
             'PDF\'s column layout agreed with Nexucon first.'
         )
     if import_type == 'JSON':
-        return _read_json(content)
+        return _read_json(content, folded)
     if import_type == 'CSV':
-        return _read_csv(content)
+        return _read_csv(content, folded)
     raise ImportReadError(f'"{import_type}" is not an importable file type.')
 
 
@@ -102,7 +142,8 @@ def read_rows(content: bytes, import_type: str):
 # CSV
 # ----------------------------------------------------------------------
 
-def _read_csv(content: bytes):
+def _read_csv(content: bytes, folded=None):
+    folded = folded or {}
     try:
         text = content.decode('utf-8-sig')
     except UnicodeDecodeError:
@@ -123,7 +164,7 @@ def _read_csv(content: bytes):
     for raw_header in reader.fieldnames:
         if raw_header is None or not str(raw_header).strip():
             continue
-        key = normalise_key(raw_header)
+        key = _apply(folded, raw_header)
         if key in headers:
             raise ImportReadError(
                 f'The file has two columns that both mean "{key}" '
@@ -154,7 +195,8 @@ def _read_csv(content: bytes):
 # JSON
 # ----------------------------------------------------------------------
 
-def _read_json(content: bytes):
+def _read_json(content: bytes, folded=None):
+    folded = folded or {}
     try:
         text = content.decode('utf-8-sig')
     except UnicodeDecodeError:
@@ -196,7 +238,7 @@ def _read_json(content: bytes):
             # Numbered by position in the array, which for JSON *is* the row.
             rows.append(SourceRow(row_number=index, data={'_not_an_object': item}))
             continue
-        data = {normalise_key(key): value for key, value in item.items()}
+        data = {_apply(folded, key): value for key, value in item.items()}
         if all(_blank(value) for value in data.values()):
             skipped += 1
             continue
