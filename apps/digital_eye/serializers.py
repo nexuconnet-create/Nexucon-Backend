@@ -3,6 +3,8 @@ Digital Eye API serializers.
 """
 from rest_framework import serializers
 
+from apps.data_import.readers import normalise_key
+from apps.data_import.registry import UPV_ACCEPTED_KEYS
 from common.permissions import scoped_projects
 from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CoreSample,
@@ -35,12 +37,60 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'assigned_project', 'battery_level',
             'latitude', 'longitude', 'last_seen', 'calibration_date',
             'calibration_expiry', 'calibration_certificate_url', 'notes', 'is_active',
-            'registered_by',
+            'registered_by', 'column_mapping',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'device_reference', 'status', 'battery_level',
                             'latitude', 'longitude', 'last_seen', 'registered_by',
                             'created_at', 'updated_at']
+
+    def validate_column_mapping(self, value):
+        """Refuse a mapping the importer could never honour.
+
+        The mapping is a declaration of what this instrument's export columns
+        are called, and the importer reads it on every upload from this device.
+        A value that is not a contract key would not fail here — it would fail
+        weeks later, on a laptop at a site, as a refusal naming a column nobody
+        present had written. The form that made the mistake is the right place
+        to catch it.
+
+        Only the *values* are checked. The keys are the instrument's own column
+        names and are deliberately not constrained: they are whatever the
+        export says, and the platform has no business having an opinion about
+        them.
+
+        Checked against the UPV contract, which is the only file contract that
+        describes a whole capture. When a second instrument gets one, this
+        validator has to branch on ``device_type`` rather than widen the set —
+        a GPR mapping that named a pulse-velocity key would be accepted here
+        and then read as nothing.
+        """
+        if not value:
+            # Empty is the honest default: the export speaks the template.
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'Column mapping must be an object of "their column": '
+                '"platform column" pairs.')
+
+        blank_sources = sorted(str(k) for k in value if not str(k).strip())
+        if blank_sources:
+            raise serializers.ValidationError(
+                'Every entry needs the instrument\'s own column name as its '
+                'key. Remove the entry with the blank name, or fill it in.')
+
+        # Folded on both sides, exactly as the reader folds them, so a mapping
+        # written as "PATH LENGTH L (MM)" is accepted — it resolves to the same
+        # contract key, and rejecting it would refuse a mapping that works.
+        unknown = sorted({
+            str(target) for target in value.values()
+            if normalise_key(target) not in UPV_ACCEPTED_KEYS
+        })
+        if unknown:
+            raise serializers.ValidationError(
+                f'Not platform columns: {", ".join(unknown)}. Accepted columns '
+                f'are: {", ".join(sorted(UPV_ACCEPTED_KEYS))}.')
+        return value
 
 
 class SensorDataFileSerializer(serializers.ModelSerializer):

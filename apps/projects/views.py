@@ -27,7 +27,7 @@ from rest_framework.permissions import IsAuthenticated
 @method_decorator(cache_page(60 * 15), name='retrieve')
 class ProjectViewSet(viewsets.ModelViewSet):
     """CRUD API for Project model"""
-    queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
+    queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -36,7 +36,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
-        queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
+        queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
         status_param = self.request.query_params.get('status')
         search_param = self.request.query_params.get('search')
 

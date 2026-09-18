@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import AgencyProfileView, QuickActionsSummaryView
+from .district_views import DistrictDetailView, DistrictListCreateView
 from .inspector_views import InspectorDashboardView
 from .inspector_accreditation_views import (
     InspectorDetailView, InspectorListCreateView, InspectorMeView,
@@ -9,6 +10,14 @@ urlpatterns = [
     path('agency-profile/', AgencyProfileView.as_view(), name='agency-profile'),
     path('dashboard/quick-actions/', QuickActionsSummaryView.as_view(), name='quick-actions-summary'),
     path('inspectors/me/dashboard/', InspectorDashboardView.as_view(), name='inspector-me-dashboard'),
+
+    # Operational zones (the `District` model). No DELETE is routed — retiring
+    # a zone is `PATCH {"is_active": false}`, for the reason written up in
+    # district_views.py.
+    path('districts/', DistrictListCreateView.as_view(),
+         name='government-district-list'),
+    path('districts/<uuid:district_id>/', DistrictDetailView.as_view(),
+         name='government-district-detail'),
 
     # `inspectors/me/` MUST be declared before `inspectors/<uuid:...>/`. Both
     # are literals here so Django's resolver would get it right anyway, but the

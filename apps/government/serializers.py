@@ -1,5 +1,56 @@
 from rest_framework import serializers
-from .models import Agency, Inspector, Profile, Role
+from .models import Agency, District, Inspector, Profile, Role
+
+
+class DistrictSerializer(serializers.ModelSerializer):
+    """An operational zone — the state's zonal jurisdiction (Government UI).
+
+    The two counts are the deciding information before a zone is retired: a
+    district with projects or staff still attached is not an unused row, and
+    retiring it changes what those officers can see. They are annotated by the
+    list view and counted directly otherwise, so the value is the real count in
+    either case rather than an estimate the client has to trust.
+
+    ``boundary_polygon`` stays a pass-through field. Boundaries are supplied by
+    the Survey/GIS client (plan §7) and are never invented by the platform, so
+    the API accepts and returns real geometry without this serializer implying
+    the UI can produce one.
+    """
+
+    project_count = serializers.SerializerMethodField()
+    staff_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = District
+        fields = [
+            'id', 'name', 'code', 'state_region', 'description',
+            'boundary_polygon', 'office_address',
+            'lead_officer_name', 'lead_officer_email',
+            'is_active', 'project_count', 'staff_count',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_project_count(self, obj):
+        count = getattr(obj, 'project_count', None)
+        return count if count is not None else obj.projects.count()
+
+    def get_staff_count(self, obj):
+        count = getattr(obj, 'staff_count', None)
+        return count if count is not None else obj.staff.count()
+
+    def validate_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('A zone name is required.')
+        return value
+
+    def validate_code(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('A zone code is required.')
+        return value
+
 
 class AgencyProfileSerializer(serializers.ModelSerializer):
     class Meta:

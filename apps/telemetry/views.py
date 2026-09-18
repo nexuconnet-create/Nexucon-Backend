@@ -115,13 +115,33 @@ def _get_session(request, session_id):
 
 
 def _scoped_devices(user):
-    """Devices the caller may see: assigned to a project in scope, or having
-    actually captured a session on one. Both are real relationships; neither
-    invents an assignment."""
+    """Devices the caller may see.
+
+    Three relationships, each of them real and none of them an invented
+    assignment:
+
+      * assigned to a project in scope, or
+      * having actually captured a session on one, or
+      * registered by the caller.
+
+    The third is what makes the documented setup order work. An instrument is
+    registered when it arrives and put on a project later, once its first job
+    is known — but it cannot send anything until it holds a credential, and a
+    credential is issued against the device. Without this the registry and the
+    credential endpoints disagreed about the same instrument: `digital_eye`
+    listed it, and `telemetry` answered 404 for it.
+
+    Note that the first two alone never matched an unassigned device at all.
+    ``assigned_project__in=...`` does not match NULL and a device with no
+    sessions has no rows to join, so this was not a narrow scope that a
+    privileged role could see past — no role could issue a credential for an
+    instrument that had not yet been put on a project.
+    """
     scoped = scoped_projects(user)
     return FieldDevice.objects.filter(
         Q(assigned_project__in=scoped) |
-        Q(telemetry_sessions__project__in=scoped)
+        Q(telemetry_sessions__project__in=scoped) |
+        Q(registered_by=user)
     ).distinct()
 
 
@@ -262,6 +282,24 @@ class TelemetrySessionFromFileView(APIView):
                           })
             return Response({'detail': str(exc)}, status=exc.status_code)
 
+        payload = TelemetrySessionSerializer(session).data
+        payload['import_stats'] = stats
+
+        if stats.get('duplicate'):
+            # A resend, answered with the session the first attempt created.
+            # 200 rather than 201 because nothing was created this time, and a
+            # caller that retries after a lost response can treat either status
+            # as "the file is in" — which is what stops a gateway from
+            # re-sending the same export forever.
+            _record_audit(request.user, 'telemetry.session.file_import_resend',
+                          session.id, {
+                              'session_reference': session.session_reference,
+                              'device_id': device.device_id,
+                              'file': session.source_file_name,
+                              'sha256': session.source_file_sha256,
+                          })
+            return Response(payload, status=status.HTTP_200_OK)
+
         _record_audit(request.user, 'telemetry.session.file_import', session.id, {
             'session_reference': session.session_reference,
             'device_id': device.device_id,
@@ -270,8 +308,6 @@ class TelemetrySessionFromFileView(APIView):
             'readings': stats['readings'],
             'project': str(project.id),
         })
-        payload = TelemetrySessionSerializer(session).data
-        payload['import_stats'] = stats
         return Response(payload, status=status.HTTP_201_CREATED)
 
 

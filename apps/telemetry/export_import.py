@@ -48,7 +48,10 @@ from django.utils import timezone
 from apps.data_import.readers import (
     ImportReadError, SourceRow, detect_import_type, read_rows,
 )
-from apps.data_import.registry import REGISTRY, RowError, UPV_COLUMNS
+from apps.data_import.registry import (
+    REGISTRY, RowError, UPV_ACCEPTED_KEYS, UPV_COLUMNS, UPV_CONTEXT_KEYS,
+    UPV_MEASUREMENT_KEYS,
+)
 from apps.evidence.files import safe_file_name
 
 from .models import TelemetrySession
@@ -60,20 +63,13 @@ logger = logging.getLogger(__name__)
 #: sweep can find them without walking every evidence file on the bucket.
 EXPORT_STORAGE_PREFIX = 'telemetry/exports'
 
-#: The measurement columns — what the instrument measured.
-MEASUREMENT_KEYS = frozenset({
-    'point', 'path_length_l_mm', 'transit_time_t_us', 't_uncracked_us',
-    'surface_condition', 'rebound_number', 'notes',
-})
-
-#: The context columns — the inspector's judgements, which a full-template
-#: export may also carry rather than the app supplying them.
-CONTEXT_KEYS = frozenset({
-    'structural_element', 'floor', 'test_type', 'test_location',
-    'weather_condition', 'transducer_type', 'transducer_frequency_khz',
-})
-
-ACCEPTED_KEYS = MEASUREMENT_KEYS | CONTEXT_KEYS
+#: The accepted-column contract, in the key form the registry sees. Defined
+#: beside ``UPV_COLUMNS`` in ``apps.data_import.registry`` because that module
+#: owns the contract — a device's column mapping is validated against the same
+#: sets, and a second definition here is how the two would drift apart.
+MEASUREMENT_KEYS = UPV_MEASUREMENT_KEYS
+CONTEXT_KEYS = UPV_CONTEXT_KEYS
+ACCEPTED_KEYS = UPV_ACCEPTED_KEYS
 
 #: Only PUNDIT has a file contract that describes a whole capture. GPR's
 #: documents survey headers (one row, no anomaly rows), and GNSS and SLAM have
@@ -128,10 +124,42 @@ class SessionFromFileService:
 
         content = cls._read_upload(uploaded_file)
         name = safe_file_name(getattr(uploaded_file, 'name', ''))
+        digest = cls._digest(content)
+
+        # The same bytes arriving twice is a resend, not a second capture. A
+        # field gateway whose response was lost in transit will retry, and an
+        # inspector unsure whether the upload went through will try again —
+        # both must land on the session that already exists rather than filing
+        # one measurement twice under two references. Checked before the parse
+        # because a resend has nothing left to learn.
+        #
+        # Scoped to the device: identical bytes from a *different* instrument
+        # would be a coincidence worth looking at, not a duplicate to swallow.
+        existing = (TelemetrySession.objects
+                    .filter(device=device, source_file_sha256=digest)
+                    .order_by('created_at')
+                    .first())
+        if existing is not None:
+            logger.info('Telemetry file import: %s is already session %s',
+                        name, existing.session_reference)
+            return existing, {
+                'duplicate': True,
+                'rows': existing.packet_count,
+                'skipped': 0,
+                'readings': existing.packet_count,
+            }
 
         import_type = detect_import_type(content)
         try:
-            rows, skipped = read_rows(content, import_type)
+            # The device's own declaration of what its columns are called. A
+            # unit that writes its export in the platform's documented spelling
+            # carries no mapping and takes the plain path; one that writes
+            # `Distance (mm)` is read through the mapping its record holds.
+            # Either way `_assert_known_columns` below still runs, so a column
+            # the mapping does not cover is refused by name rather than folded
+            # into a neighbouring reading.
+            rows, skipped = read_rows(content, import_type,
+                                      header_map=device.column_mapping or None)
         except ImportReadError as exc:
             raise TelemetryError(str(exc))
 
@@ -141,7 +169,7 @@ class SessionFromFileService:
                 + (f' ({skipped} blank lines were skipped).' if skipped else '.')
                 + ' An empty file is not a capture.')
 
-        cls._assert_known_columns(rows, name)
+        cls._assert_known_columns(rows, name, device.column_mapping)
 
         config = dict(session_config or {})
         merged = cls._merge_context(rows, config)
@@ -250,7 +278,7 @@ class SessionFromFileService:
         return content
 
     @staticmethod
-    def _assert_known_columns(rows, name):
+    def _assert_known_columns(rows, name, column_mapping=None):
         """Refuse a file whose columns the platform has not been told about.
 
         This is the guard that keeps a misread out of the registry. Without
@@ -258,6 +286,12 @@ class SessionFromFileService:
         ``path_length_l_mm`` and every row would fail as "no path length" —
         a confusing message about the wrong problem, on a file the platform
         could arguably have read.
+
+        ``column_mapping`` is the device's own declaration, and it changes only
+        the advice, never the decision: a column the mapping does not name is
+        still refused. The message says which of the two fixes applies — extend
+        this device's mapping, or agree a layout with Nexucon — because those
+        are different people's jobs.
         """
         present = set()
         for row in rows:
@@ -266,12 +300,23 @@ class SessionFromFileService:
                     present.add(key)
         unknown = sorted(present - ACCEPTED_KEYS)
         if unknown:
+            if column_mapping:
+                next_step = (
+                    f'This device carries a column mapping that does not cover '
+                    f'them. Add the missing column(s) to the mapping on the '
+                    f'device record, or correct the export.')
+            else:
+                next_step = (
+                    'This device has no column mapping recorded. If this is the '
+                    'instrument\'s own column naming, record a mapping on the '
+                    'device; otherwise send Nexucon the export itself and the '
+                    'layout can be agreed.')
             raise TelemetryError(
                 f'{name} has column(s) this platform does not recognise: '
                 f'{", ".join(unknown)}. Nothing was imported, because guessing '
                 f'which column is which would risk recording a wrong value as '
                 f'a measurement. Accepted columns are: {_accepted_columns()}. '
-                'Send Nexucon the export itself and the layout can be agreed.')
+                + next_step)
 
     @staticmethod
     def _merge_context(rows, config):
@@ -294,6 +339,17 @@ class SessionFromFileService:
         return merged
 
     @staticmethod
+    def _digest(content):
+        """SHA-256 of the export's bytes.
+
+        One definition, used for two jobs that must agree: the name the bytes
+        are stored under, and the key a resend is recognised by. Two separate
+        hashes would be two chances to disagree about whether a file is the
+        one already imported.
+        """
+        return hashlib.sha256(content).hexdigest()
+
+    @staticmethod
     def _store(content, name):
         """Retain the export and return ``(storage name, sha256)``.
 
@@ -301,7 +357,7 @@ class SessionFromFileService:
         them. If the parse is ever questioned, the original is the only thing
         that can settle it.
         """
-        digest = hashlib.sha256(content).hexdigest()
+        digest = SessionFromFileService._digest(content)
         try:
             stored_name = default_storage.save(
                 f'{EXPORT_STORAGE_PREFIX}/{digest[:2]}/{digest[:16]}-{name}',
