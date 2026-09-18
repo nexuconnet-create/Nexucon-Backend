@@ -1,5 +1,11 @@
 from django.contrib import admin
-from .models import Agency, Inspector, Role, Profile
+from .models import Agency, Inspector, Role, Profile, District
+
+@admin.register(District)
+class DistrictAdmin(admin.ModelAdmin):
+    list_display = ('name', 'code', 'state_region', 'lead_officer_name', 'is_active')
+    search_fields = ('name', 'code', 'lead_officer_name')
+    list_filter = ('is_active', 'state_region')
 
 @admin.register(Agency)
 class AgencyAdmin(admin.ModelAdmin):

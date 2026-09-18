@@ -34,6 +34,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 import config.urls as config_urls
+from apps.audit.models import AuditEvent
 from apps.compliance.models import ComplianceCertificate
 from apps.government.models import Agency, District, Inspector, Profile, Role
 from apps.inspections.models import Inspection
@@ -683,3 +684,231 @@ class InspectorAccreditationRouteTests(TestCase):
                          '/api/v1/government/inspectors/')
         self.assertEqual(reverse('inspector-list'),
                          '/api/v1/stakeholders/inspectors/')
+
+
+class DistrictRouteTests(TestCase):
+    """The zone routes, and the deliberate absence of a DELETE route."""
+
+    def test_routes_resolve(self):
+        self.assertEqual(reverse('government-district-list'),
+                         '/api/v1/government/districts/')
+        self.assertEqual(
+            reverse('government-district-detail',
+                    kwargs={'district_id': '11111111-1111-1111-1111-111111111111'}),
+            '/api/v1/government/districts/11111111-1111-1111-1111-111111111111/')
+
+
+class DistrictAPITests(APITestCase):
+    """Operational zones: who may shape them, and what the ledger records.
+
+    The register was previously reachable only through Django admin because
+    `District` had no API at all, and the one endpoint the UI did call
+    (`/evidence/hq/districts/`) is a Director-only risk heatmap that returns
+    `{districts, computed_at}` — a shape the client's list `unwrap` discards, so
+    the zone dropdown was empty for every user. These tests pin the real
+    contract in its place.
+    """
+
+    def setUp(self):
+        self.agency_head_role = Role.objects.create(name='Agency Head')
+        self.director_role = Role.objects.create(name='Director')
+        self.inspector_role = Role.objects.create(name='Inspector')
+
+        self.agency_head = User.objects.create_user(
+            username='head@nexucon.com', email='head@nexucon.com',
+            password='Password123!', first_name='Ada', last_name='Bello')
+        Profile.objects.create(user=self.agency_head, role=self.agency_head_role,
+                               is_state_hq=True)
+
+        self.director = User.objects.create_user(
+            username='director@nexucon.com', email='director@nexucon.com',
+            password='Password123!', first_name='Dee', last_name='Rector')
+        Profile.objects.create(user=self.director, role=self.director_role,
+                               is_state_hq=True)
+
+        self.inspector = User.objects.create_user(
+            username='inspector@nexucon.com', email='inspector@nexucon.com',
+            password='Password123!')
+        Profile.objects.create(user=self.inspector, role=self.inspector_role)
+
+        # A user with no government Profile at all — a client-side account.
+        self.outsider = User.objects.create_user(
+            username='outsider@nexucon.com', email='outsider@nexucon.com',
+            password='Password123!')
+
+        self.client.force_authenticate(self.director)
+
+    def _create(self, **overrides):
+        body = {'name': 'Eti-Osa', 'code': 'Z-ETI', 'state_region': 'Lagos'}
+        body.update(overrides)
+        return self.client.post(reverse('government-district-list'), body,
+                                format='json')
+
+    def _audit(self):
+        return AuditEvent.objects.filter(resource_type='District')
+
+    # --------------------------------------------------- the honest empty state
+    def test_the_register_is_empty_until_a_zone_is_created(self):
+        response = self.client.get(reverse('government-district-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    # ------------------------------------------------------------- creating
+    def test_a_director_can_create_a_zone(self):
+        response = self._create()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['name'], 'Eti-Osa')
+        self.assertEqual(response.data['code'], 'Z-ETI')
+        self.assertTrue(response.data['is_active'])
+        self.assertEqual(District.objects.count(), 1)
+
+    def test_an_agency_head_can_create_a_zone(self):
+        self.client.force_authenticate(self.agency_head)
+        self.assertEqual(self._create().status_code, status.HTTP_201_CREATED)
+        self.assertEqual(District.objects.count(), 1)
+
+    def test_an_inspector_cannot_create_a_zone(self):
+        self.client.force_authenticate(self.inspector)
+        response = self._create()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(District.objects.count(), 0)
+
+    def test_a_client_side_account_cannot_create_a_zone(self):
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self._create().status_code,
+                         status.HTTP_403_FORBIDDEN)
+        self.assertEqual(District.objects.count(), 0)
+
+    def test_a_zone_without_a_name_is_refused(self):
+        response = self._create(name='   ')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data['errors'])
+        self.assertEqual(District.objects.count(), 0)
+
+    def test_a_duplicate_name_is_refused(self):
+        self._create()
+        response = self._create(code='Z-OTHER')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data['errors'])
+        self.assertEqual(District.objects.count(), 1)
+
+    def test_a_duplicate_code_is_refused(self):
+        self._create()
+        response = self._create(name='Ikeja')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('code', response.data['errors'])
+        self.assertEqual(District.objects.count(), 1)
+
+    # -------------------------------------------------------------- reading
+    def test_a_non_staff_account_cannot_read_the_register(self):
+        self.client.force_authenticate(self.outsider)
+        response = self.client.get(reverse('government-district-list'))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_an_inspector_can_read_the_register(self):
+        """The register is the zone vocabulary the dashboard displays, not a
+        credential — an inspector may see which zones exist."""
+        self._create()
+        self.client.force_authenticate(self.inspector)
+        response = self.client.get(reverse('government-district-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+
+    def test_the_register_defaults_to_active_zones_only(self):
+        self._create(name='Eti-Osa', code='Z-ETI')
+        retired = self._create(name='Ikeja', code='Z-IKE').data
+        District.objects.filter(pk=retired['id']).update(is_active=False)
+
+        response = self.client.get(reverse('government-district-list'))
+        self.assertEqual([z['code'] for z in response.data], ['Z-ETI'])
+
+    def test_active_all_includes_the_retired_zones(self):
+        self._create(name='Eti-Osa', code='Z-ETI')
+        retired = self._create(name='Ikeja', code='Z-IKE').data
+        District.objects.filter(pk=retired['id']).update(is_active=False)
+
+        response = self.client.get(reverse('government-district-list'),
+                                   {'active': 'all'})
+        self.assertEqual(sorted(z['code'] for z in response.data),
+                         ['Z-ETI', 'Z-IKE'])
+
+    def test_the_counts_reported_are_the_real_ones(self):
+        zone = self._create().data
+        Project.objects.create(name='Lekki Phase 1', district_id=zone['id'],
+                               project_type='')
+        Project.objects.create(name='Ikoyi Towers', district_id=zone['id'],
+                               project_type='')
+
+        response = self.client.get(reverse('government-district-list'))
+        self.assertEqual(response.data[0]['project_count'], 2)
+        self.assertEqual(response.data[0]['staff_count'], 0)
+
+    # ------------------------------------------------------------ retiring
+    def test_a_zone_with_no_projects_can_be_retired(self):
+        zone = self._create().data
+        response = self.client.patch(
+            reverse('government-district-detail', kwargs={'district_id': zone['id']}),
+            {'is_active': False}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_active'])
+
+    def test_retiring_a_zone_that_still_holds_projects_is_refused(self):
+        zone = self._create().data
+        Project.objects.create(name='Lekki Phase 1', district_id=zone['id'],
+                               project_type='')
+
+        response = self.client.patch(
+            reverse('government-district-detail', kwargs={'district_id': zone['id']}),
+            {'is_active': False}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('1 project', response.data['detail'])
+        # Nothing was written.
+        self.assertTrue(District.objects.get(pk=zone['id']).is_active)
+
+    def test_an_inspector_cannot_amend_a_zone(self):
+        zone = self._create().data
+        self.client.force_authenticate(self.inspector)
+        response = self.client.patch(
+            reverse('government-district-detail', kwargs={'district_id': zone['id']}),
+            {'name': 'Renamed'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(District.objects.get(pk=zone['id']).name, 'Eti-Osa')
+
+    def test_delete_is_not_routed(self):
+        """`Profile.district` and `Project.district` are SET_NULL, so a hard
+        delete would silently detach every project and officer scoped to the
+        zone. It is not offered at all."""
+        zone = self._create().data
+        response = self.client.delete(
+            reverse('government-district-detail', kwargs={'district_id': zone['id']}))
+        self.assertEqual(response.status_code,
+                         status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(District.objects.count(), 1)
+
+    # --------------------------------------------------------------- ledger
+    def test_creating_a_zone_writes_one_audit_event(self):
+        zone = self._create().data
+        event = self._audit().get()
+        self.assertEqual(event.action, 'government.district.create')
+        self.assertEqual(event.resource_id, zone['id'])
+        self.assertEqual(event.metadata['code'], 'Z-ETI')
+
+    def test_a_patch_that_changes_nothing_writes_no_audit_event(self):
+        zone = self._create().data
+        before = self._audit().count()
+        response = self.client.patch(
+            reverse('government-district-detail', kwargs={'district_id': zone['id']}),
+            {'name': 'Eti-Osa'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._audit().count(), before)
+
+    def test_an_amend_records_the_before_and_the_after(self):
+        zone = self._create().data
+        self.client.patch(
+            reverse('government-district-detail', kwargs={'district_id': zone['id']}),
+            {'lead_officer_name': 'Engr. A. Onike'}, format='json')
+
+        event = self._audit().get(action='government.district.amend')
+        self.assertEqual(event.metadata['changed']['lead_officer_name'],
+                         {'from': '', 'to': 'Engr. A. Onike'})
+

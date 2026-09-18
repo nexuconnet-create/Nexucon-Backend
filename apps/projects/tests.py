@@ -645,3 +645,74 @@ class ScopeEscalationAuditCommandTestCase(_InspectorFixtureMixin, TestCase):
 
         out_all, _ = self.run_command('--all-roles')
         self.assertIn('Users in scope: 1', out_all)
+
+
+# ======================================================================
+# Operational zone on a project (18 Sep 2026). `Project.district` is the FK
+# that scopes which officers can see a project and which district it appears
+# under on the HQ heatmap. It was always writable through the API — but no
+# frontend ever sent it: the register-project form wrote a free-text
+# "LGA / District" into `Project.lga`, so no project ever carried a zone.
+# `district_name` is new, so a consumer never has to resolve the FK itself
+# (and so a project on a retired zone still names it).
+# ======================================================================
+
+class ProjectZoneAssignmentTestCase(APITestCase):
+    def setUp(self):
+        from apps.government.models import District
+
+        self.user = User.objects.create_user(
+            username='zoneuser', email='zoneuser@test.com', password='testpass')
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+
+        self.zone = District.objects.create(
+            name='Eti-Osa', code='Z-ETI', state_region='Lagos')
+        self.other_zone = District.objects.create(
+            name='Ikeja', code='Z-IKJ', state_region='Lagos')
+
+    def test_a_new_project_can_be_registered_into_a_zone(self):
+        res = self.client.post(reverse('project-list'), {
+            'name': 'Zone Scoped Tower', 'district': str(self.zone.id),
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(res.data['district'], self.zone.id)
+        self.assertEqual(res.data['district_name'], 'Eti-Osa')
+
+    def test_a_project_can_be_moved_between_zones(self):
+        project = Project.objects.create(name='Movable', district=self.zone)
+        res = self.client.patch(
+            reverse('project-detail', args=[project.id]),
+            {'district': str(self.other_zone.id)}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        project.refresh_from_db()
+        self.assertEqual(project.district_id, self.other_zone.id)
+        self.assertEqual(res.data['district_name'], 'Ikeja')
+
+    def test_a_project_can_be_taken_out_of_its_zone(self):
+        project = Project.objects.create(name='Unassignable', district=self.zone)
+        res = self.client.patch(
+            reverse('project-detail', args=[project.id]),
+            {'district': None}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        project.refresh_from_db()
+        self.assertIsNone(project.district_id)
+        self.assertIsNone(res.data['district_name'])
+
+    def test_an_unzoned_project_reports_no_zone(self):
+        project = Project.objects.create(name='Never Zoned')
+        res = self.client.get(reverse('project-detail', args=[project.id]))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIsNone(res.data['district'])
+        self.assertIsNone(res.data['district_name'])
+
+    def test_a_retired_zone_is_still_named_on_its_projects(self):
+        """Retiring a zone must not make its projects read as unassigned."""
+        self.zone.is_active = False
+        self.zone.save(update_fields=['is_active'])
+        project = Project.objects.create(name='On Retired Zone', district=self.zone)
+
+        res = self.client.get(reverse('project-detail', args=[project.id]))
+        self.assertEqual(res.data['district'], self.zone.id)
+        self.assertEqual(res.data['district_name'], 'Eti-Osa')

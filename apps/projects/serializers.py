@@ -21,6 +21,12 @@ class ProjectSerializer(serializers.ModelSerializer):
     professionals = ProjectProfessionalSerializer(many=True, required=False)
     project_documents = ProjectDocumentSerializer(many=True, read_only=True)
     last_activity_at = serializers.SerializerMethodField()
+    # The zone's name alongside the `district` pk, so a consumer never has to
+    # resolve the FK itself. Resolving it client-side would be wrong for a
+    # project on a retired zone: the zone register is fetched active-only, so
+    # the lookup would miss and the project would read as unattached when it
+    # is in fact still scoped to a zone.
+    district_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
@@ -30,6 +36,9 @@ class ProjectSerializer(serializers.ModelSerializer):
         """Newest real activity (own edits or captured records) — drives the
         cold-storage policy."""
         return obj.last_activity_at()
+
+    def get_district_name(self, obj):
+        return obj.district.name if obj.district_id else None
 
     def create(self, validated_data):
         professionals_data = validated_data.pop('professionals', [])
