@@ -502,6 +502,92 @@ class AssignedInspectorScopeTestCase(_InspectorFixtureMixin, TestCase):
         self.assertNotIn(project, scoped_projects(user))
 
 
+class AssignableProjectsEndpointTestCase(_InspectorFixtureMixin, APITestCase):
+    """`GET /projects/assignable/` — the set a write will actually accept.
+
+    The defect this closes: the registry *browse* (`/projects/`) is
+    `IsAuthenticatedOrReadOnly` and unscoped on purpose, so a picker fed from
+    it offered every project on the platform while the write behind it
+    resolved through `scoped_projects(user)`. An officer choosing a project
+    they had no standing on was answered *Invalid pk … does not exist* — a true
+    statement about a set they were never shown, and one that reads as the
+    platform being broken.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.inspector = self.make_inspector('bello@lasbca.gov', 'Bello', 'Wahab')
+        self.mine = self.make_project('Ikoyi Tower', 'Bello Wahab')
+
+        self.other = self.make_inspector('ade@lasbca.gov', 'Ade', 'Okoro')
+        self.theirs = self.make_project('Victoria Island Plaza', 'Ade Okoro')
+
+        refresh = RefreshToken.for_user(self.inspector)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+    def _assignable_ids(self):
+        response = self.client.get(reverse('project-assignable'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [row['id'] for row in response.data]
+
+    def _browse_ids(self):
+        response = self.client.get(reverse('project-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [row['id'] for row in response.data]
+
+    def test_it_returns_the_projects_in_the_callers_scope(self):
+        ids = self._assignable_ids()
+        self.assertIn(str(self.mine.id), ids)
+        self.assertNotIn(str(self.theirs.id), ids)
+
+    def test_the_browse_list_is_untouched(self):
+        """The narrowing is confined to the new route.
+
+        `/projects/` is a public registry browse and several screens rely on
+        it being unscoped. If a later edit "fixes" that viewset by scoping
+        `get_queryset`, this fails rather than those screens quietly emptying.
+        """
+        browse = self._browse_ids()
+        self.assertIn(str(self.mine.id), browse)
+        self.assertIn(str(self.theirs.id), browse)
+
+    def test_two_officers_are_not_served_each_others_answer(self):
+        """The reason this route is not decorated with `cache_page`.
+
+        `ProjectViewSet.list` is cached, and `cache_page` keys on the URL
+        alone — it does not vary on the Authorization header. The cache
+        backend is the default per-process LocMemCache, so a cached
+        user-scoped response would be handed to the next caller. Two officers
+        asking the same URL in the same process must still get their own sets.
+        """
+        mine = self._assignable_ids()
+
+        refresh = RefreshToken.for_user(self.other)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+        theirs = self._assignable_ids()
+
+        self.assertNotEqual(mine, theirs)
+        self.assertNotIn(str(self.theirs.id), mine)
+        self.assertNotIn(str(self.mine.id), theirs)
+
+    def test_a_caller_with_no_scope_is_told_nothing_is_assignable(self):
+        """An empty list is the honest answer, not a failure.
+
+        A user with no government profile has no scoped projects at all. The
+        picker must show nothing and say so, rather than offer the platform's
+        whole registry and fail on every choice.
+        """
+        nobody = User.objects.create_user(
+            username='stranger@example.com',
+            email='stranger@example.com',
+            password='Password123!',
+        )
+        refresh = RefreshToken.for_user(nobody)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+        self.assertEqual(self._assignable_ids(), [])
+
+
 class BackfillCommandTestCase(_InspectorFixtureMixin, TestCase):
     """`backfill_project_assigned_inspector_user`."""
 

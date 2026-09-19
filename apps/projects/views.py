@@ -6,6 +6,7 @@ from django.db.models import Q
 from .models import Project, ProjectMilestone, ProjectDocument
 from .serializers import ProjectSerializer, ProjectMilestoneSerializer, ProjectDocumentSerializer
 from apps.applications.models import Application
+from common.permissions import scoped_projects
 
 
 class ProjectMilestoneViewSet(viewsets.ModelViewSet):
@@ -64,6 +65,39 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
         return queryset
+
+    @extend_schema(responses={200: ProjectSerializer(many=True)})
+    @action(detail=False, methods=['get'])
+    def assignable(self, request):
+        """The projects this caller may actually name in a write.
+
+        ``/projects/`` is the registry *browse*: ``IsAuthenticatedOrReadOnly``,
+        deliberately unscoped, and its ``list`` is cached. A write that names a
+        project is validated far more narrowly — ``ScopedProjectField`` (see
+        ``apps/digital_eye/serializers.py``) resolves through
+        ``scoped_projects(user)`` — so a picker fed from the browse list offers
+        choices the server answers with *Invalid pk … does not exist*. That
+        message is true, but about a set the officer was never shown, which
+        reads as the platform being broken rather than the choice being out of
+        scope.
+
+        This returns exactly the set a write will accept, so a picker can offer
+        nothing but what will work, and an empty list is a real answer: this
+        caller has no project in scope, and no assignment is possible for them
+        until one is.
+
+        Deliberately **not** cached. The response differs per caller and
+        ``cache_page`` does not vary on the Authorization header, so caching it
+        would hand one officer's scope to the next request served by the same
+        worker — and the cache backend here is the default LocMemCache, which
+        is per-process and shared by every user of it.
+
+        ``cold_storage`` projects are included: they are out of the default
+        browse but still real rows a record may legitimately point at.
+        """
+        queryset = scoped_projects(request.user).order_by('name')
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def restore_from_cold_storage(self, request, pk=None):

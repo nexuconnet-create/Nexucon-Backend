@@ -1703,6 +1703,180 @@ class FieldDeviceColumnMappingTestCase(DigitalEyeAPITestBase):
         self.assertEqual(response.data['column_mapping'], {})
 
 
+class FieldDeviceProjectAssignmentTestCase(DigitalEyeAPITestBase):
+    """Putting an instrument on a project *after* it was registered.
+
+    Registration is where a project is normally chosen. An instrument
+    registered without one — or registered by somebody else, before its project
+    existed — is invisible to every project-scoped screen: it is missing from
+    the telemetry device list, which feeds both the Devices panel and the
+    import form's instrument picker, and no session can be opened for it. It
+    sits on the Instruments page looking perfectly healthy while every other
+    screen ignores it.
+
+    ``_scoped_devices`` is what answers that question, so these tests assert
+    against the real endpoint rather than the PATCH response alone. A PATCH
+    that returned 200 and left the instrument unscoped would be no fix at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The instrument is somebody else's: not registered by the officer
+        # looking at it, on no project, with no sessions. That is the exact
+        # shape that falls out of scope, because the three relationships
+        # ``_scoped_devices`` matches on are the only ways in.
+        self.other_user = User.objects.create_user(
+            username='site_engineer@nexucon.com',
+            email='site_engineer@nexucon.com',
+            password='Password123!',
+        )
+
+    def _foreign_device(self, **overrides):
+        payload = {
+            'device_id': 'PL-200-ASSIGN-01',
+            'device_type': 'pundit',
+            'registered_by': self.other_user,
+        }
+        payload.update(overrides)
+        return FieldDevice.objects.create(**payload)
+
+    def _patch_project(self, device, project):
+        return self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': device.id}),
+            {'assigned_project': project}, format='json')
+
+    def _visible_device_ids(self):
+        response = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [str(row['id']) for row in response.data]
+
+    def test_an_unassigned_instrument_is_absent_from_the_device_list(self):
+        device = self._foreign_device()
+
+        self.assertNotIn(str(device.id), self._visible_device_ids())
+
+    def test_assigning_a_project_puts_it_on_the_device_list(self):
+        device = self._foreign_device()
+        self.assertNotIn(str(device.id), self._visible_device_ids())
+
+        response = self._patch_project(device, str(self.project.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        device.refresh_from_db()
+        self.assertEqual(device.assigned_project_id, self.project.id)
+        # The instrument the officer just attached is now the instrument the
+        # picker offers them — which is the whole point of the change.
+        self.assertIn(str(device.id), self._visible_device_ids())
+
+    def test_the_project_can_be_removed_again(self):
+        """Detaching is a real operation, not an accident of a blank field."""
+        device = self._foreign_device(assigned_project=self.project)
+        self.assertIn(str(device.id), self._visible_device_ids())
+
+        response = self._patch_project(device, None)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        device.refresh_from_db()
+        self.assertIsNone(device.assigned_project_id)
+        self.assertNotIn(str(device.id), self._visible_device_ids())
+
+
+class FieldDeviceProjectAssignmentAsInspectorTestCase(DigitalEyeAPITestBase):
+    """The same attach, done by the role that will actually do it.
+
+    The tests above run as a superuser, for whom ``scoped_projects`` is
+    ``Project.objects.all()`` — so they prove the field is writable and that
+    the telemetry list follows it, but they cannot prove anything about
+    *scoping*, because a superuser has none. The officer holding the PL-200 is
+    not a superuser, and the panel this backs is deliberately ungated on the
+    frontend, so the scope check has to be the thing that holds. These two
+    tests are that check: one that the attach succeeds inside the officer's
+    scope, and one that it is refused outside it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from apps.government.models import Profile, Role
+
+        role, _ = Role.objects.get_or_create(name='Inspector')
+        self.inspector = User.objects.create_user(
+            username='inspector@lasbca.gov',
+            email='inspector@lasbca.gov',
+            password='Password123!',
+        )
+        Profile.objects.create(user=self.inspector, role=role)
+        # Being named on the project is what puts it in `scoped_projects` for
+        # an Inspector — the FK, not the display name.
+        self.project.assigned_inspector_user = self.inspector
+        self.project.save(update_fields=['assigned_inspector_user'])
+
+        # The instrument is somebody else's and on no project: the shape that
+        # falls out of every scoped screen.
+        self.owner = User.objects.create_user(
+            username='site_engineer@nexucon.com',
+            email='site_engineer@nexucon.com',
+            password='Password123!',
+        )
+        self.device = FieldDevice.objects.create(
+            device_id='PL-200-INSPECTOR-01',
+            device_type='pundit',
+            registered_by=self.owner,
+        )
+
+        refresh = RefreshToken.for_user(self.inspector)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+    def _patch_project(self, project):
+        return self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': self.device.id}),
+            {'assigned_project': project}, format='json')
+
+    def _visible_device_ids(self):
+        response = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [str(row['id']) for row in response.data]
+
+    def test_an_inspector_can_attach_a_foreign_instrument_to_their_project(self):
+        """The claim the ungated button rests on."""
+        self.assertNotIn(str(self.device.id), self._visible_device_ids())
+
+        response = self._patch_project(str(self.project.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.assigned_project_id, self.project.id)
+        self.assertIn(str(self.device.id), self._visible_device_ids())
+
+    def test_an_inspector_cannot_attach_it_to_a_project_outside_their_scope(self):
+        """Dropping the frontend gate must not become a way to reach anyone's project.
+
+        This is why the button could be ungated safely: `assigned_project` is a
+        ``ScopedProjectField``, so the set of projects the dropdown offers and
+        the set the server accepts are the same set.
+        """
+        from apps.government.models import Profile, Role
+
+        stranger = User.objects.create_user(
+            username='other-inspector@lasbca.gov',
+            email='other-inspector@lasbca.gov',
+            password='Password123!',
+        )
+        Profile.objects.create(user=stranger, role=Role.objects.get(name='Inspector'))
+        theirs = Project.objects.create(
+            name='A Site This Officer Is Not On',
+            project_type='Commercial',
+            status='ACTIVE',
+            assigned_inspector_user=stranger,
+        )
+
+        response = self._patch_project(str(theirs.id))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.assigned_project_id)
+
+
 class FieldDeviceRegistryTestCase(DigitalEyeAPITestBase):
     def test_device_create_requires_serial_device_id(self):
         response = self.client.post(reverse('field-device-list'),
