@@ -1571,6 +1571,60 @@ class FileImportParsingTests(FileImportTestBase):
         self.assertEqual(TelemetryPacket.objects.count(), 0)
         self.assertEqual(_stored_exports(), [])
 
+    def test_an_unrecognised_column_carries_a_code_the_app_can_act_on(self):
+        """So the client can offer to record the mapping without matching on
+        the English message, which breaks the first time it is reworded."""
+        content = (
+            'STRUCTURAL ELEMENT,TEST TYPE,DISTANCE (MM),TRANSIT TIME T (US)\n'
+            'Column C1,Pulse Velocity,300,65.2\n'
+        ).encode('utf-8')
+
+        response = self._upload(content, name='proprietary.csv')
+
+        self.assertEqual(response.data['code'], 'unknown_columns')
+
+    def test_a_refusal_for_another_reason_carries_no_code(self):
+        content = ('STRUCTURAL ELEMENT,PATH LENGTH L (MM),TRANSIT TIME T (US)\n'
+                   'Column C3,300,65.2\n').encode('utf-8')
+
+        response = self._upload(content)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIsNone(response.data['code'])
+
+    def test_a_declared_scale_is_honoured_on_the_way_in(self):
+        """The whole reason the mapping can express a unit.
+
+        The same bytes read as millimetres give a pulse velocity a thousand
+        times too low — positive, plausible, and impossible to tell from a slow
+        reading once it is on a record. So the number is asserted, end to end,
+        rather than the shape of the mapping that produced it.
+        """
+        self.device.column_mapping = {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+        }
+        self.device.save(update_fields=['column_mapping'])
+        content = (
+            'Structural Element,Test Type,Distance,Time 1\n'
+            'Column C9,Pulse Velocity,0.300,65.2\n'
+        ).encode('utf-8')
+
+        response = self._upload(content, name='pl200.csv')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        packet = TelemetryPacket.objects.get(session_id=response.data['id'])
+        self.assertEqual(packet.payload['path_length_mm'], 300.0)
+
+        ended = self.client.post(
+            reverse('telemetry-session-end',
+                    kwargs={'session_id': response.data['id']}),
+            {}, format='json')
+        test = PUNDITTest.objects.get(pk=ended.data['promoted']['test_id'])
+        # 300 mm across 65.2 us. Read as millimetres without the scale this
+        # same file would promote at 0.0046 km/s.
+        self.assertAlmostEqual(test.velocity_km_s, 4.601, places=2)
+
     def test_a_file_with_no_test_type_is_refused(self):
         content = ('STRUCTURAL ELEMENT,PATH LENGTH L (MM),TRANSIT TIME T (US)\n'
                    'Column C3,300,65.2\n').encode('utf-8')
@@ -1580,6 +1634,82 @@ class FileImportParsingTests(FileImportTestBase):
         self.assertIn('TEST TYPE', response.data['detail'])
         self.assertEqual(TelemetrySession.objects.count(), 0)
         self.assertEqual(_stored_exports(), [])
+
+    def test_an_instrument_s_own_export_is_taught_to_the_platform(self):
+        """The whole errand, in the order an inspector actually does it.
+
+        A PL-200 export is refused for its column names. The platform reads the
+        file's own header row and proposes a mapping — including the conversion
+        its metre-valued ``Distance`` needs to become the millimetres the
+        contract is in. The inspector accepts it, the same file is sent again,
+        and the reading that lands is a real pulse velocity rather than one a
+        thousand times too low.
+
+        Every step goes through the API, so this fails if any link between them
+        stops holding — the refusal's code, the proposal, the serializer, the
+        scaled read, or the promotion.
+        """
+        #: What a Proceq Pundit PL-200 writes: metres, and its own names. The
+        #: element and test type are not in the file — the unit has no notion
+        #: of them — so the import form supplies both, as it does in the app.
+        pl200 = (
+            'Id,Distance,Time 1,Time 2,Velocity,Measurement Type\n'
+            '1,0.300,65.2,65.4,4601,Direct\n'
+            '2,0.300,65.2,65.6,4601,Direct\n'
+        ).encode('utf-8')
+        context = {'test_type': 'Pulse Velocity',
+                   'structural_element': 'Column C9'}
+
+        # 1. Refused, with the code that tells the app a mapping is the fix.
+        refused = self._upload(pl200, name='pl200.csv', **context)
+        self.assertEqual(refused.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(refused.data['code'], 'unknown_columns')
+
+        # 2. The platform reads the header row and proposes.
+        proposed = self.client.post(
+            reverse('field-device-suggest-columns',
+                    kwargs={'pk': str(self.device.id)}),
+            {'file': SimpleUploadedFile('pl200.csv', pl200)},
+            format='multipart')
+        self.assertEqual(proposed.status_code, status.HTTP_200_OK)
+        self.assertEqual(proposed.data['mapping']['Time 1'], 'transit_time_t_us')
+        self.assertEqual(proposed.data['mapping']['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000.0})
+        # `Velocity` is computed by the platform, so it is never read — and it
+        # is proposed as declined rather than merely left out, because a column
+        # the mapping does not mention would refuse the file all over again.
+        self.assertIn('Velocity', proposed.data['mapping'])
+        self.assertIsNone(proposed.data['mapping']['Velocity'])
+
+        # 3. Nothing has been recorded by any of that.
+        self.assertEqual(
+            FieldDevice.objects.get(pk=self.device.id).column_mapping, {})
+
+        # 4. The inspector accepts it, and only now is anything written.
+        saved = self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': str(self.device.id)}),
+            {'column_mapping': proposed.data['mapping']}, format='json')
+        self.assertEqual(saved.status_code, status.HTTP_200_OK, saved.data)
+
+        # 5. The same file again, against the instrument that now knows.
+        accepted = self._upload(pl200, name='pl200.csv', **context)
+        self.assertEqual(accepted.status_code, status.HTTP_201_CREATED,
+                         accepted.data)
+        packet = TelemetryPacket.objects.get(
+            session_id=accepted.data['id'], sequence=1)
+        self.assertEqual(packet.payload['path_length_mm'], 300.0)
+        # The declined columns reached nothing — not the packet, not a row.
+        self.assertNotIn('velocity_km_s', packet.payload)
+        self.assertNotIn('id', packet.payload)
+
+        ended = self.client.post(
+            reverse('telemetry-session-end',
+                    kwargs={'session_id': accepted.data['id']}),
+            {}, format='json')
+        test = PUNDITTest.objects.get(pk=ended.data['promoted']['test_id'])
+        self.assertAlmostEqual(test.velocity_km_s, 4.601, places=2)
+        # The refusals stored nothing; the one accepted upload stored its bytes.
+        self.assertEqual(len(_stored_exports()), 1)
 
     def test_a_pulse_velocity_row_with_no_transit_time_is_refused(self):
         content = (

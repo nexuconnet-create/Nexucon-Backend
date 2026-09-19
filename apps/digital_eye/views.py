@@ -16,6 +16,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError as InvalidQueryParam
 from rest_framework.filters import SearchFilter
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -233,6 +234,77 @@ class FieldDeviceViewSet(viewsets.ModelViewSet):
         device.refresh_from_db(fields=['gateway_enabled'])
         return Response(
             FieldDeviceSerializer(device, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'], url_path='column-mapping/suggest',
+            parser_classes=[MultiPartParser, FormParser])
+    def suggest_columns(self, request, pk=None):
+        """`POST digital-eye/devices/<uuid>/column-mapping/suggest/`.
+
+        Body: multipart, optionally carrying a ``file``. With one, returns the
+        file's own header names — verbatim, as the export spells them — beside
+        the platform column each one appears to be, plus a ready-to-save
+        mapping. Without one, returns the accepted contract and nothing else.
+
+        The file is optional because a picker needs the contract whether or not
+        there is an export to read: an inspector editing a mapping already
+        recorded has no file in hand, and the contract has to come from the
+        server rather than be written out a second time in the frontend — two
+        lists of what the platform accepts drift, and a picker that offers a
+        column the platform has stopped accepting is worse than no picker.
+
+        **It writes nothing.** No device changes, no bytes are stored, no
+        session is opened. It exists so an inspector can see what the platform
+        made of their export *before* anything is recorded from it; saving the
+        mapping is then a separate, deliberate request against the device. That
+        separation is the point — ``FieldDevice.column_mapping`` says a wrong
+        mapping is indistinguishable from a right one once rows have been
+        written from it, so the proposal and the acceptance cannot be the same
+        event.
+
+        Scoped through ``_scoped_devices`` for the same reason ``gateway`` is:
+        this answer describes an instrument's file, and this viewset's own
+        queryset would give it to any authenticated user.
+        """
+        from apps.data_import.readers import ImportReadError, detect_import_type
+        from apps.data_import.suggest import accepted_columns, describe
+        from apps.telemetry.views import _scoped_devices
+
+        device = _scoped_devices(request.user).filter(pk=pk).first()
+        if device is None:
+            return Response(
+                {'detail': 'Device not found among the devices you can see.'},
+                status=status.HTTP_404_NOT_FOUND)
+
+        uploaded = request.FILES.get('file')
+        if uploaded is None:
+            return Response({
+                'device': str(device.id),
+                'device_reference': device.device_reference,
+                'file_name': '',
+                'columns': [],
+                'mapping': {},
+                'accepted': accepted_columns(),
+            })
+
+        content = uploaded.read()
+        if not content:
+            return Response(
+                {'detail': f'{uploaded.name} is empty, so it has no columns '
+                           'to read.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            described = describe(content, detect_import_type(content))
+        except ImportReadError as exc:
+            return Response({'detail': str(exc)},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'device': str(device.id),
+            'device_reference': device.device_reference,
+            'file_name': uploaded.name,
+            **described,
+        })
 
 
 class SensorDataFileViewSet(viewsets.ModelViewSet):

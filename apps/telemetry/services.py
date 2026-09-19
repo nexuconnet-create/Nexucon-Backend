@@ -37,11 +37,20 @@ logger = logging.getLogger(__name__)
 
 
 class TelemetryError(Exception):
-    """Invalid telemetry operation. Carries an HTTP status for the view."""
+    """Invalid telemetry operation. Carries an HTTP status for the view.
 
-    def __init__(self, message, status_code=400):
+    ``code`` is an optional machine-readable label for the refusals a client
+    has to *act* on differently rather than merely display — an unrecognised
+    column, say, where the app offers to record the mapping. Without it the
+    only way to tell those apart would be to match on the English message,
+    which breaks the first time the wording is improved. Most refusals carry
+    none, and a client that ignores it behaves exactly as before.
+    """
+
+    def __init__(self, message, status_code=400, code=None):
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
 
 
 class DeviceTokenService:

@@ -37,9 +37,12 @@ from apps.projects.models import Project
 from apps.scans.models import Defect, ScanSession
 
 from .models import ImportBatch, ImportRecord
-from .readers import ImportReadError, detect_import_type, normalise_key, read_rows
-from .registry import REGISTRY
+from .readers import (
+    ImportReadError, detect_import_type, normalise_key, read_headers, read_rows,
+)
+from .registry import REGISTRY, UPV_ACCEPTED_KEYS
 from .services import ImportService, ImportServiceError
+from .suggest import describe
 from .templates import build_template
 
 User = get_user_model()
@@ -1063,3 +1066,437 @@ class ImportAPITests(APITestCase):
         response = self.client.get('/api/v1/import/templates/GPR')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('SURVEY TITLE', response.content.decode('utf-8-sig'))
+
+
+# ======================================================================
+# Describing a file's columns — and converting a declared unit
+# ======================================================================
+
+class ReadHeadersTests(TestCase):
+    """``read_headers`` describes a file without interpreting it.
+
+    It exists because ``read_rows`` keys every row by the *contract* key a
+    column resolves to, so the instrument's own spelling is gone by the time a
+    caller sees a row. A mapping keyed by text the file does not literally
+    contain is one nobody can check against the file they are holding.
+    """
+
+    def test_the_header_text_is_returned_verbatim(self):
+        content = b'Distance (mm),Time 1,Struct  El\n0.1,25.1,C2\n'
+        headers, _ = read_headers(content, 'CSV')
+
+        # Not folded, not renamed, not stripped of the punctuation a person
+        # would use to recognise the column in their own export.
+        self.assertEqual(headers, ['Distance (mm)', 'Time 1', 'Struct  El'])
+
+    def test_sample_values_are_returned_as_written(self):
+        content = b'Distance,Time 1\n0.100,25.1\n0.150,25.4\n'
+        _, samples = read_headers(content, 'CSV')
+
+        self.assertEqual(samples['Distance'], ['0.100', '0.150'])
+        self.assertEqual(samples['Time 1'], ['25.1', '25.4'])
+
+    def test_blank_cells_are_not_collected_as_samples(self):
+        content = b'Distance,Notes\n0.100,\n0.150,fine\n,also fine\n'
+        _, samples = read_headers(content, 'CSV')
+
+        self.assertEqual(samples['Notes'], ['fine', 'also fine'])
+
+    def test_only_the_requested_number_of_samples_is_collected(self):
+        content = b'Distance\n' + b'\n'.join(
+            str(n).encode() for n in range(50)) + b'\n'
+        _, samples = read_headers(content, 'CSV', sample_limit=3)
+
+        self.assertEqual(len(samples['Distance']), 3)
+
+    def test_a_json_file_is_described_by_its_keys(self):
+        content = json.dumps([{'Distance': 0.1, 'Note': 'ok'}]).encode()
+        headers, samples = read_headers(content, 'JSON')
+
+        self.assertEqual(headers, ['Distance', 'Note'])
+        self.assertEqual(samples['Distance'], ['0.1'])
+
+    def test_a_sparse_json_file_still_reports_every_column(self):
+        # A later record carrying a key an earlier one did not is still a
+        # column the operator has to account for.
+        content = json.dumps([{'A': 1}, {'A': 2, 'B': 3}]).encode()
+        headers, _ = read_headers(content, 'JSON')
+
+        self.assertEqual(headers, ['A', 'B'])
+
+    def test_it_agrees_with_read_rows_about_what_a_header_is(self):
+        content = b'Distance,Time 1\n0.1,25.1\n'
+        headers, _ = read_headers(content, 'CSV')
+        rows, _ = read_rows(content, 'CSV')
+
+        self.assertEqual([normalise_key(h) for h in headers],
+                         list(rows[0].data.keys()))
+
+    def test_a_pdf_is_refused_rather_than_described(self):
+        with self.assertRaises(ImportReadError):
+            read_headers(b'%PDF-1.7\n...', 'PDF')
+
+    def test_a_file_with_no_header_row_is_refused(self):
+        with self.assertRaises(ImportReadError):
+            read_headers(b'', 'CSV')
+
+    def test_a_file_that_is_not_utf8_is_refused_with_the_csv_advice(self):
+        with self.assertRaises(ImportReadError) as caught:
+            read_headers(b'Distance\n\xff\xfe\n', 'CSV')
+
+        self.assertIn('CSV UTF-8', str(caught.exception))
+
+
+class ColumnMappingScaleTests(TestCase):
+    """A declared mapping may convert a unit, not only rename a column.
+
+    The scale is the difference between 3984 m/s and 4 m/s from the same bytes
+    — the one error in this pipeline that is positive, plausible and graded, so
+    it is asserted as a number rather than as the shape of a mapping object.
+    """
+
+    CSV = b'Distance,Time 1\n0.100,25.1\n'
+
+    def _velocity_km_s(self, header_map):
+        rows, _ = read_rows(self.CSV, 'CSV', header_map=header_map)
+        data = rows[0].data
+        return (float(data['path_length_l_mm'])
+                / float(data['transit_time_t_us']))
+
+    def test_a_declared_scale_converts_the_values(self):
+        velocity = self._velocity_km_s({
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+        })
+
+        self.assertAlmostEqual(velocity, 3.984, places=3)
+
+    def test_without_the_scale_the_same_file_is_a_thousand_times_slower(self):
+        """The failure the scale exists to prevent, asserted here so that a
+        later edit which stopped applying it fails in a test rather than in a
+        registry."""
+        velocity = self._velocity_km_s({
+            'Distance': 'path_length_l_mm', 'Time 1': 'transit_time_t_us'})
+
+        self.assertAlmostEqual(velocity, 0.003984, places=6)
+
+    def test_a_plain_string_mapping_still_renames(self):
+        rows, _ = read_rows(self.CSV, 'CSV', header_map={
+            'Distance': 'path_length_l_mm'})
+
+        self.assertEqual(rows[0].data['path_length_l_mm'], '0.100')
+
+    def test_no_mapping_takes_the_path_it_always_took(self):
+        rows, _ = read_rows(self.CSV, 'CSV', header_map=None)
+
+        self.assertEqual(rows[0].data, {'distance': '0.100', 'time_1': '25.1'})
+
+    def test_a_scaled_column_of_text_is_left_alone(self):
+        # A scale on a column that does not hold numbers is a declaration with
+        # no effect. Coercing the text would invent a value.
+        content = b'Distance,Notes\n0.100,fine\n0.150,also fine\n'
+        rows, _ = read_rows(content, 'CSV', header_map={
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Notes': {'to': 'notes', 'scale': 1000}})
+
+        self.assertEqual(rows[0].data['notes'], 'fine')
+
+    def test_a_scale_is_applied_to_json_values_too(self):
+        content = json.dumps([{'Distance': 0.2, 'Time 1': 25.1}]).encode()
+        rows, _ = read_rows(content, 'JSON', header_map={
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us'})
+
+        self.assertEqual(rows[0].data['path_length_l_mm'], 200.0)
+
+    def test_a_scale_that_is_not_a_number_is_refused(self):
+        with self.assertRaises(ImportReadError) as caught:
+            read_rows(self.CSV, 'CSV', header_map={
+                'Distance': {'to': 'path_length_l_mm', 'scale': 'lots'}})
+
+        self.assertIn('Distance', str(caught.exception))
+
+    def test_a_scale_that_cannot_convert_is_refused(self):
+        for scale in (0, -2):
+            with self.assertRaises(ImportReadError):
+                read_rows(self.CSV, 'CSV', header_map={
+                    'Distance': {'to': 'path_length_l_mm', 'scale': scale}})
+
+    def test_a_column_the_mapping_does_not_cover_is_still_refused_by_name(self):
+        """The scale widens what a mapping can *say*, never what it accepts."""
+        rows, _ = read_rows(self.CSV, 'CSV', header_map={
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000}})
+
+        self.assertIn('time_1', rows[0].data)
+
+
+class ColumnSuggestTests(TestCase):
+    """Proposing a mapping from a file, without ever deciding one.
+
+    The suggester is allowed to be wrong; it is not allowed to be silently
+    wrong. Every claim it makes is shown to a person beside the values it was
+    drawn from, and these tests pin the two that matter — a column it cannot
+    place is left unplaced, and a column of metres is not read as millimetres.
+    """
+
+    PL200 = (
+        b'Id,Name,Distance,Time 1,Time 2,Velocity,Measurement Type,'
+        b'Crack Depth,Correction Factor,Date & Time\n'
+        b'1,P1,0.100,25.1,25.3,3984,Direct,,1.00,2026-09-19 10:00\n'
+        b'2,P2,0.150,25.4,25.6,5905,Direct,,1.00,2026-09-19 10:01\n')
+
+    def _described(self, content=None):
+        content = content if content is not None else self.PL200
+        return describe(content, detect_import_type(content))
+
+    def _column(self, described, header):
+        for column in described['columns']:
+            if column['header'] == header:
+                return column
+        self.fail(f'{header!r} was not described at all')
+
+    def test_a_header_that_is_already_a_contract_key_is_matched_exactly(self):
+        described = self._described(
+            b'Structural Element,Test Type,Transit Time T (Us)\n'
+            b'C2,pulse_velocity,25.1\n')
+
+        self.assertEqual(self._column(described, 'Structural Element')['target'],
+                         'structural_element')
+        self.assertEqual(self._column(described, 'Test Type')['target'],
+                         'test_type')
+        self.assertEqual(self._column(described, 'Transit Time T (Us)')['basis'],
+                         'exact')
+
+    def test_an_instrument_s_own_name_is_matched_through_the_alias_table(self):
+        described = self._described()
+
+        self.assertEqual(self._column(described, 'Time 1')['target'],
+                         'transit_time_t_us')
+        self.assertEqual(self._column(described, 'Time 1')['basis'], 'alias')
+
+    def test_the_unit_is_read_from_the_values_not_the_column_name(self):
+        """The one place the suggester is clever, and the reason it has to be.
+
+        ``Distance`` holds metres. Mapped to a millimetre key without a scale,
+        every pulse velocity from this file would be a thousand times too low —
+        positive, plausible, and impossible to tell from a slow reading.
+        """
+        distance = self._column(self._described(), 'Distance')
+
+        self.assertEqual(distance['target'], 'path_length_l_mm')
+        self.assertEqual(distance['scale'], 1000.0)
+        self.assertIn('metres', distance['note'])
+
+    def test_a_genuine_millimetre_column_is_not_converted(self):
+        described = self._described(
+            b'Distance,Time 1\n100,25.1\n150,25.4\n300,26.0\n')
+
+        distance = self._column(described, 'Distance')
+
+        self.assertEqual(distance['scale'], 1.0)
+        self.assertEqual(distance['note'], '')
+
+    def test_a_column_with_nothing_to_measure_is_not_converted(self):
+        # One value cannot tell a column in metres from a column with a typo in
+        # it, so no claim is made at all.
+        described = self._described(b'Distance,Time 1\n0.100,25.1\n')
+
+        self.assertEqual(self._column(described, 'Distance')['scale'], 1.0)
+
+    def test_a_column_holding_no_numbers_is_not_converted(self):
+        described = self._described(b'Distance,Time 1\nn/a,25.1\nn/a,25.4\n')
+
+        self.assertEqual(self._column(described, 'Distance')['scale'], 1.0)
+
+    def test_velocity_is_declined_with_the_reason(self):
+        velocity = self._column(self._described(), 'Velocity')
+
+        self.assertIsNone(velocity['target'])
+        self.assertEqual(velocity['basis'], 'declined')
+        self.assertIn('computes', velocity['note'])
+
+    def test_the_second_transit_time_is_declined_rather_than_guessed(self):
+        """It is a repeat reading on one test and the uncracked time on
+        another. Guessing would put a real number in the wrong column."""
+        second = self._column(self._described(), 'Time 2')
+
+        self.assertIsNone(second['target'])
+        self.assertIn('ambiguous', second['note'])
+
+    def test_measurement_type_is_not_offered_as_the_test_type(self):
+        """The near-miss this table exists for: it is the transducer
+        arrangement, and the registry reads test_type as something else."""
+        measurement = self._column(self._described(), 'Measurement Type')
+
+        self.assertIsNone(measurement['target'])
+        self.assertIn('transducer arrangement', measurement['note'])
+
+    def test_an_unknown_column_is_left_unplaced_with_no_invented_note(self):
+        described = self._described(b'Distance,Widget\n0.100,7\n0.150,8\n')
+        widget = self._column(described, 'Widget')
+
+        self.assertIsNone(widget['target'])
+        self.assertEqual(widget['basis'], 'unknown')
+        self.assertEqual(widget['note'], '')
+
+    def test_samples_are_carried_so_a_person_can_check_the_values(self):
+        self.assertEqual(self._column(self._described(), 'Distance')['samples'],
+                         ['0.100', '0.150'])
+
+    def test_the_proposed_mapping_is_ready_to_save(self):
+        mapping = self._described()['mapping']
+
+        self.assertEqual(mapping['Time 1'], 'transit_time_t_us')
+        self.assertEqual(mapping['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000.0})
+
+    def test_a_declined_column_is_proposed_as_null_not_omitted(self):
+        """The difference between the two is the difference between a file the
+        platform can be taught to read and one it refuses forever.
+
+        An omitted column is one nobody has accounted for and the importer
+        refuses the file over it; ``null`` says a person looked at that column
+        and set it aside. So the declined columns are *in* the proposal, and
+        the only thing that keeps them out of the row is this.
+        """
+        mapping = self._described()['mapping']
+
+        for header in ('Velocity', 'Time 2', 'Measurement Type', 'Crack Depth'):
+            self.assertIn(header, mapping)
+            self.assertIsNone(mapping[header])
+
+    def test_a_scale_of_one_is_written_as_a_plain_key(self):
+        """So a mapping recorded here reads like every mapping recorded before
+        it, and stays legible to anyone who opens the field by hand."""
+        mapping = self._described(b'Distance,Time 1\n100,25.1\n150,25.4\n')['mapping']
+
+        self.assertEqual(mapping['Distance'], 'path_length_l_mm')
+
+    def test_the_proposal_survives_the_serializer_that_will_store_it(self):
+        """A proposal the API would refuse is worse than no proposal."""
+        from apps.digital_eye.serializers import FieldDeviceSerializer
+
+        mapping = self._described()['mapping']
+        serializer = FieldDeviceSerializer()
+        self.assertEqual(serializer.validate_column_mapping(mapping), mapping)
+
+    def test_the_picker_offers_the_whole_contract_and_nothing_else(self):
+        accepted = self._described()['accepted']
+        keys = {entry['key'] for entry in accepted}
+
+        self.assertEqual(keys, set(UPV_ACCEPTED_KEYS))
+        # Every key has a name a person can read, not just its snake_case form.
+        for entry in accepted:
+            self.assertTrue(entry['label'])
+            self.assertIn(entry['group'], ('measurement', 'context'))
+
+
+class ColumnDeclineTests(TestCase):
+    """A mapping may set a column aside, and that is not the same as omitting it.
+
+    Both leave the column unread, but they mean opposite things and the
+    importer treats them oppositely. An *omitted* column is one nobody has
+    accounted for, and the file is refused for it — which is the guard that
+    keeps an unknown column from being silently dropped when it might have
+    been a measurement. A *declined* column is one a person looked at and set
+    aside, and the file is read past it.
+
+    The distinction is what makes an instrument's own export importable at all.
+    A PL-200 writes six columns; the contract reads two. Without a way to say
+    "these other four are known, and not wanted", accepting a proposed mapping
+    would leave the file exactly as refused as it was before.
+    """
+
+    CSV = b'Id,Distance,Time 1,Velocity\n1,0.100,25.1,3984\n'
+
+    def test_a_declined_column_is_dropped_from_the_row(self):
+        rows, _ = read_rows(self.CSV, 'CSV', header_map={
+            'Distance': 'path_length_l_mm',
+            'Time 1': 'transit_time_t_us',
+            'Velocity': None,
+            'Id': None,
+        })
+
+        self.assertEqual(sorted(rows[0].data), ['path_length_l_mm',
+                                                'transit_time_t_us'])
+
+    def test_a_declined_column_is_not_left_under_a_made_up_name(self):
+        """``None`` folded as though it were a target would key the column by
+        the string "none" — a column the importer would then refuse."""
+        rows, _ = read_rows(self.CSV, 'CSV', header_map={'Velocity': None})
+
+        self.assertNotIn('none', rows[0].data)
+        self.assertNotIn('Velocity', rows[0].data)
+
+    def test_a_column_the_mapping_does_not_name_keeps_its_own_name(self):
+        """The contrast that gives declining its meaning: unaccounted for is
+        not the same as set aside, and this is the one the guard refuses."""
+        rows, _ = read_rows(self.CSV, 'CSV', header_map={
+            'Distance': 'path_length_l_mm'})
+
+        self.assertIn('velocity', rows[0].data)
+        self.assertIn('id', rows[0].data)
+        self.assertIn('time_1', rows[0].data)
+
+    def test_a_declined_column_is_declined_in_json_too(self):
+        content = json.dumps([{'Distance': 0.100, 'Time 1': 25.1,
+                               'Velocity': 3984}]).encode('utf-8')
+
+        rows, _ = read_rows(content, 'JSON', header_map={
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+            'Velocity': None,
+        })
+
+        self.assertEqual(rows[0].data['path_length_l_mm'], 100.0)
+        self.assertNotIn('velocity', rows[0].data)
+
+    def test_declining_and_scaling_the_same_column_compose(self):
+        """A declined column is dropped before anything is done to its values,
+        so a scale on one cannot resurrect it as a number."""
+        rows, _ = read_rows(self.CSV, 'CSV', header_map={
+            'Velocity': {'to': 'path_length_l_mm', 'scale': 1000}})
+
+        self.assertEqual(rows[0].data['path_length_l_mm'], 3984.0 * 1000)
+
+    def test_a_file_whose_columns_are_all_declined_has_no_rows(self):
+        """Every value blank is how a blank line reads, so a file with nothing
+        left to read reports as holding no rows rather than as valid."""
+        rows, skipped = read_rows(self.CSV, 'CSV', header_map={
+            'Id': None, 'Distance': None, 'Time 1': None, 'Velocity': None})
+
+        self.assertEqual(rows, [])
+        self.assertEqual(skipped, 1)
+
+
+class DeclinedColumnSuggestionTests(TestCase):
+    """What the suggester proposes for a column it recognises and will not read."""
+
+    PL200 = (
+        b'Id,Distance,Time 1,Time 2,Velocity,Measurement Type,Substance\n'
+        b'1,0.100,25.1,25.3,3984,Direct,concrete\n'
+        b'2,0.150,25.4,25.6,5905,Direct,concrete\n')
+
+    def test_a_declined_column_is_proposed_as_deliberately_not_imported(self):
+        """Null, not absent. An absent column would refuse the file again the
+        moment the mapping was saved, which is the whole thing this fixes."""
+        mapping = describe(self.PL200, 'CSV')['mapping']
+
+        for header in ('Id', 'Time 2', 'Velocity', 'Measurement Type'):
+            self.assertIn(header, mapping)
+            self.assertIsNone(mapping[header])
+
+    def test_a_column_nothing_is_known_about_is_left_out_not_declined(self):
+        """The platform has no basis for setting an unrecognised column aside.
+        Nulling it would be the misread the unknown-column guard exists to
+        catch, made by the suggester instead of by a guess."""
+        mapping = describe(self.PL200, 'CSV')['mapping']
+
+        self.assertNotIn('Substance', mapping)
+
+    def test_the_mapped_columns_still_come_through_beside_the_declines(self):
+        mapping = describe(self.PL200, 'CSV')['mapping']
+
+        self.assertEqual(mapping['Time 1'], 'transit_time_t_us')
+        self.assertEqual(mapping['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000.0})

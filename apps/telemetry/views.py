@@ -280,7 +280,8 @@ class TelemetrySessionFromFileView(APIView):
                               'file': getattr(data['file'], 'name', ''),
                               'reason': str(exc),
                           })
-            return Response({'detail': str(exc)}, status=exc.status_code)
+            return Response({'detail': str(exc), 'code': exc.code},
+                            status=exc.status_code)
 
         payload = TelemetrySessionSerializer(session).data
         payload['import_stats'] = stats

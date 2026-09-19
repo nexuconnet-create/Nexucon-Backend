@@ -1,6 +1,8 @@
 """
 Digital Eye API serializers.
 """
+import math
+
 from rest_framework import serializers
 
 from apps.data_import.readers import normalise_key
@@ -93,6 +95,14 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
         export says, and the platform has no business having an opinion about
         them.
 
+        A value is either the platform column on its own, an object naming it
+        with the scale that gets from the instrument's unit to the contract's —
+        ``{"Distance": {"to": "path_length_l_mm", "scale": 1000}}`` — or
+        ``null``, which says the column was accounted for and is deliberately
+        not read. The scale is validated here rather than left to the reader
+        because a multiplier the importer refuses is a refusal that arrives on
+        a laptop at a site, weeks after the form that made the mistake.
+
         Checked against the UPV contract, which is the only file contract that
         describes a whole capture. When a second instrument gets one, this
         validator has to branch on ``device_type`` rather than widen the set —
@@ -113,12 +123,56 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
                 'Every entry needs the instrument\'s own column name as its '
                 'key. Remove the entry with the blank name, or fill it in.')
 
+        targets = {}
+        for source, target in value.items():
+            if isinstance(target, dict):
+                scale = target.get('scale')
+                if scale is not None and scale != '':
+                    try:
+                        scale = float(scale)
+                    except (TypeError, ValueError):
+                        raise serializers.ValidationError(
+                            f'The scale given for "{source}" is not a number. '
+                            'A scale the platform cannot read would be ignored '
+                            'on import, writing every value in that column '
+                            'unconverted.')
+                    if not math.isfinite(scale) or scale <= 0:
+                        raise serializers.ValidationError(
+                            f'The scale given for "{source}" cannot convert '
+                            'anything. Use a positive number, or leave the '
+                            'scale out to record the column as written.')
+                key = target.get('to')
+                if key is None:
+                    # An object with no destination is a mistyped rename, not a
+                    # decline — `null` is how a column is declined, and reading
+                    # this as one would throw away a column somebody meant to
+                    # map because they misspelled "to".
+                    raise serializers.ValidationError(
+                        f'The entry for "{source}" names no platform column. '
+                        'Give it a "to" column, or use null to record it as '
+                        'deliberately not imported.')
+                targets[source] = key
+            elif isinstance(target, str):
+                targets[source] = target
+            elif target is None:
+                # Accounted for and set aside. This is what lets an instrument
+                # that writes six columns be read by a contract that wants two:
+                # without it, the other four would refuse the file forever.
+                targets[source] = None
+            else:
+                raise serializers.ValidationError(
+                    f'The mapping for "{source}" must be a platform column '
+                    'name, an object naming one with a scale, or null to '
+                    'record it as deliberately not imported.')
+
         # Folded on both sides, exactly as the reader folds them, so a mapping
         # written as "PATH LENGTH L (MM)" is accepted — it resolves to the same
         # contract key, and rejecting it would refuse a mapping that works.
+        # A declined column is not looked up as though it were a name.
         unknown = sorted({
-            str(target) for target in value.values()
-            if normalise_key(target) not in UPV_ACCEPTED_KEYS
+            str(target) for target in targets.values()
+            if target is not None
+            and normalise_key(target) not in UPV_ACCEPTED_KEYS
         })
         if unknown:
             raise serializers.ValidationError(

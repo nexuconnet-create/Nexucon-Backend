@@ -316,7 +316,8 @@ class SessionFromFileService:
                 f'{", ".join(unknown)}. Nothing was imported, because guessing '
                 f'which column is which would risk recording a wrong value as '
                 f'a measurement. Accepted columns are: {_accepted_columns()}. '
-                + next_step)
+                + next_step,
+                code='unknown_columns')
 
     @staticmethod
     def _merge_context(rows, config):

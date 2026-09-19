@@ -34,7 +34,7 @@ from apps.audit.models import AuditEvent
 from apps.common.ai_service import AIProviderUnavailable
 from apps.evidence.models import AIAnalysisRecord, EvidenceRecord
 from apps.projects.models import Project
-from apps.telemetry.models import DeviceToken
+from apps.telemetry.models import DeviceToken, TelemetrySession
 
 from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .models import (
@@ -1701,6 +1701,234 @@ class FieldDeviceColumnMappingTestCase(DigitalEyeAPITestBase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['column_mapping'], {})
+
+    # ------------------------------------------------------------------
+    # A value may carry the scale from the instrument's unit to the
+    # contract's. Without this the metres a PL-200 writes cannot be
+    # declared at all, and a column of them reads as millimetres.
+    # ------------------------------------------------------------------
+
+    def test_a_mapping_that_declares_a_scale_is_accepted(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['column_mapping']['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000})
+
+    def test_a_scale_that_is_not_a_number_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 'lots'}})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('not a number', str(response.data['errors']))
+
+    def test_a_scale_that_cannot_convert_is_refused(self):
+        device_id = self._device()
+
+        for scale in (0, -5):
+            response = self._patch(device_id, {
+                'Distance': {'to': 'path_length_l_mm', 'scale': scale}})
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST,
+                             msg=f'scale={scale} should be refused')
+
+    def test_a_scaled_value_still_has_to_name_a_platform_column(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'distance_mm', 'scale': 1000}})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('distance_mm', str(response.data['errors']))
+
+    def test_a_value_that_is_neither_a_key_nor_an_object_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'Distance': ['path_length_l_mm']})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ------------------------------------------------------------------
+    # A column may be declared and deliberately not read. Without this,
+    # accepting a proposed mapping would leave an instrument's own export
+    # exactly as refused as it was — the four PL-200 columns the contract
+    # has no home for would refuse the file every time.
+    # ------------------------------------------------------------------
+
+    def test_a_null_value_records_a_column_as_deliberately_not_imported(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+            'Velocity': None,
+            'Time 2': None,
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(response.data['column_mapping']['Velocity'])
+        self.assertEqual(response.data['column_mapping']['Time 1'],
+                         'transit_time_t_us')
+
+    def test_an_object_naming_no_column_is_refused_rather_than_declined(self):
+        """A mistyped "to" must not read as a decision to drop the column —
+        that would throw away a measurement because of a spelling mistake."""
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'too': 'path_length_l_mm', 'scale': 1000}})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('to', str(response.data['errors']))
+        self.assertEqual(
+            FieldDevice.objects.get(pk=device_id).column_mapping, {})
+
+
+class FieldDeviceSuggestColumnsTestCase(DigitalEyeAPITestBase):
+    """Reading an export to propose a mapping — and writing nothing.
+
+    The proposal and the acceptance are two requests on purpose. A device's
+    column mapping is indistinguishable from a right one once rows have been
+    written from it, so the platform may read a file and say what it makes of
+    it, but a person saves it. These tests hold both halves: that the reading
+    is useful, and that it changes nothing on its own.
+    """
+
+    PL200 = (
+        b'Id,Distance,Time 1,Time 2,Velocity,Measurement Type\n'
+        b'1,0.100,25.1,25.3,3984,Direct\n'
+        b'2,0.150,25.4,25.6,5905,Direct\n')
+
+    def _device(self, **overrides):
+        payload = {'device_id': 'PUNDIT-SUGGEST-01', 'device_type': 'pundit'}
+        payload.update(overrides)
+        response = self.client.post(reverse('field-device-list'), payload,
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return response.data['id']
+
+    def _suggest(self, device_id, content=None, name='export.csv'):
+        upload = SimpleUploadedFile(
+            name, self.PL200 if content is None else content,
+            content_type='text/csv')
+        return self.client.post(
+            reverse('field-device-suggest-columns', kwargs={'pk': device_id}),
+            {'file': upload}, format='multipart')
+
+    def test_it_returns_the_file_s_own_columns_and_a_proposed_mapping(self):
+        response = self._suggest(self._device())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['file_name'], 'export.csv')
+        headers = [column['header'] for column in response.data['columns']]
+        self.assertEqual(headers, ['Id', 'Distance', 'Time 1', 'Time 2',
+                                   'Velocity', 'Measurement Type'])
+        self.assertEqual(response.data['mapping']['Time 1'], 'transit_time_t_us')
+
+    def test_it_proposes_the_conversion_the_values_need(self):
+        response = self._suggest(self._device())
+
+        self.assertEqual(response.data['mapping']['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000.0})
+
+    def test_it_offers_the_contract_for_a_picker(self):
+        response = self._suggest(self._device())
+
+        keys = {entry['key'] for entry in response.data['accepted']}
+        self.assertIn('path_length_l_mm', keys)
+        self.assertIn('structural_element', keys)
+
+    def test_it_writes_nothing_at_all(self):
+        """No mapping saved, no bytes stored, no session opened."""
+        device_id = self._device()
+
+        self._suggest(device_id)
+
+        device = FieldDevice.objects.get(pk=device_id)
+        self.assertEqual(device.column_mapping, {})
+        self.assertFalse(
+            TelemetrySession.objects.filter(device_id=device_id).exists())
+
+    def test_a_file_with_no_columns_to_read_is_refused(self):
+        response = self._suggest(self._device(), content=b'')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('empty', str(response.data['detail']).lower())
+
+    def test_with_no_file_it_answers_with_the_contract_alone(self):
+        """An inspector editing a mapping already recorded has no export in
+        hand, and the picker still has to offer the platform's own columns.
+
+        Answering with the contract rather than a hardcoded list in the frontend
+        is what stops the two drifting apart.
+        """
+        response = self.client.post(
+            reverse('field-device-suggest-columns',
+                    kwargs={'pk': self._device()}), {}, format='multipart')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['columns'], [])
+        self.assertEqual(response.data['mapping'], {})
+        keys = {entry['key'] for entry in response.data['accepted']}
+        self.assertIn('path_length_l_mm', keys)
+        self.assertIn('structural_element', keys)
+
+    def test_answering_with_the_contract_writes_nothing_either(self):
+        device_id = self._device()
+
+        self.client.post(
+            reverse('field-device-suggest-columns', kwargs={'pk': device_id}),
+            {}, format='multipart')
+
+        self.assertEqual(
+            FieldDevice.objects.get(pk=device_id).column_mapping, {})
+
+    def test_a_pdf_is_refused_with_the_reason(self):
+        response = self._suggest(self._device(), content=b'%PDF-1.7\n...',
+                                 name='scan.pdf')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('PDF', str(response.data['detail']))
+
+    def test_a_device_outside_the_caller_s_sight_is_not_found(self):
+        """The scope check that matters, because this viewset's own queryset
+        would answer for every device in the system."""
+        from apps.government.models import Profile, Role
+
+        owner = User.objects.create_user(
+            username='other_engineer@nexucon.com',
+            email='other_engineer@nexucon.com', password='Password123!')
+        device = FieldDevice.objects.create(
+            device_id='SOMEBODY-ELSES-01', device_type='pundit',
+            registered_by=owner)
+
+        officer = User.objects.create_user(
+            username='officer@lasbca.gov', email='officer@lasbca.gov',
+            password='Password123!')
+        role, _ = Role.objects.get_or_create(name='Inspector')
+        Profile.objects.create(user=officer, role=role)
+        refresh = RefreshToken.for_user(officer)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+        response = self._suggest(device.id)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_an_anonymous_caller_is_refused(self):
+        device_id = self._device()
+        self.client.force_authenticate(None)
+
+        response = self._suggest(device_id)
+
+        self.assertIn(response.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
 
 
 class FieldDeviceProjectAssignmentTestCase(DigitalEyeAPITestBase):
