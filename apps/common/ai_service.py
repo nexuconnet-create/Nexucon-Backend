@@ -100,10 +100,10 @@ class StructuredResult(dict):
 #
 # Capability is DERIVED from which runner exists (see `CAPABILITIES` below),
 # never declared in parallel with it — so a provider cannot advertise a
-# capability it has no code for, and the two can never drift apart. DeepSeek's
-# public API (deepseek-chat) has no vision endpoint, so there is no vision
-# runner for it and CAPABILITIES["deepseek"] == {"text"} is a computed fact
-# rather than a claim.
+# capability it has no code for, and the two can never drift apart. There is
+# no vision runner for DeepSeek, so CAPABILITIES["deepseek"] == {"text"} is a
+# computed fact rather than a claim. Giving it one is a code change, not a
+# config change: write the runner and the capability follows.
 #
 # ORDER IS DETERMINISTIC ON PURPOSE. A failover sequence appears in logs and
 # in reasoning records; dict or set iteration order would make the same
@@ -232,10 +232,15 @@ class AIService:
 
     @staticmethod
     def _get_anthropic_model():
-        # Claude Opus 5 — the most capable current model. Read at call time so
-        # an operator can change model without a deploy.
+        # Claude Haiku 4.5 — the cheapest Claude model that still does both
+        # vision and structured JSON, at $1/$5 per million tokens against
+        # Opus 5's $5/$25. The prompts here are short and the numbers they
+        # must not touch (pulse velocity, E.C.S., confidence) are computed
+        # deterministically, so the top tier buys little on this workload.
+        # Read at call time: move to `claude-sonnet-5` ($2/$10) or
+        # `claude-opus-5` ($5/$25) in .env alone, no deploy.
         return getattr(settings, "ANTHROPIC_MODEL",
-                       AIService._env("ANTHROPIC_MODEL", "claude-opus-5"))
+                       AIService._env("ANTHROPIC_MODEL", "claude-haiku-4-5"))
 
     @staticmethod
     def _get_anthropic_base_url():
@@ -248,10 +253,14 @@ class AIService:
 
     @staticmethod
     def _get_deepseek_model():
-        # `deepseek-chat` and not `deepseek-reasoner`: the reasoner model
-        # rejects `response_format`, and every caller here asks for JSON.
+        # `deepseek-flash` is DeepSeek's cheapest model and one of only two
+        # IDs their pricing page still documents — the previous default,
+        # `deepseek-chat`, no longer appears there at all, so it was a stale
+        # ID rather than merely an expensive one. Both documented models
+        # (flash and v4-pro) list JSON Output as supported, which this
+        # service needs: the runner below sends `{"type": "json_object"}`.
         return getattr(settings, "DEEPSEEK_MODEL",
-                       AIService._env("DEEPSEEK_MODEL", "deepseek-chat"))
+                       AIService._env("DEEPSEEK_MODEL", "deepseek-flash"))
 
     @staticmethod
     def _get_deepseek_base_url():
