@@ -2,6 +2,7 @@ import datetime
 import os
 import urllib.error
 from contextlib import contextmanager
+from decimal import Decimal
 from unittest import mock
 
 from django.test import TestCase
@@ -21,6 +22,11 @@ from apps.settings.models import (
 from apps.settings.services import (
     GovernmentAPIProvider, TersusProvider, BIMProvider, DocumentProvider,
     BaseIntegrationProvider, IntegrationService, SettingsService, _http_probe,
+    role_standing,
+)
+from apps.government.models import District, Profile, Role
+from common.permissions import (
+    ROLE_AGENCY_HEAD, ROLE_DIRECTOR, ROLE_INSPECTOR, scoped_projects,
 )
 
 User = get_user_model()
@@ -176,19 +182,21 @@ class SettingsAndIntegrationsTestCase(TestCase):
         self.assertIn('GOV_CAC_API_TOKEN', res.data['reason'])
 
     # ---------------- SETTINGS TESTS ----------------
-
     def test_staff_user_list_and_invite(self):
         # List staff
         res = self.client.get('/api/v1/settings/users/')
         self.assertEqual(res.status_code, 200)
         self.assertTrue(len(res.data) >= 1)
 
-        # Invite new staff
+        # Invite new staff. A zone is required for a scoped role — without one
+        # the officer would fall through scoped_projects to no projects at all.
+        zone = District.objects.create(name='Ikeja Zone', code='IKJ')
         invite_res = self.client.post('/api/v1/settings/users/', {
             "name": "Engr. Folake Balogun",
             "email": "folake.b@agency.gov.ng",
             "role": "Lead Inspector",
-            "department": "Structural Engineering"
+            "department": "Structural Engineering",
+            "district_id": str(zone.id),
         })
         self.assertEqual(invite_res.status_code, 201)
         self.assertEqual(invite_res.data['email'], "folake.b@agency.gov.ng")
@@ -906,6 +914,10 @@ class StaffDirectoryServiceTestCase(TestCase):
         self.director = User.objects.create_superuser(
             username='staff_admin', email='staff.admin@government.gov.ng',
             password='Password123!', first_name='Staff', last_name='Admin')
+        # Every role that is not state-wide is scoped by a zone, so a zone is
+        # required to invite one. These tests invite real officers, so they
+        # supply the zone a real invitation would carry.
+        self.zone = District.objects.create(name='Ikeja Zone', code='IKJ')
 
     def test_staff_users_include_pending_invitations_not_yet_accepted(self):
         UserInvitation.objects.create(
@@ -966,7 +978,7 @@ class StaffDirectoryServiceTestCase(TestCase):
             invitation = SettingsService.invite_user(
                 'new.engineer@government.gov.ng', 'Engr. New Engineer',
                 role='Reviewer', department='Urban Planning',
-                invited_by=self.director)
+                invited_by=self.director, district_id=str(self.zone.id))
 
         send.assert_called_once()
         self.assertEqual(invitation.status, 'Pending')
@@ -986,7 +998,8 @@ class StaffDirectoryServiceTestCase(TestCase):
         with mock.patch('apps.notifications.email_service.'
                         'EmailService.send_invitation_email'):
             invitation = SettingsService.invite_user(
-                'existing@government.gov.ng', 'Existing Staff')
+                'existing@government.gov.ng', 'Existing Staff',
+                district_id=str(self.zone.id))
 
         self.assertEqual(invitation.email, 'existing@government.gov.ng')
         user = User.objects.get(email='existing@government.gov.ng')
@@ -997,7 +1010,8 @@ class StaffDirectoryServiceTestCase(TestCase):
                         'EmailService.send_invitation_email',
                         side_effect=RuntimeError('Resend unavailable')):
             invitation = SettingsService.invite_user(
-                'mailer.down@government.gov.ng', 'Mailer Down')
+                'mailer.down@government.gov.ng', 'Mailer Down',
+                district_id=str(self.zone.id))
         self.assertEqual(invitation.status, 'Pending')
         self.assertTrue(User.objects.filter(
             email='mailer.down@government.gov.ng').exists())
@@ -1017,7 +1031,7 @@ class StaffDirectoryServiceTestCase(TestCase):
             invitation = SettingsService.invite_user(
                 'activate.me@government.gov.ng', 'Activate Me',
                 role='City Planner', department='Transport',
-                invited_by=self.director)
+                invited_by=self.director, district_id=str(self.zone.id))
 
         # The token is the invitee's own credential — it is the UUID in the link
         # the invitation email carries, so it is what a client sends. Without
@@ -1057,7 +1071,8 @@ class StaffDirectoryServiceTestCase(TestCase):
         with mock.patch('apps.notifications.email_service.'
                         'EmailService.send_invitation_email'):
             invitation = SettingsService.invite_user(
-                'no.credential@government.gov.ng', 'No Credential')
+                'no.credential@government.gov.ng', 'No Credential',
+                district_id=str(self.zone.id))
         before = User.objects.get(email='no.credential@government.gov.ng')
         original_password = before.password
 
@@ -1099,6 +1114,7 @@ class StaffDirectoryServiceTestCase(TestCase):
             name='Engr. Test Inspector',
             role='Inspector',
             department='Building Inspectorate',
+            district_id=str(self.zone.id),
             invite_code='TEST-1234'
         )
 
@@ -1135,6 +1151,236 @@ class StaffDirectoryServiceTestCase(TestCase):
         accepted_res = SettingsService.validate_inspector_invitation(token=str(invitation.id), invite_code='TEST-1234')
         self.assertFalse(accepted_res['valid'])
         self.assertEqual(accepted_res['error_code'], 'ALREADY_ACCEPTED')
+
+
+class InvitationStandingTestCase(TestCase):
+    """The invite panel decides who sees what, so it is tested as a control.
+
+    The defect these cover: the drawer offered CustomRole labels ("Lead
+    Inspector", "City Planner", ...) that `scoped_projects` does not
+    recognise, and the zone was optional. An officer invited that way got a
+    government.Role row nothing checks, no district either, and therefore an
+    empty dashboard — unfixable from the admin panel, because the role NAME is
+    what gets checked.
+    """
+
+    def setUp(self):
+        # The invitation email is not what these tests are about, and the
+        # dispatch is a live Resend HTTP call — patching it keeps the suite
+        # from depending on a third party's availability (and from logging a
+        # 401 for every refusal test).
+        patcher = mock.patch(
+            'apps.notifications.email_service.EmailService.send_invitation_email')
+        self.send_invitation_email = patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.governor = User.objects.create_superuser(
+            username='gov', email='governor@state.gov.ng', password='Password123!')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.governor)
+        self.zone = District.objects.create(name='Ikeja Zone', code='IKJ')
+        self.other_zone = District.objects.create(name='Epe Zone', code='EPE')
+
+    def _invite(self, **overrides):
+        body = {
+            "name": "Engr. Test Officer",
+            "email": "officer@agency.gov.ng",
+            "role": "Inspector",
+            "department": "Building Inspectorate",
+            "district_id": str(self.zone.id),
+        }
+        body.update(overrides)
+        # Multipart cannot carry None ("did you mean an empty string?"), and
+        # "no zone" is expressed by the drawer as the field being absent, so
+        # the helper drops the key rather than sending a null.
+        body = {k: v for k, v in body.items() if v is not None}
+        return self.client.post('/api/v1/settings/users/', body)
+
+    # ---- the zone is the scope -------------------------------------------
+
+    def test_a_scoped_role_without_a_zone_is_refused(self):
+        res = self._invite(role='Lead Inspector', district_id=None)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('zone is required', res.data['detail'])
+        # Refused means refused — no half-created invitation and no user.
+        self.assertFalse(UserInvitation.objects.filter(email='officer@agency.gov.ng').exists())
+        self.assertFalse(User.objects.filter(email='officer@agency.gov.ng').exists())
+
+    def test_an_unknown_zone_id_is_reported_as_unknown_not_as_missing(self):
+        res = self._invite(district_id='00000000-0000-0000-0000-000000000000')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('could not be found', res.data['detail'])
+
+    def test_a_state_wide_role_does_not_need_a_zone(self):
+        res = self._invite(role='Director', district_id=None)
+        self.assertEqual(res.status_code, 201)
+
+    def test_the_refusal_message_names_the_role_and_the_consequence(self):
+        res = self._invite(role='City Planner', district_id=None)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('City Planner', res.data['detail'])
+        self.assertIn('cannot be changed', res.data['detail'])
+
+    # ---- the label maps onto a standing ----------------------------------
+
+    def test_a_lead_inspector_is_scoped_to_their_zone_not_to_nothing(self):
+        # The reported bug, end to end: the officer must actually see the
+        # zone's projects rather than an empty dashboard.
+        from apps.projects.models import Project
+        mine = Project.objects.create(name='Ikeja Estate', district=self.zone)
+        Project.objects.create(name='Epe Estate', district=self.other_zone)
+
+        self.assertEqual(self._invite(role='Lead Inspector').status_code, 201)
+        officer = User.objects.get(email='officer@agency.gov.ng')
+        visible = set(scoped_projects(officer).values_list('name', flat=True))
+        self.assertEqual(visible, {mine.name})
+
+    def test_a_lead_inspector_carries_the_inspector_standing(self):
+        self._invite(role='Lead Inspector')
+        profile = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertEqual(profile.role.name, ROLE_INSPECTOR)
+
+    def test_a_label_with_no_standing_keeps_its_name_but_grants_none(self):
+        # City Planner is a seeded CustomRole with a permission-matrix column
+        # of its own. It must keep its label and must NOT be promoted to a
+        # standing it does not have.
+        self.assertEqual(self._invite(role='City Planner').status_code, 201)
+        profile = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertEqual(profile.role.name, 'City Planner')
+        self.assertNotIn(profile.role.name, {ROLE_INSPECTOR, ROLE_DIRECTOR, ROLE_AGENCY_HEAD})
+
+    def test_a_system_administrator_is_never_promoted_to_agency_head(self):
+        # `user_is_agency_head` is what IsDirector checks, so mapping this
+        # label to it would hand Director-level API authority to whoever the
+        # label was typed for.
+        self._invite(role='System Administrator')
+        profile = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertNotEqual(profile.role.name, ROLE_AGENCY_HEAD)
+        self.assertFalse(profile.is_state_hq)
+
+    def test_standing_lookup_is_case_and_space_insensitive(self):
+        self.assertEqual(role_standing('  lead INSPECTOR '), ROLE_INSPECTOR)
+        self.assertEqual(role_standing('City Planner'), None)
+        self.assertEqual(role_standing(''), None)
+        self.assertEqual(role_standing(None), None)
+
+    # ---- a district officer cannot mint a state-wide peer -----------------
+
+    def test_a_district_officer_cannot_mint_a_state_wide_peer(self):
+        # The escalation this closes is live, not theoretical:
+        # `scoped_projects` grants every project to `user_is_director`, which
+        # is true from the ROLE NAME alone. So a district officer posting
+        # role='Director' would create a state-wide peer no matter what
+        # `is_state_hq` was set to — which is why the invite is refused rather
+        # than quietly downgraded.
+        district_user = User.objects.create_user(
+            username='district_officer', email='do@state.gov.ng',
+            password='Password123!')
+        district_role = Role.objects.create(name=ROLE_INSPECTOR)
+        Profile.objects.create(user=district_user, role=district_role,
+                               district=self.zone, is_state_hq=False)
+        self.client.force_authenticate(user=district_user)
+
+        res = self._invite(role='Director', district_id=None)
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('State HQ', res.data['detail'])
+        self.assertFalse(
+            User.objects.filter(email='officer@agency.gov.ng').exists())
+        self.assertFalse(
+            UserInvitation.objects.filter(email='officer@agency.gov.ng').exists())
+
+    def test_a_district_officer_can_still_appoint_a_zone_scoped_officer(self):
+        # The refusal must be narrow. A district officer appointing an
+        # inspector in their own zone is ordinary business.
+        district_user = User.objects.create_user(
+            username='district_officer2', email='do2@state.gov.ng',
+            password='Password123!')
+        Profile.objects.create(
+            user=district_user,
+            role=Role.objects.create(name=ROLE_INSPECTOR),
+            district=self.zone, is_state_hq=False)
+        self.client.force_authenticate(user=district_user)
+
+        res = self._invite(role='Lead Inspector')
+
+        self.assertEqual(res.status_code, 201)
+        profile = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertEqual(profile.role.name, ROLE_INSPECTOR)
+        self.assertFalse(profile.is_state_hq)
+
+    def test_a_district_officer_cannot_invite_into_another_zone(self):
+        # The endpoint's own permission class does not narrow who may call it,
+        # so the scope is checked in the service. Without this check an officer
+        # could post any `district_id` and create a peer who sees a zone they
+        # do not belong to.
+        district_user = User.objects.create_user(
+            username='district_officer3', email='do3@state.gov.ng',
+            password='Password123!')
+        Profile.objects.create(
+            user=district_user,
+            role=Role.objects.create(name=ROLE_INSPECTOR),
+            district=self.zone, is_state_hq=False)
+        self.client.force_authenticate(user=district_user)
+
+        res = self._invite(district_id=str(self.other_zone.id))
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('own zone', res.data['detail'])
+        self.assertFalse(
+            User.objects.filter(email='officer@agency.gov.ng').exists())
+
+    def test_a_system_initiated_invite_is_not_jurisdiction_checked(self):
+        # A call with no inviter is a management command or a seed, not a
+        # user action — there is no jurisdiction to compare the zone against,
+        # and such a caller writes any row it likes anyway. The check must not
+        # turn into a refusal of internal callers.
+        invitation = SettingsService.invite_user(
+            email='seeded@agency.gov.ng', name='Seeded Officer',
+            role='Inspector', district_id=str(self.other_zone.id))
+
+        self.assertEqual(invitation.status, 'Pending')
+        profile = Profile.objects.get(user__email='seeded@agency.gov.ng')
+        self.assertEqual(profile.district, self.other_zone)
+
+    def test_a_state_level_inviter_may_appoint_across_zones(self):
+        res = self._invite(district_id=str(self.other_zone.id))
+        self.assertEqual(res.status_code, 201)
+        profile = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertEqual(profile.district, self.other_zone)
+
+    def test_the_governors_own_director_invite_is_state_hq(self):
+        self._invite(role='Director', district_id=None)
+        profile = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertEqual(profile.role.name, ROLE_DIRECTOR)
+        self.assertTrue(profile.is_state_hq)
+
+    # ---- derived fields the panel displays -------------------------------
+
+    def test_approval_limit_is_derived_from_the_role(self):
+        self._invite(role='Director', district_id=None)
+        director = Profile.objects.get(user__email='officer@agency.gov.ng')
+        self.assertEqual(director.approval_limit, Decimal('50000000.00'))
+
+        self._invite(email='inspect@agency.gov.ng', role='Inspector')
+        inspector = Profile.objects.get(user__email='inspect@agency.gov.ng')
+        self.assertEqual(inspector.approval_limit, Decimal('0.00'))
+
+    def test_the_audit_event_records_the_scope_that_was_granted(self):
+        self._invite(role='Lead Inspector')
+        event = AuditEvent.objects.filter(
+            action='INVITE_STAFF_USER').order_by('-timestamp').first()
+        self.assertEqual(event.new_state['role'], 'Lead Inspector')
+        self.assertEqual(event.new_state['recognised_standing'], ROLE_INSPECTOR)
+        self.assertEqual(event.new_state['district'], 'Ikeja Zone')
+        self.assertFalse(event.new_state['granted_state_hq'])
+
+    def test_reinviting_the_same_email_does_not_leave_a_stale_profile(self):
+        self._invite(role='Inspector')
+        self._invite(role='Director', district_id=None)
+        profiles = Profile.objects.filter(user__email='officer@agency.gov.ng')
+        self.assertEqual(profiles.count(), 1)
+        self.assertTrue(profiles.first().is_state_hq)
 
 
 class SettingsServiceDomainTestCase(TestCase):

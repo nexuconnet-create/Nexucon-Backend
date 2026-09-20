@@ -337,7 +337,12 @@ class NDTWordExporter:
                     rows = e['rows']
                     mid = len(rows) // 2 if len(rows) > 1 else 0
                     remark = e['remark']
-                    if (e['spread_pct'] is not None and e['spread_pct'] > 2.0):
+                    # The spread is a quality signal about a reading that was
+                    # graded; see ndt_reports._element_data for why an
+                    # unverified element does not carry one.
+                    if (remark != 'UNVERIFIED'
+                            and e['spread_pct'] is not None
+                            and e['spread_pct'] > 2.0):
                         remark += (f" (POINT SPREAD "
                                    f"{e['spread_km_s'] * 1000:.0f} M/S, "
                                    f"±{e['spread_pct'] / 2:.1f}%)")
@@ -358,20 +363,43 @@ class NDTWordExporter:
                 for e in element_data:
                     key = (e['floor_label'], e['member_type'])
                     g = result_groups.setdefault(
-                        key, {'good': 0, 'poor': 0, 'total': 0})
+                        key, {'good': 0, 'poor': 0, 'unverified': 0, 'total': 0})
                     g['total'] += 1
                     if e['remark'] == 'GOOD':
                         g['good'] += 1
                     elif e['remark'] == 'POOR':
                         g['poor'] += 1
+                    elif e['remark'] == 'UNVERIFIED':
+                        g['unverified'] += 1
+
+                def _pct(count, g):
+                    # Percentage of the elements that could be assessed — see
+                    # ndt_reports for why an unverifiable element is not in the
+                    # denominator.
+                    graded = g['good'] + g['poor']
+                    return f"{count} ({round(count * 100 / graded, 1)}%)" if graded else '-'
+
                 _add_table(
                     doc,
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
                      'POOR (NO, %)'],
                     [[member.title(), floor.title(),
-                      f"{g['good']} ({round(g['good'] * 100 / g['total'], 1)}%)",
-                      f"{g['poor']} ({round(g['poor'] * 100 / g['total'], 1)}%)"]
+                      _pct(g['good'], g), _pct(g['poor'], g)]
                      for (floor, member), g in sorted(result_groups.items())])
+                unverified_members = [e for e in element_data
+                                      if e['remark'] == 'UNVERIFIED']
+                if unverified_members:
+                    _add_para(
+                        doc,
+                        f"{len(unverified_members)} of {len(element_data)} "
+                        "element(s) could not be verified and are excluded "
+                        "from the GOOD / POOR summary above. Their pulse "
+                        "velocity is outside the range physically plausible "
+                        "for concrete, so no grade and no compressive strength "
+                        "is asserted for them, and the percentages above are of "
+                        "the elements that could be assessed.")
+                    for e in unverified_members:
+                        _add_para(doc, f"{e['element']}: {e['implausibility_note']}")
             if surface_tests:
                 _add_heading(doc, '5.2 SURFACE QUALITY OBSERVATIONS', level=2)
                 for t in surface_tests:

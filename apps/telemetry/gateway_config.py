@@ -218,6 +218,12 @@ class GatewayConfigService:
             'project': str(device.assigned_project_id or ''),
             'watch_dir': inbox_dir_for(device),
             'data_type': data_type,
+            'context': {
+                'test_type': device.default_test_type,
+                'structural_element': device.default_structural_element,
+                'floor': device.default_floor,
+                'test_location': device.default_test_location,
+            },
             # True, not false. The site may not have pointed its sync client at
             # the folder yet, and under a restart policy the alternative is a
             # process that exits every minute for a folder nobody has created.

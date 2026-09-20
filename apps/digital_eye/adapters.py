@@ -41,12 +41,33 @@ PUNDIT_GRADE_THRESHOLDS = [
     (0.0, 'very_poor'),
 ]
 
+# Physically plausible pulse velocity through concrete, in km/s.
+#
+# The classification bands above are open-ended downward: everything under
+# 2.0 km/s is 'very_poor'. That means the table cannot distinguish *bad
+# concrete* from *a measurement that is not concrete* — and a path-length or
+# unit error lands in the same band as a genuinely failed element, is
+# risk-scored 'critical', and is then narrated by the AI as a real defect.
+# A model cannot be more accurate than the number it is handed, so the floor
+# is enforced before grading, not after.
+#
+# Below the floor the reading is not consistent with any solid cementitious
+# element, so the BS EN 12504-4 test is not valid and no grade may be
+# asserted. Above the ceiling no concrete element reaches it at any strength.
+# This is a stated physical bound, NOT a tuned threshold, and it is
+# deliberately an open-ended band (not a new grade band) — a reading outside
+# it is reported as unverified, never graded.
+PUNDIT_PLAUSIBLE_VELOCITY_KM_S = (1.0, 6.0)
+
 PUNDIT_GRADE_RISK = {
     'excellent': ('info', 0.05),
     'good': ('low', 0.20),
     'questionable': ('medium', 0.50),
     'poor': ('high', 0.93),
     'very_poor': ('critical', 0.95),
+    # Not a grade: no risk is asserted, because nothing was established.
+    # (None, None) is what every consumer already reads as "no risk level".
+    'unverified': (None, None),
     'pending': (None, None),
 }
 
@@ -100,13 +121,44 @@ class PUNDITAdapter:
 
     @staticmethod
     def grade_quality(velocity_km_s):
-        """BS 1881-203 / ASTM C597 concrete quality classification."""
+        """BS 1881-203 / ASTM C597 concrete quality classification.
+
+        Returns 'unverified' — deliberately NOT a grade — when the velocity
+        falls outside `PUNDIT_PLAUSIBLE_VELOCITY_KM_S`. Because the band table
+        is open-ended downward, a reading that is not physically concrete
+        would otherwise be graded 'very_poor', risk-scored 'critical' and
+        narrated as a real structural defect. Nothing is asserted about an
+        unverifiable measurement.
+        """
         if velocity_km_s is None:
             return 'pending'
+        floor, ceiling = PUNDIT_PLAUSIBLE_VELOCITY_KM_S
+        if not floor <= velocity_km_s <= ceiling:
+            return 'unverified'
         for threshold, grade in PUNDIT_GRADE_THRESHOLDS:
             if velocity_km_s >= threshold:
                 return grade
         return 'very_poor'
+
+    @staticmethod
+    def implausibility_note(velocity_km_s):
+        """One operator-facing sentence for a velocity outside the plausible
+        range, naming the bound and the check that would resolve it. Returns
+        None when the velocity is plausible or absent, so a caller can print
+        it unconditionally. Never invents a cause — only states which
+        measurement to re-check."""
+        if velocity_km_s is None:
+            return None
+        floor, ceiling = PUNDIT_PLAUSIBLE_VELOCITY_KM_S
+        if floor <= velocity_km_s <= ceiling:
+            return None
+        return (
+            f"pulse velocity {velocity_km_s:.3f} km/s falls outside the "
+            f"{floor:.1f}-{ceiling:.1f} km/s range physically plausible for "
+            "concrete (BS EN 12504-4), so the reading is not graded — verify "
+            "the transducer path length and its unit (mm vs m) before reading "
+            "this as a concrete-quality result."
+        )
 
     @staticmethod
     def compute_crack_depth_mm(crack_path_length_mm, crack_pulse_time_us, uncracked_pulse_time_us):
@@ -203,7 +255,9 @@ class PUNDITAdapter:
             )
 
         grade = cls.grade_quality(velocity)
-        if grade != 'pending':
+        if grade == 'unverified':
+            steps.append("NOT GRADED — " + cls.implausibility_note(velocity))
+        elif grade != 'pending':
             steps.append(f"Concrete quality graded '{grade}' per BS 1881-203 / ASTM C597 velocity bands.")
 
         if crack_depth is not None and not has_readings:
@@ -221,7 +275,17 @@ class PUNDITAdapter:
 
         risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
         deterministic_observations = []
-        if grade != 'pending':
+        if grade == 'unverified':
+            # Stated as a measurement problem, not a concrete-quality finding.
+            # This element is excluded from grading and from the evidence
+            # confidence, and the narrative is told why, so it cannot be
+            # written up as a critical defect.
+            deterministic_observations.append(
+                f"Element {test.structural_element or 'unspecified'}"
+                + (f" ({len(rows)} test points)" if len(rows) > 1 else '')
+                + f": MEASUREMENT UNVERIFIED — {cls.implausibility_note(velocity)}"
+            )
+        elif grade != 'pending':
             deterministic_observations.append(
                 f"Element {test.structural_element or 'unspecified'}"
                 + (f" ({len(rows)} test points)" if len(rows) > 1 else '')
@@ -369,11 +433,18 @@ class PUNDITAdapter:
             )
             observations = data.get('observations') if isinstance(data, dict) else None
             if observations and isinstance(observations, list) and observations:
+                # Provenance must name the provider that ACTUALLY answered,
+                # not the configured one. With a failover chain the two differ
+                # whenever the first choice is down, and this value is written
+                # to a statutory AIAnalysisRecord — a false attribution there
+                # is a false statement on an inspection document. A patched
+                # plain-dict return (as tests use) carries no attributes, so
+                # it falls back to the configured provider as before.
                 return (
                     [str(o) for o in observations],
-                    AIService._get_provider(),
-                    str(AIService._get_gemini_model() if AIService._get_provider() == 'gemini'
-                        else AIService._get_openai_model()),
+                    getattr(data, 'provider', None) or AIService._get_provider(),
+                    getattr(data, 'model', None)
+                    or AIService._model_for(AIService._get_provider()),
                 )
         except Exception as e:  # noqa: BLE001 — provider down must never break analysis
             logger.info("PUNDIT LLM narrative unavailable (%s) — deterministic record stands.", e)
@@ -466,7 +537,12 @@ class PUNDITAdapter:
                 ] or None,
             })
 
-        graded = [s['grade'] for s in element_summaries if s['grade'] != 'pending']
+        # 'unverified' elements are excluded from grading for the same reason
+        # 'pending' ones are: nothing was established about them. They are
+        # counted and named separately below so the exclusion is visible.
+        graded = [s['grade'] for s in element_summaries
+                  if s['grade'] not in ('pending', 'unverified')]
+        unverified = [s for s in element_summaries if s['grade'] == 'unverified']
         good = sum(1 for g in graded if g in ('excellent', 'good'))
         poor = len(graded) - good
         deterministic_observations = []
@@ -477,6 +553,13 @@ class PUNDITAdapter:
             )
         else:
             deterministic_observations.append("No graded PUNDIT results for this project yet.")
+        for s in unverified:
+            deterministic_observations.append(
+                f"Element {s['element'] or 'unspecified'}"
+                + (f" ({s['n_points']} test points)" if s['n_points'] > 1 else '')
+                + ": MEASUREMENT UNVERIFIED — "
+                + cls.implausibility_note((s['mean_velocity_m_s'] or 0) / 1000.0)
+            )
 
         # ---- Fact pack: crack findings FIRST, then floors -> elements
         crack_elements = [
@@ -502,6 +585,22 @@ class PUNDITAdapter:
             'velocity_units': 'm/s',
             'counts': {'graded': len(graded), 'good_or_better': good, 'below_good': poor},
         }
+        if unverified:
+            # Named explicitly so the model cannot silently fold an
+            # unverifiable reading into its verdict, and cannot write it up
+            # as a defect: it is told the reading is suspect and why.
+            fact_pack['unverified_measurements'] = [
+                {
+                    'element': s['element'],
+                    'floor': s['floor'],
+                    'mean_velocity_m_s': s['mean_velocity_m_s'],
+                    'n_points': s['n_points'],
+                    'why_not_graded': cls.implausibility_note(
+                        (s['mean_velocity_m_s'] or 0) / 1000.0),
+                }
+                for s in unverified
+            ]
+            fact_pack['counts']['unverified'] = len(unverified)
         # 8 Sep meeting: weather recorded on any element is surfaced at
         # project level so the model can discuss its impact on the dataset.
         weather = sorted({test.weather_condition for test in tests
@@ -535,23 +634,58 @@ class PUNDITAdapter:
                 "a recommendation; (6) cite the relevant codes where "
                 "applicable (BS 1881-203, BS EN 12504-4, ASTM C597, "
                 "ACI 228.2R). Do not invent facts, numbers, or events that "
-                "are not present in the data. Return JSON: "
+                "are not present in the data. "
+                "(7) Every entry under unverified_measurements is a reading "
+                "that falls outside the range physically possible for "
+                "concrete and has deliberately NOT been graded. Treat it as "
+                "a probable instrumentation, path-length or unit error: say "
+                "so plainly and ask for the transducer path length and its "
+                "unit to be re-checked. Do NOT describe an unverified "
+                "element as poor-quality or defective concrete, do not give "
+                "it a severity, and do not include it in any strength or "
+                "quality verdict. Return JSON: "
                 '{"observations": ["..."]}\n\n'
                 f"Measured data: {fact_pack}"
             )
             llm_obs = data.get('observations') if isinstance(data, dict) else None
             if llm_obs and isinstance(llm_obs, list) and llm_obs:
                 observations = [str(o) for o in llm_obs]
-                provider = AIService._get_provider()
+                # Name the provider that actually answered, not the configured
+                # one — see _llm_observations for why this matters.
+                provider = getattr(data, 'provider', None) or AIService._get_provider()
                 model_version = str(
-                    AIService._get_gemini_model() if provider == 'gemini'
-                    else AIService._get_openai_model())
+                    getattr(data, 'model', None)
+                    or AIService._model_for(AIService._get_provider()))
                 steps.append(
                     f"Project narrative synthesised by {provider} ({model_version}) "
                     "from the per-element measurements above.")
         except Exception as e:  # noqa: BLE001 — provider down must never break the roll-up
             logger.info("PUNDIT project LLM narrative unavailable (%s) — "
                         "deterministic record stands.", e)
+
+        # Computed before the record so the reasoning trace can carry the
+        # composition: an engineer reading a confidence figure must be able
+        # to see what it was built from, or it is just a number.
+        confidence, confidence_breakdown = cls._evidence_confidence(
+            element_summaries,
+            llm_used=(provider != 'deterministic'),
+            with_breakdown=True)
+        if confidence_breakdown:
+            steps.append(
+                f"Evidence confidence {confidence:.3f} = "
+                f"{confidence_breakdown['base']:.0f} base + "
+                f"{confidence_breakdown['evidence_credit']:.1f} evidence credit "
+                f"(mean element credit {confidence_breakdown['mean_element_credit']:.2f} "
+                f"across {confidence_breakdown['elements']} measured element(s), "
+                "size-weighted; see _element_evidence_credit) + "
+                f"{confidence_breakdown['narrative_bonus']:.0f} narrative"
+                + (f" — raw {confidence_breakdown['raw_score']:.1f}, capped at 0.95."
+                   if confidence_breakdown['raw_score'] > 95.0 else ".")
+            )
+        else:
+            steps.append(
+                "Evidence confidence not computed — no graded element carries "
+                "a measurement this figure could be based on.")
 
         record = AIAnalysisRecord.objects.create(
             project=project,
@@ -563,8 +697,7 @@ class PUNDITAdapter:
             recommendations=cls._project_recommendations(element_summaries),
             reasoning_log="\n".join(steps),
             requires_human_review=True,
-            confidence=cls._evidence_confidence(element_summaries,
-                                                llm_used=(provider != 'deterministic')),
+            confidence=confidence,
             model_provider=provider,
             model_version=model_version,
         )
@@ -614,8 +747,45 @@ class PUNDITAdapter:
 
 
     # ---------------------------------------------- evidence-based confidence
-    @staticmethod
-    def _evidence_confidence(element_summaries, llm_used=False):
+    # Per-element evidence credit weights. These three ARE stated policy —
+    # the relative worth this platform places on having enough points, having
+    # them agree, and having a strength estimate. They are labelled as a
+    # policy choice rather than dressed up as derived from a standard, and
+    # they are disclosed in the reasoning trace so the number is inspectable.
+    _EVIDENCE_CREDIT_WEIGHTS = {'points': 0.25, 'spread': 0.45, 'ecs': 0.30}
+
+    # Spread band edges for the agreement credit. BOTH are published edges of
+    # `data_quality_score` (apps/digital_eye/confidence_metrics.py), which
+    # calls a spread <= 2% HIGH and > 5% LOW. Full credit at the HIGH edge,
+    # zero at the LOW edge, linear between — so the two figures printed in
+    # the same report cannot contradict each other, and neither edge is
+    # invented here.
+    _SPREAD_CREDIT_FULL_PCT = 2.0
+    _SPREAD_CREDIT_ZERO_PCT = 5.0
+
+    # BS EN 12504-4: the minimum number of test points per element for a
+    # pulse-velocity result to characterise that element.
+    _MIN_POINTS_PER_ELEMENT = 3
+
+    @classmethod
+    def _element_evidence_credit(cls, n_points, spread_pct, has_ecs):
+        """0.0-1.0 credit for ONE physical element's evidence. Proportional in
+        every input, so a shortfall costs its share and nothing else."""
+        w = cls._EVIDENCE_CREDIT_WEIGHTS
+        points = min(n_points or 0, cls._MIN_POINTS_PER_ELEMENT) / cls._MIN_POINTS_PER_ELEMENT
+        if spread_pct is None:
+            spread = 0.0
+        elif spread_pct <= cls._SPREAD_CREDIT_FULL_PCT:
+            spread = 1.0
+        else:
+            spread = max(0.0, (cls._SPREAD_CREDIT_ZERO_PCT - spread_pct)
+                         / (cls._SPREAD_CREDIT_ZERO_PCT - cls._SPREAD_CREDIT_FULL_PCT))
+        return (w['points'] * points
+                + w['spread'] * spread
+                + w['ecs'] * (1.0 if has_ecs else 0.0))
+
+    @classmethod
+    def _evidence_confidence(cls, element_summaries, llm_used=False, with_breakdown=False):
         """
         Confidence the analysis deserves, computed from the evidence (7 Sep
         meeting item 6 — the client asked for 93-95%; good field data earns
@@ -630,41 +800,98 @@ class PUNDITAdapter:
         another, so each unnamed station stands alone.
 
           base 70  — deterministic BS 1881-203 math over recorded readings
-          +10      — every graded element has 3+ test points (BS EN 12504-4)
-          +10      — within-element point spread within 2% of the mean
-          +5       — every graded element has an E.C.S (strength estimate)
-        and, when the narrative layer ran, +5 for provider synthesis.
+          +0..20   — per-element evidence credit, size-weighted (see below)
+          +5       — the narrative layer ran (provider synthesis)
+
+        THE EVIDENCE BLOCK IS PROPORTIONAL, NOT CONJUNCTIVE (20 Sep 2026).
+        It previously awarded +10 only if EVERY element had 3+ points, +10
+        only if EVERY element's spread was within 2%, and +5 only if EVERY
+        element had an E.C.S. Those are three `all()` gates over an
+        unbounded element set, so the score was `70 + 10*min + 10*min +
+        5*min` — the project's WORST element counted three times. Two
+        consequences made the metric unusable: a single two-point station
+        zeroed 20 points for the whole project, and adding a well-
+        instrumented element could only ever break a gate, never satisfy
+        one, so confidence FELL as more evidence was collected. It also
+        contradicted the sentence above it — "good field data earns it" —
+        while implementing a worst-element gate.
+
+        Each element now earns its own 0.0-1.0 credit, weighted by its point
+        count, so a shortfall costs its share instead of the whole bonus.
+        The shortfall shapes are unchanged and still deterministic:
+          * points — full credit at 3+ (BS EN 12504-4), proportional below
+          * spread — full at <= 2%, zero at > 5% (see the band edges above)
+          * E.C.S  — present or not
+        Only `n_points`, `point_velocities_m_s`, `mean_ecs_n_mm2` and
+        `grade` feed this. NOTHING AI-supplied enters the number; the
+        narrative flag moves it by a flat 5 and nothing else.
+
+        A better-composed figure nobody can inspect would just be a better-
+        hidden constant, so `with_breakdown=True` also returns the
+        composition for the reasoning trace.
+
         Capped at 95. Returns a 0.0-1.0 fraction (the field's documented
         scale) or None with no evidence.
+
+        NOT the same figure as `apps.evidence.ingestion.pundit_confidence`,
+        which returns 0.90-0.95 for an individual PUNDIT record. That one
+        answers *is this one measurement complete enough to trust?* — a
+        per-record question, independent of any project. This one answers
+        *how much does this project's evidence support this analysis?* The
+        two disagreeing is expected, not a bug, and neither should be raised
+        to match the other; surface both, labelled, so a reader sees two
+        figures rather than one that looks broken.
         """
-        graded = [s for s in element_summaries if s['grade'] != 'pending']
+        # 'unverified' is excluded exactly as 'pending' is: nothing was
+        # established about that element, so it can neither earn credit nor
+        # withhold it from elements that were measured successfully.
+        graded = [s for s in element_summaries
+                  if s['grade'] not in ('pending', 'unverified')]
         if not graded:
-            return None
+            return (None, None) if with_breakdown else None
         groups = {}
         for s in graded:
             name = (s.get('element') or '').strip().lower()
             floor = (s.get('floor') or '').strip().lower()
             key = (name, floor) if name else (None, id(s))
-            g = groups.setdefault(key, {'n_points': 0, 'velocities': []})
+            g = groups.setdefault(key, {'n_points': 0, 'velocities': [], 'has_ecs': True})
             g['n_points'] += s.get('n_points') or 0
             g['velocities'].extend(s.get('point_velocities_m_s') or [])
-        score = 70.0
-        if all(g['n_points'] >= 3 for g in groups.values()):
-            score += 10
-        spreads = []
+            g['has_ecs'] = g['has_ecs'] and s['mean_ecs_n_mm2'] is not None
+
+        credits, weights = [], []
         for g in groups.values():
             vs = [v for v in g['velocities'] if v]
+            spread_pct = None
             if len(vs) > 1:
                 mean = sum(vs) / len(vs)
                 if mean > 0:
-                    spreads.append((max(vs) - min(vs)) / mean * 100.0)
-        if spreads and max(spreads) <= 2.0:
-            score += 10
-        if all(s['mean_ecs_n_mm2'] is not None for s in graded):
-            score += 5
-        if llm_used:
-            score += 5
-        return round(min(score, 95.0) / 100.0, 3)
+                    spread_pct = (max(vs) - min(vs)) / mean * 100.0
+            credits.append(cls._element_evidence_credit(
+                g['n_points'], spread_pct, g['has_ecs']))
+            # Size-weight: a 5-point element carries more of the verdict than
+            # a 1-point one. Floored at 1 so a zero-point element still
+            # counts against the mean rather than dividing by zero.
+            weights.append(max(g['n_points'] or 0, 1))
+
+        project_credit = (sum(w * c for w, c in zip(weights, credits)) / sum(weights))
+        evidence_points = 20.0 * project_credit
+        raw_score = 70.0 + evidence_points + (5.0 if llm_used else 0.0)
+        confidence = round(min(raw_score, 95.0) / 100.0, 3)
+        if not with_breakdown:
+            return confidence
+        return confidence, {
+            'base': 70.0,
+            'evidence_credit': round(evidence_points, 2),
+            'elements': len(groups),
+            'mean_element_credit': round(project_credit, 4),
+            'narrative_bonus': 5.0 if llm_used else 0.0,
+            # The uncapped figure, so a reader can see whether the cap bit.
+            # (It cannot today — 70 + 20 + 5 is exactly the 95 cap — but
+            # stating the raw value means the disclosure stays true if the
+            # base or the block is ever changed.)
+            'raw_score': round(raw_score, 2),
+        }
 
     @staticmethod
     def _project_recommendations(element_summaries):
@@ -712,6 +939,19 @@ class PUNDITAdapter:
             recs.append({
                 'recommendation': "Immediate structural engineering review — pulse velocity indicates compromised concrete.",
                 'priority': 'Urgent',
+            })
+        if grade == 'unverified':
+            # No defect is asserted, so nothing structural is recommended.
+            # The action is to resolve the measurement, which is the only
+            # thing that can make this element speak.
+            recs.append({
+                'recommendation': (
+                    "Re-measure this element: the recorded pulse velocity is "
+                    "outside the range physically possible for concrete, so "
+                    "the reading is unverified. Confirm the transducer path "
+                    "length and its unit (mm vs m) and repeat the test."
+                ),
+                'priority': 'High',
             })
         if crack_depth_mm is not None and crack_depth_mm > 25:
             recs.append({

@@ -41,6 +41,8 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'last_seen', 'calibration_date',
             'calibration_expiry', 'calibration_certificate_url', 'notes', 'is_active',
             'registered_by', 'column_mapping',
+            'default_test_type', 'default_structural_element',
+            'default_floor', 'default_test_location',
             # Read-only: it is set by the gateway action, which mints a
             # credential and writes the config in the same step. A writable
             # boolean here would let a client say "sync is on" with no config

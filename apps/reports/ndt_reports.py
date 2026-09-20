@@ -1861,7 +1861,22 @@ class NDTReportService:
             # project's active calibration curve — never a single fixed
             # formula. Same path the platform computes every E.C.S with.
             from apps.digital_eye.strength_curves import apply_active_curve
-            if mean_v is None:
+            from apps.digital_eye.adapters import (
+                PUNDIT_PLAUSIBLE_VELOCITY_KM_S, PUNDITAdapter)
+            # A mean velocity outside the physically plausible band is a
+            # measurement error, not bad concrete. The platform's own grader
+            # refuses to grade such a reading (PUNDITAdapter.grade_quality
+            # returns 'unverified'), and this report recomputes from the raw
+            # readings rather than reading the stored grade — so without the
+            # same bound here a statutory document would print "POOR" and an
+            # E.C.S for a slab that was never actually measured. No strength
+            # is asserted from an impossible velocity.
+            implausible = (
+                mean_v is not None
+                and not (PUNDIT_PLAUSIBLE_VELOCITY_KM_S[0]
+                         <= mean_v
+                         <= PUNDIT_PLAUSIBLE_VELOCITY_KM_S[1]))
+            if mean_v is None or implausible:
                 mean_ecs = None
                 curve_snapshot = None
             else:
@@ -1881,8 +1896,14 @@ class NDTReportService:
             mean_ecs_unadjusted = (
                 se_disclosure.get('base_f_cu_mpa')
                 if isinstance(se_disclosure, dict) else None)
-            remark = ('GOOD' if mean_ecs is not None and mean_ecs >= 25.0
-                      else 'POOR' if mean_ecs is not None else 'NOT ASSESSED')
+            if implausible:
+                remark = 'UNVERIFIED'
+            elif mean_ecs is not None and mean_ecs >= 25.0:
+                remark = 'GOOD'
+            elif mean_ecs is not None:
+                remark = 'POOR'
+            else:
+                remark = 'NOT ASSESSED'
             # Within-element spread (7 Sep meeting: the client wants the
             # ±variance between a member's points visible, not silently
             # averaged). Spread > 2% of the mean flags the remark.
@@ -1903,6 +1924,9 @@ class NDTReportService:
                 'mean_ecs_unadjusted': mean_ecs_unadjusted,
                 'se_adjustment': se_disclosure,
                 'remark': remark,
+                'implausibility_note': (
+                    PUNDITAdapter.implausibility_note(mean_v)
+                    if implausible else None),
                 'n_points': len(rows),
                 'spread_km_s': spread_km_s,
                 'spread_pct': spread_pct,
@@ -3213,7 +3237,13 @@ class NDTReportService:
                             # table.
                             element_cell = _element_display(e['element'])
                             remark = e['remark']
-                            if (e['spread_pct'] is not None
+                            # The point spread is a quality signal about a
+                            # reading that was graded. On an unverified element
+                            # the spread is arithmetic over readings nothing
+                            # else is asserted from, so printing it invites the
+                            # reader to treat it as evidence.
+                            if (remark != 'UNVERIFIED'
+                                    and e['spread_pct'] is not None
                                     and e['spread_pct'] > 2.0):
                                 remark += (f"\nPOINT SPREAD "
                                            f"{e['spread_km_s'] * 1000:.0f} M/S "
@@ -3236,7 +3266,23 @@ class NDTReportService:
                                  'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
                                  'REMARK'],
                                 table_rows,
-                                [40, 17, 19, 26, 12, 29, 21],
+                                # REMARK now carries 'UNVERIFIED' as well as
+                                # 'GOOD' / 'POOR', and at its old width the
+                                # renderer broke that word mid-character
+                                # ("UNVERIFIE" / "D").
+                                #
+                                # The widths total 159 mm against 159.2 mm of
+                                # text area (A4 minus the 25.4 mm margins
+                                # `_setup` sets). The old vector totalled 164,
+                                # which `ruled_table` silently scaled down by
+                                # ~3% to fit — so every column was narrower
+                                # than its stated figure, and the room the
+                                # remark needed was being paid for by every
+                                # column including the ones whose headers were
+                                # already at their wrap point. Fitting the
+                                # budget unscaled gives REMARK its width back
+                                # without pushing any header over.
+                                [34, 16, 18, 26, 11, 29, 25],
                                 ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
                             )
                             builder.ln_gap(2)
@@ -3247,21 +3293,30 @@ class NDTReportService:
                 for e in element_data:
                     key = (e['floor_label'], e['member_type'])
                     g = result_groups.setdefault(
-                        key, {'good': 0, 'poor': 0, 'total': 0})
+                        key, {'good': 0, 'poor': 0, 'unverified': 0, 'total': 0})
                     g['total'] += 1
                     if e['remark'] == 'GOOD':
                         g['good'] += 1
                     elif e['remark'] == 'POOR':
                         g['poor'] += 1
+                    elif e['remark'] == 'UNVERIFIED':
+                        g['unverified'] += 1
                 result_rows = []
                 for (floor, member), g in sorted(result_groups.items()):
-                    good_pct = round(g['good'] * 100 / g['total'], 1)
-                    poor_pct = round(g['poor'] * 100 / g['total'], 1)
+                    # The percentages are of the elements that could actually be
+                    # assessed. Counting an unverifiable reading in the
+                    # denominator would state a GOOD/POOR split over a set that
+                    # includes an element nothing is known about — and the two
+                    # columns would then not add up to 100%, which reads as an
+                    # arithmetic error in a statutory report.
+                    graded = g['good'] + g['poor']
+                    good_pct = round(g['good'] * 100 / graded, 1) if graded else None
+                    poor_pct = round(g['poor'] * 100 / graded, 1) if graded else None
                     result_rows.append([
                         member.title(),
                         floor.title(),
-                        f"{g['good']} ({good_pct}%)",
-                        f"{g['poor']} ({poor_pct}%)",
+                        f"{g['good']} ({good_pct}%)" if graded else '-',
+                        f"{g['poor']} ({poor_pct}%)" if graded else '-',
                     ])
                 builder.ruled_table(
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
@@ -3270,6 +3325,23 @@ class NDTReportService:
                     [50, 60, 34, 32],
                     ['C', 'C', 'C', 'C'],
                 )
+                unverified_members = [e for e in element_data
+                                      if e['remark'] == 'UNVERIFIED']
+                if unverified_members:
+                    builder.ln_gap(2)
+                    builder.para(
+                        f"{len(unverified_members)} of {len(element_data)} "
+                        "element(s) could not be verified and are excluded "
+                        "from the GOOD / POOR summary above. Their pulse "
+                        "velocity is outside the range physically plausible "
+                        "for concrete, so no grade and no compressive strength "
+                        "is asserted for them, and the percentages above are of "
+                        "the elements that could be assessed.",
+                        leading=7.5)
+                    for e in unverified_members:
+                        builder.para(
+                            f"{e['element']}: {e['implausibility_note']}",
+                            leading=7.5)
                 builder.ln_gap(4)
 
             if surface_tests:

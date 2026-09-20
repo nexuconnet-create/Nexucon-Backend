@@ -503,15 +503,23 @@ class CorrelationFindingViewSet(ScopedEvidenceMixin, viewsets.ModelViewSet):
                 f"Provide professional engineering diagnostic under BS 1881-203 and BS 8110. Return JSON with root_cause_analysis, "
                 f"inversion_summary, and ncr_remedial_draft."
             )
-            llm_result = AIService.generate_structured_json(prompt, {
-                'type': 'object',
-                'properties': {
-                    'root_cause_analysis': {'type': 'string'},
-                    'inversion_summary': {'type': 'string'},
-                    'ncr_remedial_draft': {'type': 'string'},
+            # The JSON schema goes in `schema=`, which is stated to the model as
+            # an explicit output contract. It used to be passed positionally
+            # into `max_tokens`, which the service accepted and silently
+            # dropped — so this request had no schema and no token cap.
+            llm_result = AIService.generate_structured_json(
+                prompt,
+                max_tokens=2048,
+                schema={
+                    'type': 'object',
+                    'properties': {
+                        'root_cause_analysis': {'type': 'string'},
+                        'inversion_summary': {'type': 'string'},
+                        'ncr_remedial_draft': {'type': 'string'},
+                    },
+                    'required': ['root_cause_analysis', 'inversion_summary', 'ncr_remedial_draft'],
                 },
-                'required': ['root_cause_analysis', 'inversion_summary', 'ncr_remedial_draft'],
-            })
+            )
             if llm_result and isinstance(llm_result, dict):
                 if llm_result.get('root_cause_analysis'):
                     diagnostic['root_cause_analysis'] = llm_result['root_cause_analysis']

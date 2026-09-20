@@ -27,10 +27,20 @@ Dry run by default:
 
     python manage.py backfill_evidence_confidence
     python manage.py backfill_evidence_confidence --execute
+
+NOT affected by the `unverified` quality standing (Sep 2026): that standing
+stops a physically implausible pulse velocity from being graded, and lives on
+PUNDITTest.quality_grade. This command recomputes EvidenceRecord.confidence,
+which `pundit_confidence` derives from measurement completeness alone — path
+length, transit time, reading count, crack depth. It never reads a grade, so
+a reading that became `unverified` keeps the same confidence it always had.
+The rule below is imported from apps.evidence.ingestion rather than copied, so
+the two cannot drift apart again.
 """
 from django.core.management.base import BaseCommand
 
 from apps.digital_eye.models import PUNDITTest
+from apps.evidence.ingestion import pundit_confidence as pundit_confidence_for
 from apps.evidence.models import EvidenceRecord
 
 # The old severity->risk numbers that were being stored as "confidence".
@@ -42,20 +52,6 @@ SEVERITY_CONFIDENCE = {
     'medium': 0.50,
     'low': 0.25,
 }
-
-
-def pundit_confidence_for(test):
-    """Same rule as apps.evidence.ingestion.pundit_confidence."""
-    if not (test.path_length_mm and test.pulse_time_us):
-        return None
-    confidence = 0.90
-    if test.readings.exists() and test.readings.count() > 1:
-        confidence += 0.03
-    if test.crack_depth_mm is not None or (
-        test.crack_pulse_time_us and test.uncracked_pulse_time_us
-    ):
-        confidence += 0.02
-    return min(confidence, 0.95)
 
 
 def manual_confidence_for(payload):
