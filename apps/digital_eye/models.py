@@ -129,6 +129,15 @@ class FieldDevice(models.Model):
             "contract keys. Empty means the export already speaks the template."
         ),
     )
+    default_test_type = models.CharField(max_length=30, blank=True, default='',
+                                         help_text="Default test type for gateway-pushed files")
+    default_structural_element = models.CharField(max_length=100, blank=True, default='',
+                                                  help_text="Default structural element for gateway-pushed files")
+    default_floor = models.CharField(max_length=100, blank=True, default='',
+                                     help_text="Default floor for gateway-pushed files")
+    default_test_location = models.CharField(max_length=255, blank=True, default='',
+                                             help_text="Default test location for gateway-pushed files")
+
     # Whether the field gateway holds this instrument's config, so its exports
     # are pushed without anyone opening an upload form.
     #
