@@ -353,6 +353,11 @@ class PUNDITTest(models.Model):
         ('questionable', 'Questionable (3.0 – 3.75 km/s)'),
         ('poor', 'Poor (2.0 – 3.0 km/s)'),
         ('very_poor', 'Very Poor (< 2.0 km/s)'),
+        # Not a grade: the recorded velocity falls outside the range
+        # physically possible for concrete, so no quality may be asserted and
+        # no risk is scored. See PUNDITAdapter.grade_quality. Kept distinct
+        # from 'very_poor', which is a real (bad) concrete verdict.
+        ('unverified', 'Unverified — velocity not plausible for concrete'),
         ('pending', 'Pending Analysis'),
         ('EXCELLENT', 'Excellent'),
         ('GOOD', 'Good'),

@@ -1436,6 +1436,44 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         # And the Section 5.0 verdict itself follows the project curve.
         self.assertIn('18.0', flat)
 
+    def test_implausible_velocity_is_not_graded_and_asserts_no_strength(self):
+        # Element 780995 in the client's project read 694 m/s. That is below
+        # the pulse velocity of any concrete, so it is a path-length or unit
+        # error — but the band table is open-ended downward, so the report
+        # used to print "POOR" and an E.C.S for it: a statutory defect finding
+        # for a slab that was never actually measured.
+        test = self.make_test(self.project, self.device,
+                              path_length_mm=694.0, pulse_time_us=1000.0)
+        element = NDTReportService._element_data([test])[0]
+
+        self.assertAlmostEqual(element['mean_v'], 0.694, places=3)
+        self.assertEqual(element['remark'], 'UNVERIFIED')
+        self.assertIsNone(element['mean_ecs'])
+        self.assertIn('physically plausible', element['implausibility_note'])
+
+    def test_implausible_element_is_excluded_from_the_good_poor_summary(self):
+        from apps.digital_eye.models import PUNDITReading
+        good = self.make_test(self.project, self.device,
+                              path_length_mm=250.0, pulse_time_us=62.5)
+        for label, transit in (('A', 62.5), ('B', 62.5), ('C', 62.5)):
+            PUNDITReading.objects.create(
+                test=good, point_label=label, path_length_mm=250.0,
+                transit_time_us=transit)
+        self.make_test(self.project, self.device,
+                       structural_element='COL-IMPOSSIBLE',
+                       path_length_mm=694.0, pulse_time_us=1000.0)
+
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+
+        self.assertIn('UNVERIFIED', flat)
+        self.assertIn('could not be verified', flat)
+        self.assertIn('path length', flat)
+        # The GOOD/POOR percentages are of what could be assessed, so the one
+        # graded element reads 100% / 0% rather than 50% / 0%.
+        self.assertIn('1 (100.0%)', flat)
+        self.assertIn('0 (0.0%)', flat)
+
     def test_report_element_verdicts_follow_the_project_curve(self):
         # The Section 5.0 average compressive strength — and the archive's
         # pass/fail basis — flow through the project's active curve, not a
@@ -3308,6 +3346,33 @@ class NDTWordExportTests(ReportCMSBase):
         self.assertIn("UPV = L / t", text)
         # The editable-copy disclosure is present.
         self.assertIn("editable working copy", text)
+
+    def test_word_export_excludes_an_unverifiable_element_from_the_summary(self):
+        # The Word path carries the same verdict blocks as the PDF, so it
+        # must make the same refusal: the client's 694 m/s reading (element
+        # 780995) is below the pulse velocity of any concrete, and used to
+        # be printed here as POOR with an E.C.S. setUp already recorded one
+        # good element (250 mm / 62.5 us = 4000 m/s), so the graded set is
+        # one element and the percentages are of that one.
+        self.make_test(self.project, self.device,
+                       structural_element="COL-IMPOSSIBLE",
+                       path_length_mm=694.0, pulse_time_us=1000.0)
+        response = self.client.get(
+            reverse("project-ndt-report-word",
+                    kwargs={"project_id": self.project.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        text = self._full_docx_text(response.content)
+
+        self.assertIn("UNVERIFIED", text)
+        self.assertIn("could not be verified", text)
+        self.assertIn("physically plausible", text)
+        self.assertIn("path length", text)
+        # 1 of 1 assessed element is GOOD; the unverified one is not in the
+        # denominator, so POOR reads 0% rather than 50%.
+        self.assertIn("1 (100.0%)", text)
+        self.assertIn("0 (0.0%)", text)
+        # And no strength is asserted for it anywhere in the document.
+        self.assertIn("no grade and no compressive strength", text)
 
     def test_word_export_respects_cms_overrides(self):
         self._set_password()

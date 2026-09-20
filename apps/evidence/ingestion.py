@@ -346,6 +346,16 @@ def pundit_confidence(test):
     - Capped at 0.95 (AI confidence never reaches 1.0)
 
     Well-instrumented tests with multiple readings typically score 0.93–0.95.
+
+    NOT the same figure as `PUNDITAdapter._evidence_confidence`, and the two
+    disagreeing is correct rather than a bug. This one answers a per-record
+    question — *is this one measurement complete enough to trust?* — and is
+    grade-independent, so a velocity that is later declared `unverified` still
+    carries the same confidence it always had. `_evidence_confidence` answers
+    a project-level question — *how much does this project's evidence support
+    the analysis drawn from it?* — and is size-weighted across elements. Do
+    not raise one to match the other; surface both, labelled, so a reader can
+    see they are two figures and not one that is broken.
     """
     if not (test.path_length_mm and test.pulse_time_us):
         return None

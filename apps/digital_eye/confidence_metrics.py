@@ -89,7 +89,16 @@ def probability_below_design(mean_ecs_mpa, se_mpa,
 def data_quality_score(n_points, point_spread_pct):
     """(label, reason) describing the reliability of an element's own
     readings. Honest buckets from BS EN 12504-4 practice — never a
-    fabricated grade."""
+    fabricated grade.
+
+    The 2% and 5% edges are also the published bucket boundaries the
+    evidence-confidence score decays against: `PUNDITAdapter
+    ._element_evidence_credit` reaches zero spread credit at 5%, this
+    function's LOW boundary, so the two figures in one report cannot
+    contradict each other. That function also reports the number of
+    points as one element's contribution to a PROJECT-level figure —
+    the two questions are different and the two numbers are allowed to
+    disagree."""
     if n_points is None or n_points < 1:
         return None, 'no recorded test points'
     if n_points == 1:

@@ -36,7 +36,13 @@ from apps.evidence.models import AIAnalysisRecord, EvidenceRecord
 from apps.projects.models import Project
 from apps.telemetry.models import DeviceToken, TelemetrySession
 
-from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
+from .adapters import (
+    GNSSProjection,
+    GPRAdapter,
+    PUNDITAdapter,
+    PUNDIT_GRADE_RISK,
+    PUNDIT_PLAUSIBLE_VELOCITY_KM_S,
+)
 from .models import (
     BIMElementMapping, BIMModelGeometry, EvidenceSpatialPoint, FieldDevice,
     GPRAnomaly, GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey,
@@ -90,12 +96,44 @@ class PUNDITMathTestCase(TestCase):
             (2.99, 'poor'),
             (2.0, 'poor'),
             (1.99, 'very_poor'),
-            (0.5, 'very_poor'),
+            (1.0, 'very_poor'),  # the plausible floor is inclusive
         ]
         for velocity, expected_grade in cases:
             self.assertEqual(
                 PUNDITAdapter.grade_quality(velocity), expected_grade,
                 msg=f"grade for v={velocity!r}")
+
+    def test_implausible_velocity_is_not_graded_as_concrete(self):
+        # 20 Sep 2026. The bands above are open-ended downward, so without a
+        # plausibility floor a path-length or unit error is indistinguishable
+        # from the worst possible concrete: it graded 'very_poor', scored
+        # risk 'critical', and the AI then narrated a measurement error as a
+        # real structural defect. 694.17 m/s is the reading the client was
+        # shown. Nothing may be asserted about a measurement that is not
+        # physically concrete.
+        for velocity in (0.694, 0.5, 0.1, 0.0, 6.01, 8.0, -3.0):
+            self.assertEqual(
+                PUNDITAdapter.grade_quality(velocity), 'unverified',
+                msg=f"v={velocity!r} must not be graded")
+        # And the standing must not read as a defect verdict anywhere.
+        self.assertEqual(PUNDIT_GRADE_RISK['unverified'], (None, None))
+
+    def test_unverified_velocity_is_never_risk_scored(self):
+        # The grade is what feeds the risk table, so this is the point of the
+        # floor: an impossible reading asserts no risk at all.
+        grade = PUNDITAdapter.grade_quality(0.694)
+        risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
+        self.assertIsNone(risk_level)
+        self.assertIsNone(risk_score)
+
+    def test_implausibility_note_names_the_check_and_silent_when_plausible(self):
+        note = PUNDITAdapter.implausibility_note(0.694)
+        self.assertIn('path length', note)
+        self.assertIn('BS EN 12504-4', note)
+        # A plausible velocity says nothing — the note is printed
+        # unconditionally by callers, so silence has to be the default.
+        self.assertIsNone(PUNDITAdapter.implausibility_note(4.0))
+        self.assertIsNone(PUNDITAdapter.implausibility_note(None))
 
     def test_crack_depth_time_difference_method(self):
         # d = L/2 * sqrt((t_c/t_0)^2 - 1)
@@ -3749,9 +3787,19 @@ class ReviewMeeting2PunditFieldsTestCase(DigitalEyeAPITestBase):
 
 class EvidenceConfidenceTestCase(TestCase):
     """Item 6: the analysis confidence is evidence-based — a 0-1 fraction
-    (the AIAnalysisRecord scale) built from points-per-element, spread,
-    calibration validity and LLM success. Good field data reaches the 0.95
-    cap; thin data scores honestly lower; nothing graded returns None."""
+    (the AIAnalysisRecord scale) built from points-per-element, spread and
+    E.C.S. Good field data reaches the 0.95 cap; thin data scores honestly
+    lower; nothing graded returns None.
+
+    20 Sep 2026 — the evidence block became PROPORTIONAL and size-weighted.
+    It was three conjunctive `all()` gates over every element, so the score
+    was `70 + 10*min + 10*min + 5*min` (the project's worst element counted
+    three times), and it FELL as more evidence was collected. The
+    expectations below are the honest arithmetic of the proportional rule;
+    each test's *intent* is unchanged and in several cases is now asserted
+    more directly (e.g. the model bonus is asserted as a 0.05 delta rather
+    than a hardcoded total).
+    """
 
     @staticmethod
     def _summary(**overrides):
@@ -3770,39 +3818,105 @@ class EvidenceConfidenceTestCase(TestCase):
         self.assertEqual(confidence, 0.95)
 
     def test_thin_evidence_scores_lower(self):
+        # One point, no spread to check, no E.C.S: the element earns only
+        # the points share of its credit (0.25 * 1/3) = 0.0833 of 20 points.
         confidence = PUNDITAdapter._evidence_confidence(
             [self._summary(n_points=1, point_velocities_m_s=[4000.0],
                            point_spread_pct=None, mean_ecs_n_mm2=None)],
             llm_used=False)
-        self.assertEqual(confidence, 0.70)
+        self.assertEqual(confidence, 0.717)
 
     def test_high_spread_loses_the_consistency_bonus(self):
         # 3+ points and an E.C.S, but the points genuinely disagree by
         # > 2% (the velocities themselves — the score no longer trusts a
-        # stored spread field that can contradict its own points).
+        # stored spread field that can contradict its own points). At a 5%
+        # spread the agreement share is gone entirely, so the element keeps
+        # only points + E.C.S = 0.55 of its 20-point block.
         confidence = PUNDITAdapter._evidence_confidence(
             [self._summary(point_velocities_m_s=[3900.0, 4000.0, 4100.0],
                            point_spread_pct=5.0)], llm_used=True)
-        self.assertEqual(confidence, 0.90)
+        self.assertEqual(confidence, 0.86)
 
     def test_no_llm_loses_the_model_bonus(self):
-        # Without the provider narrative the same evidence scores 5 lower.
-        # The E.C.S bonus is dropped here because 70+10+10+5 already hits
-        # the 95 cap — the cap would mask the model bonus being absent.
-        confidence = PUNDITAdapter._evidence_confidence(
-            [self._summary(mean_ecs_n_mm2=None)], llm_used=False)
-        self.assertEqual(confidence, 0.90)
+        # Without the provider narrative the same evidence scores exactly 5
+        # lower. Asserted as a DELTA so it cannot drift with the evidence
+        # arithmetic, and so the cap cannot mask it.
+        summary = [self._summary()]
+        with_llm = PUNDITAdapter._evidence_confidence(summary, llm_used=True)
+        without = PUNDITAdapter._evidence_confidence(summary, llm_used=False)
+        self.assertEqual(round((with_llm - without) * 100), 5)
 
     def test_ungraded_elements_return_none(self):
         self.assertIsNone(PUNDITAdapter._evidence_confidence(
             [self._summary(grade='pending')], llm_used=True))
 
+    def test_unverified_elements_are_excluded_not_counted_against(self):
+        # 20 Sep 2026: an element whose velocity is outside the range
+        # physically possible for concrete is NOT graded. It must neither
+        # earn credit nor withhold it from the elements that were measured
+        # successfully — so the score is identical to the good element alone.
+        good_only = PUNDITAdapter._evidence_confidence(
+            [self._summary()], llm_used=True)
+        with_unverified = PUNDITAdapter._evidence_confidence(
+            [self._summary(),
+             self._summary(element='COL-IMPOSSIBLE', grade='unverified',
+                           mean_velocity_m_s=694.17,
+                           point_velocities_m_s=[694.17, 700.0, 690.0])],
+            llm_used=True)
+        self.assertEqual(with_unverified, good_only)
+
+    def test_an_unverifiable_element_cannot_return_none_alone(self):
+        # Only 'unverified' present => nothing was established => None, the
+        # same honest answer as no evidence at all.
+        self.assertIsNone(PUNDITAdapter._evidence_confidence(
+            [self._summary(grade='unverified')], llm_used=True))
+
+    def test_breakdown_states_the_composition(self):
+        # A better-composed figure nobody can inspect is a better-hidden
+        # constant: the disclosure must add up to the score.
+        confidence, breakdown = PUNDITAdapter._evidence_confidence(
+            [self._summary()], llm_used=True, with_breakdown=True)
+        self.assertEqual(confidence, 0.95)
+        self.assertEqual(breakdown['base'], 70.0)
+        self.assertEqual(breakdown['elements'], 1)
+        self.assertEqual(breakdown['narrative_bonus'], 5.0)
+        # 70 base + 20 credit + 5 narrative = exactly 95 — the cap is
+        # reached, not exceeded, and the raw figure says so.
+        self.assertEqual(breakdown['raw_score'], 95.0)
+        self.assertEqual(
+            round(breakdown['base'] + breakdown['evidence_credit']
+                  + breakdown['narrative_bonus'], 2),
+            breakdown['raw_score'])
+
+    def test_adding_good_evidence_never_lowers_the_score(self):
+        # The old rule was non-monotone: a conjunctive gate can only be
+        # broken by a new element, never satisfied, so confidence FELL as
+        # more evidence arrived. Confidence must not be punished for
+        # collecting more data.
+        one = [self._summary(element='COL-1')]
+        two = one + [self._summary(element='COL-2')]
+        self.assertGreaterEqual(
+            PUNDITAdapter._evidence_confidence(two, llm_used=True),
+            PUNDITAdapter._evidence_confidence(one, llm_used=True))
+
+    def test_one_weak_element_does_not_zero_the_whole_project(self):
+        # The specific defect the client hit: a single short element used to
+        # wipe 20 points off every other element's work. It must now cost
+        # only its own share.
+        strong = [self._summary(element=f'COL-{i}') for i in range(1, 10)]
+        with_weak = strong + [self._summary(
+            element='COL-WEAK', n_points=2,
+            point_velocities_m_s=[4000.0, 4050.0])]
+        before = PUNDITAdapter._evidence_confidence(strong, llm_used=True)
+        after = PUNDITAdapter._evidence_confidence(with_weak, llm_used=True)
+        self.assertGreater(after, before - 0.01)
+
     def test_cross_test_points_pool_per_element(self):
         # 12 Sep 2026: the registry and device ingestion record each station
         # measurement as its own test row — an element's 3+ real points
         # (BS EN 12504-4) arrive as several single-point tests. Pooled per
-        # element they earn the coverage and consistency bonuses; scored
-        # per test row (the old behaviour) the same data read as thin.
+        # element they earn the coverage and consistency credit; scored
+        # per test row the same data reads as thin.
         stations = [
             self._summary(element='WALL-W1', floor='Ground Floor',
                           n_points=1, point_velocities_m_s=[4000.0],
@@ -3820,7 +3934,7 @@ class EvidenceConfidenceTestCase(TestCase):
             0.95)
         # The identical measurements on DISTINCT elements stay thin data —
         # each element genuinely has one point only. (No E.C.S so the
-        # score isolates the pooling behaviour: 70 base + 5 LLM.)
+        # score isolates the pooling behaviour: 70 base + 1.67 credit + 5.)
         distinct = [self._summary(element=f'WALL-W{i}', floor='Ground Floor',
                                   n_points=1,
                                   point_velocities_m_s=[4000.0 + 10 * i],
@@ -3829,11 +3943,11 @@ class EvidenceConfidenceTestCase(TestCase):
                     for i in (1, 2, 3)]
         self.assertEqual(
             PUNDITAdapter._evidence_confidence(distinct, llm_used=True),
-            0.75)
+            0.767)
 
     def test_same_element_name_on_different_floors_stays_separate(self):
-        # A name repeated on two floors is two elements — never pooled.
-        # (No E.C.S: 70 base only.)
+        # A name repeated on two floors is two elements — never pooled, so
+        # neither inherits the other's points. (No E.C.S: 70 base + 1.67.)
         stations = [
             self._summary(element='COL-A1', floor='Ground Floor',
                           n_points=1, point_velocities_m_s=[4000.0],
@@ -3844,7 +3958,7 @@ class EvidenceConfidenceTestCase(TestCase):
         ]
         self.assertEqual(
             PUNDITAdapter._evidence_confidence(stations, llm_used=False),
-            0.70)
+            0.717)
 
 
 class PunditResultsExportTestCase(DigitalEyeAPITestBase):
