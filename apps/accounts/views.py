@@ -169,10 +169,24 @@ class UserRegistrationView(generics.CreateAPIView):
         email = (request.data.get('email') or '').strip().lower()
         password = request.data.get('password')
 
-        # Check if user already exists
+        # Check if user already exists or belongs to agency/inspector
         if email:
+            from apps.government.models import Profile
+            from apps.settings.models import UserInvitation
+
             existing_user = User.objects.filter(email__iexact=email).first()
             if existing_user:
+                has_gov = hasattr(existing_user, 'government_profile') and existing_user.government_profile
+                if has_gov or Profile.objects.filter(user=existing_user).exists():
+                    return Response({
+                        'success': False,
+                        'message': 'This email belongs to an existing Government Agency or Inspector account. It cannot be used to create a Stakeholder account.',
+                        'data': None,
+                        'errors': {
+                            'email': ['This email belongs to an existing Government Agency or Inspector account.']
+                        }
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 if existing_user.is_verified:
                     return Response({
                         'success': False,
@@ -182,8 +196,19 @@ class UserRegistrationView(generics.CreateAPIView):
                             'email': ['An account with this email address already exists. Please log in instead.']
                         }
                     }, status=status.HTTP_400_BAD_REQUEST)
-                else:
-                    # User exists but is NOT verified yet. Update credentials & issue fresh OTP
+
+            if UserInvitation.objects.filter(email__iexact=email).exists():
+                return Response({
+                    'success': False,
+                    'message': 'This email is assigned to an Agency or Inspectorate credential and cannot be registered as a Stakeholder.',
+                    'data': None,
+                    'errors': {
+                        'email': ['This email is assigned to an Agency or Inspectorate credential.']
+                    }
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if existing_user:
+                # User exists as unverified regular user. Update credentials & issue fresh OTP
                     if password:
                         if len(password) < 8:
                             return Response({
