@@ -26,6 +26,22 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'country', 'state_region', 'office_address'
         )
 
+    def validate_email(self, value):
+        clean_email = value.strip().lower()
+        # Rule 1: No replica email across Agency, Inspector, and Stakeholder
+        if User.objects.filter(email__iexact=clean_email).exists():
+            raise serializers.ValidationError("An account with this email address already exists. Please sign in instead.")
+
+        from apps.government.models import Profile
+        if Profile.objects.filter(user__email__iexact=clean_email).exists():
+            raise serializers.ValidationError("This email belongs to an existing Government Agency or Inspector account. It cannot be used to create a Stakeholder account.")
+
+        from apps.settings.models import UserInvitation
+        if UserInvitation.objects.filter(email__iexact=clean_email).exists():
+            raise serializers.ValidationError("This email is assigned to an Agency or Inspectorate credential and cannot be registered as a Stakeholder.")
+
+        return clean_email
+
     def create(self, validated_data):
         # Extract extra stakeholder registration metadata
         name = validated_data.pop('name', '').strip()
@@ -293,6 +309,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        # Normalize email/username to handle case-insensitivity in PostgreSQL
+        raw_username = (attrs.get(self.username_field) or '').strip()
+        if raw_username:
+            user = User.objects.filter(email__iexact=raw_username).first()
+            if not user:
+                user = User.objects.filter(username__iexact=raw_username).first()
+            if user:
+                attrs[self.username_field] = getattr(user, self.username_field)
+
         data = super().validate(attrs)
         # Add extra responses here
         data.update({'user': UserMeSerializer(self.user).data})

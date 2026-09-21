@@ -63,6 +63,27 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 Q(developer_name__icontains=search_param)
             )
 
+        # Constrain mock seed projects: Only SiteIQ@nexucon.net and official inspectors
+        # have visibility into the initial regulatory mock projects during the testing period.
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            user_email = (user.email or '').strip().lower()
+            is_siteiq = (user_email == 'siteiq@nexucon.net')
+            has_gov = hasattr(user, 'government_profile') and user.government_profile
+            is_inspector = bool(has_gov and user.government_profile.role and 'inspector' in user.government_profile.role.name.lower())
+
+            if not is_siteiq and not is_inspector and not user.is_superuser:
+                mock_names = [
+                    'Eko Atlantic Marina Towers',
+                    'Victoria Island Financial Center',
+                    'Lekki Free Trade Zone Warehouse Complex',
+                    'Ikoyi Imperial Heights Luxury Condominiums'
+                ]
+                queryset = queryset.filter(
+                    Q(developer_email__iexact=user.email) |
+                    Q(client_contact__icontains=user.email)
+                ).exclude(name__in=mock_names)
+
         return queryset
 
     @action(detail=True, methods=['post'])

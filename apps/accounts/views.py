@@ -595,6 +595,141 @@ class ChangePasswordView(APIView):
 
         return Response({'success': True, 'message': 'Password updated successfully'})
 
+
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+from django.template.loader import render_to_string
+import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class PasswordResetRequestView(APIView):
+    """
+    POST /api/v1/auth/password-reset/
+    Generates a secure recovery token and dispatches an email via Resend.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        if not email:
+            return Response({
+                'success': False,
+                'message': 'Official email address is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email).first()
+        if user and user.is_active:
+            token = default_token_generator.make_token(user)
+            uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
+            otp_token = EmailVerificationToken.generate_token(email, user=user, duration_minutes=60)
+
+            origin = request.headers.get('origin') or request.headers.get('referer') or ''
+            if 'stakeholder' in origin:
+                base_url = 'https://stakeholder.nexucon.net'
+            elif 'inspector' in origin:
+                base_url = 'https://inspector.nexucon.net'
+            else:
+                base_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
+
+            reset_url = f"{base_url}/stakeholder/reset-password?email={urllib.parse.quote(user.email)}&token={token}&uid={uidb64}"
+
+            context = {
+                'name': user.get_full_name() or user.first_name or 'Stakeholder Official',
+                'email': user.email,
+                'reset_url': reset_url,
+                'otp_code': otp_token.code,
+            }
+            try:
+                html_body = render_to_string('emails/password_reset.html', context)
+                dispatch_res = EmailService.send_email(
+                    to_email=user.email,
+                    subject='Reset Your Nexucon Password',
+                    html_content=html_body,
+                )
+                logger.info(f"Password reset email dispatched to {user.email}: {dispatch_res}")
+            except Exception as e:
+                logger.error(f"Failed to dispatch password reset email to {user.email}: {e}")
+
+        # Always return generic success to prevent email enumeration
+        return Response({
+            'success': True,
+            'message': 'If your email is registered in the system, password reset instructions have been dispatched.'
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    POST /api/v1/auth/password-reset-confirm/
+    Validates the token or 6-digit code and establishes a new password.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        token = (request.data.get('token') or '').strip()
+        code = (request.data.get('code') or '').strip()
+        uidb64 = (request.data.get('uid') or '').strip()
+        new_password = request.data.get('new_password', '')
+        confirm_password = request.data.get('confirm_password', '')
+
+        if not new_password:
+            return Response({'success': False, 'message': 'New password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(new_password) < 8:
+            return Response({'success': False, 'message': 'Password must be at least 8 characters long.'}, status=status.HTTP_400_BAD_REQUEST)
+        if confirm_password and new_password != confirm_password:
+            return Response({'success': False, 'message': 'Passwords do not match.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = None
+        if uidb64:
+            try:
+                uid = force_str(urlsafe_base64_decode(uidb64))
+                user = User.objects.filter(pk=uid).first()
+            except Exception:
+                user = None
+
+        if not user and email:
+            user = User.objects.filter(email__iexact=email).first()
+
+        if not user or not user.is_active:
+            return Response({'success': False, 'message': 'Invalid recovery request or user not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_token_valid = False
+        if token and default_token_generator.check_token(user, token):
+            is_token_valid = True
+        elif code:
+            ev_token = EmailVerificationToken.objects.filter(
+                email__iexact=user.email,
+                code=code,
+                is_used=False,
+                expires_at__gte=timezone.now()
+            ).first()
+            if ev_token:
+                is_token_valid = True
+                ev_token.is_used = True
+                ev_token.save(update_fields=['is_used'])
+
+        if not is_token_valid:
+            return Response({
+                'success': False,
+                'message': 'Invalid or expired password reset token / code. Please request a new recovery link.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Invalidate remaining unused verification tokens for this user
+        EmailVerificationToken.objects.filter(email__iexact=user.email, is_used=False).update(is_used=True)
+
+        return Response({
+            'success': True,
+            'message': 'Password has been successfully updated. You may now sign in with your new credentials.'
+        }, status=status.HTTP_200_OK)
+
+
 class UserOnboardingView(APIView):
     permission_classes = (IsAuthenticated,)
 
