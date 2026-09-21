@@ -111,6 +111,7 @@ class Inspector(BaseStakeholder):
 class LicensedProfessional(models.Model):
     """Architects, structural engineers, and MEP professionals with regulatory license verification."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     license_id = models.CharField(max_length=100, default=generate_lic_id, db_index=True)
     name = models.CharField(max_length=255)
     role_title = models.CharField(max_length=100)
@@ -304,3 +305,81 @@ class MeetingActionItem(models.Model):
 
     def __str__(self):
         return f"{self.title} ({'Done' if self.is_completed else 'Pending'})"
+
+
+class BuildingStageInspection(models.Model):
+    """
+    Stage Inspections requested by Client/Developer or Contractor and performed by Government Inspectors.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stage_id = models.CharField(max_length=100, default=generate_ins_id, db_index=True)
+    project_name = models.CharField(max_length=255)
+    stage = models.CharField(max_length=100)
+    assigned_inspector = models.ForeignKey(Inspector, on_delete=models.SET_NULL, null=True, blank=True, related_name='stage_inspections')
+    client = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='client_inspections')
+    contractor_on_site = models.CharField(max_length=255, blank=True, default='')
+    preferred_date = models.CharField(max_length=100, blank=True, default='')
+    time_slot = models.CharField(max_length=100, default='Morning (09:00 - 12:00)')
+    status = models.CharField(max_length=50, default='Scheduled')
+    has_ncr = models.BooleanField(default=False)
+    ncr_description = models.TextField(blank=True, default='')
+    ncr_remediation_proof = models.TextField(blank=True, default='')
+    ncr_deadline = models.CharField(max_length=100, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.stage_id} - {self.project_name} ({self.stage})"
+
+
+class ProjectTimelineMilestone(models.Model):
+    """
+    Timeline stage-gates connecting construction phases to mandatory regulatory clearance.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    milestone_id = models.CharField(max_length=100, db_index=True)
+    project_name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255)
+    category = models.CharField(max_length=100)
+    start_date = models.CharField(max_length=100)
+    due_date = models.CharField(max_length=100)
+    is_hold_point = models.BooleanField(default=False)
+    government_signoff = models.CharField(max_length=255, default='Pending')
+    progress = models.IntegerField(default=0)
+    status = models.CharField(max_length=50, default='Pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['due_date']
+
+    def __str__(self):
+        return f"{self.milestone_id} - {self.name} ({self.project_name})"
+
+
+class StatutoryFinancialTransaction(models.Model):
+    """
+    Official government assessment levies, building plan fees, and contractor escrow tracking.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice_number = models.CharField(max_length=100, unique=True, db_index=True)
+    project_name = models.CharField(max_length=255)
+    fee_category = models.CharField(max_length=255)
+    amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    amount_formatted = models.CharField(max_length=100, blank=True, default='')
+    issued_date = models.CharField(max_length=100)
+    due_date = models.CharField(max_length=100)
+    status = models.CharField(max_length=50, default='DUE')
+    paid_date = models.CharField(max_length=100, blank=True, default='')
+    receipt_number = models.CharField(max_length=100, blank=True, default='')
+    beneficiary = models.CharField(max_length=255, blank=True, default='')
+    payment_gateway = models.CharField(max_length=50, default='Remita')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.invoice_number} - {self.project_name} ({self.status}: {self.amount_formatted})"
+

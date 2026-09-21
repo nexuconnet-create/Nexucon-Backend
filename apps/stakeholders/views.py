@@ -6,13 +6,15 @@ from .models import (
     Developer, Contractor, Consultant, Inspector,
     LicensedProfessional, ProjectStakeholderTeam,
     BlacklistRecord, StakeholderMeeting, StakeholderMessage,
-    Certification, TrainingRecord, MeetingActionItem, MessageTranslation
+    Certification, TrainingRecord, MeetingActionItem, MessageTranslation,
+    BuildingStageInspection, ProjectTimelineMilestone, StatutoryFinancialTransaction
 )
 from .serializers import (
     DeveloperSerializer, ContractorSerializer, ConsultantSerializer,
     InspectorSerializer, LicensedProfessionalSerializer, ProjectStakeholderTeamSerializer,
     BlacklistRecordSerializer, StakeholderMeetingSerializer, StakeholderMessageSerializer,
-    CertificationSerializer, TrainingRecordSerializer, MeetingActionItemSerializer, MessageTranslationSerializer
+    CertificationSerializer, TrainingRecordSerializer, MeetingActionItemSerializer, MessageTranslationSerializer,
+    BuildingStageInspectionSerializer, ProjectTimelineMilestoneSerializer, StatutoryFinancialTransactionSerializer
 )
 from .services import StakeholderService
 from .translation import TranslationService
@@ -351,3 +353,78 @@ class StakeholderStatsViewSet(viewsets.ViewSet):
     def list(self, request):
         stats = StakeholderService.get_stakeholder_stats()
         return Response(stats, status=status.HTTP_200_OK)
+
+
+class BuildingStageInspectionViewSet(viewsets.ModelViewSet):
+    queryset = BuildingStageInspection.objects.all().order_by('-created_at')
+    serializer_class = BuildingStageInspectionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        project = self.request.query_params.get('project')
+        if project:
+            qs = qs.filter(project_name__icontains=project)
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(client=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='resolve-ncr')
+    def resolve_ncr(self, request, pk=None):
+        inspection = self.get_object()
+        proof = request.data.get('remediation_proof', '')
+        inspection.ncr_remediation_proof = proof
+        inspection.status = 'Remediation Under Review'
+        inspection.save()
+        return Response(BuildingStageInspectionSerializer(inspection).data, status=status.HTTP_200_OK)
+
+
+class ProjectTimelineMilestoneViewSet(viewsets.ModelViewSet):
+    queryset = ProjectTimelineMilestone.objects.all().order_by('due_date')
+    serializer_class = ProjectTimelineMilestoneSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        project = self.request.query_params.get('project')
+        if project:
+            qs = qs.filter(project_name__icontains=project)
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='signoff')
+    def signoff(self, request, pk=None):
+        milestone = self.get_object()
+        signoff_note = request.data.get('government_signoff', f'Approved by {request.user.get_full_name() or request.user.email}')
+        milestone.government_signoff = signoff_note
+        milestone.progress = 100
+        milestone.status = 'Completed'
+        milestone.save()
+        return Response(ProjectTimelineMilestoneSerializer(milestone).data, status=status.HTTP_200_OK)
+
+
+class StatutoryFinancialTransactionViewSet(viewsets.ModelViewSet):
+    queryset = StatutoryFinancialTransaction.objects.all().order_by('-created_at')
+    serializer_class = StatutoryFinancialTransactionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        project = self.request.query_params.get('project')
+        status_filter = self.request.query_params.get('status')
+        if project:
+            qs = qs.filter(project_name__icontains=project)
+        if status_filter:
+            qs = qs.filter(status__iexact=status_filter)
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='pay')
+    def pay(self, request, pk=None):
+        import datetime
+        invoice = self.get_object()
+        invoice.status = 'PAID'
+        invoice.paid_date = datetime.date.today().strftime('%d %b %Y')
+        invoice.receipt_number = f"REC-LAS-{pk.hex[:5].upper() if hasattr(pk, 'hex') else str(pk)[:5].upper()}"
+        invoice.save()
+        return Response(StatutoryFinancialTransactionSerializer(invoice).data, status=status.HTTP_200_OK)
+

@@ -4,7 +4,8 @@ from .views import (
     DeveloperViewSet, ContractorViewSet, ConsultantViewSet,
     InspectorViewSet, LicensedProfessionalViewSet, ProjectStakeholderTeamViewSet,
     BlacklistRecordViewSet, StakeholderMeetingViewSet, StakeholderMessageViewSet,
-    CertificationViewSet, TrainingRecordViewSet, StakeholderStatsViewSet
+    CertificationViewSet, TrainingRecordViewSet, StakeholderStatsViewSet,
+    BuildingStageInspectionViewSet, ProjectTimelineMilestoneViewSet, StatutoryFinancialTransactionViewSet
 )
 
 router = DefaultRouter()
@@ -20,6 +21,9 @@ router.register(r'messages', StakeholderMessageViewSet, basename='message')
 router.register(r'certifications', CertificationViewSet, basename='certification')
 router.register(r'trainings', TrainingRecordViewSet, basename='training')
 router.register(r'stats', StakeholderStatsViewSet, basename='stakeholder-stats')
+router.register(r'stage-inspections', BuildingStageInspectionViewSet, basename='stage-inspection')
+router.register(r'timeline-milestones', ProjectTimelineMilestoneViewSet, basename='timeline-milestone')
+router.register(r'financial-invoices', StatutoryFinancialTransactionViewSet, basename='financial-invoice')
 
 urlpatterns = [
     path('', include(router.urls)),

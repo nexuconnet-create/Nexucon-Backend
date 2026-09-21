@@ -418,3 +418,132 @@ class RegisterLoginEndpointsTestCase(TestCase):
         })
         self.assertEqual(res.status_code, 401)
 
+
+class StakeholderAuthTestCase(TestCase):
+    """
+    Validates stakeholder registration, login, and onboarding flows
+    for Developers, Contractors, Licensed Professionals, and Consultants.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_stakeholder_registration_creates_user_and_developer_record(self):
+        payload = {
+            'name': 'Femi Adebayo',
+            'email': 'femi@primedev.ng',
+            'password': 'Password123!',
+            'phone_number': '+2348011112222',
+            'stakeholder_type': 'developer',
+            'company_name': 'Prime Developments Ltd',
+            'registration_number': 'RC-102938',
+            'country': 'NG',
+            'state_region': 'Lagos',
+            'office_address': 'Plot 4, Victoria Island, Lagos',
+        }
+        res = self.client.post('/api/v1/auth/register/', payload)
+        self.assertEqual(res.status_code, 201)
+        self.assertTrue(res.data['success'])
+
+        # Verify user created with split names
+        user = User.objects.get(email='femi@primedev.ng')
+        self.assertEqual(user.first_name, 'Femi')
+        self.assertEqual(user.last_name, 'Adebayo')
+
+        # Verify Developer entity created
+        from apps.stakeholders.models import Developer
+        dev = Developer.objects.filter(user=user).first()
+        self.assertIsNotNone(dev)
+        self.assertEqual(dev.name, 'Prime Developments Ltd')
+        self.assertEqual(dev.primary_contact_name, 'Femi Adebayo')
+
+    def test_stakeholder_contractor_registration(self):
+        payload = {
+            'name': 'Chidi Okeke',
+            'email': 'chidi@buildtech.ng',
+            'password': 'Password123!',
+            'phone_number': '+2348033334444',
+            'stakeholder_type': 'contractor',
+            'company_name': 'BuildTech Construction',
+            'registration_number': 'RC-555666',
+            'license_number': 'CON-LIC-998',
+        }
+        res = self.client.post('/api/v1/auth/register/', payload)
+        self.assertEqual(res.status_code, 201)
+
+        from apps.stakeholders.models import Contractor
+        user = User.objects.get(email='chidi@buildtech.ng')
+        con = Contractor.objects.filter(user=user).first()
+        self.assertIsNotNone(con)
+        self.assertEqual(con.company_name, 'BuildTech Construction')
+        self.assertEqual(con.license_number, 'CON-LIC-998')
+
+    def test_stakeholder_login_and_me_profile(self):
+        user = User.objects.create_user(
+            username='dev@skyline.ng',
+            email='dev@skyline.ng',
+            password='Password123!',
+            first_name='Amina',
+            last_name='Danjuma',
+            is_verified=True,
+        )
+        from apps.stakeholders.models import Developer
+        Developer.objects.create(
+            user=user,
+            name='Skyline Properties',
+            status='Active',
+            hq_location='Abuja FCT',
+            primary_contact_name='Amina Danjuma',
+        )
+
+        res = self.client.post('/api/v1/auth/login/', {
+            'email': 'dev@skyline.ng',
+            'password': 'Password123!',
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        user_data = res.data['data']['user']
+        self.assertEqual(user_data['role_name'], 'Stakeholder: Developer')
+        self.assertIsNotNone(user_data['stakeholder_profile'])
+        self.assertEqual(user_data['stakeholder_profile']['name'], 'Skyline Properties')
+
+    def test_stakeholder_onboarding_updates_profile_and_completes(self):
+        user = User.objects.create_user(
+            username='engr.tunde@consult.ng',
+            email='engr.tunde@consult.ng',
+            password='Password123!',
+            first_name='Tunde',
+            last_name='Bakare',
+            is_verified=True,
+            is_onboarded=False,
+        )
+        self.client.force_authenticate(user=user)
+
+        onboarding_payload = {
+            'portal': 'stakeholder',
+            'stakeholder_type': 'professional',
+            'company_name': 'Bakare & Associates Structural Engineering',
+            'registration_number': 'RC-998877',
+            'license_authority': 'COREN',
+            'license_number': 'R.29481',
+            'country': 'NG',
+            'state_region': 'Lagos',
+            'city': 'Ikeja',
+            'office_address': '12 Allen Avenue, Ikeja',
+            'project_scale_focus': 'infrastructure',
+        }
+        res = self.client.post('/api/v1/auth/onboarding/', onboarding_payload)
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+
+        user.refresh_from_db()
+        self.assertTrue(user.is_onboarded)
+
+        from apps.stakeholders.models import LicensedProfessional
+        prof = LicensedProfessional.objects.filter(user=user).first()
+        self.assertIsNotNone(prof)
+        self.assertEqual(prof.license_authority, 'COREN')
+        self.assertEqual(prof.firm_name, 'Bakare & Associates Structural Engineering')
+        self.assertEqual(prof.license_status, 'Active')
+
+
