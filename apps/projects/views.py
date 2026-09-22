@@ -20,12 +20,22 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiRespo
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
 from django.views.decorators.cache import cache_page
+from django.views.decorators.vary import vary_on_headers
 
 from rest_framework.permissions import IsAuthenticated
 
+# `get_queryset` below answers a different question for every caller — an
+# ordinary user sees only their own projects, and the seeded mock projects are
+# hidden from everyone else. A cached response is keyed by URL alone, so
+# without the `Vary` these two decorators set, the first caller to miss the
+# cache would serve *their* project list to every other user for the next
+# fifteen minutes. `vary_on_headers` sits inside `cache_page` on purpose: the
+# header has to be on the response before the cache decides what to key on.
 @method_decorator(ratelimit(key='ip', rate='60/m', block=True), name='dispatch')
 @method_decorator(cache_page(60 * 15), name='list')
+@method_decorator(vary_on_headers('Authorization'), name='list')
 @method_decorator(cache_page(60 * 15), name='retrieve')
+@method_decorator(vary_on_headers('Authorization'), name='retrieve')
 class ProjectViewSet(viewsets.ModelViewSet):
     """CRUD API for Project model"""
     queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')

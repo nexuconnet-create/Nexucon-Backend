@@ -2,6 +2,7 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from apps.projects.models import Project
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -9,7 +10,15 @@ User = get_user_model()
 
 class ProjectAPITests(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='projuser', email='projuser@test.com', password='testpass')
+        # A superuser, because `ProjectViewSet.get_queryset` narrows an
+        # ordinary authenticated user to projects carrying their own email and
+        # hides the seeded mock projects from them. That narrowing is not what
+        # this test is about — it is about creating a project and reading it
+        # back — so it runs as the kind of caller the endpoint admits without
+        # qualification. The narrowing itself is covered by
+        # `ProjectVisibilityTestCase` below.
+        self.user = User.objects.create_superuser(
+            username='projuser', email='projuser@test.com', password='testpass')
         refresh = RefreshToken.for_user(self.user)
         self.token = str(refresh.access_token)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token}')
@@ -25,6 +34,74 @@ class ProjectAPITests(APITestCase):
         response = self.client.get(create_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(any(p['id'] == proj_id for p in response.data))
+
+
+# ======================================================================
+# Who may see which projects. `ProjectViewSet.get_queryset` narrows an
+# ordinary authenticated user to projects carrying their own email, and
+# hides the four seeded mock projects from everyone except SiteIQ,
+# government inspectors and superusers. That rule is live in production,
+# and the fixtures above run as admitted callers precisely so this file
+# does not have to keep re-testing it — so it is tested here instead,
+# once, against the behaviour rather than the implementation.
+# ======================================================================
+
+class ProjectVisibilityTestCase(APITestCase):
+    MOCK_NAME = 'Eko Atlantic Marina Towers'
+
+    def setUp(self):
+        # The list endpoint is `cache_page`d and the cache outlives a single
+        # test, so a response cached by one test would answer the next. It
+        # also holds the ratelimit counters, which this clears with it.
+        cache.clear()
+        self.ordinary = User.objects.create_user(
+            username='ordinary', email='ordinary@test.com', password='testpass')
+        self.siteiq = User.objects.create_user(
+            username='siteiq', email='siteiq@nexucon.net', password='testpass')
+
+    def _as(self, user):
+        refresh = RefreshToken.for_user(user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+
+    def _listed_names(self):
+        res = self.client.get(reverse('project-list'))
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        return [project['name'] for project in res.data]
+
+    def test_an_ordinary_user_does_not_see_a_project_that_is_not_theirs(self):
+        Project.objects.create(name='Someone Elses Tower')
+        self._as(self.ordinary)
+        self.assertNotIn('Someone Elses Tower', self._listed_names())
+
+    def test_an_ordinary_user_sees_the_project_carrying_their_email(self):
+        Project.objects.create(name='My Own Tower',
+                               developer_email='ordinary@test.com')
+        self._as(self.ordinary)
+        self.assertIn('My Own Tower', self._listed_names())
+
+    def test_the_seeded_mock_projects_are_hidden_from_an_ordinary_user(self):
+        # Carries their email, so only the mock-name exclusion can hide it.
+        Project.objects.create(name=self.MOCK_NAME,
+                               developer_email='ordinary@test.com')
+        self._as(self.ordinary)
+        self.assertNotIn(self.MOCK_NAME, self._listed_names())
+
+    def test_siteiq_sees_the_seeded_mock_projects(self):
+        Project.objects.create(name=self.MOCK_NAME)
+        self._as(self.siteiq)
+        self.assertIn(self.MOCK_NAME, self._listed_names())
+
+    def test_the_list_response_varies_on_authorization(self):
+        """Otherwise the cached list is served across users.
+
+        The list is cached for fifteen minutes and the body differs per
+        caller, so without this the first caller to miss the cache would
+        answer everyone else with their own project list.
+        """
+        self._as(self.ordinary)
+        res = self.client.get(reverse('project-list'))
+        self.assertIn('Authorization', res.headers.get('Vary', ''))
 
 
 # ======================================================================
@@ -747,7 +824,7 @@ class ProjectZoneAssignmentTestCase(APITestCase):
     def setUp(self):
         from apps.government.models import District
 
-        self.user = User.objects.create_user(
+        self.user = User.objects.create_superuser(
             username='zoneuser', email='zoneuser@test.com', password='testpass')
         refresh = RefreshToken.for_user(self.user)
         self.client.credentials(
