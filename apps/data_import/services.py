@@ -720,6 +720,13 @@ class _BytesReader:
     def readable(self):
         return True
 
+    @property
+    def closed(self):
+        return self._stream.closed
+
+    def close(self):
+        self._stream.close()
+
     def __len__(self):
         return self.size
 
