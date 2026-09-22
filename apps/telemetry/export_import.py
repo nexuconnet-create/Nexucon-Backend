@@ -50,7 +50,7 @@ from apps.data_import.readers import (
 )
 from apps.data_import.registry import (
     REGISTRY, RowError, UPV_ACCEPTED_KEYS, UPV_COLUMNS, UPV_CONTEXT_KEYS,
-    UPV_MEASUREMENT_KEYS,
+    UPV_MEASUREMENT_KEYS, group_upv_rows,
 )
 from apps.evidence.files import safe_file_name
 
@@ -182,23 +182,61 @@ class SessionFromFileService:
                 'things depending on the test it came from, so the platform '
                 'will not assume one.')
 
-        # The registry's own UPV builder validates the rows — the same code the
-        # CSV wizard runs, so the two paths cannot disagree about what a valid
-        # PUNDIT row is.
-        try:
-            payload, _ = REGISTRY['UPV'].build(merged, _BuildContext(project))
-        except RowError as exc:
-            raise TelemetryError(str(exc))
+        # An export is a day's work, not one test. The same file routinely
+        # holds every element the operator walked, so the rows are split into
+        # the tests they describe before anything is built — by the same rule
+        # the CSV wizard applies, so a file and a workbook of the same readings
+        # produce the same records.
+        #
+        # Building one test over every row is what this used to do, and it is
+        # why a file of ten elements was read as ten copies of the first
+        # element's points and then refused at promotion for repeating a label.
+        # The measurements were never wrong; the split was missing.
+        groups, grouping_error = group_upv_rows(merged)
+        if grouping_error:
+            raise TelemetryError(f'{name}: {grouping_error}')
 
-        readings = payload.pop('readings', [])
-        if not readings:
+        packets = []
+        # What every group in this file agrees on. Nothing else belongs on the
+        # session, because a session carries one config and a file may hold
+        # several tests.
+        shared = None
+        for _key, group_rows in groups:
+            # The registry's own UPV builder validates the rows — the same code
+            # the CSV wizard runs, so the two paths cannot disagree about what
+            # a valid PUNDIT row is.
+            try:
+                payload, _ = REGISTRY['UPV'].build(group_rows,
+                                                   _BuildContext(project))
+            except RowError as exc:
+                raise TelemetryError(str(exc))
+
+            readings = payload.pop('readings', [])
+            if not readings:
+                raise TelemetryError(
+                    f'{name} produced no readable readings. Nothing was imported.')
+            payload.pop('project', None)
+
+            # The context of the test a reading belongs to travels on the
+            # packet. It cannot live on the session alone: one session has one
+            # config, so a grouping kept only there could never describe a file
+            # holding more than one element.
+            context = {key: value for key, value in payload.items()
+                       if key in UPV_CONTEXT_KEYS}
+            shared = context if shared is None else {
+                key: value for key, value in shared.items()
+                if context.get(key) == value}
+            for reading in readings:
+                packets.append({**context, **reading})
+
+        if not packets:
             raise TelemetryError(
                 f'{name} produced no readable readings. Nothing was imported.')
-        # Everything the builder resolved at test level becomes the session's
-        # shared config, applied to every promoted reading — exactly the shape
-        # the promotion path expects.
-        payload.pop('project', None)
-        config.update(payload)
+
+        # The session records only what the whole file agrees on. For a
+        # one-element file that is what it always was, and it stays the
+        # fallback for a packet that carries no context of its own.
+        config.update(shared or {})
 
         stored_name, digest = cls._store(content, name)
 
@@ -228,8 +266,8 @@ class SessionFromFileService:
                     source_file_sha256=digest,
                     source_file_storage_name=stored_name,
                 )
-                for index, reading in enumerate(readings, start=1):
-                    TelemetryService.append_packet(session, reading, sequence=index)
+                for index, packet in enumerate(packets, start=1):
+                    TelemetryService.append_packet(session, packet, sequence=index)
                 # Closed within the transaction: the instrument finished long
                 # before the file reached the platform, and a session left
                 # OPEN would refuse the next import from the same device.
@@ -248,10 +286,10 @@ class SessionFromFileService:
             raise TelemetryError(
                 f'{name} could not be imported, so nothing was recorded: {exc}')
 
-        logger.info('Telemetry file import: %s → %s (%s readings)',
-                    name, session.session_reference, len(readings))
+        logger.info('Telemetry file import: %s → %s (%s readings in %s tests)',
+                    name, session.session_reference, len(packets), len(groups))
         return session, {'rows': len(rows), 'skipped': skipped,
-                         'readings': len(readings)}
+                         'readings': len(packets), 'tests': len(groups)}
 
     # ------------------------------------------------------------------
     # Steps

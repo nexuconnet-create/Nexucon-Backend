@@ -386,46 +386,104 @@ class TelemetryService:
 
     @classmethod
     def _promote_pundit(cls, session, packets, request):
-        """One PUNDIT test whose readings are the packets.
+        """One PUNDIT test per element the capture holds.
 
         The readings are handed to the serializer as its own ``readings`` list
         rather than written directly, so the per-point velocity, the element
         mean, the quality grade, the E.C.S through the project's active curve
         and the point-count threading all happen in the one place that already
         implements them.
+
+        A capture is not always one test. An instrument export is a day's work
+        and routinely holds every element the operator walked, so the packets of
+        such a file carry the context of the test they belong to and are
+        regrouped here exactly as the importer split them.
+
+        Only a *file* capture is regrouped, and that restriction is deliberate
+        rather than incidental. A file is a finished export whose packets were
+        grouped by the importer from rows the operator can read for themselves.
+        A live or replayed session declares its element once, in
+        ``session_config``, at the moment it starts — and a device naming an
+        element on every packet while its operator named one at the start is a
+        disagreement this method has no business settling by quietly splitting
+        the capture into two tests.
         """
+        from apps.data_import.registry import UPV_CONTEXT_KEYS
         from apps.digital_eye.serializers import PUNDITTestSerializer
         from apps.evidence.ingestion import EvidenceIngestionService
 
         config = dict(session.session_config or {})
-        config.setdefault('structural_element',
-                          f'Telemetry capture {session.session_reference}')
-        readings = []
+        regroup = session.transport == TelemetrySession.TRANSPORT_FILE
+
+        # Consecutive packets of one context are one test — the rule the
+        # importer applies to the rows, and for the same reason: an element
+        # seen in two separate blocks is a sorting accident, not two tests.
+        groups = []
         for packet in packets:
-            reading = dict(packet.payload)
-            # Point labels are left to the serializer's own A, B, C... rule
-            # when the device did not assign one — the same rule the manual
-            # multi-point form uses.
-            reading.setdefault('point_label', '')
-            readings.append(reading)
+            payload = dict(packet.payload or {})
+            context = ({key: payload[key] for key in UPV_CONTEXT_KEYS
+                        if key in payload} if regroup else {})
+            key = tuple(sorted(context.items()))
+            if groups and groups[-1][0] == key:
+                groups[-1][1].append(payload)
+                continue
+            groups.append((key, [payload]))
 
-        test = cls._run(
-            PUNDITTestSerializer,
-            {**config,
-             'project': session.project_id,
-             'device': session.device_id,
-             'readings': readings},
-            session, request,
-            created_by=request.user if request else None,
-            operator=request.user if request else None,
-            operator_name=session.operator_name,
-        )
-        EvidenceIngestionService.ingest_pundit_test(
-            test, ingested_by=request.user if request else None)
+        tests = []
+        total = 0
+        for key, members in groups:
+            readings = []
+            for payload in members:
+                # A packet's context describes its test, not its point, so it
+                # is dropped here rather than handed to the reading serializer.
+                reading = {name: value for name, value in payload.items()
+                           if name not in UPV_CONTEXT_KEYS}
+                # Point labels are left to the serializer's own A, B, C... rule
+                # when the device did not assign one — the same rule the manual
+                # multi-point form uses.
+                reading.setdefault('point_label', '')
+                readings.append(reading)
 
-        return {'test_id': str(test.id),
+            test_config = {**config, **dict(key)}
+            test_config.setdefault(
+                'structural_element',
+                f'Telemetry capture {session.session_reference}')
+
+            test = cls._run(
+                PUNDITTestSerializer,
+                {**test_config,
+                 'project': session.project_id,
+                 'device': session.device_id,
+                 'readings': readings},
+                session, request,
+                created_by=request.user if request else None,
+                operator=request.user if request else None,
+                operator_name=session.operator_name,
+            )
+            EvidenceIngestionService.ingest_pundit_test(
+                test, ingested_by=request.user if request else None)
+
+            count = test.readings.count()
+            total += count
+            tests.append({
+                'test_id': str(test.id),
                 'test_reference': test.test_reference,
-                'readings': test.readings.count()}
+                'structural_element': test.structural_element,
+                'floor': test.floor,
+                'readings': count,
+            })
+
+        first = tests[0] if tests else {}
+        return {
+            'tests': tests,
+            'test_count': len(tests),
+            # Kept because a promotion used to be reportable as a single test
+            # and a live capture still is one. A caller reading only these sees
+            # the capture's first test rather than nothing at all.
+            'test_id': first.get('test_id', ''),
+            'test_reference': first.get('test_reference', ''),
+            'readings': total,
+        }
 
     @classmethod
     def _promote_gnss(cls, session, packets, request):

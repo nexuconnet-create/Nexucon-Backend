@@ -318,6 +318,45 @@ def _build_upv(rows, ctx):
     return payload, {}
 
 
+def group_upv_rows(rows):
+    """Split rows into the tests they describe. Returns ``(groups, error)``.
+
+    One element, one floor, one test type, on consecutive rows — the rule
+    ``ImportService._group`` already applies to the wizard, stated here as well
+    because the telemetry file path needs the same split without the record
+    types and registry lookups that method is written around. The rule is what
+    must not drift between the two paths, and it is one line above.
+
+    A block that is interrupted and resumed is an error rather than two tests:
+    it is almost always a sorting accident, and splitting it silently would
+    file the same element twice in the registry. ``error`` is '' when every row
+    grouped.
+
+    Note what this is *not*. It is not a limit on how much a file may hold. A
+    file of forty elements groups into forty tests and imports; what it refuses
+    is the one shape that would put a real number under the wrong element.
+    """
+    groups = []
+    seen = {}
+    for row in rows:
+        data = row.data
+        key = (_text(data.get('structural_element')),
+               _text(data.get('test_type')).lower(),
+               _text(data.get('floor')))
+        if groups and groups[-1][0] == key:
+            groups[-1][1].append(row)
+            continue
+        if key in seen:
+            return [], (
+                f'Rows for element {key[0]!r} (test type {key[1]!r}, floor '
+                f'{key[2] or "not recorded"}) appear in two separate blocks, '
+                f'the first starting at row {seen[key]}. Keep one element\'s '
+                'points on consecutive rows so they form a single test.')
+        seen[key] = row.row_number
+        groups.append((key, [row]))
+    return groups, ''
+
+
 # ----------------------------------------------------------------------
 # GPR — survey headers
 # ----------------------------------------------------------------------
