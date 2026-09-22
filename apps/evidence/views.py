@@ -70,7 +70,13 @@ class AIAnalysisRecordViewSet(ScopedEvidenceMixin, viewsets.ReadOnlyModelViewSet
     def get_queryset(self):
         qs = AIAnalysisRecord.objects.select_related('project').prefetch_related('evidence')
         allowed = scoped_projects(self.request.user)
-        return qs.filter(project__in=allowed)
+        qs = qs.filter(project__in=allowed)
+        
+        is_rollup = self.request.query_params.get('is_rollup')
+        if is_rollup == 'true':
+            qs = qs.filter(evidence__isnull=True)
+            
+        return qs
 
 
 import uuid

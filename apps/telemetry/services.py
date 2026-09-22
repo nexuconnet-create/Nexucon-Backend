@@ -385,6 +385,80 @@ class TelemetryService:
                 'anomalies': len(anomalies)}
 
     @classmethod
+    def _reparse_file_packets(cls, session):
+        """Re-read and re-parse the stored original file to recover per-element
+        grouping for legacy sessions whose packets lack context keys.
+
+        Returns a list of ``(context_dict, [reading_dict, ...])`` groups — the
+        same shape ``_promote_pundit`` builds from well-formed packets — or
+        ``None`` when the file cannot be recovered.
+
+        The original bytes are retained in storage precisely for this: the
+        packets are a *derived interpretation* of a file, and if that
+        interpretation was wrong the original is the only ground truth. A
+        legacy session imported before the multi-element fix is that case — the
+        parse was not wrong per se, but it dropped the per-element context that
+        promotion now needs.
+        """
+        from django.core.files.storage import default_storage
+
+        from apps.data_import.readers import (
+            ImportReadError, detect_import_type, read_rows,
+        )
+        from apps.data_import.registry import (
+            REGISTRY, RowError, UPV_CONTEXT_KEYS, group_upv_rows,
+        )
+        from apps.telemetry.export_import import (
+            SessionFromFileService, _BuildContext,
+        )
+
+        storage_name = session.source_file_storage_name
+        if not storage_name:
+            return None
+
+        try:
+            with default_storage.open(storage_name) as handle:
+                content = handle.read()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                'Cannot re-read stored file %s for session %s',
+                storage_name, session.session_reference)
+            return None
+
+        try:
+            import_type = detect_import_type(content)
+            header_map = (session.device.column_mapping or None
+                          if session.device else None)
+            rows, _ = read_rows(content, import_type, header_map=header_map)
+            if not rows:
+                return None
+
+            # Merge session_config context into the rows, exactly as the
+            # current file-import path does.
+            config = dict(session.session_config or {})
+            merged = SessionFromFileService._merge_context(rows, config)
+            groups, error = group_upv_rows(merged)
+            if error:
+                return None
+
+            result = []
+            for _key, group_rows in groups:
+                payload, _ = REGISTRY['UPV'].build(
+                    group_rows, _BuildContext(session.project))
+                readings = payload.pop('readings', [])
+                payload.pop('project', None)
+                context = {k: v for k, v in payload.items()
+                           if k in UPV_CONTEXT_KEYS}
+                result.append((context, readings))
+            return result if result else None
+
+        except (ImportReadError, RowError, Exception):  # noqa: BLE001
+            logger.warning(
+                'Re-parse failed for session %s: stored file may be corrupt',
+                session.session_reference, exc_info=True)
+            return None
+
+    @classmethod
     def _promote_pundit(cls, session, packets, request):
         """One PUNDIT test per element the capture holds.
 
@@ -429,22 +503,65 @@ class TelemetryService:
                 continue
             groups.append((key, [payload]))
 
-        tests = []
-        total = 0
+        # Legacy file sessions imported before the multi-element fix carry no
+        # per-element context on their packets, so every reading lands in one
+        # group and fails on duplicate point labels. Detect this degenerate
+        # case and recover by re-parsing the stored original file.
+        if (regroup and len(groups) == 1
+                and groups[0][0] == ()
+                and len(groups[0][1]) > 1):
+            labels = [(p.get('point_label') or '').strip().upper()
+                      for p in groups[0][1]]
+            has_dupes = len(labels) != len(set(l for l in labels if l))
+            if has_dupes:
+                reparsed = cls._reparse_file_packets(session)
+                if reparsed:
+                    logger.info(
+                        'Recovered per-element grouping for legacy session %s '
+                        '(%d groups from re-parse)',
+                        session.session_reference, len(reparsed))
+                    # Build the promotion from the fresh parse instead of the
+                    # context-less packets.
+                    return cls._promote_pundit_from_groups(
+                        session, reparsed, config, request)
+
+        # Build test groups into the promotion result — the normal path for
+        # well-formed packets and the fallback for legacy packets that could
+        # not be recovered.
+        promotion_groups = []
         for key, members in groups:
             readings = []
             for payload in members:
-                # A packet's context describes its test, not its point, so it
-                # is dropped here rather than handed to the reading serializer.
                 reading = {name: value for name, value in payload.items()
                            if name not in UPV_CONTEXT_KEYS}
+                reading.setdefault('point_label', '')
+                readings.append(reading)
+            promotion_groups.append((dict(key), readings))
+
+        return cls._promote_pundit_from_groups(
+            session, promotion_groups, config, request)
+
+    @classmethod
+    def _promote_pundit_from_groups(cls, session, groups, config, request):
+        """Write one PUNDIT test per group into the registry.
+
+        ``groups`` is a list of ``(context_dict, [reading_dict, ...])`` pairs —
+        produced either from the packets' own context keys (the normal path) or
+        from a re-parse of the stored file (the legacy recovery path).
+        """
+        from apps.digital_eye.serializers import PUNDITTestSerializer
+        from apps.evidence.ingestion import EvidenceIngestionService
+
+        tests = []
+        total = 0
+        for context, readings in groups:
+            for reading in readings:
                 # Point labels are left to the serializer's own A, B, C... rule
                 # when the device did not assign one — the same rule the manual
                 # multi-point form uses.
                 reading.setdefault('point_label', '')
-                readings.append(reading)
 
-            test_config = {**config, **dict(key)}
+            test_config = {**config, **context}
             test_config.setdefault(
                 'structural_element',
                 f'Telemetry capture {session.session_reference}')

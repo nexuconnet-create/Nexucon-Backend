@@ -1981,6 +1981,92 @@ class FileImportMultiElementTests(FileImportTestBase):
         self.assertEqual(TelemetrySession.objects.count(), 0)
 
 
+class FileImportLegacyRecoveryTests(FileImportTestBase):
+    """A legacy session whose packets carry no per-element context can still be
+    promoted by re-parsing the stored original file.
+
+    Sessions imported before the multi-element fix have packets that are flat
+    readings — no ``structural_element`` on the payload. When promotion
+    regroups them, every reading lands in one group and fails on duplicate
+    point labels. The recovery path detects that degenerate case and re-reads
+    the original file (which is always retained) through the current code to
+    recover per-element grouping.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def _create_legacy_session(self, csv_bytes, name='export.csv'):
+        """Simulate the old import path: upload the file normally to store it,
+        then strip the per-element context from every packet — reproducing
+        exactly what the pre-fix code wrote.
+        """
+        from apps.data_import.registry import UPV_CONTEXT_KEYS
+
+        response = self._upload(csv_bytes, name=name)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        session = TelemetrySession.objects.get(pk=response.data['id'])
+
+        # Strip context keys from every packet — what the old importer did.
+        for packet in session.packets.all():
+            payload = dict(packet.payload)
+            for key in UPV_CONTEXT_KEYS:
+                payload.pop(key, None)
+            packet.payload = payload
+            packet.save(update_fields=['payload'])
+
+        # Clear the session_config so it doesn't carry the element either.
+        session.session_config = {}
+        session.sync_status = TelemetrySession.SYNC_PENDING
+        session.save(update_fields=['session_config', 'sync_status'])
+
+        return session
+
+    def _promote(self, session_id):
+        return self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': session_id}),
+            {}, format='json')
+
+    def test_a_legacy_two_element_session_promotes_by_re_parsing_the_file(self):
+        session = self._create_legacy_session(TWO_ELEMENT_CSV)
+
+        # Verify the packets really have no context (the old shape).
+        for packet in session.packets.all():
+            self.assertNotIn('structural_element', packet.payload)
+
+        ended = self._promote(session.id)
+
+        self.assertEqual(ended.status_code, status.HTTP_200_OK)
+        self.assertEqual(ended.data['sync_status'], 'SYNCED')
+        self.assertEqual(ended.data['promoted']['test_count'], 2)
+
+        by_element = {test.structural_element: test
+                      for test in PUNDITTest.objects.all()}
+        self.assertEqual(set(by_element), {'Column C1', 'Beam B2'})
+        for element, test in by_element.items():
+            with self.subTest(element=element):
+                self.assertEqual(test.readings.count(), 3)
+                self.assertEqual(_reading_labels(test.readings.all()),
+                                 ['P1', 'P2', 'P3'])
+
+    def test_legacy_recovery_preserves_computed_fields(self):
+        """The recovered tests carry velocity, grade, and E.C.S — the full
+        serializer ran, not a shortcut."""
+        session = self._create_legacy_session(TWO_ELEMENT_CSV)
+
+        self._promote(session.id)
+
+        for test in PUNDITTest.objects.all():
+            with self.subTest(element=test.structural_element):
+                self.assertIsNotNone(test.velocity_km_s)
+                self.assertIsNotNone(test.quality_grade)
+                self.assertIsNotNone(test.estimated_compressive_strength_mpa)
+                self.assertEqual(test.readings.count(), 3)
+                self.assertEqual(EvidenceRecord.objects.filter(
+                    source_model='digital_eye.PUNDITTest', source_id=str(test.id)).count(), 1)
+
+
 class FileImportStorageTests(FileImportTestBase):
     """A refused import leaves no bytes behind either."""
 
