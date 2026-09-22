@@ -280,6 +280,12 @@ class ImportService:
             'skipped_row_count', 'validation_errors', 'errors_truncated',
             'validated_at', 'import_status', 'updated_at',
         ])
+        
+        types_in_batch = {item['record'].record_type for item in prepared if item['record'].record_type}
+        if not batch.record_type and len(types_in_batch) == 1:
+            batch.record_type = types_in_batch.pop()
+            batch.save(update_fields=['record_type'])
+            
         return batch
 
     @classmethod
