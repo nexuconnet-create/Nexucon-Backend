@@ -41,7 +41,7 @@ from .readers import (
     ImportReadError, detect_import_type, normalise_key, read_headers, read_rows,
 )
 from .registry import REGISTRY, UPV_ACCEPTED_KEYS
-from .services import ImportService, ImportServiceError
+from .services import ImportService, ImportServiceError, _BytesReader
 from .suggest import describe
 from .templates import build_template
 
@@ -89,6 +89,42 @@ def csv_bytes(columns, rows):
     for row in rows:
         writer.writerow(row)
     return buffer.getvalue().encode('utf-8')
+
+
+# ----------------------------------------------------------------------
+# The stream handed to storage — the object, not the call site
+# ----------------------------------------------------------------------
+
+class BytesReaderTests(TestCase):
+    """The reader ``ImportService.upload`` gives to ``default_storage``.
+
+    Worth its own tests because getting it wrong is invisible locally and
+    fatal in production. A storage backend decides whether it may seek by
+    looking for a ``seek``, and the S3/R2 backend then calls it the standard
+    way — so an object that offers a one-argument ``seek`` passes every test
+    that writes to the local filesystem and returns a 500 from every upload on
+    the deployed platform, before the importer has seen the file.
+    """
+
+    def test_it_can_be_seeked_the_way_a_storage_backend_seeks(self):
+        """``S3Boto3Storage._save`` opens with ``content.seek(0, SEEK_SET)``."""
+        reader = _BytesReader(b'STRUCTURAL ELEMENT\nCOL-G1\n')
+        self.assertEqual(reader.seek(0, io.SEEK_SET), 0)
+        self.assertTrue(reader.read().startswith(b'STRUCTURAL'))
+
+    def test_reading_advances_instead_of_repeating_the_first_bytes(self):
+        reader = _BytesReader(b'abcdef')
+        self.assertEqual(reader.read(3), b'abc')
+        self.assertEqual(reader.read(3), b'def')
+
+    def test_it_declares_itself_seekable(self):
+        """The absence of this method is what ``is_seekable`` reads as yes."""
+        self.assertTrue(_BytesReader(b'abc').seekable())
+
+    def test_it_reports_its_size_and_chunks_the_whole_content(self):
+        reader = _BytesReader(b'abcdef')
+        self.assertEqual(reader.size, 6)
+        self.assertEqual(b''.join(reader.chunks(chunk_size=4)), b'abcdef')
 
 
 # ----------------------------------------------------------------------
