@@ -546,4 +546,94 @@ class StakeholderAuthTestCase(TestCase):
         self.assertEqual(prof.firm_name, 'Bakare & Associates Structural Engineering')
         self.assertEqual(prof.license_status, 'Active')
 
+    def test_portal_role_isolation_cross_login_blocked(self):
+        """Ensure inspectors cannot log into stakeholder portal and vice versa."""
+        # 1. Create inspector user with invitation
+        from apps.settings.models import UserInvitation
+        from apps.government.models import Role, Profile
+        inspector_user = User.objects.create_user(
+            username='inspector.tunde@lasbca.gov.ng',
+            email='inspector.tunde@lasbca.gov.ng',
+            password='InspectorPassword123!',
+            first_name='Tunde',
+            last_name='Inspector',
+            is_active=True,
+            is_verified=True,
+        )
+        insp_role, _ = Role.objects.get_or_create(name='Inspector')
+        Profile.objects.create(user=inspector_user, role=insp_role)
+        UserInvitation.objects.create(
+            email='inspector.tunde@lasbca.gov.ng',
+            name='Tunde Inspector',
+            role='Inspector',
+            status='Accepted',
+            invite_code='INSP-0001'
+        )
+
+        # 2. Attempt login as inspector on stakeholder portal -> Expect 403 Forbidden
+        res_insp_on_stakeholder = self.client.post('/api/v1/auth/login/', {
+            'email': 'inspector.tunde@lasbca.gov.ng',
+            'password': 'InspectorPassword123!',
+            'portal': 'stakeholder'
+        })
+        self.assertEqual(res_insp_on_stakeholder.status_code, 403)
+        self.assertEqual(res_insp_on_stakeholder.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+        self.assertIn('Inspector', res_insp_on_stakeholder.data.get('detail', ''))
+
+        # 3. Attempt login as inspector on government portal -> Expect 403 Forbidden
+        res_insp_on_gov = self.client.post('/api/v1/auth/login/', {
+            'email': 'inspector.tunde@lasbca.gov.ng',
+            'password': 'InspectorPassword123!',
+            'portal': 'government'
+        })
+        self.assertEqual(res_insp_on_gov.status_code, 403)
+        self.assertEqual(res_insp_on_gov.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+
+        # 4. Attempt login as inspector on inspector portal -> Expect 200 OK
+        res_insp_on_insp = self.client.post('/api/v1/auth/login/', {
+            'email': 'inspector.tunde@lasbca.gov.ng',
+            'password': 'InspectorPassword123!',
+            'portal': 'inspector'
+        })
+        self.assertEqual(res_insp_on_insp.status_code, 200)
+
+        # 5. Create stakeholder user
+        stakeholder_user = User.objects.create_user(
+            username='contractor@buildfast.ng',
+            email='contractor@buildfast.ng',
+            password='ContractorPass123!',
+            first_name='Emeka',
+            last_name='Okeke',
+            is_active=True,
+            is_verified=True,
+        )
+        from apps.stakeholders.models import Contractor
+        Contractor.objects.create(user=stakeholder_user, name='BuildFast Ltd', status='Active')
+
+        # 6. Attempt login as stakeholder on inspector portal -> Expect 403 Forbidden
+        res_st_on_insp = self.client.post('/api/v1/auth/login/', {
+            'email': 'contractor@buildfast.ng',
+            'password': 'ContractorPass123!',
+            'portal': 'inspector'
+        })
+        self.assertEqual(res_st_on_insp.status_code, 403)
+        self.assertEqual(res_st_on_insp.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+
+        # 7. Attempt login as stakeholder on government portal -> Expect 403 Forbidden
+        res_st_on_gov = self.client.post('/api/v1/auth/login/', {
+            'email': 'contractor@buildfast.ng',
+            'password': 'ContractorPass123!',
+            'portal': 'government'
+        })
+        self.assertEqual(res_st_on_gov.status_code, 403)
+        self.assertEqual(res_st_on_gov.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+
+        # 8. Attempt login as stakeholder on stakeholder portal -> Expect 200 OK
+        res_st_on_st = self.client.post('/api/v1/auth/login/', {
+            'email': 'contractor@buildfast.ng',
+            'password': 'ContractorPass123!',
+            'portal': 'stakeholder'
+        })
+        self.assertEqual(res_st_on_st.status_code, 200)
+
 

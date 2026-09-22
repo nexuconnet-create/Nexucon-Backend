@@ -260,6 +260,11 @@ class UserMeSerializer(serializers.ModelSerializer):
         if obj.is_superuser:
             return 'Director'
 
+        from apps.settings.models import UserInvitation
+        inv = UserInvitation.objects.filter(email__iexact=obj.email).first()
+        if inv and inv.role:
+            return inv.role
+
         from apps.stakeholders.models import Developer, Contractor, Consultant, LicensedProfessional
         if Developer.objects.filter(user=obj).exists():
             return 'Stakeholder: Developer'

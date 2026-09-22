@@ -107,16 +107,104 @@ class CustomLoginView(TokenObtainPairView):
         if response.status_code == 200:
             access_token = response.data.get('access')
             refresh_token = response.data.get('refresh')
-            user_data = response.data.get('user')
-            
-            # Extract device info
-            user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown Device')
-            ip = request.META.get('REMOTE_ADDR')
+            user_data = response.data.get('user') or {}
             
             # Find user
             from django.contrib.auth import get_user_model
             User = get_user_model()
             user = User.objects.get(id=user_data['id'])
+
+            # Determine target portal from request param, header, or Origin/Referer
+            req_portal = (request.data.get('portal') or request.headers.get('X-Portal-Type') or '').strip().lower()
+            if not req_portal:
+                origin = (request.headers.get('Origin') or request.META.get('HTTP_ORIGIN') or '').lower()
+                referer = (request.headers.get('Referer') or request.META.get('HTTP_REFERER') or '').lower()
+                host = (request.headers.get('Host') or request.META.get('HTTP_HOST') or '').lower()
+                if 'stakeholder' in origin or 'stakeholder' in referer or 'stakeholder' in host:
+                    req_portal = 'stakeholder'
+                elif 'inspector' in origin or 'inspector' in referer or 'inspector' in host:
+                    req_portal = 'inspector'
+                elif 'government' in origin or 'government' in referer or 'government' in host:
+                    req_portal = 'government'
+
+            # Classify user's role
+            role_name = (user_data.get('role_name') or '').strip()
+            role_lower = role_name.lower()
+
+            is_inspector = any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
+            if not is_inspector and hasattr(user, 'government_profile') and user.government_profile and user.government_profile.role:
+                is_inspector = any(k in user.government_profile.role.name.lower() for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
+            if not is_inspector:
+                from apps.settings.models import UserInvitation
+                inv = UserInvitation.objects.filter(email__iexact=user.email).first()
+                if inv and any(k in (inv.role or '').lower() for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
+                    is_inspector = True
+
+            is_government = (
+                not is_inspector and (
+                    user.is_superuser or
+                    (hasattr(user, 'government_profile') and user.government_profile and not is_inspector) or
+                    any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator'])
+                )
+            )
+
+            is_stakeholder = not is_inspector and not is_government
+
+            # Enforce portal access restrictions
+            if req_portal == 'stakeholder' and not is_stakeholder:
+                if is_inspector:
+                    err_msg = "Access Denied: You are attempting to sign in with an Inspector account. Please log in at the Inspector Terminal (https://inspector.nexucon.net)."
+                    allowed_p = 'inspector'
+                else:
+                    err_msg = "Access Denied: Government Agency accounts cannot access the Stakeholder portal. Please log in at the Government Command Center (https://government.nexucon.net)."
+                    allowed_p = 'government'
+
+                return Response({
+                    'success': False,
+                    'detail': err_msg,
+                    'message': err_msg,
+                    'code': 'PORTAL_ROLE_MISMATCH',
+                    'user_role': role_name,
+                    'allowed_portal': allowed_p
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            if req_portal == 'government' and not is_government:
+                if is_inspector:
+                    err_msg = "Access Denied: Field Inspector accounts cannot log in to the Government Command Center. Please log in at the Inspector Terminal (https://inspector.nexucon.net)."
+                    allowed_p = 'inspector'
+                else:
+                    err_msg = "Access Denied: Stakeholder accounts cannot access the Government Command Center. Please log in at the Stakeholder Portal (https://stakeholder.nexucon.net)."
+                    allowed_p = 'stakeholder'
+
+                return Response({
+                    'success': False,
+                    'detail': err_msg,
+                    'message': err_msg,
+                    'code': 'PORTAL_ROLE_MISMATCH',
+                    'user_role': role_name,
+                    'allowed_portal': allowed_p
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            if req_portal == 'inspector' and not is_inspector:
+                if is_government:
+                    err_msg = "Access Denied: Government Agency accounts cannot log in to the Inspector Terminal. Please log in at the Government Command Center (https://government.nexucon.net)."
+                    allowed_p = 'government'
+                else:
+                    err_msg = "Access Denied: Stakeholder accounts cannot access the Inspector Terminal. Please log in at the Stakeholder Portal (https://stakeholder.nexucon.net)."
+                    allowed_p = 'stakeholder'
+
+                return Response({
+                    'success': False,
+                    'detail': err_msg,
+                    'message': err_msg,
+                    'code': 'PORTAL_ROLE_MISMATCH',
+                    'user_role': role_name,
+                    'allowed_portal': allowed_p
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            # Extract device info
+            user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown Device')
+            ip = request.META.get('REMOTE_ADDR')
             
             # Create session
             import jwt
