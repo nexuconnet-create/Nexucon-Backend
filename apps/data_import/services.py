@@ -444,9 +444,18 @@ class ImportService:
         """
         if batch.record_type:
             return [batch.record_type] * len(rows)
+
+        from apps.data_import.registry import REGISTRY
+        from apps.data_import.readers import normalise_key
+
         types = []
         for row in rows:
             declared = str(row.data.get('record_type') or '').strip().upper()
+            if not declared:
+                for rtype, entry in REGISTRY.items():
+                    if all(normalise_key(req) in row.data for req in entry.required):
+                        declared = rtype
+                        break
             types.append(declared)
         return types
 
