@@ -107,16 +107,104 @@ class CustomLoginView(TokenObtainPairView):
         if response.status_code == 200:
             access_token = response.data.get('access')
             refresh_token = response.data.get('refresh')
-            user_data = response.data.get('user')
-            
-            # Extract device info
-            user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown Device')
-            ip = request.META.get('REMOTE_ADDR')
+            user_data = response.data.get('user') or {}
             
             # Find user
             from django.contrib.auth import get_user_model
             User = get_user_model()
             user = User.objects.get(id=user_data['id'])
+
+            # Determine target portal from request param, header, or Origin/Referer
+            req_portal = (request.data.get('portal') or request.headers.get('X-Portal-Type') or '').strip().lower()
+            if not req_portal:
+                origin = (request.headers.get('Origin') or request.META.get('HTTP_ORIGIN') or '').lower()
+                referer = (request.headers.get('Referer') or request.META.get('HTTP_REFERER') or '').lower()
+                host = (request.headers.get('Host') or request.META.get('HTTP_HOST') or '').lower()
+                if 'stakeholder' in origin or 'stakeholder' in referer or 'stakeholder' in host:
+                    req_portal = 'stakeholder'
+                elif 'inspector' in origin or 'inspector' in referer or 'inspector' in host:
+                    req_portal = 'inspector'
+                elif 'government' in origin or 'government' in referer or 'government' in host:
+                    req_portal = 'government'
+
+            # Classify user's role
+            role_name = (user_data.get('role_name') or '').strip()
+            role_lower = role_name.lower()
+
+            is_inspector = any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
+            if not is_inspector and hasattr(user, 'government_profile') and user.government_profile and user.government_profile.role:
+                is_inspector = any(k in user.government_profile.role.name.lower() for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
+            if not is_inspector:
+                from apps.settings.models import UserInvitation
+                inv = UserInvitation.objects.filter(email__iexact=user.email).first()
+                if inv and any(k in (inv.role or '').lower() for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
+                    is_inspector = True
+
+            is_government = (
+                not is_inspector and (
+                    user.is_superuser or
+                    (hasattr(user, 'government_profile') and user.government_profile and not is_inspector) or
+                    any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator'])
+                )
+            )
+
+            is_stakeholder = not is_inspector and not is_government
+
+            # Enforce portal access restrictions
+            if req_portal == 'stakeholder' and not is_stakeholder:
+                if is_inspector:
+                    err_msg = "Access Denied: You are attempting to sign in with an Inspector account. Please log in at the Inspector Terminal (https://inspector.nexucon.net)."
+                    allowed_p = 'inspector'
+                else:
+                    err_msg = "Access Denied: Government Agency accounts cannot access the Stakeholder portal. Please log in at the Government Command Center (https://government.nexucon.net)."
+                    allowed_p = 'government'
+
+                return Response({
+                    'success': False,
+                    'detail': err_msg,
+                    'message': err_msg,
+                    'code': 'PORTAL_ROLE_MISMATCH',
+                    'user_role': role_name,
+                    'allowed_portal': allowed_p
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            if req_portal == 'government' and not is_government:
+                if is_inspector:
+                    err_msg = "Access Denied: Field Inspector accounts cannot log in to the Government Command Center. Please log in at the Inspector Terminal (https://inspector.nexucon.net)."
+                    allowed_p = 'inspector'
+                else:
+                    err_msg = "Access Denied: Stakeholder accounts cannot access the Government Command Center. Please log in at the Stakeholder Portal (https://stakeholder.nexucon.net)."
+                    allowed_p = 'stakeholder'
+
+                return Response({
+                    'success': False,
+                    'detail': err_msg,
+                    'message': err_msg,
+                    'code': 'PORTAL_ROLE_MISMATCH',
+                    'user_role': role_name,
+                    'allowed_portal': allowed_p
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            if req_portal == 'inspector' and not is_inspector:
+                if is_government:
+                    err_msg = "Access Denied: Government Agency accounts cannot log in to the Inspector Terminal. Please log in at the Government Command Center (https://government.nexucon.net)."
+                    allowed_p = 'government'
+                else:
+                    err_msg = "Access Denied: Stakeholder accounts cannot access the Inspector Terminal. Please log in at the Stakeholder Portal (https://stakeholder.nexucon.net)."
+                    allowed_p = 'stakeholder'
+
+                return Response({
+                    'success': False,
+                    'detail': err_msg,
+                    'message': err_msg,
+                    'code': 'PORTAL_ROLE_MISMATCH',
+                    'user_role': role_name,
+                    'allowed_portal': allowed_p
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            # Extract device info
+            user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown Device')
+            ip = request.META.get('REMOTE_ADDR')
             
             # Create session
             import jwt
@@ -169,10 +257,24 @@ class UserRegistrationView(generics.CreateAPIView):
         email = (request.data.get('email') or '').strip().lower()
         password = request.data.get('password')
 
-        # Check if user already exists
+        # Check if user already exists or belongs to agency/inspector
         if email:
+            from apps.government.models import Profile
+            from apps.settings.models import UserInvitation
+
             existing_user = User.objects.filter(email__iexact=email).first()
             if existing_user:
+                has_gov = hasattr(existing_user, 'government_profile') and existing_user.government_profile
+                if has_gov or Profile.objects.filter(user=existing_user).exists():
+                    return Response({
+                        'success': False,
+                        'message': 'This email belongs to an existing Government Agency or Inspector account. It cannot be used to create a Stakeholder account.',
+                        'data': None,
+                        'errors': {
+                            'email': ['This email belongs to an existing Government Agency or Inspector account.']
+                        }
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 if existing_user.is_verified:
                     return Response({
                         'success': False,
@@ -182,8 +284,19 @@ class UserRegistrationView(generics.CreateAPIView):
                             'email': ['An account with this email address already exists. Please log in instead.']
                         }
                     }, status=status.HTTP_400_BAD_REQUEST)
-                else:
-                    # User exists but is NOT verified yet. Update credentials & issue fresh OTP
+
+            if UserInvitation.objects.filter(email__iexact=email).exists():
+                return Response({
+                    'success': False,
+                    'message': 'This email is assigned to an Agency or Inspectorate credential and cannot be registered as a Stakeholder.',
+                    'data': None,
+                    'errors': {
+                        'email': ['This email is assigned to an Agency or Inspectorate credential.']
+                    }
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if existing_user:
+                # User exists as unverified regular user. Update credentials & issue fresh OTP
                     if password:
                         if len(password) < 8:
                             return Response({
@@ -194,14 +307,71 @@ class UserRegistrationView(generics.CreateAPIView):
                             }, status=status.HTTP_400_BAD_REQUEST)
                         existing_user.set_password(password)
 
-                    if request.data.get('first_name'):
-                        existing_user.first_name = request.data.get('first_name')
-                    if request.data.get('last_name'):
-                        existing_user.last_name = request.data.get('last_name')
+                    full_name = (request.data.get('name') or '').strip()
+                    if full_name and not (request.data.get('first_name') or request.data.get('last_name')):
+                        parts = full_name.split(None, 1)
+                        existing_user.first_name = parts[0]
+                        existing_user.last_name = parts[1] if len(parts) > 1 else ''
+                    else:
+                        if request.data.get('first_name'):
+                            existing_user.first_name = request.data.get('first_name')
+                        if request.data.get('last_name'):
+                            existing_user.last_name = request.data.get('last_name')
                     if request.data.get('phone_number'):
                         existing_user.phone_number = request.data.get('phone_number')
                     existing_user.save()
                     user = existing_user
+
+                    # Check and link stakeholder if requested
+                    st_type = (request.data.get('stakeholder_type') or '').lower().strip()
+                    if st_type:
+                        from apps.stakeholders.models import (
+                            Developer, Contractor, Consultant, LicensedProfessional, generate_lic_id
+                        )
+                        c_name = (request.data.get('company_name') or '').strip()
+                        u_full = f"{user.first_name} {user.last_name}".strip() or user.email
+                        if st_type in ['client', 'developer'] and not Developer.objects.filter(user=user).exists():
+                            Developer.objects.create(
+                                user=user,
+                                name=c_name or u_full,
+                                status='Active',
+                                primary_contact_name=u_full,
+                                primary_contact_email=user.email,
+                                primary_contact_phone=user.phone_number or '',
+                                is_active=True,
+                            )
+                        elif st_type == 'contractor' and not Contractor.objects.filter(user=user).exists():
+                            Contractor.objects.create(
+                                user=user,
+                                name=c_name or u_full,
+                                company_name=c_name,
+                                registration_number=request.data.get('registration_number', ''),
+                                license_number=request.data.get('license_number', ''),
+                                contractor_type='General Contractor',
+                                status='Prequalified',
+                                is_active=True,
+                            )
+                        elif st_type == 'professional' and not LicensedProfessional.objects.filter(user=user).exists():
+                            LicensedProfessional.objects.create(
+                                user=user,
+                                license_id=request.data.get('license_number') or generate_lic_id(),
+                                name=u_full,
+                                role_title='Licensed Professional',
+                                firm_name=c_name or 'Independent Practice',
+                                license_authority=request.data.get('license_authority') or 'COREN',
+                                license_status='Active',
+                                is_verified=True,
+                            )
+                        elif st_type == 'consultant' and not Consultant.objects.filter(user=user).exists():
+                            Consultant.objects.create(
+                                user=user,
+                                name=c_name or u_full,
+                                company_name=c_name,
+                                registration_number=request.data.get('registration_number', ''),
+                                specialty='Advisory Consultant',
+                                status='Active',
+                                is_active=True,
+                            )
 
                     # Generate 6-digit email verification token
                     otp_token = EmailVerificationToken.generate_token(email=user.email, user=user)
@@ -538,6 +708,154 @@ class ChangePasswordView(APIView):
 
         return Response({'success': True, 'message': 'Password updated successfully'})
 
+
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+from django.template.loader import render_to_string
+import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class PasswordResetRequestView(APIView):
+    """
+    POST /api/v1/auth/password-reset/
+    Generates a secure recovery token and dispatches an email via Resend.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        if not email:
+            return Response({
+                'success': False,
+                'message': 'Official email address is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email).first()
+        if user and user.is_active:
+            token = default_token_generator.make_token(user)
+            uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
+            otp_token = EmailVerificationToken.generate_token(email, user=user, duration_minutes=60)
+
+            origin = request.headers.get('origin') or request.headers.get('referer') or ''
+            has_gov = hasattr(user, 'government_profile') and user.government_profile
+            is_agency_user = bool(has_gov and user.government_profile.role and 'inspector' not in user.government_profile.role.name.lower())
+
+            if 'government' in origin or is_agency_user:
+                base_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
+                reset_path = '/government/reset-password'
+                user_label = 'Government Official'
+            elif 'stakeholder' in origin:
+                base_url = 'https://stakeholder.nexucon.net'
+                reset_path = '/stakeholder/reset-password'
+                user_label = 'Stakeholder Official'
+            elif 'inspector' in origin:
+                base_url = 'https://inspector.nexucon.net'
+                reset_path = '/inspector/reset-password'
+                user_label = 'Inspector'
+            else:
+                base_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
+                reset_path = '/reset-password'
+                user_label = 'Nexucon Member'
+
+            reset_url = f"{base_url}{reset_path}?email={urllib.parse.quote(user.email)}&token={token}&uid={uidb64}"
+
+            context = {
+                'name': user.get_full_name() or user.first_name or user_label,
+                'email': user.email,
+                'reset_url': reset_url,
+                'otp_code': otp_token.code,
+            }
+            try:
+                html_body = render_to_string('emails/password_reset.html', context)
+                dispatch_res = EmailService.send_email(
+                    to_email=user.email,
+                    subject='Reset Your Nexucon Password',
+                    html_content=html_body,
+                )
+                logger.info(f"Password reset email dispatched to {user.email}: {dispatch_res}")
+            except Exception as e:
+                logger.error(f"Failed to dispatch password reset email to {user.email}: {e}")
+
+        # Always return generic success to prevent email enumeration
+        return Response({
+            'success': True,
+            'message': 'If your email is registered in the system, password reset instructions have been dispatched.'
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    POST /api/v1/auth/password-reset-confirm/
+    Validates the token or 6-digit code and establishes a new password.
+    """
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        token = (request.data.get('token') or '').strip()
+        code = (request.data.get('code') or '').strip()
+        uidb64 = (request.data.get('uid') or '').strip()
+        new_password = request.data.get('new_password', '')
+        confirm_password = request.data.get('confirm_password', '')
+
+        if not new_password:
+            return Response({'success': False, 'message': 'New password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(new_password) < 8:
+            return Response({'success': False, 'message': 'Password must be at least 8 characters long.'}, status=status.HTTP_400_BAD_REQUEST)
+        if confirm_password and new_password != confirm_password:
+            return Response({'success': False, 'message': 'Passwords do not match.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = None
+        if uidb64:
+            try:
+                uid = force_str(urlsafe_base64_decode(uidb64))
+                user = User.objects.filter(pk=uid).first()
+            except Exception:
+                user = None
+
+        if not user and email:
+            user = User.objects.filter(email__iexact=email).first()
+
+        if not user or not user.is_active:
+            return Response({'success': False, 'message': 'Invalid recovery request or user not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_token_valid = False
+        if token and default_token_generator.check_token(user, token):
+            is_token_valid = True
+        elif code:
+            ev_token = EmailVerificationToken.objects.filter(
+                email__iexact=user.email,
+                code=code,
+                is_used=False,
+                expires_at__gte=timezone.now()
+            ).first()
+            if ev_token:
+                is_token_valid = True
+                ev_token.is_used = True
+                ev_token.save(update_fields=['is_used'])
+
+        if not is_token_valid:
+            return Response({
+                'success': False,
+                'message': 'Invalid or expired password reset token / code. Please request a new recovery link.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Invalidate remaining unused verification tokens for this user
+        EmailVerificationToken.objects.filter(email__iexact=user.email, is_used=False).update(is_used=True)
+
+        return Response({
+            'success': True,
+            'message': 'Password has been successfully updated. You may now sign in with your new credentials.'
+        }, status=status.HTTP_200_OK)
+
+
 class UserOnboardingView(APIView):
     permission_classes = (IsAuthenticated,)
 
@@ -545,11 +863,180 @@ class UserOnboardingView(APIView):
         user = request.user
         data = request.data
         
-        # Mark as verified
+        # Mark as verified and onboarded
         user.is_verified = True
-        user.save()
-        
-        # Ensure Agency Head role exists with full permissions
+        user.is_onboarded = True
+        user.save(update_fields=['is_verified', 'is_onboarded'])
+
+        # Determine onboarding stream: Stakeholder vs Government
+        portal = (request.headers.get('X-Portal-Type') or data.get('portal') or data.get('portal_type') or '').lower()
+        stakeholder_type = (data.get('stakeholder_type') or data.get('stakeholderRole') or '').lower()
+
+        from apps.stakeholders.models import (
+            Developer, Contractor, Consultant, LicensedProfessional, generate_lic_id
+        )
+
+        has_stakeholder_record = (
+            Developer.objects.filter(user=user).exists() or
+            Contractor.objects.filter(user=user).exists() or
+            Consultant.objects.filter(user=user).exists() or
+            LicensedProfessional.objects.filter(user=user).exists()
+        )
+
+        is_stakeholder = bool(
+            portal == 'stakeholder' or
+            stakeholder_type or
+            has_stakeholder_record or
+            data.get('companyName') or
+            data.get('company_name') or
+            data.get('registration_number')
+        )
+
+        if is_stakeholder:
+            company_name = (data.get('company_name') or data.get('companyName') or data.get('firmName') or '').strip()
+            registration_number = (data.get('registration_number') or data.get('registrationNumber') or '').strip()
+            license_authority = (data.get('license_authority') or data.get('licenseAuthority') or 'COREN').strip()
+            license_number = (data.get('license_number') or data.get('licenseNumber') or '').strip()
+            country = (data.get('country') or '').strip()
+            state_region = (data.get('state_region') or data.get('stateRegion') or '').strip()
+            city = (data.get('city') or '').strip()
+            office_address = (data.get('office_address') or data.get('officeAddress') or '').strip()
+            project_scale_focus = (data.get('project_scale_focus') or data.get('projectScaleFocus') or '').strip()
+            project_ref = (data.get('project_reference_code') or data.get('projectReferenceCode') or data.get('project_reference') or '').strip()
+            contact_name = (data.get('contact_name') or data.get('fullName') or user.get_full_name()).strip() or user.email
+            phone = (data.get('phone') or data.get('phone_number') or user.phone_number or '').strip()
+
+            hq_loc = office_address or f"{city}, {state_region}, {country}".strip(', ') or 'Nigeria'
+
+            # If stakeholder_type wasn't explicitly passed, detect from existing records
+            if not stakeholder_type:
+                if Developer.objects.filter(user=user).exists():
+                    stakeholder_type = 'developer'
+                elif Contractor.objects.filter(user=user).exists():
+                    stakeholder_type = 'contractor'
+                elif Consultant.objects.filter(user=user).exists():
+                    stakeholder_type = 'consultant'
+                elif LicensedProfessional.objects.filter(user=user).exists():
+                    stakeholder_type = 'professional'
+                else:
+                    stakeholder_type = 'client'
+
+            if stakeholder_type in ['client', 'developer']:
+                dev = Developer.objects.filter(user=user).first()
+                if not dev:
+                    dev = Developer.objects.create(
+                        user=user,
+                        name=company_name or contact_name,
+                        status='Active',
+                        hq_location=hq_loc,
+                        primary_contact_name=contact_name,
+                        primary_contact_email=user.email,
+                        primary_contact_phone=phone,
+                        is_active=True,
+                    )
+                else:
+                    if company_name:
+                        dev.name = company_name
+                    dev.hq_location = hq_loc
+                    dev.primary_contact_name = contact_name
+                    dev.primary_contact_phone = phone
+                    dev.status = 'Active'
+                    dev.is_active = True
+                    dev.save()
+
+            elif stakeholder_type == 'contractor':
+                con = Contractor.objects.filter(user=user).first()
+                if not con:
+                    con = Contractor.objects.create(
+                        user=user,
+                        name=company_name or contact_name,
+                        company_name=company_name,
+                        registration_number=registration_number,
+                        license_number=license_number,
+                        contractor_type='General Contractor',
+                        status='Active',
+                        license_status='Active' if license_number else 'Pending',
+                        specialties=[project_scale_focus] if project_scale_focus else [],
+                        is_active=True,
+                    )
+                else:
+                    if company_name:
+                        con.name = company_name
+                        con.company_name = company_name
+                    if registration_number:
+                        con.registration_number = registration_number
+                    if license_number:
+                        con.license_number = license_number
+                        con.license_status = 'Active'
+                    if project_scale_focus:
+                        con.specialties = [project_scale_focus]
+                    con.status = 'Active'
+                    con.is_active = True
+                    con.save()
+
+            elif stakeholder_type == 'professional':
+                lic = LicensedProfessional.objects.filter(user=user).first()
+                if not lic:
+                    lic = LicensedProfessional.objects.create(
+                        user=user,
+                        license_id=license_number or generate_lic_id(),
+                        name=contact_name,
+                        role_title='Licensed Professional',
+                        firm_name=company_name or 'Independent Practice',
+                        license_authority=license_authority,
+                        license_status='Active',
+                        is_verified=True,
+                    )
+                else:
+                    if contact_name:
+                        lic.name = contact_name
+                    if company_name:
+                        lic.firm_name = company_name
+                    if license_authority:
+                        lic.license_authority = license_authority
+                    if license_number:
+                        lic.license_id = license_number
+                    lic.license_status = 'Active'
+                    lic.is_verified = True
+                    lic.save()
+
+            elif stakeholder_type == 'consultant':
+                cns = Consultant.objects.filter(user=user).first()
+                if not cns:
+                    cns = Consultant.objects.create(
+                        user=user,
+                        name=company_name or contact_name,
+                        company_name=company_name,
+                        registration_number=registration_number,
+                        specialty=f"Consultant - {project_scale_focus.capitalize()}" if project_scale_focus else 'Advisory Consultant',
+                        status='Active',
+                        hq_location=hq_loc,
+                        is_active=True,
+                    )
+                else:
+                    if company_name:
+                        cns.name = company_name
+                        cns.company_name = company_name
+                    if registration_number:
+                        cns.registration_number = registration_number
+                    if project_scale_focus:
+                        cns.specialty = f"Consultant - {project_scale_focus.capitalize()}"
+                    cns.hq_location = hq_loc
+                    cns.status = 'Active'
+                    cns.is_active = True
+                    cns.save()
+
+            # Refresh user instance from DB to serialize latest profile/role state
+            user.refresh_from_db()
+            serializer = UserMeSerializer(user)
+            return Response({
+                'success': True,
+                'message': 'Stakeholder onboarding completed successfully',
+                'data': serializer.data,
+                'errors': None
+            })
+
+        # Default Government Agency Head Onboarding
         agency_head_role, _ = Role.objects.get_or_create(
             name="Agency Head",
             defaults={
@@ -563,7 +1050,6 @@ class UserOnboardingView(APIView):
             }
         )
         
-        # Handle Government Profile creation/update
         department_name = data.get('department', 'Default Agency')
         
         # Try to find an existing profile or create one

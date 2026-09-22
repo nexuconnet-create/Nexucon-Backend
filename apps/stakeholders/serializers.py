@@ -3,7 +3,8 @@ from .models import (
     Developer, Contractor, Consultant, Inspector,
     LicensedProfessional, ProjectStakeholderTeam,
     BlacklistRecord, StakeholderMeeting, StakeholderMessage,
-    Certification, TrainingRecord, MessageTranslation, MeetingActionItem
+    Certification, TrainingRecord, MessageTranslation, MeetingActionItem,
+    BuildingStageInspection, ProjectTimelineMilestone, StatutoryFinancialTransaction
 )
 
 class DeveloperSerializer(serializers.ModelSerializer):
@@ -150,3 +151,27 @@ class TrainingRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = TrainingRecord
         fields = '__all__'
+
+
+class BuildingStageInspectionSerializer(serializers.ModelSerializer):
+    inspector_details = InspectorSerializer(source='assigned_inspector', read_only=True)
+
+    class Meta:
+        model = BuildingStageInspection
+        fields = '__all__'
+        read_only_fields = ('id', 'stage_id', 'created_at')
+
+
+class ProjectTimelineMilestoneSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectTimelineMilestone
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at')
+
+
+class StatutoryFinancialTransactionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StatutoryFinancialTransaction
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at')
+

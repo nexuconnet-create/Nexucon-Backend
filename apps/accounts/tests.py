@@ -418,3 +418,222 @@ class RegisterLoginEndpointsTestCase(TestCase):
         })
         self.assertEqual(res.status_code, 401)
 
+
+class StakeholderAuthTestCase(TestCase):
+    """
+    Validates stakeholder registration, login, and onboarding flows
+    for Developers, Contractors, Licensed Professionals, and Consultants.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_stakeholder_registration_creates_user_and_developer_record(self):
+        payload = {
+            'name': 'Femi Adebayo',
+            'email': 'femi@primedev.ng',
+            'password': 'Password123!',
+            'phone_number': '+2348011112222',
+            'stakeholder_type': 'developer',
+            'company_name': 'Prime Developments Ltd',
+            'registration_number': 'RC-102938',
+            'country': 'NG',
+            'state_region': 'Lagos',
+            'office_address': 'Plot 4, Victoria Island, Lagos',
+        }
+        res = self.client.post('/api/v1/auth/register/', payload)
+        self.assertEqual(res.status_code, 201)
+        self.assertTrue(res.data['success'])
+
+        # Verify user created with split names
+        user = User.objects.get(email='femi@primedev.ng')
+        self.assertEqual(user.first_name, 'Femi')
+        self.assertEqual(user.last_name, 'Adebayo')
+
+        # Verify Developer entity created
+        from apps.stakeholders.models import Developer
+        dev = Developer.objects.filter(user=user).first()
+        self.assertIsNotNone(dev)
+        self.assertEqual(dev.name, 'Prime Developments Ltd')
+        self.assertEqual(dev.primary_contact_name, 'Femi Adebayo')
+
+    def test_stakeholder_contractor_registration(self):
+        payload = {
+            'name': 'Chidi Okeke',
+            'email': 'chidi@buildtech.ng',
+            'password': 'Password123!',
+            'phone_number': '+2348033334444',
+            'stakeholder_type': 'contractor',
+            'company_name': 'BuildTech Construction',
+            'registration_number': 'RC-555666',
+            'license_number': 'CON-LIC-998',
+        }
+        res = self.client.post('/api/v1/auth/register/', payload)
+        self.assertEqual(res.status_code, 201)
+
+        from apps.stakeholders.models import Contractor
+        user = User.objects.get(email='chidi@buildtech.ng')
+        con = Contractor.objects.filter(user=user).first()
+        self.assertIsNotNone(con)
+        self.assertEqual(con.company_name, 'BuildTech Construction')
+        self.assertEqual(con.license_number, 'CON-LIC-998')
+
+    def test_stakeholder_login_and_me_profile(self):
+        user = User.objects.create_user(
+            username='dev@skyline.ng',
+            email='dev@skyline.ng',
+            password='Password123!',
+            first_name='Amina',
+            last_name='Danjuma',
+            is_verified=True,
+        )
+        from apps.stakeholders.models import Developer
+        Developer.objects.create(
+            user=user,
+            name='Skyline Properties',
+            status='Active',
+            hq_location='Abuja FCT',
+            primary_contact_name='Amina Danjuma',
+        )
+
+        res = self.client.post('/api/v1/auth/login/', {
+            'email': 'dev@skyline.ng',
+            'password': 'Password123!',
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        user_data = res.data['data']['user']
+        self.assertEqual(user_data['role_name'], 'Stakeholder: Developer')
+        self.assertIsNotNone(user_data['stakeholder_profile'])
+        self.assertEqual(user_data['stakeholder_profile']['name'], 'Skyline Properties')
+
+    def test_stakeholder_onboarding_updates_profile_and_completes(self):
+        user = User.objects.create_user(
+            username='engr.tunde@consult.ng',
+            email='engr.tunde@consult.ng',
+            password='Password123!',
+            first_name='Tunde',
+            last_name='Bakare',
+            is_verified=True,
+            is_onboarded=False,
+        )
+        self.client.force_authenticate(user=user)
+
+        onboarding_payload = {
+            'portal': 'stakeholder',
+            'stakeholder_type': 'professional',
+            'company_name': 'Bakare & Associates Structural Engineering',
+            'registration_number': 'RC-998877',
+            'license_authority': 'COREN',
+            'license_number': 'R.29481',
+            'country': 'NG',
+            'state_region': 'Lagos',
+            'city': 'Ikeja',
+            'office_address': '12 Allen Avenue, Ikeja',
+            'project_scale_focus': 'infrastructure',
+        }
+        res = self.client.post('/api/v1/auth/onboarding/', onboarding_payload)
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+
+        user.refresh_from_db()
+        self.assertTrue(user.is_onboarded)
+
+        from apps.stakeholders.models import LicensedProfessional
+        prof = LicensedProfessional.objects.filter(user=user).first()
+        self.assertIsNotNone(prof)
+        self.assertEqual(prof.license_authority, 'COREN')
+        self.assertEqual(prof.firm_name, 'Bakare & Associates Structural Engineering')
+        self.assertEqual(prof.license_status, 'Active')
+
+    def test_portal_role_isolation_cross_login_blocked(self):
+        """Ensure inspectors cannot log into stakeholder portal and vice versa."""
+        # 1. Create inspector user with invitation
+        from apps.settings.models import UserInvitation
+        from apps.government.models import Role, Profile
+        inspector_user = User.objects.create_user(
+            username='inspector.tunde@lasbca.gov.ng',
+            email='inspector.tunde@lasbca.gov.ng',
+            password='InspectorPassword123!',
+            first_name='Tunde',
+            last_name='Inspector',
+            is_active=True,
+            is_verified=True,
+        )
+        insp_role, _ = Role.objects.get_or_create(name='Inspector')
+        Profile.objects.create(user=inspector_user, role=insp_role)
+        UserInvitation.objects.create(
+            email='inspector.tunde@lasbca.gov.ng',
+            name='Tunde Inspector',
+            role='Inspector',
+            status='Accepted',
+            invite_code='INSP-0001'
+        )
+
+        # 2. Attempt login as inspector on stakeholder portal -> Expect 403 Forbidden
+        res_insp_on_stakeholder = self.client.post('/api/v1/auth/login/', {
+            'email': 'inspector.tunde@lasbca.gov.ng',
+            'password': 'InspectorPassword123!',
+            'portal': 'stakeholder'
+        })
+        self.assertEqual(res_insp_on_stakeholder.status_code, 403)
+        self.assertEqual(res_insp_on_stakeholder.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+        self.assertIn('Inspector', res_insp_on_stakeholder.data.get('detail', ''))
+
+        # 3. Attempt login as inspector on government portal -> Expect 403 Forbidden
+        res_insp_on_gov = self.client.post('/api/v1/auth/login/', {
+            'email': 'inspector.tunde@lasbca.gov.ng',
+            'password': 'InspectorPassword123!',
+            'portal': 'government'
+        })
+        self.assertEqual(res_insp_on_gov.status_code, 403)
+        self.assertEqual(res_insp_on_gov.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+
+        # 4. Attempt login as inspector on inspector portal -> Expect 200 OK
+        res_insp_on_insp = self.client.post('/api/v1/auth/login/', {
+            'email': 'inspector.tunde@lasbca.gov.ng',
+            'password': 'InspectorPassword123!',
+            'portal': 'inspector'
+        })
+        self.assertEqual(res_insp_on_insp.status_code, 200)
+
+        # 5. Create stakeholder user
+        stakeholder_user = User.objects.create_user(
+            username='contractor@buildfast.ng',
+            email='contractor@buildfast.ng',
+            password='ContractorPass123!',
+            first_name='Emeka',
+            last_name='Okeke',
+            is_active=True,
+            is_verified=True,
+        )
+        from apps.stakeholders.models import Contractor
+        Contractor.objects.create(user=stakeholder_user, name='BuildFast Ltd', status='Active')
+
+        # 6. Attempt login as stakeholder on inspector portal -> Expect 403 Forbidden
+        res_st_on_insp = self.client.post('/api/v1/auth/login/', {
+            'email': 'contractor@buildfast.ng',
+            'password': 'ContractorPass123!',
+            'portal': 'inspector'
+        })
+        self.assertEqual(res_st_on_insp.status_code, 403)
+        self.assertEqual(res_st_on_insp.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+
+        # 7. Attempt login as stakeholder on government portal -> Expect 403 Forbidden
+        res_st_on_gov = self.client.post('/api/v1/auth/login/', {
+            'email': 'contractor@buildfast.ng',
+            'password': 'ContractorPass123!',
+            'portal': 'government'
+        })
+        self.assertEqual(res_st_on_gov.status_code, 403)
+        self.assertEqual(res_st_on_gov.data.get('code'), 'PORTAL_ROLE_MISMATCH')
+
+        # 8. Attempt login as stakeholder on stakeholder portal -> Expect 200 OK
+        res_st_on_st = self.client.post('/api/v1/auth/login/', {
+            'email': 'contractor@buildfast.ng',
+            'password': 'ContractorPass123!',
+            'portal': 'stakeholder'
+        })
+        self.assertEqual(res_st_on_st.status_code, 200)
+
+

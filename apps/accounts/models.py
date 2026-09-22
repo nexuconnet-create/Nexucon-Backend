@@ -11,6 +11,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True, db_index=True)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
     is_verified = models.BooleanField(default=False, help_text="Designates whether the user's email has been verified.")
+    is_onboarded = models.BooleanField(default=False, help_text="Designates whether the user has completed their onboarding flow.")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -123,8 +123,14 @@ def _sanitize_csrf_origin(origin):
         return f"{scheme}://{rest}"
     return origin
 
+from corsheaders.defaults import default_headers
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_HEADERS = True
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'x-portal-type',
+    'portal',
+]
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys([_sanitize_origin(o) for o in CORS_ALLOWED_ORIGINS if o]))
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys([_sanitize_csrf_origin(o) for o in CSRF_TRUSTED_ORIGINS if o]))
 
