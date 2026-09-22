@@ -34,6 +34,7 @@ it was, and nothing enters a statutory registry from a file the platform has
 already rejected.
 """
 import hashlib
+import io
 import logging
 import os
 
@@ -674,25 +675,53 @@ class _BytesReader:
     Django's storage backends read ``.chunks()`` and consult ``.size`` for
     metadata; a bare ``io.BytesIO`` has the first but not the second, and the
     S3 backend logs a missing-size warning for every upload without it.
+
+    The reads and the seeks are delegated to a real ``BytesIO`` rather than
+    answered from the bytes directly, and that is not tidiness. A backend
+    decides whether it may seek by *asking*, and django-storages asks the
+    weakest question there is — ``is_seekable`` reads the absence of a
+    ``seekable`` method as permission — and then calls ``seek(0, SEEK_SET)``
+    before it uploads. An object that advertises a ``seek`` taking one
+    argument and then meets that call raises ``TypeError`` from inside the
+    storage backend, which surfaces as a 500 on an upload the importer never
+    saw.
+
+    None of this shows on the local filesystem, which never seeks: the failure
+    exists only on the R2/S3 storage the deployed platform uses, and there it
+    takes down *every* upload rather than one bad file.
+
+    Delegating also makes ``read`` advance the way callers assume. The
+    previous version returned the first ``size`` bytes on every call, so a
+    consumer reading in a loop would have read the same bytes forever.
     """
 
     def __init__(self, content):
-        self._content = content
+        self._stream = io.BytesIO(content)
         self.size = len(content)
         self.name = ''
 
     def chunks(self, chunk_size=1024 * 1024):
-        for start in range(0, len(self._content), chunk_size):
-            yield self._content[start:start + chunk_size]
+        buffer = self._stream.getbuffer()
+        for start in range(0, self.size, chunk_size):
+            yield bytes(buffer[start:start + chunk_size])
 
     def read(self, size=-1):
-        return self._content if size in (-1, None) else self._content[:size]
+        return self._stream.read(size)
 
-    def seek(self, position):
-        return position
+    def seek(self, offset, whence=0):
+        return self._stream.seek(offset, whence)
+
+    def tell(self):
+        return self._stream.tell()
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
 
     def __len__(self):
-        return len(self._content)
+        return self.size
 
 
 def _text(value):

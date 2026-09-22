@@ -1440,6 +1440,29 @@ UPV_CSV = (
     'Column C1,Ground Floor,Pulse Velocity,C,300,71.4,54,direct\n'
 ).encode('utf-8')
 
+#: One export holding two elements — what a day's work actually looks like when
+#: it leaves a unit that has no radio and no notion of a "session".
+TWO_ELEMENT_CSV = (
+    'STRUCTURAL ELEMENT,FLOOR,TEST TYPE,POINT,PATH LENGTH L (MM),'
+    'TRANSIT TIME T (US),TRANSDUCER FREQUENCY (KHZ),TRANSDUCER TYPE\n'
+    'Column C1,Ground Floor,Pulse Velocity,P1,300,65.2,54,direct\n'
+    'Column C1,Ground Floor,Pulse Velocity,P2,295,66.1,54,direct\n'
+    'Column C1,Ground Floor,Pulse Velocity,P3,305,68.4,54,direct\n'
+    'Beam B2,Ground Floor,Pulse Velocity,P1,350,80.1,54,direct\n'
+    'Beam B2,Ground Floor,Pulse Velocity,P2,345,81.3,54,direct\n'
+    'Beam B2,Ground Floor,Pulse Velocity,P3,355,83.7,54,direct\n'
+).encode('utf-8')
+
+#: The same two elements, written in the order a spreadsheet sorted by point
+#: would produce: each element interrupted by the other and resumed.
+INTERLEAVED_ELEMENTS_CSV = (
+    'STRUCTURAL ELEMENT,FLOOR,TEST TYPE,POINT,PATH LENGTH L (MM),'
+    'TRANSIT TIME T (US)\n'
+    'Column C1,Ground Floor,Pulse Velocity,P1,300,65.2\n'
+    'Beam B2,Ground Floor,Pulse Velocity,P1,350,80.1\n'
+    'Column C1,Ground Floor,Pulse Velocity,P2,295,66.1\n'
+).encode('utf-8')
+
 #: A bare measurement export — what a unit with no notion of a structural
 #: element actually writes. The app supplies the context.
 MEASUREMENTS_ONLY_CSV = (
@@ -1859,6 +1882,103 @@ class FileImportParsingTests(FileImportTestBase):
         self._upload(b'%PDF-1.4\n', name='bad.pdf')
         self.assertTrue(AuditEvent.objects.filter(
             action='telemetry.session.file_import_failed').exists())
+
+
+class FileImportMultiElementTests(FileImportTestBase):
+    """A file of several elements is several tests, not one broken one.
+
+    The unit has no radio, so a day's readings leave it as a single export, and
+    that export holds every element the operator walked. The platform used to
+    build one test over all of them, name it after the first row, and then
+    refuse the promotion for repeating a point label on that one element — a
+    refusal that named a label which had never been wrong, on a file that was
+    never malformed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def _promote(self, session_id):
+        return self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': session_id}),
+            {}, format='json')
+
+    def test_a_file_of_two_elements_is_one_session_holding_two_tests(self):
+        response = self._upload(TWO_ELEMENT_CSV)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        # Six readings, one capture: the file is not split into two sessions.
+        self.assertEqual(response.data['packet_count'], 6)
+        self.assertEqual(response.data['import_stats']['tests'], 2)
+        self.assertEqual(TelemetrySession.objects.count(), 1)
+
+    def test_every_packet_carries_the_element_it_was_measured_on(self):
+        session_id = self._upload(TWO_ELEMENT_CSV).data['id']
+        session = TelemetrySession.objects.get(pk=session_id)
+
+        elements = [packet.payload.get('structural_element') for packet
+                    in session.packets.order_by('sequence')]
+        self.assertEqual(elements, ['Column C1'] * 3 + ['Beam B2'] * 3)
+
+    def test_the_session_records_only_what_the_whole_file_agrees_on(self):
+        """The element belongs to a test, not to the capture, once a capture
+        can hold more than one. The transducer is on every row, so it stays."""
+        session_id = self._upload(TWO_ELEMENT_CSV).data['id']
+        session = TelemetrySession.objects.get(pk=session_id)
+
+        self.assertNotIn('structural_element', session.session_config)
+        self.assertEqual(session.session_config['transducer_frequency_khz'], 54)
+
+    def test_promotion_writes_one_test_per_element(self):
+        session_id = self._upload(TWO_ELEMENT_CSV).data['id']
+        ended = self._promote(session_id)
+
+        self.assertEqual(ended.status_code, status.HTTP_200_OK)
+        self.assertEqual(ended.data['sync_status'], 'SYNCED')
+        self.assertEqual(ended.data['promoted']['test_count'], 2)
+
+        by_element = {test.structural_element: test
+                      for test in PUNDITTest.objects.all()}
+        self.assertEqual(set(by_element), {'Column C1', 'Beam B2'})
+        for element, test in by_element.items():
+            with self.subTest(element=element):
+                self.assertEqual(test.readings.count(), 3)
+                # P1, P2, P3 on each element — distinct within their own test,
+                # which is the rule that was being broken when the two elements
+                # were written as one.
+                self.assertEqual(_reading_labels(test.readings.all()),
+                                 ['P1', 'P2', 'P3'])
+                # The computed columns prove the real serializer ran per test.
+                self.assertIsNotNone(test.velocity_km_s)
+                self.assertIsNotNone(test.estimated_compressive_strength_mpa)
+        # 300 mm across 65.2 us on the first point of Column C1.
+        self.assertAlmostEqual(by_element['Column C1'].readings.first().velocity_km_s,
+                               4.601, places=2)
+        self.assertEqual(EvidenceRecord.objects.count(), 2)
+
+    def test_a_one_element_file_still_promotes_as_a_single_test(self):
+        """The common case is unchanged, including the shape of the result."""
+        session_id = self._upload(UPV_CSV).data['id']
+        ended = self._promote(session_id)
+
+        self.assertEqual(ended.data['promoted']['test_count'], 1)
+        self.assertEqual(PUNDITTest.objects.count(), 1)
+        self.assertEqual(ended.data['promoted']['readings'], 3)
+
+    def test_an_element_interrupted_and_resumed_is_refused(self):
+        """The one shape still refused, and the reason is not size.
+
+        Two blocks of one element would file that element twice, so the file is
+        refused by name and row rather than silently read as two tests.
+        """
+        response = self._upload(INTERLEAVED_ELEMENTS_CSV)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('two separate blocks', response.data['detail'])
+        # Refused before a session exists, so nothing is left holding packets
+        # that could never be promoted.
+        self.assertEqual(TelemetrySession.objects.count(), 0)
 
 
 class FileImportStorageTests(FileImportTestBase):
