@@ -10,7 +10,8 @@ from apps.data_import.registry import UPV_ACCEPTED_KEYS
 from common.permissions import scoped_projects
 from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CoreSample,
-    DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice,
+    DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding,
+    EvidenceSpatialPoint, FieldDevice,
     GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
     GnssSurvey, LiveStream, NexuconLinkSettings, ProjectCurveSetting,
     PUNDITReading, PUNDITTest, ProcessingQueueJob, SensorDataFile,
@@ -41,6 +42,7 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'last_seen', 'calibration_date',
             'calibration_expiry', 'calibration_certificate_url', 'notes', 'is_active',
             'registered_by', 'column_mapping',
+            'connection_protocol',
             'default_test_type', 'default_structural_element',
             'default_floor', 'default_test_location',
             # Read-only: it is set by the gateway action, which mints a
@@ -180,6 +182,47 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f'Not platform columns: {", ".join(unknown)}. Accepted columns '
                 f'are: {", ".join(sorted(UPV_ACCEPTED_KEYS))}.')
+        return value
+
+
+class DeviceConnectionLogSerializer(serializers.ModelSerializer):
+    """Connection events (pair / disconnect / fail) for auditing."""
+    device_id = serializers.CharField(source='device.device_id', read_only=True)
+    device_name = serializers.CharField(source='device.name', read_only=True)
+    device_type = serializers.CharField(source='device.device_type', read_only=True)
+    event_display = serializers.CharField(source='get_event_display', read_only=True)
+    protocol_display = serializers.CharField(source='get_protocol_display', read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DeviceConnectionLog
+        fields = [
+            'id', 'device', 'device_id', 'device_name', 'device_type',
+            'event', 'event_display', 'protocol', 'protocol_display',
+            'user', 'user_name',
+            'rssi_dbm', 'ip_address', 'cloud_workspace_id',
+            'firmware_banner', 'error_message', 'notes',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'user', 'user_name', 'created_at']
+
+    def get_user_name(self, obj):
+        if obj.user:
+            return obj.user.get_full_name() or obj.user.email or str(obj.user)
+        return None
+
+    def validate_event(self, value):
+        valid = {c[0] for c in DeviceConnectionLog.EVENT_CHOICES}
+        if value not in valid:
+            raise serializers.ValidationError(
+                f'Event must be one of: {", ".join(sorted(valid))}')
+        return value
+
+    def validate_protocol(self, value):
+        valid = {c[0] for c in DeviceConnectionLog.PROTOCOL_CHOICES}
+        if value not in valid:
+            raise serializers.ValidationError(
+                f'Protocol must be one of: {", ".join(sorted(valid))}')
         return value
 
 

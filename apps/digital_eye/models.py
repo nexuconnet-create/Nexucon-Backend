@@ -97,6 +97,14 @@ class FieldDevice(models.Model):
 
     calibration_date = models.DateField(null=True, blank=True)
     calibration_certificate_url = models.URLField(max_length=500, blank=True, default='')
+    
+    CONNECTION_PROTOCOLS = [
+        ('usb', 'USB Wired'),
+        ('bluetooth', 'Bluetooth Wireless'),
+        ('wifi', 'Wi-Fi Hotspot / Network'),
+    ]
+    connection_protocol = models.CharField(max_length=30, choices=CONNECTION_PROTOCOLS, blank=True, default='', help_text="Wireless or wired connection method (e.g. Wi-Fi, Bluetooth)")
+    
     calibration_expiry = models.DateField(
         null=True, blank=True,
         help_text=(
@@ -169,6 +177,69 @@ class FieldDevice(models.Model):
 
     def __str__(self):
         return f"{self.device_id} ({self.get_device_type_display()})"
+
+
+class DeviceConnectionLog(models.Model):
+    """
+    Auditable log of Bluetooth / Wi-Fi / Cloud connection events for a
+    FieldDevice. Each row records a connection or disconnection attempt,
+    its protocol, whether it succeeded, and optional diagnostic detail
+    (RSSI, firmware banner, cloud workspace ID).
+
+    The inspector dashboard writes a row every time a user pairs via Web
+    Bluetooth, connects to a device hotspot, or authenticates with the
+    Screening Eagle cloud, and another when they deliberately disconnect.
+    Backend-initiated heartbeats do NOT write rows here — those are device
+    telemetry, not user actions.
+    """
+    EVENT_CONNECTED = 'connected'
+    EVENT_DISCONNECTED = 'disconnected'
+    EVENT_FAILED = 'failed'
+    EVENT_CHOICES = [
+        (EVENT_CONNECTED, 'Connected'),
+        (EVENT_DISCONNECTED, 'Disconnected'),
+        (EVENT_FAILED, 'Failed'),
+    ]
+
+    PROTOCOL_BLE = 'bluetooth'
+    PROTOCOL_WIFI = 'wifi'
+    PROTOCOL_CLOUD = 'cloud'
+    PROTOCOL_CHOICES = [
+        (PROTOCOL_BLE, 'Bluetooth Wireless'),
+        (PROTOCOL_WIFI, 'Wi-Fi Hotspot / Network'),
+        (PROTOCOL_CLOUD, 'Cloud Push (Screening Eagle)'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    device = models.ForeignKey(
+        FieldDevice, on_delete=models.CASCADE,
+        related_name='connection_logs',
+    )
+    event = models.CharField(max_length=20, choices=EVENT_CHOICES, db_index=True)
+    protocol = models.CharField(max_length=20, choices=PROTOCOL_CHOICES, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='device_connections',
+    )
+    # Optional diagnostic context — never required, never fabricated.
+    rssi_dbm = models.IntegerField(null=True, blank=True,
+                                   help_text="Received signal strength (dBm) at connection time")
+    ip_address = models.GenericIPAddressField(null=True, blank=True,
+                                             help_text="Device IP (Wi-Fi) or client IP (Cloud)")
+    cloud_workspace_id = models.CharField(max_length=255, blank=True, default='',
+                                          help_text="Screening Eagle workspace ID for cloud connections")
+    firmware_banner = models.CharField(max_length=255, blank=True, default='',
+                                      help_text="Firmware version string received at handshake")
+    error_message = models.TextField(blank=True, default='',
+                                     help_text="Diagnostic message when event is 'failed'")
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.device.device_id} {self.event} ({self.protocol}) @ {self.created_at}"
 
 
 class SensorDataFile(models.Model):

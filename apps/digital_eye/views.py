@@ -29,7 +29,7 @@ from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .bim_preview import build_preview_geometry
 from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMModelGeometry, BIMStructuralElement,
-    CoreSample, DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint,
+    CoreSample, DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint,
     FieldDevice, GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark,
     GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
     PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
@@ -37,7 +37,7 @@ from .models import (
 )
 from .serializers import (
     AIAnalysisRecordSerializer, BIMElementMappingSerializer, BIMStructuralElementSerializer,
-    CoreSampleSerializer, DeviceReportRecordSerializer, DigitalEyeFindingSerializer,
+    CoreSampleSerializer, DeviceConnectionLogSerializer, DeviceReportRecordSerializer, DigitalEyeFindingSerializer,
     EvidenceSpatialPointSerializer, FieldDeviceSerializer, GPRAnomalySerializer,
     GPRScanSerializer, GPRSurveySerializer, GnssBenchmarkSerializer,
     GnssBoundaryPointSerializer, GnssSurveySerializer,
@@ -182,6 +182,69 @@ class FieldDeviceViewSet(viewsets.ModelViewSet):
                 updates.append(name)
         device.save(update_fields=updates)
         return Response(FieldDeviceSerializer(device, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'])
+    def connect(self, request, pk=None):
+        """`POST digital-eye/devices/<uuid>/connect/` — log a user connection event."""
+        device = self.get_object()
+        protocol = request.data.get('protocol')
+        
+        valid_protocols = {c[0] for c in DeviceConnectionLog.PROTOCOL_CHOICES}
+        if protocol not in valid_protocols:
+            return Response({'detail': f'protocol must be one of: {", ".join(sorted(valid_protocols))}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+                            
+        log = DeviceConnectionLog.objects.create(
+            device=device,
+            event=DeviceConnectionLog.EVENT_CONNECTED,
+            protocol=protocol,
+            user=request.user,
+            rssi_dbm=request.data.get('rssi_dbm'),
+            ip_address=request.data.get('ip_address'),
+            cloud_workspace_id=request.data.get('cloud_workspace_id', ''),
+            firmware_banner=request.data.get('firmware_banner', ''),
+            notes=request.data.get('notes', ''),
+        )
+        
+        # Connection also counts as a heartbeat if it succeeded
+        device.last_seen = timezone.now()
+        device.status = 'online'
+        device.save(update_fields=['last_seen', 'status'])
+        
+        _record_audit(request.user, 'digital_eye.device.connect',
+                      'FieldDevice', device.id,
+                      {'device_id': device.device_id, 'protocol': protocol})
+                      
+        return Response(DeviceConnectionLogSerializer(log).data)
+
+    @action(detail=True, methods=['post'])
+    def disconnect(self, request, pk=None):
+        """`POST digital-eye/devices/<uuid>/disconnect/` — log a user disconnection event."""
+        device = self.get_object()
+        protocol = request.data.get('protocol')
+        
+        valid_protocols = {c[0] for c in DeviceConnectionLog.PROTOCOL_CHOICES}
+        if protocol not in valid_protocols:
+            return Response({'detail': f'protocol must be one of: {", ".join(sorted(valid_protocols))}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+                            
+        is_error = request.data.get('error', False)
+        event_type = DeviceConnectionLog.EVENT_FAILED if is_error else DeviceConnectionLog.EVENT_DISCONNECTED
+        
+        log = DeviceConnectionLog.objects.create(
+            device=device,
+            event=event_type,
+            protocol=protocol,
+            user=request.user,
+            error_message=request.data.get('error_message', ''),
+            notes=request.data.get('notes', ''),
+        )
+        
+        _record_audit(request.user, 'digital_eye.device.disconnect',
+                      'FieldDevice', device.id,
+                      {'device_id': device.device_id, 'protocol': protocol, 'error': is_error})
+                      
+        return Response(DeviceConnectionLogSerializer(log).data)
 
     @action(detail=True, methods=['post'])
     def gateway(self, request, pk=None):
