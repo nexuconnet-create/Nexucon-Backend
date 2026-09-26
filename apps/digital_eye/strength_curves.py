@@ -850,7 +850,10 @@ def run_regression(data_points):
     v = np.array([p['v'] for p in points], dtype=float)
     f = np.array([p['f'] for p in points], dtype=float)
     v_min, v_max = float(v.min()), float(v.max())
-    span = np.linspace(v_min, v_max, 50)
+    # Project valid range for UPV pulse velocity: 2,000 to 5,000 m/s (BS 1881-203 / ASTM C597)
+    valid_lo = min(2000.0, v_min)
+    valid_hi = max(5000.0, v_max)
+    span = np.linspace(valid_lo, valid_hi, 50)
 
     def _publish(curve_type, params, f_pred, n_params):
         r2, std_err, aic = _fit_stats(f.tolist(), f_pred.tolist(), n_params)
@@ -861,7 +864,7 @@ def run_regression(data_points):
             'r2_score': r2,
             'standard_error': std_err,
             'aic': aic,
-            'valid_range_ms': [v_min, v_max],
+            'valid_range_ms': [valid_lo, valid_hi],
         }
 
     # --- Linear: f = m*V + c ------------------------------------------------
