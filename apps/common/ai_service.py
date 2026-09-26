@@ -1345,13 +1345,15 @@ class AIService:
         ]
         active_providers = [p.capitalize() for p in successful_results.keys()]
 
-        # Always include deterministic physical acoustic inversion as ground-truth anchor
-        provider_title = "Multi-Model Ensemble (" + " + ".join(
-            active_providers + ["Deterministic Inversion"]
-        ) + ")"
-        version_title = "Ensemble Consensus v2.4 (" + ", ".join(
-            active_models + ["BS 1881-203 Inversion"]
-        ) + ")"
+        # Always adhere strictly to database column limits (provider <= 50, version <= 100)
+        provider_title = "Multi-Model Ensemble"
+        if active_models:
+            engines_str = ", ".join(active_models[:2]) + " + BS 1881-203 Inversion"
+        else:
+            engines_str = "Multi-Engine Synthesis + BS 1881-203 Inversion"
+        version_title = f"Ensemble v2.4 ({engines_str})"
+        if len(version_title) > 95:
+            version_title = version_title[:92] + "..."
 
         res_dict = {
             "observations": merged_observations,

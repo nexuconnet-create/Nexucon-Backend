@@ -310,8 +310,8 @@ class AIAnalysisRecord(models.Model):
     confidence = models.FloatField(null=True, blank=True, help_text="Analysis confidence 0.0–1.0")
 
     # Provenance of the AI output: which provider/model produced it.
-    model_provider = models.CharField(max_length=50, blank=True, default='')
-    model_version = models.CharField(max_length=100, blank=True, default='')
+    model_provider = models.CharField(max_length=100, blank=True, default='')
+    model_version = models.CharField(max_length=255, blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

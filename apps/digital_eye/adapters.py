@@ -661,13 +661,15 @@ class PUNDITAdapter:
 
             prov_names = [p.capitalize() for p in successful_provs if p != 'deterministic_acoustics']
             if not prov_names:
-                prov_names = ['Gemini (Acoustic Corroborated)', 'Inversion Engine']
-            provider = f"Multi-Model Ensemble ({' + '.join(prov_names)})"
+                prov_names = ['Gemini', 'Inversion']
+            provider = "Multi-Model Ensemble"
 
             model_names = data.get('models_used') or []
             if not model_names:
-                model_names = ['gemini-flash-latest', 'BS 1881-203 Inversion v2.4']
-            model_version = f"Ensemble Consensus v2.4 ({', '.join(model_names)})"
+                model_names = ['gemini-3.5-flash-lite', 'BS 1881-203 Inversion']
+            model_version = f"Ensemble Consensus v2.4 ({', '.join(model_names[:2])})"
+            if len(model_version) > 95:
+                model_version = model_version[:92] + "..."
             ensemble_active = True
 
             steps.append("[ENSEMBLE] Multi-Model Consensus active: dispatched parallel inference across analytical engines.")
@@ -721,6 +723,10 @@ class PUNDITAdapter:
                 "Evidence confidence not computed — no graded element carries "
                 "a measurement this figure could be based on.")
 
+        # Defensive slicing to guarantee strict compliance with Postgres column constraints (VARCHAR(50), VARCHAR(100))
+        safe_provider = str(provider or 'Multi-Model Ensemble')[:50]
+        safe_version = str(model_version or 'BS 1881-203 physical inversion')[:100]
+
         record = AIAnalysisRecord.objects.create(
             project=project,
             analysis_type='pundit',
@@ -732,8 +738,8 @@ class PUNDITAdapter:
             reasoning_log="\n".join(steps),
             requires_human_review=True,
             confidence=confidence,
-            model_provider=provider,
-            model_version=model_version,
+            model_provider=safe_provider,
+            model_version=safe_version,
         )
         return record
 
