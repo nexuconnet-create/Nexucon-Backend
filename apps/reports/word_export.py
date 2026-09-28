@@ -411,6 +411,62 @@ class NDTWordExporter:
                             f"{_element_display(t.structural_element)} "
                             f"{r['label'] or '-'}: {condition}")
 
+        def emit_remarks():
+            # ------------------------------------------------------------ 5.4
+            _add_heading(doc, '5.4 FIELD REMARKS & OBSERVATIONS', level=2)
+            remarks_rows = []
+            for t in tests:
+                clean_notes = (S._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
+                               if t.notes else '')
+                surface = (t.surface_condition or '').strip()
+                point_remarks = []
+                for r in t.reading_rows():
+                    cond = (r.get('surface_condition') or '').strip()
+                    pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    pt_lbl = r.get('label') or ''
+                    if cond and cond.lower() not in [c.lower() for c in point_remarks]:
+                        point_remarks.append(f"Pt {pt_lbl}: {cond}" if pt_lbl else cond)
+                    if pt_note and pt_note.lower() not in [c.lower() for c in point_remarks]:
+                        point_remarks.append(f"Pt {pt_lbl}: {pt_note}" if pt_lbl else pt_note)
+
+                parts = []
+                if clean_notes:
+                    parts.append(clean_notes)
+                if surface and surface.lower() not in clean_notes.lower():
+                    parts.append(f"Surface: {surface}")
+                for pr in point_remarks:
+                    if pr.lower() not in clean_notes.lower() and pr.lower() not in surface.lower():
+                        parts.append(pr)
+
+                if parts:
+                    loc_parts = []
+                    if (t.floor or '').strip():
+                        loc_parts.append(t.floor.strip())
+                    if (t.test_location or '').strip() and t.test_location.strip().lower() not in (t.floor or '').strip().lower():
+                        loc_parts.append(t.test_location.strip())
+                    loc = " - ".join(loc_parts) if loc_parts else 'As specified on site'
+                    remarks_rows.append([
+                        _element_display(t.structural_element or 'General'),
+                        loc,
+                        "; ".join(parts)
+                    ])
+
+            lead_in = get_cms_text(project, 'remarks_preamble')[0]
+            if remarks_rows:
+                _add_para(doc, lead_in)
+                _add_table(
+                    doc,
+                    ['STRUCTURAL ELEMENT', 'LOCATION / LEVEL', 'RECORDED REMARKS & OBSERVATIONS'],
+                    remarks_rows
+                )
+            else:
+                _add_para(
+                    doc,
+                    'No specific defects, surface anomalies, or adverse field remarks '
+                    'were noted on the structural members during ultrasonic testing; '
+                    'all members tested under standard field conditions.'
+                )
+
         def emit_reco():
             # ------------------------------------------------------------ 6.0
             _add_heading(doc, '6.0 RECOMMENDATION')
@@ -485,6 +541,7 @@ class NDTWordExporter:
             '4.1': emit_visual,
             '4.2': emit_methodology,   # 4.2 + 4.3 + 4.4, as one unit
             '5.0': emit_analysis,
+            '5.4': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
         }

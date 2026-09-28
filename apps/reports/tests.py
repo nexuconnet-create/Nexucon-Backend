@@ -1757,6 +1757,11 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         # 'M_FOOTINGS' or 'FLOOR:200THKS'.
         mt = NDTReportService._member_type
         self.assertEqual(mt('COL-C24'), 'COLUMN')
+        self.assertEqual(mt('COL1-G1'), 'COLUMN')
+        self.assertEqual(mt('BEAM2-G1'), 'BEAM')
+        self.assertEqual(mt('WALL3-G1'), 'WALL')
+        self.assertEqual(mt('SLAB4-G1'), 'SLAB')
+        self.assertEqual(mt('FOUND1-G1'), 'FOUNDATION')
         self.assertEqual(mt('Floor:200THK RC SLAB:781094'), 'SLAB')
         self.assertEqual(
             mt('M_Footing-Rectangular:900 x 900 x 200mm:803711'),

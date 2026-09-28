@@ -20,6 +20,7 @@ fabricated narrative is ever stored.
 """
 import logging
 import math
+import re
 from datetime import datetime
 
 from django.utils import timezone
@@ -244,15 +245,18 @@ class PUNDITAdapter:
                 )
             else:
                 steps.append("Pulse velocity not computable — path length and/or transit time missing.")
-        if has_readings:
-            # Multi-reading crack tests: the element verdict is the mean of
-            # the per-point depths (persisted by the serializer); the scalar
-            # columns hold only point A for legacy consumers.
-            crack_depth = test.element_mean_crack_depth_mm()
+        if getattr(test, 'test_type', None) == 'crack_depth':
+            if has_readings:
+                # Multi-reading crack tests: the element verdict is the mean of
+                # the per-point depths (persisted by the serializer); the scalar
+                # columns hold only point A for legacy consumers.
+                crack_depth = test.element_mean_crack_depth_mm()
+            else:
+                crack_depth = cls.compute_crack_depth_mm(
+                    test.crack_path_length_mm, test.crack_pulse_time_us, test.uncracked_pulse_time_us,
+                )
         else:
-            crack_depth = cls.compute_crack_depth_mm(
-                test.crack_path_length_mm, test.crack_pulse_time_us, test.uncracked_pulse_time_us,
-            )
+            crack_depth = None
 
         grade = cls.grade_quality(velocity)
         if grade == 'unverified':
@@ -377,11 +381,11 @@ class PUNDITAdapter:
             'test_points': [
                 {'point': r['label'],
                  'transit_time_us': r['transit_us'],
-                 'uncracked_transit_time_us': r['uncracked_us'],
+                 'uncracked_transit_time_us': r['uncracked_us'] if getattr(test, 'test_type', None) == 'crack_depth' else None,
                  'velocity_m_s': None if r['velocity_km_s'] is None
                  else round(r['velocity_km_s'] * 1000, 2),
                  'ecs_n_mm2': None if r['ecs_mpa'] is None else round(r['ecs_mpa'], 1),
-                 'crack_depth_mm': None if r['crack_depth_mm'] is None else round(r['crack_depth_mm'], 1),
+                 'crack_depth_mm': None if (getattr(test, 'test_type', None) != 'crack_depth' or r['crack_depth_mm'] is None) else round(r['crack_depth_mm'], 1),
                  'surface_condition': r['surface_condition'] or None}
                 for r in rows
             ],
@@ -394,7 +398,7 @@ class PUNDITAdapter:
                 for f in test.files.all()[:8]
             ] or None,
             'bs_1881_203_quality_grade': grade,
-            'crack_depth_mm': None if crack_depth is None else round(crack_depth, 1),
+            'crack_depth_mm': None if (getattr(test, 'test_type', None) != 'crack_depth' or crack_depth is None) else round(crack_depth, 1),
         }
         return {k: v for k, v in pack.items() if v is not None}
 
@@ -418,34 +422,49 @@ class PUNDITAdapter:
             # Nothing measured — no narrative to contextualise; the honest
             # deterministic "insufficient measurements" record stands.
             return None
+        has_crack = (getattr(test, 'test_type', None) == 'crack_depth' and crack_depth is not None)
+        crack_clause = ", crack depth measurement" if has_crack else ""
+        boundary_constraint = (
+            "" if has_crack else
+            "CRITICAL EVIDENCE BOUNDARY: No crack-depth measurements were performed or recorded for this element; "
+            "do NOT mention cracks, crack depth, or crack attenuation. "
+            "Analyse ONLY the test types and parameters actually present in the data below. "
+        )
         try:
             data = AIService.generate_structured_json(
                 "You are the Nexucon PUNDIT ultrasonic NDT analysis layer. "
                 "Based ONLY on the following real field measurements, write 2-4 concise "
                 "engineering observations about this structural element's concrete "
-                "condition (velocity bands, point-to-point variation, strength estimate, "
-                "any crack indication). Where field_notes, weather_condition or "
+                f"condition (velocity bands, point-to-point variation, strength estimate{crack_clause}). "
+                "Where field_notes, weather_condition or "
                 "attachment descriptions are present, weigh them as contributing "
-                "evidence in your observations. Do not invent facts, numbers, or "
-                "events that are not present in the data. Return JSON: "
+                "evidence in your observations. "
+                f"{boundary_constraint}"
+                "Do not invent facts, numbers, or events that are not present in the data. Return JSON: "
                 '{"observations": ["..."]}\n\n'
                 f"Measured data: {fact_pack}"
             )
             observations = data.get('observations') if isinstance(data, dict) else None
             if observations and isinstance(observations, list) and observations:
-                # Provenance must name the provider that ACTUALLY answered,
-                # not the configured one. With a failover chain the two differ
-                # whenever the first choice is down, and this value is written
-                # to a statutory AIAnalysisRecord — a false attribution there
-                # is a false statement on an inspection document. A patched
-                # plain-dict return (as tests use) carries no attributes, so
-                # it falls back to the configured provider as before.
-                return (
-                    [str(o) for o in observations],
-                    getattr(data, 'provider', None) or AIService._get_provider(),
-                    getattr(data, 'model', None)
-                    or AIService._model_for(AIService._get_provider()),
-                )
+                if not has_crack:
+                    observations = [
+                        str(o) for o in observations
+                        if not re.search(r'\bcrack(?:[- ]depth|[- ]attenuation)?\b', str(o), re.IGNORECASE)
+                    ]
+                if observations:
+                    # Provenance must name the provider that ACTUALLY answered,
+                    # not the configured one. With a failover chain the two differ
+                    # whenever the first choice is down, and this value is written
+                    # to a statutory AIAnalysisRecord — a false attribution there
+                    # is a false statement on an inspection document. A patched
+                    # plain-dict return (as tests use) carries no attributes, so
+                    # it falls back to the configured provider as before.
+                    return (
+                        [str(o) for o in observations],
+                        getattr(data, 'provider', None) or AIService._get_provider(),
+                        getattr(data, 'model', None)
+                        or AIService._model_for(AIService._get_provider()),
+                    )
         except Exception as e:  # noqa: BLE001 — provider down must never break analysis
             logger.info("PUNDIT LLM narrative unavailable (%s) — deterministic record stands.", e)
         return None
@@ -498,8 +517,11 @@ class PUNDITAdapter:
                 spread_pct = round(
                     (max(point_velocities) - min(point_velocities))
                     / velocity * 100, 1)
-            crack_depth = (test.element_mean_crack_depth_mm()
-                           if test.readings.exists() else test.crack_depth_mm)
+            if test.test_type == 'crack_depth':
+                crack_depth = (test.element_mean_crack_depth_mm()
+                               if test.readings.exists() else test.crack_depth_mm)
+            else:
+                crack_depth = None
             mean_ecs, ecs_snapshot = (
                 _ecs_with_provenance(
                     velocity, project=project,
@@ -561,11 +583,13 @@ class PUNDITAdapter:
                 + cls.implausibility_note((s['mean_velocity_m_s'] or 0) / 1000.0)
             )
 
-        # ---- Fact pack: crack findings FIRST, then floors -> elements
+        # ---- Fact pack: crack findings FIRST (only if present), then floors -> elements
         crack_elements = [
             {k: v for k, v in s.items() if v is not None}
-            for s in element_summaries if (s['crack_depth_mm'] or 0) > 0
+            for s in element_summaries
+            if s.get('test_type') == 'crack_depth' and (s.get('crack_depth_mm') or 0) > 0
         ]
+        has_crack_findings = bool(crack_elements)
         floors = {}
         for s in element_summaries:
             if s['test_type'] == 'crack_depth' and not s['point_velocities_m_s']:
@@ -574,7 +598,6 @@ class PUNDITAdapter:
                 {k: v for k, v in s.items() if v is not None})
         fact_pack = {
             'project': project.name,
-            'crack_depth_findings': crack_elements,
             'floors': [
                 {'floor': name,
                  'elements': [{k: v for k, v in e.items()
@@ -585,6 +608,8 @@ class PUNDITAdapter:
             'velocity_units': 'm/s',
             'counts': {'graded': len(graded), 'good_or_better': good, 'below_good': poor},
         }
+        if has_crack_findings:
+            fact_pack['crack_depth_findings'] = crack_elements
         if unverified:
             # Named explicitly so the model cannot silently fold an
             # unverifiable reading into its verdict, and cannot write it up
@@ -613,14 +638,26 @@ class PUNDITAdapter:
         ensemble_active = False
         try:
             from apps.common.ai_service import AIService
+            if has_crack_findings:
+                crack_instruction = (
+                    "(1) FIRST assess any crack-depth findings (time-difference "
+                    "method) — cracks bias pulse velocities and must be known "
+                    "before strength is interpreted; "
+                )
+            else:
+                crack_instruction = (
+                    "(1) CRITICAL EVIDENCE BOUNDARY: No crack-depth measurements were performed "
+                    "or recorded for this project. Do NOT mention crack depth, do NOT speculate about "
+                    "cracks or crack attenuation, and do NOT include any crack-depth findings, headings, "
+                    "or statements. Analyse ONLY the test types and parameters actually present in the data below. "
+                    "Do NOT introduce or comment on unmeasured test types or excesses; "
+                )
             prompt_text = (
                 "You are the Nexucon PUNDIT ultrasonic NDT analysis layer, "
                 "writing for a structural engineering audience. Based ONLY on "
                 "the following real field measurements (velocities in m/s): "
-                "(1) FIRST assess any crack-depth findings (time-difference "
-                "method) — cracks bias pulse velocities and must be known "
-                "before strength is interpreted; (2) then analyse the pulse "
-                "velocity results floor-by-floor and element-by-element, "
+                f"{crack_instruction}"
+                "(2) then analyse the pulse velocity results floor-by-floor and element-by-element, "
                 "referencing each element's grid location where given; "
                 "(3) analyse the dataset COLLECTIVELY: group elements that "
                 "show similar behaviour (same floor, same member type, or "
@@ -635,7 +672,7 @@ class PUNDITAdapter:
                 "a recommendation; (6) cite the relevant codes where "
                 "applicable (BS 1881-203, BS EN 12504-4, ASTM C597, "
                 "ACI 228.2R). Do not invent facts, numbers, or events that "
-                "are not present in the data. "
+                "are not present in the data. Do NOT mention or infer unmeasured test types or excesses. "
                 "(7) Every entry under unverified_measurements is a reading "
                 "that falls outside the range physically possible for "
                 "concrete and has deliberately NOT been graded. Treat it as "
@@ -651,10 +688,22 @@ class PUNDITAdapter:
             # Run all available models simultaneously with complete fault isolation
             data = AIService.generate_ensemble_structured_json(prompt_text)
             llm_obs = data.get('observations') if isinstance(data, dict) else None
+            if llm_obs and isinstance(llm_obs, list) and not has_crack_findings:
+                llm_obs = [
+                    o for o in llm_obs
+                    if not re.search(r'\bcrack(?:[- ]depth|[- ]attenuation)?\b', str(o), re.IGNORECASE)
+                ]
+
             if not llm_obs or not isinstance(llm_obs, list) or len(llm_obs) == 0:
                 llm_obs = cls._synthesize_ensemble_observations(fact_pack, element_summaries)
 
-            observations = [str(o) for o in llm_obs]
+            if not has_crack_findings:
+                observations = [
+                    str(o) for o in llm_obs
+                    if not re.search(r'\bcrack(?:[- ]depth|[- ]attenuation)?\b', str(o), re.IGNORECASE)
+                ]
+            else:
+                observations = [str(o) for o in llm_obs]
             successful_provs = data.get('successful_providers') or []
             if 'deterministic_acoustics' not in successful_provs:
                 successful_provs.append('deterministic_acoustics')
@@ -763,7 +812,7 @@ class PUNDITAdapter:
             f"with {below_good} element(s) displaying substandard transmission velocities requiring localized remediation."
         )
 
-        # 2. Crack depth assessment
+        # 2. Crack depth assessment (ONLY if crack depth was measured)
         cracks = fact_pack.get('crack_depth_findings', [])
         if cracks:
             c_names = [f"{c.get('element')} ({c.get('crack_depth_mm')}mm)" for c in cracks[:4]]
@@ -771,11 +820,6 @@ class PUNDITAdapter:
                 f"Crack-depth acoustic differential analysis detected surface discontinuity on: "
                 f"{', '.join(c_names)}. Time-difference analysis indicates internal fracture attenuation; "
                 f"epoxy pressure grouting recommended per ACI 228.2R."
-            )
-        else:
-            obs.append(
-                "Acoustic transit-time profiles demonstrate continuous ultrasonic waveform propagation "
-                "with no significant crack-depth attenuation detected on key load-bearing members."
             )
 
         # 3. Floor-by-floor distribution
@@ -963,7 +1007,7 @@ class PUNDITAdapter:
                 if s['grade'] in ('poor', 'very_poor')]
         questionable = [s for s in element_summaries if s['grade'] == 'questionable']
         cracked = [s for s in element_summaries
-                   if (s['crack_depth_mm'] or 0) > 25]
+                   if s.get('test_type') == 'crack_depth' and (s.get('crack_depth_mm') or 0) > 25]
         if poor:
             recs.append({
                 'recommendation': f"Structural review of {len(poor)} element(s) "

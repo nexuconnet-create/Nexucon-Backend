@@ -98,6 +98,11 @@ CONCLUSION_PREAMBLE_DEFAULT = (
     'BS EN 12504-4:2021.'
 )
 
+REMARKS_PREAMBLE_DEFAULT = (
+    'The following field remarks, surface observations and operator notes '
+    'were recorded during testing of the structural members:'
+)
+
 # key -> section descriptor. Ordered; the CMS editor lists sections in
 # this order. ``kind`` tells the editor how to parse the body:
 #   'paragraphs' — blank lines separate paragraphs
@@ -226,6 +231,12 @@ CMS_SECTIONS = {
                 'sit under the CONCRETE heading; the PUNDIT equipment '
                 'description, capability list and the calibration '
                 'conversion statement are computed.',
+    },
+    'remarks_preamble': {
+        'label': 'Field remarks — opening lead-in (Section 5.4)',
+        'kind': 'paragraphs',
+        'default': REMARKS_PREAMBLE_DEFAULT,
+        'help': 'Precedes the recorded field remarks and observations table or fallback notice.',
     },
     'recommendation_preamble': {
         'label': 'Recommendation — opening lead-in (Section 6.0)',

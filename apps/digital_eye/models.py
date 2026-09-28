@@ -562,22 +562,25 @@ class PUNDITTest(models.Model):
         """
         readings = list(self.readings.all())
         if readings:
+            is_crack = (self.test_type == 'crack_depth')
             return [
                 {'label': r.point_label,
                  'path_mm': r.path_length_mm,
                  'transit_us': r.transit_time_us,
                  'velocity_km_s': r.velocity_km_s,
                  'ecs_mpa': r.ecs_mpa,
-                 'uncracked_us': r.uncracked_transit_time_us,
-                 'crack_depth_mm': r.crack_depth_mm,
-                 'surface_condition': r.surface_condition}
+                 'uncracked_us': r.uncracked_transit_time_us if is_crack else None,
+                 'crack_depth_mm': r.crack_depth_mm if is_crack else None,
+                 'surface_condition': r.surface_condition,
+                 'notes': r.notes or ''}
                 for r in readings
             ]
         from apps.digital_eye.adapters import PUNDITAdapter
         from apps.digital_eye.strength_curves import apply_active_curve
         row = {'label': 'A', 'path_mm': None, 'transit_us': None,
                'velocity_km_s': None, 'ecs_mpa': None, 'uncracked_us': None,
-               'crack_depth_mm': None, 'surface_condition': None}
+               'crack_depth_mm': None, 'surface_condition': None,
+               'notes': self.notes or ''}
         if self.test_type == 'crack_depth':
             row.update({
                 'path_mm': self.crack_path_length_mm,
@@ -633,6 +636,8 @@ class PUNDITTest(models.Model):
     def element_mean_crack_depth_mm(self):
         """Mean crack depth over this test's readings (the element verdict
         for multi-point crack tests); None when no point yields a depth."""
+        if self.test_type != 'crack_depth':
+            return None
         depths = [row['crack_depth_mm'] for row in self.reading_rows()
                   if row['crack_depth_mm'] is not None]
         return (sum(depths) / len(depths)) if depths else None

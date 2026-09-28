@@ -101,6 +101,7 @@ TOC_TITLES = {
     '4.3': 'Reinforcing Bar (Rebar) Assessment',
     '4.4': 'Equipment/Rebar Assessment Table',
     '5.0': 'Analysis of Test Results',
+    '5.4': 'Field Remarks & Observations',
     '6.0': 'Recommendations',
     '7.0': 'Conclusion',
 }
@@ -780,7 +781,8 @@ class NDTReportBuilder:
         entries = [s for s in outline
                    if not _latin1(s.name).startswith('BAR CHART')
                    and not (getattr(s, 'level', 0)
-                            and s.name.partition(' ')[0].startswith('5.'))]
+                            and s.name.partition(' ')[0].startswith('5.')
+                            and s.name.partition(' ')[0] != '5.4')]
         y = 40.5
         for idx, section in enumerate(entries):
             name = _latin1(section.name)
@@ -1800,10 +1802,13 @@ class NDTReportService:
             'BM': 'BEAM', 'BEAM': 'BEAM',
             'SL': 'SLAB', 'SLAB': 'SLAB',
             'WL': 'WALL', 'WALL': 'WALL',
-            'FDN': 'FOUNDATION', 'FOUNDATION': 'FOUNDATION',
+            'FDN': 'FOUNDATION', 'FOUND': 'FOUNDATION', 'FOUNDATION': 'FOUNDATION',
         }
         if token in mapping:
             return mapping[token]
+        base_match = re.match(r'^([A-Z]+)\d+$', token)
+        if base_match and base_match.group(1) in mapping:
+            return mapping[base_match.group(1)]
         # BIM-style names ('M_Footing-Rectangular:900 x 900 x 200mm:803711',
         # 'Floor:200THK RC SLAB:781094') carry the member word anywhere in
         # the label — find it instead of printing a raw name fragment like
@@ -3478,6 +3483,66 @@ class NDTReportService:
                     for i, step in enumerate(m.get('reasoning_trace') or [], 1):
                         builder.para(f'{i}. {step}', leading=7.5)
 
+        def emit_remarks():
+            # ----------------------------- 5.4 FIELD REMARKS & OBSERVATIONS
+            if builder.pdf.will_page_break(35):
+                builder.pdf.add_page()
+            builder.section('5.4', 'FIELD REMARKS & OBSERVATIONS', sub=True)
+            remarks_rows = []
+            for t in tests:
+                clean_notes = (cls._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
+                               if t.notes else '')
+                surface = (t.surface_condition or '').strip()
+                point_remarks = []
+                for r in t.reading_rows():
+                    cond = (r.get('surface_condition') or '').strip()
+                    pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    pt_lbl = r.get('label') or ''
+                    if cond and cond.lower() not in [c.lower() for c in point_remarks]:
+                        point_remarks.append(f"Pt {pt_lbl}: {cond}" if pt_lbl else cond)
+                    if pt_note and pt_note.lower() not in [c.lower() for c in point_remarks]:
+                        point_remarks.append(f"Pt {pt_lbl}: {pt_note}" if pt_lbl else pt_note)
+
+                parts = []
+                if clean_notes:
+                    parts.append(clean_notes)
+                if surface and surface.lower() not in clean_notes.lower():
+                    parts.append(f"Surface: {surface}")
+                for pr in point_remarks:
+                    if pr.lower() not in clean_notes.lower() and pr.lower() not in surface.lower():
+                        parts.append(pr)
+
+                if parts:
+                    loc_parts = []
+                    if (t.floor or '').strip():
+                        loc_parts.append(t.floor.strip())
+                    if (t.test_location or '').strip() and t.test_location.strip().lower() not in (t.floor or '').strip().lower():
+                        loc_parts.append(t.test_location.strip())
+                    loc = " - ".join(loc_parts) if loc_parts else 'As specified on site'
+                    remarks_rows.append([
+                        _element_display(t.structural_element or 'General'),
+                        loc,
+                        "; ".join(parts)
+                    ])
+
+            lead_in = get_cms_text(project, 'remarks_preamble')[0]
+            if remarks_rows:
+                builder.para(lead_in)
+                builder.ruled_table(
+                    ['STRUCTURAL ELEMENT', 'LOCATION / LEVEL', 'RECORDED REMARKS & OBSERVATIONS'],
+                    remarks_rows,
+                    [50, 45, 70],
+                    ['L', 'L', 'L']
+                )
+                builder.ln_gap(3)
+            else:
+                builder.para(
+                    'No specific defects, surface anomalies, or adverse field remarks '
+                    'were noted on the structural members during ultrasonic testing; '
+                    'all members tested under standard field conditions.',
+                    leading=7.5
+                )
+
         def emit_reco():
             # ---------------------------------------------- 6.0 RECOMMENDATIONS
             builder.section('6.0', 'RECOMMENDATION')
@@ -3666,6 +3731,7 @@ class NDTReportService:
             '4.2': emit_methodology,
             '5.0': emit_analysis,
             '5.3': emit_ai,
+            '5.4': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
             'APPENDIX': emit_appendix,
