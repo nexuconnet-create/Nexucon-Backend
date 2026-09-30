@@ -32,6 +32,7 @@ urlpatterns = [
     # New Client Requests Apps
     path('api/v1/emergency/', include('apps.emergency.urls')),
     path('api/v1/public-portal/', include('apps.public_portal.urls')),
+    path('api/v1/public/', include('apps.public_portal.urls')),
     
     # Migrated Apps
     path('api/v1/scans/', include('apps.scans.urls')),
@@ -40,7 +41,6 @@ urlpatterns = [
     path('api/v1/processing/', include('apps.processing.urls')),
 
     # Digital Eye & Evidence Intelligence
-    path('api/v1/digital-eye/', include('apps.digital_eye.urls')),
     path('api/v1/evidence/', include('apps.evidence.urls')),
 ]
 

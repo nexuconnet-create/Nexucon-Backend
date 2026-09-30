@@ -37,6 +37,10 @@ def generate_test_ref():
     return _ref('PND')
 
 
+def generate_batch_ref():
+    return _ref('BAT')
+
+
 def generate_gnss_ref():
     return _ref('GNS')
 
@@ -263,6 +267,77 @@ class GPRAnomaly(models.Model):
 # PUNDIT Ultrasonic NDT
 # ======================================================================
 
+class PunditScanBatch(models.Model):
+    """
+    Project-specific scan folder / batch isolating NDT tests, visual observations,
+    and attendance logs. Prevents multi-scan / multi-inspector data clashes.
+    """
+    STATUS_CHOICES = (
+        ('RAW_INGESTED', 'Raw Data Ingested (Awaiting Calibration)'),
+        ('CALIBRATED', 'Calibrated (Ready for Analysis)'),
+        ('ANALYSIS_COMPLETE', 'Analysis Completed'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.CASCADE,
+        related_name='pundit_scan_batches',
+        db_index=True,
+    )
+    folder_name = models.CharField(
+        max_length=255,
+        help_text="Human-readable folder/session name, e.g. 'Floor 2 RC Slab - Primary Grid (48 Elements)'",
+    )
+    batch_reference = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        default=generate_batch_ref,
+        help_text="Deterministic batch code, e.g. 'BATCH-2026-09-048'",
+    )
+    inspector_name = models.CharField(max_length=255, blank=True, default='')
+    inspector = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pundit_batches_conducted',
+    )
+    device_name = models.CharField(max_length=128, blank=True, default='Screening Eagle Pundit Live')
+    device_serial = models.CharField(max_length=128, blank=True, default='')
+    element_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Verified count of structural elements tested in this batch (e.g. 48).",
+    )
+    scan_date = models.DateTimeField(default=timezone.now, help_text="Timestamp when testing was conducted on site.")
+    status = models.CharField(
+        max_length=32,
+        choices=STATUS_CHOICES,
+        default='RAW_INGESTED',
+        db_index=True,
+    )
+    floor = models.CharField(max_length=64, blank=True, default='')
+    raw_sensor_file = models.ForeignKey(
+        'digital_eye.SensorDataFile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pundit_batches',
+    )
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-scan_date', '-created_at']
+        verbose_name = 'PUNDIT Scan Batch'
+        verbose_name_plural = 'PUNDIT Scan Batches'
+
+    def __str__(self):
+        return f"{self.batch_reference} — {self.folder_name} ({self.element_count} elements)"
+
+
 class PUNDITTest(models.Model):
     """
     A PUNDIT (Portable Ultrasonic Non-destructive Digital Indicating Tester)
@@ -301,6 +376,14 @@ class PUNDITTest(models.Model):
     id = models.CharField(max_length=100, primary_key=True, default=uuid.uuid4)
     test_reference = models.CharField(max_length=100, unique=True, default=generate_test_ref)
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='pundit_tests', null=True, blank=True)
+    batch = models.ForeignKey(
+        PunditScanBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='tests',
+        help_text="The isolated scan folder/batch this test measurement belongs to.",
+    )
     device = models.ForeignKey(FieldDevice, on_delete=models.SET_NULL, null=True, blank=True,
                                related_name='pundit_tests')
     scan_session = models.ForeignKey('scans.ScanSession', on_delete=models.SET_NULL, null=True, blank=True,
@@ -742,6 +825,233 @@ class PUNDITReading(models.Model):
     def save(self, *args, **kwargs):
         self.compute()
         super().save(*args, **kwargs)
+
+
+# ======================================================================
+# PUNDIT Calibration, Visual Observations & Site Attendance
+# ======================================================================
+
+class CalibrationProfile(models.Model):
+    """
+    Project-specific calibration profile establishing the mathematical UPV-to-fcu
+    correlation model before analysis execution.
+    """
+    CURVE_TYPE_CHOICES = (
+        ('exponential', 'Exponential (Default Non-Linear)'),
+        ('polynomial', 'Polynomial (Degree 2)'),
+        ('sonreb', 'SonReb Combined (UPV + Rebound)'),
+        ('linear', 'Linear (Not Recommended)'),
+        ('lookup', 'Lookup Table Interpolation'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.CASCADE,
+        related_name='calibration_profiles',
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        PunditScanBatch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='calibration_profiles',
+        db_index=True,
+    )
+    curve_type = models.CharField(
+        max_length=32,
+        choices=CURVE_TYPE_CHOICES,
+        default='exponential',
+    )
+    params = models.JSONField(
+        default=dict,
+        help_text="Model coefficients, e.g. {'a': 1.20, 'b': 0.85, 'c': 0.0}",
+    )
+    design_strength_mpa = models.FloatField(
+        default=25.0,
+        help_text="Statutory or design target strength in MPa (e.g. 25.0 for C25/30).",
+    )
+    calibrated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='calibrations_performed',
+    )
+    cube_correlation_data = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Optional array of [{'velocity_ms': 3800, 'cube_strength_mpa': 29.8}] pairs.",
+    )
+    notes = models.TextField(blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'PUNDIT Calibration Profile'
+        verbose_name_plural = 'PUNDIT Calibration Profiles'
+
+    def __str__(self):
+        return f"{self.project} - {self.get_curve_type_display()} ({self.created_at.strftime('%Y-%m-%d')})"
+
+
+class VisualObservation(models.Model):
+    """
+    Physical inspection defects and surface observations (honeycombing, cracking,
+    spalling, exposed rebar) that feed directly into the AI executive summary.
+    """
+    CATEGORY_CHOICES = (
+        ('honeycombing', 'Honeycombing / Voiding'),
+        ('cracking', 'Cracking (Shear / Flexure / Thermal)'),
+        ('spalling', 'Spalling & Delamination'),
+        ('rebar_exposure', 'Exposed Rebar / Low Cover'),
+        ('moisture_ingress', 'Moisture Ingress / Dampness'),
+        ('efflorescence', 'Efflorescence / Leaching'),
+        ('sound_uniform', 'Sound & Uniform Concrete'),
+        ('other', 'Other Workmanship Defect'),
+    )
+    SEVERITY_CHOICES = (
+        ('INFO', 'Informational'),
+        ('LOW', 'Low Severity'),
+        ('MEDIUM', 'Medium Severity'),
+        ('HIGH', 'High (Structural Concern)'),
+        ('CRITICAL', 'Critical (Stop Work / Urgent Remediation)'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.CASCADE,
+        related_name='visual_observations',
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        PunditScanBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='visual_observations',
+        db_index=True,
+    )
+    inspection = models.ForeignKey(
+        'inspections.Inspection',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='visual_observations',
+    )
+    structural_element = models.CharField(
+        max_length=255,
+        help_text="e.g. 'Column C24', 'Drop Beam B12'",
+    )
+    grid_location = models.CharField(max_length=128, blank=True, default='')
+    floor = models.CharField(max_length=64, blank=True, default='')
+    category = models.CharField(max_length=32, choices=CATEGORY_CHOICES, default='honeycombing')
+    severity = models.CharField(max_length=16, choices=SEVERITY_CHOICES, default='MEDIUM')
+    description = models.TextField(help_text="Detailed defect dimensions and observations.")
+    inspector_name = models.CharField(max_length=255, blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Visual Observation'
+        verbose_name_plural = 'Visual Observations'
+
+    def __str__(self):
+        return f"{self.structural_element} - {self.get_category_display()} ({self.severity})"
+
+
+class VisualObservationPhoto(models.Model):
+    """
+    Field photographic evidence attached to a specific visual defect observation.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    observation = models.ForeignKey(
+        VisualObservation,
+        on_delete=models.CASCADE,
+        related_name='photos',
+    )
+    photo = models.ImageField(upload_to='visual_observations/%Y/%m/')
+    caption = models.CharField(max_length=255, blank=True, default='')
+    sha256_checksum = models.CharField(max_length=64, blank=True, default='')
+    file_size_bytes = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        verbose_name = 'Visual Observation Photo'
+        verbose_name_plural = 'Visual Observation Photos'
+
+    def __str__(self):
+        return f"Photo for {self.observation.structural_element} ({self.caption or self.id})"
+
+
+class SiteAttendanceRecord(models.Model):
+    """
+    Site attendance register of client representatives, resident engineers,
+    contractors, and government inspectors witnessing the ultrasonic NDT testing.
+    """
+    ROLE_CHOICES = (
+        ('Client Representative', 'Client Representative'),
+        ('Resident Structural Engineer', 'Resident Structural Engineer'),
+        ('Contractor QA/QC Manager', 'Contractor QA/QC Manager'),
+        ('Government / LASBCA Inspector', 'Government / LASBCA Inspector'),
+        ('Project Director', 'Project Director'),
+        ('Site Safety Officer', 'Site Safety Officer'),
+        ('Other', 'Other Witness'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.CASCADE,
+        related_name='site_attendance_records',
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        PunditScanBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='attendance_records',
+        db_index=True,
+    )
+    inspection = models.ForeignKey(
+        'inspections.Inspection',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='attendance_records',
+    )
+    attendee_name = models.CharField(max_length=255)
+    organization = models.CharField(max_length=255, help_text="e.g. 'ExxonMobil', 'Julius Berger', 'LASBCA'")
+    role = models.CharField(max_length=64, choices=ROLE_CHOICES, default='Client Representative')
+    phone = models.CharField(max_length=64, blank=True, default='')
+    email = models.EmailField(blank=True, default='')
+    arrival_time = models.DateTimeField(null=True, blank=True)
+    departure_time = models.DateTimeField(null=True, blank=True)
+    signed_off = models.BooleanField(default=True)
+    signature_notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['arrival_time', 'created_at']
+        verbose_name = 'Site Attendance Record'
+        verbose_name_plural = 'Site Attendance Records'
+
+    def __str__(self):
+        return f"{self.attendee_name} ({self.role} - {self.organization})"
 
 
 # ======================================================================

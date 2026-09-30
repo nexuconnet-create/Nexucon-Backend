@@ -5,12 +5,13 @@ from rest_framework import serializers
 
 from common.permissions import scoped_projects
 from .models import (
-    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CoreSample,
-    DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint, FieldDevice,
-    GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
+    AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CalibrationProfile,
+    CoreSample, DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint,
+    FieldDevice, GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
     GnssSurvey, LiveStream, NexuconLinkSettings, ProjectCurveSetting,
-    PUNDITReading, PUNDITTest, ProcessingQueueJob, SensorDataFile,
-    StrengthCurve, TrimbleConnection, TrimbleProject,
+    PunditScanBatch, PUNDITReading, PUNDITTest, ProcessingQueueJob,
+    SensorDataFile, SiteAttendanceRecord, StrengthCurve, TrimbleConnection,
+    TrimbleProject, VisualObservation, VisualObservationPhoto,
 )
 
 
@@ -208,7 +209,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
     class Meta:
         model = PUNDITTest
         fields = [
-            'id', 'test_reference', 'project', 'project_name', 'device', 'scan_session',
+            'id', 'test_reference', 'project', 'project_name', 'batch', 'device', 'scan_session',
             'project_id_str', 'structural_element_id_str', 'structural_element_name',
             'structural_element_guid', 'device_model',
             'test_type', 'test_type_display', 'structural_element', 'floor',
@@ -423,6 +424,91 @@ class PunditTestSerializer(serializers.ModelSerializer):
     class Meta:
         model = PUNDITTest
         fields = '__all__'
+
+
+class PunditScanBatchSerializer(serializers.ModelSerializer):
+    project = ScopedProjectField(required=False, allow_null=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    test_count = serializers.IntegerField(source='tests.count', read_only=True)
+    visual_observation_count = serializers.IntegerField(source='visual_observations.count', read_only=True)
+    attendance_record_count = serializers.IntegerField(source='attendance_records.count', read_only=True)
+
+    class Meta:
+        model = PunditScanBatch
+        fields = [
+            'id', 'project', 'project_name', 'folder_name', 'batch_reference',
+            'inspector_name', 'inspector', 'device_name', 'device_serial',
+            'element_count', 'test_count', 'visual_observation_count',
+            'attendance_record_count', 'scan_date', 'status', 'status_display',
+            'floor', 'raw_sensor_file', 'notes', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class CalibrationProfileSerializer(serializers.ModelSerializer):
+    project = ScopedProjectField(required=False, allow_null=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    curve_type_display = serializers.CharField(source='get_curve_type_display', read_only=True)
+    calibrated_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CalibrationProfile
+        fields = [
+            'id', 'project', 'project_name', 'batch', 'curve_type',
+            'curve_type_display', 'params', 'design_strength_mpa',
+            'calibrated_by', 'calibrated_by_name', 'cube_correlation_data',
+            'notes', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_calibrated_by_name(self, obj):
+        if obj.calibrated_by:
+            return obj.calibrated_by.get_full_name() or obj.calibrated_by.email
+        return None
+
+
+class VisualObservationPhotoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VisualObservationPhoto
+        fields = [
+            'id', 'observation', 'photo', 'caption',
+            'sha256_checksum', 'file_size_bytes', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
+class VisualObservationSerializer(serializers.ModelSerializer):
+    project = ScopedProjectField(required=False, allow_null=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    severity_display = serializers.CharField(source='get_severity_display', read_only=True)
+    photos = VisualObservationPhotoSerializer(many=True, read_only=True)
+    photo_count = serializers.IntegerField(source='photos.count', read_only=True)
+
+    class Meta:
+        model = VisualObservation
+        fields = [
+            'id', 'project', 'batch', 'inspection', 'structural_element',
+            'grid_location', 'floor', 'category', 'category_display',
+            'severity', 'severity_display', 'description', 'inspector_name',
+            'photos', 'photo_count', 'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+
+class SiteAttendanceRecordSerializer(serializers.ModelSerializer):
+    project = ScopedProjectField(required=False, allow_null=True)
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+
+    class Meta:
+        model = SiteAttendanceRecord
+        fields = [
+            'id', 'project', 'batch', 'inspection', 'attendee_name',
+            'organization', 'role', 'role_display', 'phone', 'email',
+            'arrival_time', 'departure_time', 'signed_off', 'signature_notes',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 
 class GnssBenchmarkSerializer(serializers.ModelSerializer):
