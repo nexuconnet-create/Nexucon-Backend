@@ -1,4 +1,4 @@
-from django.test import TestCase, Client
+from django.test import TestCase, Client, override_settings
 from django.urls import reverse
 import json
 
@@ -7,6 +7,7 @@ from apps.inspections.models import Inspection, StopWorkOrder
 from apps.public_portal.models import PublicNotice, ViolationReport
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
 class PublicTransparencyPortalTests(TestCase):
     def setUp(self):
         self.client = Client()

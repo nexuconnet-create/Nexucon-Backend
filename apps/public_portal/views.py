@@ -789,13 +789,22 @@ class PublicViolationReportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        is_anonymous = bool(request.data.get('is_anonymous') or request.data.get('isAnonymous'))
         reporter_name = (request.data.get('reporter_name') or request.data.get('reporterName') or '').strip()[:150]
-        if request.data.get('is_anonymous') or request.data.get('isAnonymous'):
+        if is_anonymous:
             reporter_name = 'Anonymous Citizen'
+            reporter_contact = None
+        else:
+            reporter_contact = (
+                request.data.get('reporter_contact') or
+                request.data.get('reporterContact') or
+                request.data.get('contact') or
+                ''
+            ).strip()[:150] or None
 
         report = ViolationReport.objects.create(
             reporter_name=reporter_name or None,
-            reporter_contact=(request.data.get('reporter_contact') or request.data.get('reporterContact') or request.data.get('contact') or '').strip()[:150] or None,
+            reporter_contact=reporter_contact,
             address=address[:255],
             description=description,
             evidence_url=request.data.get('evidence_url') or request.data.get('evidenceUrl') or None,

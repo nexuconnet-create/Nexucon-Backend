@@ -183,7 +183,7 @@ def handle_evidence_upload(request):
             'description': description,
             'inspector_name': inspector_name,
             'inspection_id': str(request.data.get('inspection')) if request.data.get('inspection') else None,
-            'batch_id': str(request.data.get('batch')) if request.data.get('batch') else None,
+            'batch_id': str(request.data.get('batch_id') or request.data.get('batch')) if (request.data.get('batch_id') or request.data.get('batch')) else None,
             'last_verify_ok': True,
             'last_verified_at': timezone.now().isoformat(),
             'last_verify_note': 'Initial upload SHA-256 seal registered.',
@@ -195,7 +195,7 @@ def handle_evidence_upload(request):
     try:
         from apps.digital_eye.models import VisualObservation, VisualObservationPhoto, PunditScanBatch
         batch = None
-        batch_id = request.data.get('batch')
+        batch_id = request.data.get('batch_id') or request.data.get('batch')
         if batch_id:
             batch = PunditScanBatch.objects.filter(pk=batch_id).first()
 
