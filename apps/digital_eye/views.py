@@ -16,6 +16,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError as InvalidQueryParam
 from rest_framework.filters import SearchFilter
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -2490,6 +2491,7 @@ class CalibrationProfileViewSet(viewsets.ModelViewSet):
 
 class VisualObservationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     serializer_class = VisualObservationSerializer
     filter_backends = [SearchFilter]
     search_fields = ['structural_element', 'description', 'grid_location', 'category']
@@ -2525,17 +2527,55 @@ class VisualObservationViewSet(viewsets.ModelViewSet):
             inspector_name=serializer.validated_data.get('inspector_name') or self.request.user.get_full_name() or self.request.user.email
         )
         uploaded_photos = self.request.FILES.getlist('photos')
+        if not uploaded_photos:
+            single = self.request.FILES.get('photo') or self.request.FILES.get('file')
+            if single:
+                uploaded_photos = [single]
+
         for photo_file in uploaded_photos:
             sha = hashlib.sha256()
             for chunk in photo_file.chunks():
                 sha.update(chunk)
-            VisualObservationPhoto.objects.create(
+            checksum = sha.hexdigest()
+            photo_obj = VisualObservationPhoto.objects.create(
                 observation=obs,
                 photo=photo_file,
                 caption=self.request.data.get('caption', ''),
-                sha256_checksum=sha.hexdigest(),
+                sha256_checksum=checksum,
                 file_size_bytes=photo_file.size,
             )
+            # Synchronize to Unified Evidence Registry
+            try:
+                from apps.evidence.models import EvidenceRecord
+                if obs.project:
+                    EvidenceRecord.objects.create(
+                        project=obs.project,
+                        source_type='photo',
+                        structural_element_id=obs.structural_element or '',
+                        coordinates={'grid': obs.grid_location, 'floor': obs.floor} if (obs.grid_location or obs.floor) else None,
+                        captured_at=obs.created_at or timezone.now(),
+                        confidence=1.0,
+                        source_model='VisualObservationPhoto',
+                        source_id=str(photo_obj.id),
+                        evidence_hash=checksum,
+                        payload={
+                            'photo_url': photo_obj.photo.url if photo_obj.photo else '',
+                            'caption': photo_obj.caption,
+                            'description': obs.description,
+                            'category': obs.category,
+                            'severity': obs.severity,
+                            'structural_element': obs.structural_element,
+                            'grid_location': obs.grid_location,
+                            'floor': obs.floor,
+                            'inspector_name': obs.inspector_name,
+                            'batch_id': str(obs.batch_id) if obs.batch_id else None,
+                            'batch_name': obs.batch.batch_name if obs.batch else None,
+                        },
+                        ingested_by=self.request.user,
+                    )
+            except Exception as e:
+                logger.warning("Failed to mirror VisualObservationPhoto to EvidenceRecord: %s", e)
+
         _record_audit(self.request.user, 'digital_eye.visual_observation.create',
                       'VisualObservation', obs.id, {'structural_element': obs.structural_element})
 

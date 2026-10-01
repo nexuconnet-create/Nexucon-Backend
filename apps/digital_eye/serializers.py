@@ -469,13 +469,23 @@ class CalibrationProfileSerializer(serializers.ModelSerializer):
 
 
 class VisualObservationPhotoSerializer(serializers.ModelSerializer):
+    photo_url = serializers.SerializerMethodField()
+
     class Meta:
         model = VisualObservationPhoto
         fields = [
-            'id', 'observation', 'photo', 'caption',
+            'id', 'observation', 'photo', 'photo_url', 'caption',
             'sha256_checksum', 'file_size_bytes', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
+
+    def get_photo_url(self, obj):
+        if obj.photo:
+            try:
+                return obj.photo.url
+            except Exception:
+                return str(obj.photo)
+        return None
 
 
 class VisualObservationSerializer(serializers.ModelSerializer):

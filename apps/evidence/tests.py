@@ -11,11 +11,13 @@ All fixtures are created inside the test classes (users, projects, source
 records) — no external fixture files.
 """
 import datetime
+import hashlib
+import json
 from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -1515,3 +1517,97 @@ class BackfillEvidenceConfidenceTestCase(TestCase):
 
         # Integrity hash re-computed for the changed rows.
         self.assertNotEqual(self.generic_high.evidence_hash, "")
+
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+
+
+@override_settings(SECURE_SSL_REDIRECT=False)
+class FieldPhotoEvidenceUploadTests(APITestCase):
+    def setUp(self):
+        from apps.government.models import Role
+        self.role, _ = Role.objects.get_or_create(name="Inspector")
+        self.district = District.objects.create(name="Eti-Osa District", code="ETI")
+        self.user = User.objects.create_user(
+            username="field_inspector",
+            email="field_inspector@nexucon.ng",
+            password="testpassword123",
+            first_name="Babajide",
+            last_name="Inspector",
+        )
+        Profile.objects.create(user=self.user, role=self.role, district=self.district)
+        self.project = Project.objects.create(
+            name="Eti-Osa Towers Phase 1",
+            district=self.district,
+            status="active",
+        )
+        self.client.force_authenticate(user=self.user)
+        self.image_bytes = b"real_jpeg_binary_field_test_photo_sample_12345"
+        self.expected_sha256 = hashlib.sha256(self.image_bytes).hexdigest()
+
+    def test_upload_photo_evidence_success(self):
+        uploaded_file = SimpleUploadedFile("column_c24_crack.jpg", self.image_bytes, content_type="image/jpeg")
+        url = reverse("evidence-upload")
+        response = self.client.post(url, {
+            "project": str(self.project.id),
+            "structural_element_id": "Column C24",
+            "category": "honeycombing",
+            "severity": "HIGH",
+            "description": "Severe aggregate segregation observed during UPV test on Column C24.",
+            "sha256": self.expected_sha256,
+            "coordinates": json.dumps({"latitude": 6.43, "longitude": 3.48, "accuracy": 3.5}),
+            "file": uploaded_file,
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = response.json()
+        self.assertEqual(data["source_type"], "photo")
+        self.assertEqual(data["evidence_hash"], self.expected_sha256)
+        self.assertEqual(data["structural_element_id"], "Column C24")
+        self.assertIsNotNone(data["photo_url"])
+        self.assertIsNotNone(data["file"])
+        self.assertEqual(data["file"]["sha256_hash"], self.expected_sha256)
+
+        # Check EvidenceRecord exists in db
+        record = EvidenceRecord.objects.get(pk=data["id"])
+        self.assertEqual(record.evidence_hash, self.expected_sha256)
+        self.assertEqual(record.project, self.project)
+
+        # Check mirrored VisualObservation exists in digital_eye
+        from apps.digital_eye.models import VisualObservation
+        obs = VisualObservation.objects.filter(project=self.project, structural_element="Column C24").first()
+        self.assertIsNotNone(obs)
+        self.assertEqual(obs.category, "honeycombing")
+        self.assertEqual(obs.photos.count(), 1)
+        self.assertEqual(obs.photos.first().sha256_checksum, self.expected_sha256)
+
+    def test_upload_photo_evidence_sha256_mismatch_rejected(self):
+        uploaded_file = SimpleUploadedFile("corrupted.jpg", self.image_bytes, content_type="image/jpeg")
+        url = reverse("evidence-upload")
+        response = self.client.post(url, {
+            "project": str(self.project.id),
+            "structural_element_id": "Column C24",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "file": uploaded_file,
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("mismatch", response.json()["detail"].lower())
+
+    def test_verify_photo_evidence(self):
+        uploaded_file = SimpleUploadedFile("beam_b12.jpg", self.image_bytes, content_type="image/jpeg")
+        upload_res = self.client.post(reverse("evidence-upload"), {
+            "project": str(self.project.id),
+            "structural_element_id": "Beam B12",
+            "file": uploaded_file,
+        }, format="multipart")
+        self.assertEqual(upload_res.status_code, status.HTTP_201_CREATED)
+        record_id = upload_res.json()["id"]
+
+        verify_url = reverse("evidence-verify-uuid", kwargs={"pk": record_id})
+        verify_res = self.client.post(verify_url)
+        self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
+        vdata = verify_res.json()
+        self.assertTrue(vdata["payload_ok"])
+        self.assertTrue(vdata["file_bytes_ok"])
+        self.assertEqual(vdata["file_sha256"], self.expected_sha256)

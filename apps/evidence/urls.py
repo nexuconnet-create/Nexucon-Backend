@@ -21,5 +21,10 @@ urlpatterns = [
     path('hq/executive-briefing/', views.HQExecutiveBriefingView.as_view(), name='hq-executive-briefing'),
     path('hq/inspector-analytics/', views.HQInspectorAnalyticsView.as_view(), name='hq-inspector-analytics'),
 
+    # Field Evidence Photo Upload & Attestation
+    path('upload/', views.EvidenceUploadView.as_view(), name='evidence-upload'),
+    path('<uuid:pk>/verify/', views.EvidenceVerifyView.as_view(), name='evidence-verify-uuid'),
+    path('<str:pk>/verify/', views.EvidenceVerifyView.as_view(), name='evidence-verify-ref'),
+
     path('', include(router.urls)),
 ]
