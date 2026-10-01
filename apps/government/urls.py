@@ -1,10 +1,12 @@
 from django.urls import path
 from .views import AgencyProfileView, QuickActionsSummaryView
-from .inspector_views import InspectorDashboardView
+from .inspector_views import InspectorDashboardView, InspectorMeView
 
 urlpatterns = [
     path('agency-profile/', AgencyProfileView.as_view(), name='agency-profile'),
     path('dashboard/quick-actions/', QuickActionsSummaryView.as_view(), name='quick-actions-summary'),
     path('inspectors/me/dashboard/', InspectorDashboardView.as_view(), name='inspector-me-dashboard'),
+    path('inspectors/me/', InspectorMeView.as_view(), name='inspector-me'),
 ]
+
 

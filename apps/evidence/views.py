@@ -38,6 +38,41 @@ class ScopedEvidenceMixin:
         return qs.filter(project__in=allowed)
 
 
+import django_filters
+
+
+class EvidenceRecordFilter(django_filters.FilterSet):
+    project = django_filters.CharFilter(method='filter_project')
+    source_type = django_filters.CharFilter(method='filter_source_type')
+    structural_element_id = django_filters.CharFilter(lookup_expr='icontains')
+    bim_guid = django_filters.CharFilter(lookup_expr='iexact')
+
+    class Meta:
+        model = EvidenceRecord
+        fields = ['project', 'source_type', 'structural_element_id', 'bim_guid']
+
+    def filter_project(self, queryset, name, value):
+        if not value:
+            return queryset
+        try:
+            import uuid
+            val_uuid = uuid.UUID(str(value))
+            return queryset.filter(project_id=val_uuid)
+        except (ValueError, TypeError):
+            return queryset.filter(project__name__icontains=value)
+
+    def filter_source_type(self, queryset, name, value):
+        if not value or value.upper() == 'ALL':
+            return queryset
+        val_lower = value.lower()
+        if val_lower == 'photo':
+            return queryset.filter(
+                models.Q(source_type='photo') |
+                models.Q(source_type__in=['scan_defect', 'inspection_finding'])
+            )
+        return queryset.filter(source_type__iexact=val_lower)
+
+
 class EvidenceRecordViewSet(ScopedEvidenceMixin, viewsets.ReadOnlyModelViewSet):
     """
     Centralized Evidence Registry — read endpoint. Records are created by the
@@ -45,9 +80,10 @@ class EvidenceRecordViewSet(ScopedEvidenceMixin, viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = EvidenceRecordSerializer
     permission_classes = [IsAuthenticated]
-    filterset_fields = ['project', 'source_type', 'structural_element_id', 'bim_guid']
+    filterset_class = EvidenceRecordFilter
     search_fields = ['evidence_reference', 'structural_element_id', 'bim_guid']
     ordering_fields = ['created_at', 'captured_at']
+
 
     def get_queryset(self):
         qs = EvidenceRecord.objects.select_related('project').all()
