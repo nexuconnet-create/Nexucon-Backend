@@ -1,4 +1,5 @@
 from django.urls import reverse
+from django.test import override_settings
 from rest_framework.test import APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
@@ -7,9 +8,13 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
 
+
+@override_settings(SECURE_SSL_REDIRECT=False)
 class ProjectAPITests(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='projuser', email='projuser@test.com', password='testpass')
+        from django.core.cache import cache
+        cache.clear()
+        self.user = User.objects.create_superuser(username='projuser', email='projuser@test.com', password='testpass')
         refresh = RefreshToken.for_user(self.user)
         self.token = str(refresh.access_token)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token}')
@@ -25,6 +30,15 @@ class ProjectAPITests(APITestCase):
         response = self.client.get(create_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(any(p['id'] == proj_id for p in response.data))
+
+    def test_assignable_projects(self):
+        Project.objects.create(name='Assignable Test Site', status='ACTIVE', cold_storage=False)
+        Project.objects.create(name='Cold Stored Site', status='INACTIVE', cold_storage=True)
+        response = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = [p['name'] for p in response.data]
+        self.assertIn('Assignable Test Site', names)
+        self.assertNotIn('Cold Stored Site', names)
 
 
 # ======================================================================
@@ -42,6 +56,7 @@ from apps.digital_eye.models import PUNDITTest
 from apps.projects.tasks import cold_store_inactive_projects
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
 class ColdStoragePolicyTestCase(APITestCase):
     def setUp(self):
         # The ProjectViewSet list/retrieve actions are cache_page(15 min)

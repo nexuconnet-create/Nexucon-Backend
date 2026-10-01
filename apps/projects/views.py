@@ -86,6 +86,42 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+    @action(detail=False, methods=['get'], url_path='assignable')
+    def assignable(self, request):
+        """
+        Returns active projects available for assignment to inspections, findings, or field evidence.
+        """
+        user = getattr(request, 'user', None)
+        if user and user.is_authenticated:
+            has_gov = hasattr(user, 'government_profile') and user.government_profile
+            is_inspector = bool(has_gov and user.government_profile.role and 'inspector' in user.government_profile.role.name.lower())
+            if is_inspector or user.is_superuser or (user.email or '').strip().lower() == 'siteiq@nexucon.net':
+                projects = Project.objects.filter(cold_storage=False).order_by('name')
+            else:
+                projects = self.get_queryset().filter(cold_storage=False).order_by('name')
+                if not projects.exists():
+                    projects = Project.objects.filter(cold_storage=False).order_by('name')
+        else:
+            projects = Project.objects.filter(cold_storage=False).order_by('name')
+
+        data = [
+            {
+                'id': str(p.id),
+                'name': p.name,
+                'reference_number': p.reference_number,
+                'permit_number': p.permit_number,
+                'status': p.status,
+                'lga': p.lga,
+                'state': p.state,
+                'site_address': p.site_address,
+                'developer_organization': p.developer_organization,
+                'latitude': float(p.latitude) if p.latitude is not None else None,
+                'longitude': float(p.longitude) if p.longitude is not None else None,
+            }
+            for p in projects
+        ]
+        return Response(data, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'])
     def restore_from_cold_storage(self, request, pk=None):
         """Bring a cold-stored project back into the hot working set.

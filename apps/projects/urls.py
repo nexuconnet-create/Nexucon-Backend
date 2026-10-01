@@ -13,6 +13,7 @@ router.register(r'', ProjectViewSet, basename='project')
 
 urlpatterns = [
     path('dashboard-stats/', DashboardStatsView.as_view(), name='dashboard-stats'),
+    path('assignable/', ProjectViewSet.as_view({'get': 'assignable'}), name='project-assignable'),
 
     path('', include(router.urls)),
 ]
