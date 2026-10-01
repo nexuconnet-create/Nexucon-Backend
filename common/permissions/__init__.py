@@ -98,7 +98,7 @@ def scoped_projects(user):
 
     if user is None or not getattr(user, 'is_authenticated', False):
         return Project.objects.none()
-    if user.is_superuser or user_is_state_hq(user) or user_is_agency_head(user) or (getattr(user, 'email', '') or '').strip().lower() == 'siteiq@nexucon.net':
+    if user.is_superuser or user_is_state_hq(user) or user_is_agency_head(user):
         return Project.objects.all()
 
     profile = get_profile(user)
