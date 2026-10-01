@@ -86,23 +86,29 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         return queryset
 
-    @action(detail=False, methods=['get'], url_path='assignable')
+    @action(detail=False, methods=['get'], url_path='assignable', permission_classes=[IsAuthenticated])
     def assignable(self, request):
         """
-        Returns active projects available for assignment to inspections, findings, or field evidence.
+        Returns active projects available for assignment to inspections, findings, or field evidence,
+        strictly scoped to the authenticated user's permissions, assigned projects, or district jurisdiction.
         """
-        user = getattr(request, 'user', None)
-        if user and user.is_authenticated:
-            has_gov = hasattr(user, 'government_profile') and user.government_profile
-            is_inspector = bool(has_gov and user.government_profile.role and 'inspector' in user.government_profile.role.name.lower())
-            if is_inspector or user.is_superuser or (user.email or '').strip().lower() == 'siteiq@nexucon.net':
-                projects = Project.objects.filter(cold_storage=False).order_by('name')
-            else:
-                projects = self.get_queryset().filter(cold_storage=False).order_by('name')
-                if not projects.exists():
-                    projects = Project.objects.filter(cold_storage=False).order_by('name')
-        else:
-            projects = Project.objects.filter(cold_storage=False).order_by('name')
+        from common.permissions import scoped_projects
+        user = request.user
+
+        # 1. Scope projects strictly based on organizational role, district, and assignments
+        qs = scoped_projects(user)
+
+        # 2. For external non-government users (contractors, developers, client contacts),
+        # combine with projects where they are listed as developer or contact
+        if not user.is_superuser and not (hasattr(user, 'government_profile') and user.government_profile):
+            qs = (qs | self.get_queryset()).distinct()
+
+        # 3. Only ACTIVE or APPROVED projects that are currently under construction
+        # Exclude cold storage, draft, planning, suspended, completed, or abandoned projects.
+        projects = qs.filter(
+            cold_storage=False,
+            status__in=['ACTIVE', 'APPROVED']
+        ).order_by('name')
 
         data = [
             {

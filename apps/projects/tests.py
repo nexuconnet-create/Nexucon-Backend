@@ -31,14 +31,56 @@ class ProjectAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(any(p['id'] == proj_id for p in response.data))
 
-    def test_assignable_projects(self):
-        Project.objects.create(name='Assignable Test Site', status='ACTIVE', cold_storage=False)
-        Project.objects.create(name='Cold Stored Site', status='INACTIVE', cold_storage=True)
-        response = self.client.get('/api/v1/projects/assignable/')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        names = [p['name'] for p in response.data]
-        self.assertIn('Assignable Test Site', names)
-        self.assertNotIn('Cold Stored Site', names)
+    def test_assignable_projects_security_and_filtering(self):
+        from apps.government.models import District, Role, Profile
+        # 1. Unauthenticated request must be rejected with 401
+        self.client.credentials()  # clear auth
+        res_anon = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(res_anon.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 2. Authenticated non-government user with no projects receives empty list
+        other_user = User.objects.create_user(username='other_contractor', email='other@test.com', password='testpass')
+        tok = str(RefreshToken.for_user(other_user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {tok}')
+
+        # Create diverse projects across districts and statuses
+        district_a = District.objects.create(name='Lekki Zonal District', code='LEK-ZONAL')
+        district_b = District.objects.create(name='Ikeja Zonal District', code='IKJ-ZONAL')
+
+        Project.objects.create(name='Lekki Active Project', status='ACTIVE', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Approved Project', status='APPROVED', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Draft Project', status='DRAFT', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Suspended Project', status='SUSPENDED', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Cold Project', status='ACTIVE', district=district_a, cold_storage=True)
+        Project.objects.create(name='Ikeja Active Project', status='ACTIVE', district=district_b, cold_storage=False)
+
+        # Unrelated user has no assigned projects -> receives []
+        res_other = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(res_other.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_other.data), 0)
+
+        # 3. Inspector in District A only receives ACTIVE/APPROVED projects in District A
+        inspector_role, _ = Role.objects.get_or_create(name='Inspector')
+        inspector_user = User.objects.create_user(username='inspector_lekki', email='insp_lekki@test.com', password='testpass')
+        Profile.objects.create(user=inspector_user, district=district_a, role=inspector_role)
+        tok_insp = str(RefreshToken.for_user(inspector_user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {tok_insp}')
+
+        res_insp = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(res_insp.status_code, status.HTTP_200_OK)
+        names = [p['name'] for p in res_insp.data]
+
+        # Must include active and approved projects in District A
+        self.assertIn('Lekki Active Project', names)
+        self.assertIn('Lekki Approved Project', names)
+
+        # Must EXCLUDE inactive, draft, suspended, and cold-stored projects
+        self.assertNotIn('Lekki Draft Project', names)
+        self.assertNotIn('Lekki Suspended Project', names)
+        self.assertNotIn('Lekki Cold Project', names)
+
+        # Must EXCLUDE projects from District B
+        self.assertNotIn('Ikeja Active Project', names)
 
 
 # ======================================================================
