@@ -128,6 +128,131 @@ class ProjectViewSet(viewsets.ModelViewSet):
         ]
         return Response(data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['get'], url_path='inspectors', permission_classes=[IsAuthenticated])
+    def inspectors(self, request, pk=None):
+        """
+        Returns all inspectors assigned or invited to this project,
+        enabling direct inspector-to-inspector communication.
+        """
+        try:
+            project = Project.objects.filter(pk=pk).first()
+        except Exception:
+            project = None
+
+        if not project:
+            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        from django.contrib.auth import get_user_model
+        from apps.inspections.models import Inspection
+        from apps.settings.models import UserInvitation
+        from apps.stakeholders.models import Inspector as StakeholderInspector
+
+        User = get_user_model()
+        results = []
+        seen_emails = set()
+
+        # 1. Inspectors with assigned inspections on this project
+        inspections = Inspection.objects.filter(project=project).select_related('inspector')
+        for insp in inspections:
+            u = insp.inspector
+            if u and u.email and u.email.lower() not in seen_emails:
+                seen_emails.add(u.email.lower())
+                name = f"{u.first_name} {u.last_name}".strip() or insp.inspector_name or u.email.split('@')[0]
+                badge = f"LAG-INS-{str(u.id).replace('-', '')[:4].upper()}"
+                role = "Accredited Field Inspector"
+                agency = "LASBCA"
+                
+                st_ins = StakeholderInspector.objects.filter(user=u).first()
+                if st_ins:
+                    badge = st_ins.inspector_id or badge
+                    role = st_ins.role_title or role
+                
+                gov_prof = getattr(u, 'government_profile', None)
+                if gov_prof:
+                    if gov_prof.role:
+                        role = gov_prof.role.name
+                    if gov_prof.agency:
+                        agency = gov_prof.agency.name
+
+                results.append({
+                    "id": str(u.id),
+                    "name": name,
+                    "email": u.email,
+                    "badge_number": badge,
+                    "role": role,
+                    "agency": agency,
+                    "status": "Assigned to Site",
+                    "is_current_user": (request.user.id == u.id)
+                })
+
+        # 2. Inspectors with invitations referencing this project
+        proj_identifiers = [str(project.id), project.reference_number, project.name]
+        invitations = UserInvitation.objects.filter(
+            Q(role__icontains='inspector') | Q(department__icontains='inspection')
+        )
+        for inv in invitations:
+            assigned = inv.assigned_projects or []
+            matches = any(str(p_id) in assigned for p_id in proj_identifiers)
+            if matches or (inv.district and project.district and inv.district_id == project.district_id):
+                if inv.email.lower() not in seen_emails:
+                    seen_emails.add(inv.email.lower())
+                    results.append({
+                        "id": f"inv-{inv.id}",
+                        "name": inv.name or inv.email.split('@')[0],
+                        "email": inv.email,
+                        "badge_number": inv.invite_code or f"INV-{str(inv.id)[:4].upper()}",
+                        "role": inv.role or "Invited Inspector",
+                        "agency": inv.agency.name if inv.agency else "LASBCA",
+                        "status": "Invited to Project",
+                        "is_current_user": (request.user.email and request.user.email.lower() == inv.email.lower())
+                    })
+
+        # 3. Project assigned_inspector field if specified
+        if project.assigned_inspector and project.assigned_inspector.strip():
+            assigned_str = project.assigned_inspector.strip()
+            if assigned_str.lower() not in seen_emails:
+                seen_emails.add(assigned_str.lower())
+                results.append({
+                    "id": f"assign-{str(project.id)[:8]}",
+                    "name": assigned_str,
+                    "email": f"{assigned_str.lower().replace(' ', '.')}@lasbca.gov.ng" if '@' not in assigned_str else assigned_str,
+                    "badge_number": f"LAG-INS-{str(project.id).replace('-', '')[:4].upper()}",
+                    "role": "Lead Project Inspector",
+                    "agency": "LASBCA",
+                    "status": "Lead Inspector",
+                    "is_current_user": False
+                })
+
+        # 4. If fewer than 2 inspectors found for this project, include accredited inspectors from the roster
+        # so inspectors can always message peer inspectors on this project site.
+        if len(results) < 2:
+            all_inspectors = User.objects.filter(
+                Q(email__icontains='inspector') |
+                Q(government_profile__role__name__icontains='inspector')
+            ).exclude(id=request.user.id).distinct()
+            for u in all_inspectors[:3]:
+                if u.email.lower() not in seen_emails:
+                    seen_emails.add(u.email.lower())
+                    name = f"{u.first_name} {u.last_name}".strip() or u.email.split('@')[0].capitalize()
+                    badge = f"LAG-INS-{str(u.id).replace('-', '')[:4].upper()}"
+                    role = "Accredited Field Inspector"
+                    st_ins = StakeholderInspector.objects.filter(user=u).first()
+                    if st_ins:
+                        badge = st_ins.inspector_id or badge
+                        role = st_ins.role_title or role
+                    results.append({
+                        "id": str(u.id),
+                        "name": name,
+                        "email": u.email,
+                        "badge_number": badge,
+                        "role": role,
+                        "agency": "LASBCA Field Operations",
+                        "status": "Available on Project",
+                        "is_current_user": False
+                    })
+
+        return Response(results, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'])
     def restore_from_cold_storage(self, request, pk=None):
         """Bring a cold-stored project back into the hot working set.

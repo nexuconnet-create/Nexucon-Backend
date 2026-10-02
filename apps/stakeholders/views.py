@@ -329,8 +329,22 @@ class StakeholderMessageViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         channel = self.request.query_params.get('channel')
+        project = self.request.query_params.get('project')
+        recipient = self.request.query_params.get('recipient')
+        user = self.request.user
+
         if channel and channel.upper() != 'ALL':
             qs = qs.filter(channel_name__iexact=channel)
+        if project:
+            qs = qs.filter(project_name__icontains=project)
+        if recipient:
+            user_full = (user.get_full_name() if user.is_authenticated and user.get_full_name() else '') or (user.email if user.is_authenticated else '')
+            qs = qs.filter(
+                (Q(sender_name__iexact=user_full) & Q(recipient_name__iexact=recipient)) |
+                (Q(sender_name__iexact=recipient) & Q(recipient_name__iexact=user_full)) |
+                Q(recipient_name__iexact=recipient) |
+                Q(channel_name__iexact=f"Direct: {recipient}")
+            )
         return qs
 
     def create(self, request, *args, **kwargs):

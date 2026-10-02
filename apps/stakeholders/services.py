@@ -512,6 +512,8 @@ class StakeholderService:
             sender=user if getattr(user, 'is_authenticated', False) else None,
             sender_name=name,
             sender_role=role,
+            recipient_name=data.get('recipient_name'),
+            recipient_id=data.get('recipient_id'),
             channel_name=data.get('channel_name', 'General Council'),
             project_name=data.get('project_name'),
             message_text=text,
