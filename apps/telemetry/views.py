@@ -262,6 +262,8 @@ class TelemetrySessionFromFileView(APIView):
             key: data[key] for key in (
                 'test_type', 'structural_element', 'floor', 'test_location',
                 'weather_condition', 'transducer_type',
+                'visual_observation', 'attendance_log',
+                'injection_strategy'
             )
             if data.get(key)
         }

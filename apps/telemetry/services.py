@@ -554,6 +554,23 @@ class TelemetryService:
 
         tests = []
         total = 0
+        
+        # Handle injection strategy before creating new tests
+        strategy = config.get('injection_strategy', 'append')
+        if strategy == 'override':
+            from apps.digital_eye.models import PunditTest
+            elements_to_override = set()
+            for context, _ in groups:
+                test_config = {**config, **context}
+                elem = test_config.get('structural_element')
+                if elem:
+                    elements_to_override.add(elem)
+            if elements_to_override:
+                PunditTest.objects.filter(
+                    project_id=session.project_id, 
+                    structural_element__in=elements_to_override
+                ).delete()
+
         for context, readings in groups:
             for reading in readings:
                 # Point labels are left to the serializer's own A, B, C... rule
@@ -562,6 +579,10 @@ class TelemetryService:
                 reading.setdefault('point_label', '')
 
             test_config = {**config, **context}
+            
+            if strategy == 'new_folder' and test_config.get('structural_element'):
+                test_config['structural_element'] = f"{test_config['structural_element']} (New)"
+                
             test_config.setdefault(
                 'structural_element',
                 f'Telemetry capture {session.session_reference}')

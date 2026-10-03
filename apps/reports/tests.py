@@ -2632,7 +2632,7 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
         # max-min = 534 m/s (13.6% of the mean) — flagged, not averaged away.
-        self.assertIn("POINT SPREAD 534 M/S", flat)
+        self.assertIn("UPV VARIANCE BETWEEN POINTS 534 M/S", flat)
 
     # ------------------------------------- crack depth before velocity
     def test_crack_depth_analysis_precedes_velocity_tables(self):
@@ -3727,7 +3727,7 @@ class NDTReportPreviewTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         self.assertEqual(
             [s['key'] for s in sections],
             ['cover_page', 'executive_summary', '1.0', '2.0', '3.0',
-             '3.1', '4.0', '4.1', '4.2', '5.0', '6.0', '7.0', 'APPENDIX'])
+             '3.1', '4.0', '4.1', '4.2', '5.0', '5.4', '6.0', '7.0', 'APPENDIX'])
         self.assertEqual(sections[0]['label'], 'Cover Page')
         self.assertEqual(sections[0]['page'], 1)
         pages = [s['page'] for s in sections]

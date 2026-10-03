@@ -203,9 +203,11 @@ class ImportExportRequestSerializer(serializers.Serializer):
                   'capture; the others are refused with the reason',
     )
     test_type = serializers.CharField(
-        required=False, allow_blank=True, default='',
-        help_text='pulse velocity / crack depth / surface quality; required '
-                  'when the file does not carry a TEST TYPE column')
+        required=False, allow_blank=True, default='')
+    visual_observation = serializers.CharField(
+        required=False, allow_blank=True, default='')
+    attendance_log = serializers.CharField(
+        required=False, allow_blank=True, default='')
     structural_element = serializers.CharField(
         required=False, allow_blank=True, default='')
     floor = serializers.CharField(required=False, allow_blank=True, default='')
@@ -217,6 +219,10 @@ class ImportExportRequestSerializer(serializers.Serializer):
         required=False, allow_blank=True, default='')
     transducer_frequency_khz = serializers.IntegerField(
         required=False, allow_null=True, min_value=1)
+    injection_strategy = serializers.ChoiceField(
+        choices=['append', 'override', 'new_folder'],
+        required=False, default='append'
+    )
 
 
 class DeviceTokenSerializer(serializers.Serializer):

@@ -136,6 +136,11 @@ class Inspection(models.Model):
     checklist_results = models.JSONField(default=list, blank=True, help_text="Item by item checklist results")
     photos_and_evidence = models.JSONField(default=list, blank=True, help_text="Uploaded photos and evidence urls")
     
+    # Visual Observations & Attendance
+    visual_site_observations = models.TextField(blank=True, null=True, help_text="Inspector's visual observations on site")
+    visual_site_photos = models.JSONField(default=list, blank=True, help_text="Uploaded photos for visual observations")
+    attendance_log = models.JSONField(default=list, blank=True, help_text="[{name, role, organization, signature}] - Client/site representatives present")
+    
     # Re-inspection link
     parent_inspection = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='re_inspections')
     

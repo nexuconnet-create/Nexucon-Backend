@@ -1833,6 +1833,24 @@ class FileImportParsingTests(FileImportTestBase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['packet_count'], 2)
 
+    def test_raw_pundit_pl_link_xlsx_export_is_accepted(self):
+        """A raw Proceq PL-Link .xlsx export with preamble rows is parsed directly."""
+        import os
+        from django.conf import settings
+        sample_path = os.path.join(settings.BASE_DIR, '..', 'sample-data',
+                                   'RAW FILE FOR NDT- LAYDOWN AREA.xlsx')
+        if not os.path.exists(sample_path):
+            sample_path = os.path.join(settings.BASE_DIR, 'sample-data',
+                                       'RAW FILE FOR NDT- LAYDOWN AREA.xlsx')
+        if os.path.exists(sample_path):
+            with open(sample_path, 'rb') as f:
+                content = f.read()
+            response = self._upload(content, name='RAW FILE FOR NDT- LAYDOWN AREA.xlsx',
+                                    structural_element='Laydown Area',
+                                    test_type='Pulse Velocity')
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+            self.assertEqual(response.data['packet_count'], 59)
+
     def test_a_second_import_for_the_same_device_is_allowed(self):
         """An import is not a live stream.
 

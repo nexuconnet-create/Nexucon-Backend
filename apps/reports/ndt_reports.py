@@ -1798,10 +1798,10 @@ class NDTReportService:
             return 'UNSPECIFIED'
         token = re.split(r'[-\s]', label)[0]
         mapping = {
-            'COL': 'COLUMN', 'COLUMN': 'COLUMN', 'CS': 'COLUMN',
-            'BM': 'BEAM', 'BEAM': 'BEAM',
-            'SL': 'SLAB', 'SLAB': 'SLAB',
-            'WL': 'WALL', 'WALL': 'WALL',
+            'COL': 'COLUMN', 'COLUMN': 'COLUMN', 'CS': 'COLUMN', 'G1': 'COLUMN',
+            'BM': 'BEAM', 'BEAM': 'BEAM', 'G2': 'BEAM',
+            'SL': 'SLAB', 'SLAB': 'SLAB', 'G4': 'SLAB',
+            'WL': 'WALL', 'WALL': 'WALL', 'G3': 'WALL',
             'FDN': 'FOUNDATION', 'FOUND': 'FOUNDATION', 'FOUNDATION': 'FOUNDATION',
         }
         if token in mapping:
@@ -1916,6 +1916,7 @@ class NDTReportService:
                            if len(velocities) > 1 else None)
             spread_pct = (spread_km_s / mean_v * 100
                           if spread_km_s is not None and mean_v else None)
+            
             out.append({
                 'test': t,
                 'element': t.structural_element or 'UNSPECIFIED',
@@ -3181,7 +3182,7 @@ class NDTReportService:
                             if i == mid else '',
                         ])
                     builder.ruled_table(
-                        ['ELEMENT', 'POINT', 'SPACING L (MM)',
+                        ['ELEMENT', 'POINT', 'SPACING b (MM)',
                          'T CRACKED (US)', 'T UNCRACKED (US)',
                          'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
                         table_rows,
@@ -3232,6 +3233,7 @@ class NDTReportService:
                             f'{floor.upper()} {plural}'
                             + (f' OF {project.name.upper()}'
                                if project.name else ''))
+                        table_rows = []
                         for e in group:
                             rows = e['rows']
                             mid = len(rows) // 2 if len(rows) > 1 else 0
@@ -3250,10 +3252,9 @@ class NDTReportService:
                             if (remark != 'UNVERIFIED'
                                     and e['spread_pct'] is not None
                                     and e['spread_pct'] > 2.0):
-                                remark += (f"\nPOINT SPREAD "
+                                remark += (f"\nUPV VARIANCE BETWEEN POINTS "
                                            f"{e['spread_km_s'] * 1000:.0f} M/S "
                                            f"(±{e['spread_pct'] / 2:.1f}%)")
-                            table_rows = []
                             for i, r in enumerate(rows):
                                 table_rows.append([
                                     element_cell if i == 0 else '',
@@ -3264,33 +3265,33 @@ class NDTReportService:
                                     cls._f1(e['mean_ecs']) if i == mid else '',
                                     remark if i == mid else '',
                                 ])
-                            builder.ruled_table(
-                                ['Structural Element', 'PATH LENGTH',
-                                 'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
-                                 'E.C.S',
-                                 'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
-                                 'REMARK'],
-                                table_rows,
-                                # REMARK now carries 'UNVERIFIED' as well as
-                                # 'GOOD' / 'POOR', and at its old width the
-                                # renderer broke that word mid-character
-                                # ("UNVERIFIE" / "D").
-                                #
-                                # The widths total 159 mm against 159.2 mm of
-                                # text area (A4 minus the 25.4 mm margins
-                                # `_setup` sets). The old vector totalled 164,
-                                # which `ruled_table` silently scaled down by
-                                # ~3% to fit — so every column was narrower
-                                # than its stated figure, and the room the
-                                # remark needed was being paid for by every
-                                # column including the ones whose headers were
-                                # already at their wrap point. Fitting the
-                                # budget unscaled gives REMARK its width back
-                                # without pushing any header over.
-                                [34, 16, 18, 26, 11, 29, 25],
-                                ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
-                            )
-                            builder.ln_gap(2)
+                        builder.ruled_table(
+                            ['Structural Element', 'PATH LENGTH',
+                             'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
+                             'E.C.S',
+                             'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
+                             'REMARK'],
+                            table_rows,
+                            # REMARK now carries 'UNVERIFIED' as well as
+                            # 'GOOD' / 'POOR', and at its old width the
+                            # renderer broke that word mid-character
+                            # ("UNVERIFIE" / "D").
+                            #
+                            # The widths total 159 mm against 159.2 mm of
+                            # text area (A4 minus the 25.4 mm margins
+                            # `_setup` sets). The old vector totalled 164,
+                            # which `ruled_table` silently scaled down by
+                            # ~3% to fit — so every column was narrower
+                            # than its stated figure, and the room the
+                            # remark needed was being paid for by every
+                            # column including the ones whose headers were
+                            # already at their wrap point. Fitting the
+                            # budget unscaled gives REMARK its width back
+                            # without pushing any header over.
+                            [34, 16, 18, 26, 11, 29, 25],
+                            ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
+                        )
+                        builder.ln_gap(2)
 
                 # ---- Summary of Test Results: GOOD / POOR per member & floor
                 builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
@@ -3496,7 +3497,9 @@ class NDTReportService:
                 point_remarks = []
                 for r in t.reading_rows():
                     cond = (r.get('surface_condition') or '').strip()
-                    pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    raw_pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    pt_note = (cls._PROVENANCE_STAMP_RE.sub('', raw_pt_note).strip()
+                               if raw_pt_note else '')
                     pt_lbl = r.get('label') or ''
                     if cond and cond.lower() not in [c.lower() for c in point_remarks]:
                         point_remarks.append(f"Pt {pt_lbl}: {cond}" if pt_lbl else cond)

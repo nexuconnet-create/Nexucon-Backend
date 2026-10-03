@@ -300,7 +300,7 @@ class NDTWordExporter:
                     mean_depth = S._crack_depth(t)
                     _add_table(
                         doc,
-                        ['ELEMENT', 'POINT', 'SPACING L (MM)', 'T CRACKED (US)',
+                        ['ELEMENT', 'POINT', 'SPACING b (MM)', 'T CRACKED (US)',
                          'T UNCRACKED (US)', 'CRACK DEPTH (MM)',
                          'MEAN DEPTH (MM) / REMARK'],
                         [[_element_display(t.structural_element) if i == 0 else '',
@@ -333,32 +333,44 @@ class NDTWordExporter:
                          analysis_groups.items())])
 
                 _add_heading(doc, 'SUMMARY OF TEST RESULTS', level=2)
-                for e in element_data:
-                    rows = e['rows']
-                    mid = len(rows) // 2 if len(rows) > 1 else 0
-                    remark = e['remark']
-                    # The spread is a quality signal about a reading that was
-                    # graded; see ndt_reports._element_data for why an
-                    # unverified element does not carry one.
-                    if (remark != 'UNVERIFIED'
-                            and e['spread_pct'] is not None
-                            and e['spread_pct'] > 2.0):
-                        remark += (f" (POINT SPREAD "
-                                   f"{e['spread_km_s'] * 1000:.0f} M/S, "
-                                   f"±{e['spread_pct'] / 2:.1f}%)")
-                    _add_table(
-                        doc,
-                        ['Structural Element', 'PATH LENGTH', 'TRANSIT TIME',
-                         'PULSE VELOCITY (M/S)', 'E.C.S',
-                         'AVERAGE COMPRESSIVE STRENGTH (N/mm2)', 'REMARK'],
-                        [[_element_display(e['element']) if i == 0 else '',
-                          S._fp(r['path_mm']),
-                          S._f1(r['transit_us']),
-                          S._fms(r['velocity_km_s']),
-                          S._f1(r['ecs_mpa']),
-                          S._f1(e['mean_ecs']) if i == mid else '',
-                          remark if i == mid else '']
-                         for i, r in enumerate(rows)])
+                for floor in floors_present:
+                    floor_elements = [e for e in element_data if e['floor_label'] == floor]
+                    member_order = []
+                    for e in floor_elements:
+                        if e['member_type'] not in member_order:
+                            member_order.append(e['member_type'])
+                    for member in member_order:
+                        group = [e for e in floor_elements if e['member_type'] == member]
+                        plural = member if member.endswith('S') else member + 'S'
+                        _add_heading(doc, f'{floor.upper()} {plural}', level=3)
+                        table_rows = []
+                        for e in group:
+                            rows = e['rows']
+                            mid = len(rows) // 2 if len(rows) > 1 else 0
+                            remark = e['remark']
+                            if (remark != 'UNVERIFIED'
+                                    and e['spread_pct'] is not None
+                                    and e['spread_pct'] > 2.0):
+                                remark += (f" (UPV VARIANCE BETWEEN POINTS "
+                                           f"{e['spread_km_s'] * 1000:.0f} M/S, "
+                                           f"±{e['spread_pct'] / 2:.1f}%)")
+                            
+                            for i, r in enumerate(rows):
+                                table_rows.append([
+                                    _element_display(e['element']) if i == 0 else '',
+                                    S._fp(r['path_mm']),
+                                    S._f1(r['transit_us']),
+                                    S._fms(r['velocity_km_s']),
+                                    S._f1(r['ecs_mpa']),
+                                    S._f1(e['mean_ecs']) if i == mid else '',
+                                    remark if i == mid else ''
+                                ])
+                        _add_table(
+                            doc,
+                            ['Structural Element', 'PATH LENGTH', 'TRANSIT TIME',
+                             'PULSE VELOCITY (M/S)', 'E.C.S',
+                             'AVERAGE COMPRESSIVE STRENGTH (N/mm2)', 'REMARK'],
+                            table_rows)
                 result_groups = {}
                 for e in element_data:
                     key = (e['floor_label'], e['member_type'])
@@ -422,7 +434,9 @@ class NDTWordExporter:
                 point_remarks = []
                 for r in t.reading_rows():
                     cond = (r.get('surface_condition') or '').strip()
-                    pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    raw_pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    pt_note = (S._PROVENANCE_STAMP_RE.sub('', raw_pt_note).strip()
+                               if raw_pt_note else '')
                     pt_lbl = r.get('label') or ''
                     if cond and cond.lower() not in [c.lower() for c in point_remarks]:
                         point_remarks.append(f"Pt {pt_lbl}: {cond}" if pt_lbl else cond)

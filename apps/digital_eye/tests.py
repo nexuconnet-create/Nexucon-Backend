@@ -4025,7 +4025,7 @@ class PunditResultsExportTestCase(DigitalEyeAPITestBase):
         self.assertAlmostEqual(element['mean_v'] * 1000, 3913.84, places=1)
         # The spread of these points exceeds 2% — disclosed, not hidden.
         self.assertGreater(element['spread_pct'], 2.0)
-        self.assertIn('POINT SPREAD', sheet[5][8].value)
+        self.assertIn('UPV VARIANCE BETWEEN POINTS', sheet[5][8].value)
 
 
 # ======================================================================

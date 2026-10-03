@@ -195,14 +195,16 @@ def detect_import_type(content: bytes) -> str:
     """What this file *is*, from its bytes.
 
     PDF first: its magic number is unambiguous and its content is not text a
-    CSV or JSON reader can survive. Then JSON, which announces itself with a
-    leading brace or bracket. Everything else is CSV, because there is no
-    other format left for it to be — and a CSV reader given garbage produces a
-    readable error naming the row, whereas a wrong guess produces a confusing
-    one.
+    CSV or JSON reader can survive. Then XLSX (PK.. zip magic), followed by JSON,
+    which announces itself with a leading brace or bracket. Everything else is
+    CSV, because there is no other format left for it to be — and a CSV reader
+    given garbage produces a readable error naming the row, whereas a wrong
+    guess produces a confusing one.
     """
     if content[:4] == PDF_MAGIC:
         return 'PDF'
+    if content[:4] == b'PK\x03\x04':
+        return 'XLSX'
     head = content.lstrip()[:1]
     if head in (b'{', b'['):
         return 'JSON'
@@ -252,6 +254,8 @@ def read_rows(content: bytes, import_type: str, header_map=None):
         return _read_json(content, folded)
     if import_type == 'CSV':
         return _read_csv(content, folded)
+    if import_type in ('XLSX', 'EXCEL'):
+        return _read_xlsx(content, folded)
     raise ImportReadError(f'"{import_type}" is not an importable file type.')
 
 
@@ -286,6 +290,8 @@ def read_headers(content: bytes, import_type: str, sample_limit: int = 5):
         return _headers_from_csv(content, sample_limit)
     if import_type == 'JSON':
         return _headers_from_json(content, sample_limit)
+    if import_type in ('XLSX', 'EXCEL'):
+        return _headers_from_xlsx(content, sample_limit)
     raise ImportReadError(f'"{import_type}" is not an importable file type.')
 
 
@@ -493,4 +499,199 @@ def _headers_from_json(content: bytes, sample_limit: int):
             if _blank(value):
                 continue
             samples[key].append(str(value))
+    return headers, samples
+
+
+# ----------------------------------------------------------------------
+# XLSX / Excel
+# ----------------------------------------------------------------------
+
+def _read_xlsx(content: bytes, folded=None):
+    """Parse an Excel (.xlsx) file into (rows, skipped_blank_rows).
+
+    Handles both standard tabular templates and instrument export workbooks
+    (such as Proceq PL-Link Pundit exports) with preamble metadata rows.
+    """
+    folded = folded or {}
+    import io
+    from openpyxl import load_workbook
+
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:
+        raise ImportReadError(f'The file is not a valid Excel (.xlsx) workbook: {exc}')
+
+    sheet = wb.active
+    if not sheet:
+        raise ImportReadError('The Excel workbook contains no active worksheets.')
+
+    # Scan the first 35 rows to locate the table headers row
+    header_row_idx = None
+    is_pl_link = False
+
+    for r in range(1, min(35, sheet.max_row + 1)):
+        vals = [sheet.cell(r, c).value for c in range(1, sheet.max_column + 1)]
+        lowered = [str(v or '').strip().lower() for v in vals]
+        if any('pl-link' in str(sheet.cell(ri, 1).value or '').lower() for ri in range(1, r + 1)):
+            is_pl_link = True
+        has_time = any('time 1' in x or 'transit' in x or x == 'time' for x in lowered)
+        has_len = any('length' in x or 'distance' in x for x in lowered)
+        if (has_time and has_len) or any('structural element' in x for x in lowered):
+            header_row_idx = r
+            break
+
+    if header_row_idx is None:
+        for r in range(1, min(35, sheet.max_row + 1)):
+            vals = [sheet.cell(r, c).value for c in range(1, sheet.max_column + 1)]
+            if any(v is not None for v in vals):
+                header_row_idx = r
+                break
+
+    if header_row_idx is None:
+        raise ImportReadError('The Excel sheet contains no header row or readable rows.')
+
+    raw_headers = [str(sheet.cell(header_row_idx, c).value or '').strip()
+                   for c in range(1, sheet.max_column + 1)]
+
+    # Check if Proceq PL-Link format
+    if is_pl_link or any('time 1' in h.lower() for h in raw_headers):
+        rows = []
+        skipped = 0
+        for r in range(header_row_idx + 1, sheet.max_row + 1):
+            vals = [sheet.cell(r, c).value for c in range(1, sheet.max_column + 1)]
+            if not any(v is not None for v in vals):
+                skipped += 1
+                continue
+            row_dict = {raw_headers[i]: vals[i]
+                        for i in range(min(len(raw_headers), len(vals))) if raw_headers[i]}
+
+            name = ''
+            for k in row_dict:
+                if k.lower() == 'name':
+                    name = str(row_dict[k] or '').strip()
+                    break
+            if not name:
+                continue
+
+            data = {}
+            if '-' in name:
+                elem, pt = name.split('-', 1)
+                data['structural_element'] = elem.strip()
+                data['point'] = pt.strip()
+            else:
+                data['point'] = name
+                data['structural_element'] = str(sheet.title or 'Element').strip()
+
+            for k, val in row_dict.items():
+                kl = k.lower()
+                if 'time 1' in kl or 'transit' in kl or kl == 'time':
+                    try:
+                        data['transit_time_t_us'] = round(float(val), 2)
+                    except (ValueError, TypeError):
+                        pass
+                elif 'length' in kl or 'distance' in kl:
+                    try:
+                        v = float(val)
+                        data['path_length_l_mm'] = round(v * 1000.0 if v < 10.0 else v, 1)
+                    except (ValueError, TypeError):
+                        pass
+                elif 'freq' in kl:
+                    try:
+                        data['transducer_frequency_khz'] = int(round(float(val)))
+                    except (ValueError, TypeError):
+                        pass
+                elif 'probe type' in kl:
+                    pt_str = str(val or '').lower()
+                    data['transducer_type'] = 'direct' if ('p-wave' in pt_str or 'direct' in pt_str) else 'indirect'
+                elif 'comment' in kl or 'note' in kl:
+                    if val and not _blank(val):
+                        data['notes'] = str(val).strip()
+                elif 'rebound' in kl:
+                    if val and str(val).strip() not in ('--', 'n/a', ''):
+                        try:
+                            data['rebound_number'] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+
+            data.setdefault('test_type', 'pulse_velocity')
+            data.setdefault('floor', 'Ground Floor')
+            rows.append(SourceRow(row_number=r, data=data))
+        return rows, skipped
+
+    # Standard / General Excel table
+    columns = []
+    headers = {}
+    for idx, raw_header in enumerate(raw_headers):
+        if not raw_header:
+            continue
+        key, scale = _apply(folded, raw_header)
+        if key is None:
+            continue
+        if key in headers:
+            raise ImportReadError(
+                f'The sheet has two columns that both mean "{key}" '
+                f'({headers[key]!r} and {raw_header!r}). Rename one of them.')
+        headers[key] = raw_header
+        columns.append((key, idx, scale))
+
+    rows = []
+    skipped = 0
+    for r in range(header_row_idx + 1, sheet.max_row + 1):
+        vals = [sheet.cell(r, c).value for c in range(1, sheet.max_column + 1)]
+        if not any(v is not None for v in vals):
+            skipped += 1
+            continue
+        data = {}
+        for key, col_idx, scale in columns:
+            val = vals[col_idx] if col_idx < len(vals) else None
+            if isinstance(val, str):
+                val = val.strip()
+            data[key] = _scaled(val, scale)
+        if all(_blank(v) for v in data.values()):
+            skipped += 1
+            continue
+        rows.append(SourceRow(row_number=r, data=data))
+    return rows, skipped
+
+
+def _headers_from_xlsx(content: bytes, sample_limit: int):
+    """Extract column headers and sample values from an Excel sheet."""
+    import io
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:
+        raise ImportReadError(f'The file is not a valid Excel (.xlsx) workbook: {exc}')
+
+    sheet = wb.active
+    if not sheet:
+        raise ImportReadError('The Excel workbook contains no active worksheets.')
+
+    header_row_idx = 1
+    for r in range(1, min(35, sheet.max_row + 1)):
+        vals = [sheet.cell(r, c).value for c in range(1, sheet.max_column + 1)]
+        lowered = [str(v or '').strip().lower() for v in vals]
+        if any('time' in x or 'transit' in x for x in lowered) and any('length' in x or 'distance' in x for x in lowered):
+            header_row_idx = r
+            break
+        elif any('structural element' in x for x in lowered):
+            header_row_idx = r
+            break
+
+    raw_headers = [str(sheet.cell(header_row_idx, c).value or '').strip()
+                   for c in range(1, sheet.max_column + 1)]
+    headers = [h for h in raw_headers if h]
+    samples = {h: [] for h in headers}
+
+    for r in range(header_row_idx + 1, min(header_row_idx + 50, sheet.max_row + 1)):
+        for c, h in enumerate(raw_headers, start=1):
+            if not h:
+                continue
+            if len(samples[h]) >= sample_limit:
+                continue
+            val = sheet.cell(r, c).value
+            if val is not None and not _blank(val):
+                samples[h].append(str(val).strip())
+        if all(len(vals) >= sample_limit for vals in samples.values()):
+            break
     return headers, samples

@@ -163,7 +163,7 @@ class PUNDITAdapter:
 
     @staticmethod
     def compute_crack_depth_mm(crack_path_length_mm, crack_pulse_time_us, uncracked_pulse_time_us):
-        """Time-difference crack depth: d = L/2 * sqrt((t_c/t_0)^2 - 1)."""
+        """Time-difference crack depth: d = b * sqrt((t_c/t_0)^2 - 1)."""
         if not (crack_path_length_mm and crack_pulse_time_us and uncracked_pulse_time_us):
             return None
         if crack_pulse_time_us <= 0 or uncracked_pulse_time_us <= 0:
