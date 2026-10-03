@@ -3477,17 +3477,25 @@ class NDTReportService:
                     'derived solely from the recorded readings in Section 5.0 '
                     'and serves as decision support for the responsible '
                     'engineer, who reviews and signs off this report.')
-                # Principal Engineer Peer Review (Joint Review)
+                # Principal Engineer Peer Review & Inspector Collaboration (Joint Review)
                 review = getattr(ai_record, 'pundit_review', None)
-                if review and review.decision:
-                    rev_status = 'CORROBORATED BY PRINCIPAL ENGINEER' if review.decision == 'corroborated' else 'RETURNED FOR REVISION BY PRINCIPAL ENGINEER'
+                if review and (review.decision or review.inspector_notes):
+                    rev_status = ('CORROBORATED BY PRINCIPAL ENGINEER' if review.decision == 'corroborated'
+                                  else ('RETURNED FOR REVISION BY PRINCIPAL ENGINEER' if review.decision == 'returned'
+                                        else 'FIELD INSPECTOR COLLABORATION'))
                     builder.inner_heading(f'JOINT REVIEW: {rev_status}')
-                    rev_name = (review.reviewed_by.get_full_name() or review.reviewed_by.email
-                                if review.reviewed_by else 'Principal Engineer')
-                    rev_date = review.reviewed_at.strftime('%d/%m/%Y, %I:%M %p') if review.reviewed_at else ''
-                    builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}")
-                    if review.notes:
-                        builder.para(f"**Review Notes & Directives:** “{review.notes}”")
+                    if review.decision:
+                        rev_name = (review.reviewed_by.get_full_name() or review.reviewed_by.email
+                                    if review.reviewed_by else 'Principal Engineer')
+                        rev_date = review.reviewed_at.strftime('%d/%m/%Y, %I:%M %p') if review.reviewed_at else ''
+                        builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}")
+                        if review.notes:
+                            builder.para(f"**Review Directives:** “{review.notes}”")
+                    if review.inspector_notes:
+                        insp_name = (review.inspector_responded_by.get_full_name() or review.inspector_responded_by.email
+                                     if review.inspector_responded_by else 'Field Inspector')
+                        insp_date = review.inspector_responded_at.strftime('%d/%m/%Y, %I:%M %p') if review.inspector_responded_at else ''
+                        builder.para(f"**Field Inspector Collaboration ({insp_name}{f' - {insp_date}' if insp_date else ''}):** “{review.inspector_notes}”")
                     builder.ln_gap(2)
 
                 for obs in ai_record.observations:

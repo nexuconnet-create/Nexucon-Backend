@@ -1204,13 +1204,19 @@ class PunditAnalysisReview(models.Model):
     analysis = models.OneToOneField(
         'evidence.AIAnalysisRecord', on_delete=models.CASCADE,
         related_name='pundit_review')
-    decision = models.CharField(max_length=20, choices=DECISIONS)
+    decision = models.CharField(max_length=20, choices=DECISIONS, blank=True, default='')
     notes = models.TextField(blank=True, default='')
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL,
                                     on_delete=models.SET_NULL,
                                     null=True, blank=True,
                                     related_name='pundit_analysis_reviews')
     reviewed_at = models.DateTimeField(default=timezone.now)
+    inspector_notes = models.TextField(blank=True, default='')
+    inspector_responded_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                               on_delete=models.SET_NULL,
+                                               null=True, blank=True,
+                                               related_name='pundit_analysis_inspector_responses')
+    inspector_responded_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1218,7 +1224,7 @@ class PunditAnalysisReview(models.Model):
         ordering = ['-reviewed_at']
 
     def __str__(self):
-        return f"{self.analysis_id} — {self.get_decision_display()}"
+        return f"{self.analysis_id} — {self.get_decision_display() or 'pending'}"
 
 
 # ======================================================================

@@ -2428,6 +2428,31 @@ class PunditAnalysisReviewView(APIView):
         return (AIAnalysisRecord.objects.filter(project__in=allowed)
                 .filter(pk=analysis_id).first())
 
+    def _format_response(self, review, analysis):
+        project = getattr(analysis, 'project', None)
+        return {
+            'review_status': review.decision if (review and review.decision) else 'pending',
+            'requires_human_review': analysis.requires_human_review,
+            'decision': review.decision if review else None,
+            'notes': review.notes if review else '',
+            'reviewed_by': (review.reviewed_by.get_full_name()
+                            or review.reviewed_by.email)
+            if (review and review.reviewed_by) else None,
+            'reviewed_at': review.reviewed_at if review else None,
+            'inspector_notes': review.inspector_notes if review else '',
+            'inspector_responded_by': (review.inspector_responded_by.get_full_name()
+                                       or review.inspector_responded_by.email)
+            if (review and review.inspector_responded_by) else None,
+            'inspector_responded_at': review.inspector_responded_at if review else None,
+            'project_id': str(project.id) if project else None,
+            'project_name': getattr(project, 'name', '') if project else '',
+            'project_reference': getattr(project, 'reference', '') if project else '',
+            'project_location': getattr(project, 'location', '') or getattr(project, 'address', '') if project else '',
+            'analysis_id': str(analysis.id),
+            'analysis_reference': analysis.analysis_reference,
+            'analysis_title': getattr(analysis, 'title', '') or analysis.analysis_reference,
+        }
+
     def get(self, request, analysis_id):
         from .models import PunditAnalysisReview
         analysis = self._analysis(request, analysis_id)
@@ -2435,59 +2460,95 @@ class PunditAnalysisReviewView(APIView):
             return Response({'detail': 'Analysis not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         review = getattr(analysis, 'pundit_review', None)
-        if review is None:
-            return Response({'review_status': 'pending',
-                             'requires_human_review':
-                                 analysis.requires_human_review})
-        return Response({
-            'review_status': review.decision,
-            'requires_human_review': analysis.requires_human_review,
-            'decision': review.decision,
-            'notes': review.notes,
-            'reviewed_by': (review.reviewed_by.get_full_name()
-                            or review.reviewed_by.email)
-            if review.reviewed_by else None,
-            'reviewed_at': review.reviewed_at,
-        })
+        return Response(self._format_response(review, analysis))
 
     def post(self, request, analysis_id):
         from .models import PunditAnalysisReview
-        if not user_is_director(request.user):
-            return Response({'detail': 'Director-level role required.'},
-                            status=status.HTTP_403_FORBIDDEN)
         analysis = self._analysis(request, analysis_id)
         if analysis is None:
             return Response({'detail': 'Analysis not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
-        decision = request.data.get('decision')
-        if decision not in ('corroborated', 'returned'):
-            return Response(
-                {'detail': "decision must be 'corroborated' or 'returned'."},
-                status=status.HTTP_400_BAD_REQUEST)
-        notes = str(request.data.get('notes') or '').strip()
-        if len(notes) > 4000:
-            return Response({'detail': 'notes: maximum 4000 characters.'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        review, _ = PunditAnalysisReview.objects.update_or_create(
-            analysis=analysis,
-            defaults={'decision': decision, 'notes': notes,
-                      'reviewed_by': request.user})
 
-        # Update the AIAnalysisRecord to reflect this Joint Review
-        rev_label = "CORROBORATED" if review.decision == 'corroborated' else "RETURNED FOR REVISION"
-        rev_by = (request.user.get_full_name() or request.user.email)
+        is_director = user_is_director(request.user)
+        inspector_notes = request.data.get('inspector_notes')
+        decision = request.data.get('decision')
+        notes = request.data.get('notes')
+
+        if not is_director and decision is not None:
+            return Response({
+                'detail': 'Director-level role required to record or alter review decisions. Field inspectors can collaborate via inspector_notes.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if not is_director and inspector_notes is None:
+            return Response({'detail': 'inspector_notes required for field inspector collaboration.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        review, _ = PunditAnalysisReview.objects.get_or_create(
+            analysis=analysis,
+            defaults={'decision': ''}
+        )
+
+        audit_payload = {}
+
+        if is_director and decision:
+            if decision not in ('corroborated', 'returned'):
+                return Response(
+                    {'detail': "decision must be 'corroborated' or 'returned'."},
+                    status=status.HTTP_400_BAD_REQUEST)
+            clean_notes = str(notes or '').strip()
+            if len(clean_notes) > 4000:
+                return Response({'detail': 'notes: maximum 4000 characters.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            review.decision = decision
+            review.notes = clean_notes
+            review.reviewed_by = request.user
+            review.reviewed_at = timezone.now()
+            audit_payload['decision'] = decision
+
+        if inspector_notes is not None:
+            clean_insp = str(inspector_notes).strip()
+            if len(clean_insp) > 4000:
+                return Response({'detail': 'inspector_notes: maximum 4000 characters.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            review.inspector_notes = clean_insp
+            review.inspector_responded_by = request.user
+            review.inspector_responded_at = timezone.now()
+            audit_payload['inspector_notes'] = clean_insp
+
+        review.save()
+
+        # Update the AIAnalysisRecord to reflect this Joint Review and Inspector Collaboration
+        rev_by = (review.reviewed_by.get_full_name() or review.reviewed_by.email) if review.reviewed_by else 'Principal Engineer'
         rev_time = review.reviewed_at.strftime('%m/%d/%Y, %I:%M:%S %p') if review.reviewed_at else ''
-        note_text = f': “{review.notes}”' if review.notes else ''
-        joint_headline = f"[JOINT REVIEW — {rev_label}] Principal Engineer {rev_by} reviewed on {rev_time}{note_text}"
+        insp_by = (review.inspector_responded_by.get_full_name() or review.inspector_responded_by.email) if review.inspector_responded_by else 'Field Inspector'
+        insp_time = review.inspector_responded_at.strftime('%m/%d/%Y, %I:%M:%S %p') if review.inspector_responded_at else ''
 
         curr_log = analysis.reasoning_log or ''
-        trace_step = f"[JOINT PEER REVIEW] Decision: {rev_label} | Reviewer: {rev_by} | Directives: {review.notes or 'None'}"
-        if trace_step not in curr_log:
-            analysis.reasoning_log = f"{curr_log}\n{trace_step}".strip()
+        curr_obs = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW') and not str(o).startswith('[INSPECTOR RESPONSE')]
 
-        curr_obs = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW')]
-        analysis.observations = [joint_headline] + curr_obs
-        analysis.requires_human_review = (decision != 'corroborated')
+        new_obs = []
+        if review.decision:
+            rev_label = "CORROBORATED" if review.decision == 'corroborated' else "RETURNED FOR REVISION"
+            note_text = f': “{review.notes}”' if review.notes else ''
+            joint_headline = f"[JOINT REVIEW — {rev_label}] Principal Engineer {rev_by} reviewed on {rev_time}{note_text}"
+            new_obs.append(joint_headline)
+
+            trace_step = f"[JOINT PEER REVIEW] Decision: {rev_label} | Reviewer: {rev_by} | Directives: {review.notes or 'None'}"
+            if trace_step not in curr_log:
+                curr_log = f"{curr_log}\n{trace_step}".strip()
+
+        if review.inspector_notes:
+            insp_headline = f"[INSPECTOR RESPONSE] {insp_by} responded on {insp_time}: “{review.inspector_notes}”"
+            new_obs.append(insp_headline)
+
+            insp_trace = f"[INSPECTOR COLLABORATION] {insp_by}: {review.inspector_notes}"
+            if insp_trace not in curr_log:
+                curr_log = f"{curr_log}\n{insp_trace}".strip()
+
+        analysis.observations = new_obs + curr_obs
+        analysis.reasoning_log = curr_log
+        if review.decision:
+            analysis.requires_human_review = (review.decision != 'corroborated')
         analysis.save(update_fields=['reasoning_log', 'observations', 'requires_human_review', 'updated_at'])
 
         if request.data.get('regenerate'):
@@ -2499,17 +2560,9 @@ class PunditAnalysisReviewView(APIView):
 
         _record_audit(request.user, 'digital_eye.pundit_analysis.review',
                       'AIAnalysisRecord', analysis.id,
-                      {'decision': decision, 'analysis_reference':
-                       analysis.analysis_reference})
-        return Response({
-            'review_status': review.decision,
-            'decision': review.decision,
-            'notes': review.notes,
-            'reviewed_by': (review.reviewed_by.get_full_name()
-                            or review.reviewed_by.email)
-            if review.reviewed_by else None,
-            'reviewed_at': review.reviewed_at,
-        })
+                      {**audit_payload, 'analysis_reference': analysis.analysis_reference})
+
+        return Response(self._format_response(review, analysis))
 
     def delete(self, request, analysis_id):
         from .models import PunditAnalysisReview
@@ -2524,22 +2577,20 @@ class PunditAnalysisReviewView(APIView):
         if review is not None:
             review.delete()
             # Remove joint review header from observations
-            analysis.observations = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW')]
+            analysis.observations = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW') and not str(o).startswith('[INSPECTOR RESPONSE')]
             analysis.requires_human_review = True
             analysis.save(update_fields=['observations', 'requires_human_review', 'updated_at'])
             _record_audit(request.user,
                           'digital_eye.pundit_analysis.review_withdrawn',
                           'AIAnalysisRecord', analysis.id,
                           {'analysis_reference': analysis.analysis_reference})
-        return Response({'review_status': 'pending',
-                         'requires_human_review':
-                             analysis.requires_human_review})
+        return Response(self._format_response(None, analysis))
 
 
 class PunditAnalysisJointRegenerateView(APIView):
     """
     POST /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/regenerate/
-    Regenerates the AI analysis incorporating the Principal Engineer's review directives.
+    Regenerates the AI analysis incorporating the Principal Engineer's review directives and Inspector field notes.
     """
     permission_classes = [IsAuthenticated]
 
@@ -2547,9 +2598,6 @@ class PunditAnalysisJointRegenerateView(APIView):
         from apps.evidence.models import AIAnalysisRecord
         from .adapters import PUNDITAdapter
         from .models import PunditAnalysisReview
-        if not user_is_director(request.user):
-            return Response({'detail': 'Director-level role required.'},
-                            status=status.HTTP_403_FORBIDDEN)
         allowed = scoped_projects(request.user)
         analysis = AIAnalysisRecord.objects.filter(project__in=allowed, pk=analysis_id).first()
         if analysis is None:

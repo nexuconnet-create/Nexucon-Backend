@@ -747,6 +747,14 @@ class PUNDITAdapter:
                 joint_lead = f"[JOINT REVIEW — {rev_label}] Principal Engineer {rev_name}" + (f": “{peer_review.notes}”" if peer_review.notes else "")
                 if not any(str(o).startswith('[JOINT REVIEW') for o in observations):
                     observations.insert(0, joint_lead)
+
+            if peer_review and getattr(peer_review, 'inspector_notes', None):
+                insp_name = (peer_review.inspector_responded_by.get_full_name() or peer_review.inspector_responded_by.email
+                             if peer_review.inspector_responded_by else 'Field Inspector')
+                insp_lead = f"[INSPECTOR RESPONSE] {insp_name}: “{peer_review.inspector_notes}”"
+                if not any(str(o).startswith('[INSPECTOR RESPONSE') for o in observations):
+                    idx = 1 if any(str(o).startswith('[JOINT REVIEW') for o in observations) else 0
+                    observations.insert(idx, insp_lead)
             successful_provs = data.get('successful_providers') or []
             if 'deterministic_acoustics' not in successful_provs:
                 successful_provs.append('deterministic_acoustics')
@@ -765,6 +773,10 @@ class PUNDITAdapter:
             ensemble_active = True
 
             steps.append("[ENSEMBLE] Multi-Model Consensus active: dispatched parallel inference across analytical engines.")
+            if peer_review and getattr(peer_review, 'inspector_notes', None):
+                insp_name = (peer_review.inspector_responded_by.get_full_name() or peer_review.inspector_responded_by.email
+                             if peer_review.inspector_responded_by else 'Field Inspector')
+                steps.append(f"[INSPECTOR COLLABORATION] {insp_name}: {peer_review.inspector_notes}")
             for prov in successful_provs:
                 steps.append(f"[ENGINE:ONLINE] Engine '{prov}' active and corroborated structural integrity.")
             for prov, err in (data.get('failed_providers') or {}).items():
@@ -833,15 +845,19 @@ class PUNDITAdapter:
             model_provider=safe_provider,
             model_version=safe_version,
         )
-        if peer_review and getattr(peer_review, 'decision', None):
+        if peer_review:
             try:
                 from .models import PunditAnalysisReview
                 PunditAnalysisReview.objects.update_or_create(
                     analysis=record,
                     defaults={
-                        'decision': peer_review.decision,
-                        'notes': peer_review.notes or '',
-                        'reviewed_by': peer_review.reviewed_by,
+                        'decision': getattr(peer_review, 'decision', '') or '',
+                        'notes': getattr(peer_review, 'notes', '') or '',
+                        'reviewed_by': getattr(peer_review, 'reviewed_by', None),
+                        'reviewed_at': getattr(peer_review, 'reviewed_at', timezone.now()),
+                        'inspector_notes': getattr(peer_review, 'inspector_notes', '') or '',
+                        'inspector_responded_by': getattr(peer_review, 'inspector_responded_by', None),
+                        'inspector_responded_at': getattr(peer_review, 'inspector_responded_at', None),
                     }
                 )
             except Exception as e:
