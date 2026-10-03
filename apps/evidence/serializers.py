@@ -92,7 +92,7 @@ class EvidenceFileUploadSerializer(serializers.Serializer):
     coordinates = serializers.JSONField(
         required=False, allow_null=True,
         help_text="{'latitude', 'longitude', 'x', 'y', 'z'} as the device reported them.")
-    captured_at = serializers.DateTimeField(required=False, allow_null=True)
+    captured_at = serializers.DateTimeField(required=False, allow_null=True, format='iso-8601')
     confidence = serializers.FloatField(
         required=False, allow_null=True, min_value=0.0, max_value=1.0)
     description = serializers.CharField(
