@@ -223,6 +223,9 @@ class ImportExportRequestSerializer(serializers.Serializer):
         choices=['append', 'override', 'new_folder'],
         required=False, default='append'
     )
+    folder_name = serializers.CharField(
+        required=False, allow_blank=True, default='',
+        help_text='Custom folder name for new_folder injection strategy.')
     latitude = serializers.FloatField(
         required=False, allow_null=True,
         help_text='GPS latitude of the test location, decimal degrees.')

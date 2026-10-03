@@ -102,7 +102,7 @@ class SessionFromFileService:
 
     @classmethod
     def create(cls, *, uploaded_file, device, project, operator, data_type,
-               session_config=None, request=None):
+               session_config=None, request=None, folder_name=None):
         """Parse ``uploaded_file`` and open an ENDED/PENDING session for it.
 
         The session is ENDED because the capture is complete — the device
@@ -112,6 +112,9 @@ class SessionFromFileService:
         are ever written. Auto-promoting here would mean a file whose parse
         was subtly wrong landed in the statutory registry with no one having
         looked at it.
+
+        If ``folder_name`` is provided with injection_strategy='new_folder',
+        it is used as the session_reference instead of auto-generating one.
 
         Raises ``TelemetryError`` for every refusal, having written nothing —
         no session, no packets, no stored bytes.
@@ -240,6 +243,20 @@ class SessionFromFileService:
 
         stored_name, digest = cls._store(content, name)
 
+        # If injection_strategy is 'new_folder' and folder_name is provided,
+        # use it as the session_reference instead of auto-generating
+        custom_ref = None
+        injection_strategy = config.get('injection_strategy', 'append')
+        if injection_strategy == 'new_folder':
+            folder_name_from_config = folder_name or config.get('folder_name', '').strip()
+            if folder_name_from_config:
+                custom_ref = folder_name_from_config
+                # Check if this reference already exists
+                if TelemetrySession.objects.filter(session_reference=custom_ref).exists():
+                    raise TelemetryError(
+                        f'Folder name "{custom_ref}" is already in use. '
+                        'Choose a different name.')
+
         try:
             with transaction.atomic():
                 # Created directly rather than through `start_session`, and
@@ -250,22 +267,25 @@ class SessionFromFileService:
                 # yesterday is not a second stream. The session is therefore
                 # made, filled, and closed inside this one transaction, so it
                 # is never observable in an OPEN state.
-                session = TelemetrySession.objects.create(
-                    device=device,
-                    project=project,
-                    operator=operator if (operator and operator.is_authenticated) else None,
-                    operator_name=(
+                session_kwargs = {
+                    'device': device,
+                    'project': project,
+                    'operator': operator if (operator and operator.is_authenticated) else None,
+                    'operator_name': (
                         (operator.get_full_name() or operator.email)
                         if (operator and operator.is_authenticated) else ''
                     ),
-                    data_type='pundit',
-                    transport=TelemetrySession.TRANSPORT_FILE,
-                    status=TelemetrySession.STATUS_OPEN,
-                    session_config=config,
-                    source_file_name=name,
-                    source_file_sha256=digest,
-                    source_file_storage_name=stored_name,
-                )
+                    'data_type': 'pundit',
+                    'transport': TelemetrySession.TRANSPORT_FILE,
+                    'status': TelemetrySession.STATUS_OPEN,
+                    'session_config': config,
+                    'source_file_name': name,
+                    'source_file_sha256': digest,
+                    'source_file_storage_name': stored_name,
+                }
+                if custom_ref:
+                    session_kwargs['session_reference'] = custom_ref
+                session = TelemetrySession.objects.create(**session_kwargs)
                 for index, packet in enumerate(packets, start=1):
                     TelemetryService.append_packet(session, packet, sequence=index)
                 # Closed within the transaction: the instrument finished long

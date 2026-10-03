@@ -1,3 +1,4 @@
+
 """
 Telemetry API views (Inspector PWA — Part 3, dual-path ingestion).
 
@@ -263,7 +264,7 @@ class TelemetrySessionFromFileView(APIView):
                 'test_type', 'structural_element', 'floor', 'test_location',
                 'weather_condition', 'transducer_type',
                 'visual_observation', 'attendance_log',
-                'injection_strategy'
+                'injection_strategy', 'folder_name'
             )
             if data.get(key)
         }
@@ -310,7 +311,8 @@ class TelemetrySessionFromFileView(APIView):
             session, stats = SessionFromFileService.create(
                 uploaded_file=data['file'], device=device, project=project,
                 operator=request.user, data_type=data['data_type'],
-                session_config=config, request=request)
+                session_config=config, request=request,
+                folder_name=data.get('folder_name'))
         except TelemetryError as exc:
             _record_audit(request.user, 'telemetry.session.file_import_failed',
                           device.id, {
