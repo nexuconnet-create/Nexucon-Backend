@@ -139,7 +139,7 @@ class EvidenceVerificationSerializer(serializers.Serializer):
     file_sha256 = serializers.CharField(allow_null=True, allow_blank=True)
     file_size_bytes = serializers.IntegerField(allow_null=True)
     note = serializers.CharField(allow_blank=True)
-    verified_at = serializers.DateTimeField()
+    verified_at = serializers.DateTimeField(format='iso-8601')
 
 
 class AIAnalysisRecordSerializer(serializers.ModelSerializer):
