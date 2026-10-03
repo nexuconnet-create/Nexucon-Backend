@@ -303,6 +303,8 @@ class NDTReportView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
         except Exception as exc:  # noqa: BLE001
@@ -310,11 +312,46 @@ class NDTReportView(APIView):
             return Response({'detail': f'Report generation failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         try:
-            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes)
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator)
         except Exception:  # noqa: BLE001 — archive failure must not block the stream
             logger.exception('NDT report archiving failed')
         safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         return _pdf_response(pdf_bytes, f'ndt_report_{project_id}{safe_op}.pdf')
+
+
+class NDTOperatorsListView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-operators/
+    Returns the distinct field inspectors/operators who conducted scans on this project,
+    with their scan counts and latest activity date, so separate reports can be
+    viewed/generated per inspector.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from apps.digital_eye.models import PUNDITTest
+        tests = PUNDITTest.objects.filter(project=project).select_related('operator', 'created_by')
+
+        ops_map = {}
+        for t in tests:
+            lbl = (t.operator_name or '').strip()
+            if not lbl and t.operator:
+                lbl = (t.operator.get_full_name() or t.operator.username or t.operator.email).strip()
+            if not lbl and t.created_by:
+                lbl = (t.created_by.get_full_name() or t.created_by.username or t.created_by.email).strip()
+            if not lbl:
+                continue
+            if lbl not in ops_map:
+                ops_map[lbl] = {'operator': lbl, 'scan_count': 0, 'last_tested': None}
+            ops_map[lbl]['scan_count'] += 1
+            t_date = t.test_date or (t.tested_at.date() if t.tested_at else None)
+            if t_date and (not ops_map[lbl]['last_tested'] or str(t_date) > str(ops_map[lbl]['last_tested'])):
+                ops_map[lbl]['last_tested'] = str(t_date)
+        return Response(sorted(list(ops_map.values()), key=lambda x: x['scan_count'], reverse=True))
 
 
 class ArchivedReportListView(APIView):
@@ -952,6 +989,8 @@ class NDTWordExportView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
             docx_bytes = NDTWordExporter.export_docx(project, request.user, operator=operator)
         except Exception as exc:  # noqa: BLE001
@@ -1098,6 +1137,8 @@ class NDTReportPreviewView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project,
                                                              request.user,
@@ -1131,6 +1172,8 @@ class NDTReportPreviewSectionsView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
                 project, request.user, operator=operator)

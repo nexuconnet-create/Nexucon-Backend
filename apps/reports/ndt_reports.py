@@ -2308,7 +2308,7 @@ class NDTReportService:
 
     # -------------------------------------------------- statutory archive
     @classmethod
-    def archive_ndt_report(cls, project, user, pdf_bytes):
+    def archive_ndt_report(cls, project, user, pdf_bytes, operator=None):
         """
         Persist the exact generated dossier (bytes, checksum, counts, pass
         verdict) as an ArchivedReport. Identical content is never archived
@@ -2321,8 +2321,23 @@ class NDTReportService:
         from apps.digital_eye.models import PUNDITTest
         from .models import ArchivedReport
 
-        tests = list(PUNDITTest.objects.filter(project=project)
-                     .prefetch_related('readings'))
+        all_tests = list(
+            PUNDITTest.objects.filter(project=project)
+            .select_related('operator', 'created_by')
+            .prefetch_related('readings')
+        )
+        tests = all_tests
+        op_label = str(operator).strip() if (operator and str(operator).strip().lower() not in ('all', 'null', 'undefined')) else None
+        if op_label:
+            op_norm = ' '.join(op_label.lower().split())
+            matched = []
+            for t in all_tests:
+                t_lbl = (t.operator_name or (t.operator.get_full_name() or t.operator.username if t.operator else '') or (t.created_by.get_full_name() or t.created_by.username if t.created_by else '')).strip().lower()
+                if op_norm == t_lbl or op_norm in t_lbl or t_lbl in op_norm:
+                    matched.append(t)
+            if matched:
+                tests = matched
+
         # The effective reference (CMS override honoured) — the archived
         # reference and content_key must match what the report printed and
         # what the cover QR digests, never the un-overridden serial.
@@ -2368,11 +2383,15 @@ class NDTReportService:
         else:
             compliance = 'COMPLIANT'
 
+        rep_title = 'BS 1881-203 Ultrasonic Pulse Velocity (UPV) NDT Report'
+        if op_label:
+            rep_title = f'BS 1881-203 UPV NDT Report ({op_label})'
+
         archived = ArchivedReport(
             project=project,
             report_kind='ndt',
             report_reference=report_no,
-            title='BS 1881-203 Ultrasonic Pulse Velocity (UPV) NDT Report',
+            title=rep_title,
             file_size_bytes=len(pdf_bytes),
             sha256_checksum=hashlib.sha256(pdf_bytes).hexdigest(),
             content_key=content_key,
@@ -2397,48 +2416,122 @@ class NDTReportService:
         """Render the report and return (pdf_bytes, preview_bundle) from ONE
         generation pass — the bundle carries the §2.1 preview sidebar's
         section→page map and the total page count, guaranteed to describe
-        exactly the bytes returned alongside them."""
+        exactly the bytes returned alongside them.
+        Enforces STRICTLY ONE inspector per report based on scans done by them."""
         from apps.digital_eye.adapters import PUNDITAdapter
         from apps.digital_eye.models import PUNDITTest, RebarTest
 
-        tests = list(
+        all_tests = list(
             PUNDITTest.objects
             .filter(project=project)
-            .select_related('device', 'operator')
+            .select_related('device', 'operator', 'created_by')
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'test_date')
         )
 
-        selected_operator_label = None
-        if operator and str(operator).strip() and str(operator).strip().lower() not in ('all', 'null', 'undefined'):
-            op_target = str(operator).strip().lower()
-            def _test_matches_operator(t):
-                if t.operator_name and t.operator_name.strip().lower() == op_target:
-                    return True
-                if t.operator:
-                    if str(t.operator.pk).lower() == op_target:
-                        return True
-                    full = (t.operator.get_full_name() or '').strip().lower()
-                    if full == op_target:
-                        return True
-                    if t.operator.email and t.operator.email.strip().lower() == op_target:
-                        return True
-                    if t.operator.username and t.operator.username.strip().lower() == op_target:
-                        return True
+        def _get_test_operator_label(t):
+            if t.operator_name and t.operator_name.strip():
+                return t.operator_name.strip()
+            if t.operator:
+                full = (t.operator.get_full_name() or '').strip()
+                if full:
+                    return full
+                if t.operator.username:
+                    return t.operator.username.strip()
+                if t.operator.email:
+                    return t.operator.email.strip()
+            if t.created_by:
+                full = (t.created_by.get_full_name() or '').strip()
+                if full:
+                    return full
+                if t.created_by.username:
+                    return t.created_by.username.strip()
+                if t.created_by.email:
+                    return t.created_by.email.strip()
+            return None
+
+        # Gather all distinct operator labels from the tests on this project
+        available_operators = []
+        for t in all_tests:
+            lbl = _get_test_operator_label(t)
+            if lbl and lbl not in available_operators:
+                available_operators.append(lbl)
+
+        def _test_matches_operator(t, target_str):
+            if not target_str:
+                return False
+            norm_target = ' '.join(str(target_str).strip().lower().split())
+            if not norm_target:
                 return False
 
-            matched = [t for t in tests if _test_matches_operator(t)]
-            if matched:
-                tests = matched
-                for t in tests:
-                    lbl = (t.operator_name
-                           or (t.operator.get_full_name() or t.operator.email
-                               if t.operator else None))
-                    if lbl:
-                        selected_operator_label = lbl
+            lbl = _get_test_operator_label(t)
+            if lbl and ' '.join(lbl.strip().lower().split()) == norm_target:
+                return True
+
+            if t.operator_name:
+                op_norm = ' '.join(t.operator_name.strip().lower().split())
+                if op_norm == norm_target or norm_target in op_norm or op_norm in norm_target:
+                    return True
+
+            for u in (t.operator, t.created_by):
+                if not u:
+                    continue
+                if str(u.pk).lower() == norm_target:
+                    return True
+                full = ' '.join((u.get_full_name() or '').strip().lower().split())
+                if full and (full == norm_target or norm_target in full or full in norm_target):
+                    return True
+                if u.email and u.email.strip().lower() == norm_target:
+                    return True
+                if u.username and u.username.strip().lower() == norm_target:
+                    return True
+            return False
+
+        selected_operator_label = None
+        has_explicit_operator = bool(
+            operator and str(operator).strip() and str(operator).strip().lower() not in ('all', 'null', 'undefined')
+        )
+
+        if has_explicit_operator:
+            op_target = str(operator).strip()
+            # Match against available_operators first
+            for av in available_operators:
+                if ' '.join(av.lower().split()) == ' '.join(op_target.lower().split()):
+                    selected_operator_label = av
+                    break
+            if not selected_operator_label:
+                for av in available_operators:
+                    if op_target.lower() in av.lower() or av.lower() in op_target.lower():
+                        selected_operator_label = av
                         break
             if not selected_operator_label:
-                selected_operator_label = str(operator).strip()
+                selected_operator_label = op_target
+        else:
+            # One report per inspector: if user is authenticated inspector/operator, match them
+            if user and getattr(user, 'is_authenticated', False):
+                user_full = (user.get_full_name() or '').strip()
+                user_uname = (user.username or '').strip()
+                for av in available_operators:
+                    if user_full and ' '.join(av.lower().split()) == ' '.join(user_full.lower().split()):
+                        selected_operator_label = av
+                        break
+                    if user_uname and ' '.join(av.lower().split()) == ' '.join(user_uname.lower().split()):
+                        selected_operator_label = av
+                        break
+            # If still not resolved but available_operators exist, pick the first inspector
+            # (Never bundle all inspectors into one report)
+            if not selected_operator_label and available_operators:
+                selected_operator_label = available_operators[0]
+
+        if selected_operator_label:
+            matched = [t for t in all_tests if _test_matches_operator(t, selected_operator_label)]
+            if matched:
+                tests = matched
+            else:
+                lbl_matched = [t for t in all_tests if _get_test_operator_label(t) == selected_operator_label]
+                tests = lbl_matched if lbl_matched else all_tests
+        else:
+            tests = all_tests
         
         rebar_tests = list(
             RebarTest.objects
@@ -2551,14 +2644,10 @@ class NDTReportService:
         visual_notes = cls._visual_observations(tests, project=project, operator=selected_operator_label)
         if selected_operator_label:
             operators = [selected_operator_label]
+        elif available_operators:
+            operators = [available_operators[0]]
         else:
             operators = []
-            for t in tests:
-                label = (t.operator_name
-                         or (t.operator.get_full_name() or t.operator.email
-                             if t.operator else None))
-                if label and label not in operators:
-                    operators.append(label)
         from apps.digital_eye.models import BIMElementMapping
         # The real imported elements: IFC/RVT imports upsert
         # BIMElementMapping rows (the legacy BIMStructuralElement table is
