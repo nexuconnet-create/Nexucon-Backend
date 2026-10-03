@@ -223,6 +223,12 @@ class ImportExportRequestSerializer(serializers.Serializer):
         choices=['append', 'override', 'new_folder'],
         required=False, default='append'
     )
+    latitude = serializers.FloatField(
+        required=False, allow_null=True,
+        help_text='GPS latitude of the test location, decimal degrees.')
+    longitude = serializers.FloatField(
+        required=False, allow_null=True,
+        help_text='GPS longitude of the test location, decimal degrees.')
     photos = serializers.ListField(
         child=serializers.FileField(),
         required=False,

@@ -269,6 +269,11 @@ class TelemetrySessionFromFileView(APIView):
         }
         if data.get('transducer_frequency_khz'):
             config['transducer_frequency_khz'] = data['transducer_frequency_khz']
+        # GPS coordinates — only stored if the inspector supplied them.
+        if data.get('latitude') is not None:
+            config['latitude'] = data['latitude']
+        if data.get('longitude') is not None:
+            config['longitude'] = data['longitude']
 
         # Handle attached visual observation photos
         uploaded_photos = request.FILES.getlist('photos')

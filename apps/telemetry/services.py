@@ -592,6 +592,8 @@ class TelemetryService:
                 {**test_config,
                  'project': session.project_id,
                  'device': session.device_id,
+                 'latitude': config.get('latitude'),
+                 'longitude': config.get('longitude'),
                  'readings': readings},
                 session, request,
                 created_by=request.user if request else None,
@@ -625,6 +627,20 @@ class TelemetryService:
                             insp.save(update_fields=updated_fields)
                 except Exception as e:
                     logger.warning("Failed syncing observations to inspection: %s", e)
+
+            # Backfill project GPS coordinates when the project has none yet.
+            lat = config.get('latitude')
+            lon = config.get('longitude')
+            if lat is not None and lon is not None and session.project_id:
+                try:
+                    from apps.projects.models import Project
+                    proj = Project.objects.get(pk=session.project_id)
+                    if proj.latitude is None or proj.longitude is None:
+                        proj.latitude = lat
+                        proj.longitude = lon
+                        proj.save(update_fields=['latitude', 'longitude'])
+                except Exception as e:
+                    logger.warning("Failed backfilling project GPS coords: %s", e)
 
             EvidenceIngestionService.ingest_pundit_test(
                 test, ingested_by=request.user if request else None)
