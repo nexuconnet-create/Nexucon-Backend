@@ -264,7 +264,7 @@ class TelemetrySessionFromFileView(APIView):
                 'test_type', 'structural_element', 'floor', 'test_location',
                 'weather_condition', 'transducer_type',
                 'visual_observation', 'attendance_log',
-                'injection_strategy', 'folder_name'
+                'injection_strategy', 'folder_name', 'clear_folder'
             )
             if data.get(key)
         }

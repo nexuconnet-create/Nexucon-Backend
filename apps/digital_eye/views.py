@@ -619,6 +619,26 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'reasoning_log': record.reasoning_log,
         })
 
+    @action(detail=False, methods=['post'], url_path='clear-project')
+    def clear_project(self, request):
+        """
+        Delete all PUNDIT tests belonging to a project to clear the folder.
+        Body: {"project": "<project_id>"}
+        """
+        project_id = request.data.get('project') or request.data.get('project_id')
+        if not project_id:
+            return Response({'detail': 'A "project" id is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        accessible = scoped_projects(request.user)
+        project = accessible.filter(id=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found or access denied.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        deleted_count, _ = PUNDITTest.objects.filter(project=project).delete()
+        _record_audit(request.user, 'digital_eye.pundit_test.clear_project',
+                      'Project', project.id, {'deleted_count': deleted_count})
+        return Response({'status': 'cleared', 'deleted_count': deleted_count, 'project': str(project.id)})
+
     @action(detail=False, methods=['post'], url_path='analyze_project')
     def analyze_project(self, request):
         """

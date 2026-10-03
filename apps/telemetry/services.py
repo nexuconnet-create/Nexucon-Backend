@@ -557,7 +557,12 @@ class TelemetryService:
         
         # Handle injection strategy before creating new tests
         strategy = config.get('injection_strategy', 'append')
-        if strategy == 'override':
+        clear_folder = bool(config.get('clear_folder'))
+        if clear_folder:
+            from apps.digital_eye.models import PunditTest
+            if session.project_id:
+                PunditTest.objects.filter(project_id=session.project_id).delete()
+        elif strategy == 'override':
             from apps.digital_eye.models import PunditTest
             elements_to_override = set()
             for context, _ in groups:
@@ -571,6 +576,8 @@ class TelemetryService:
                     structural_element__in=elements_to_override
                 ).delete()
 
+        custom_folder_name = (config.get('folder_name') or config.get('test_location') or '').strip()
+
         for context, readings in groups:
             for reading in readings:
                 # Point labels are left to the serializer's own A, B, C... rule
@@ -580,9 +587,14 @@ class TelemetryService:
 
             test_config = {**config, **context}
             
-            if strategy == 'new_folder' and test_config.get('structural_element'):
-                test_config['structural_element'] = f"{test_config['structural_element']} (New)"
-                
+            if strategy == 'new_folder':
+                if custom_folder_name:
+                    test_config['test_location'] = custom_folder_name
+                elif test_config.get('structural_element'):
+                    test_config['structural_element'] = f"{test_config['structural_element']} (New)"
+            elif not test_config.get('test_location') and config.get('test_location'):
+                test_config['test_location'] = config.get('test_location')
+
             test_config.setdefault(
                 'structural_element',
                 f'Telemetry capture {session.session_reference}')
