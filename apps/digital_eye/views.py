@@ -2439,6 +2439,8 @@ class PunditAnalysisReviewView(APIView):
                             or review.reviewed_by.email)
             if (review and review.reviewed_by) else None,
             'reviewed_at': review.reviewed_at if review else None,
+            'inspector_verdict': review.inspector_verdict if review else '',
+            'inspector_verdict_display': review.get_inspector_verdict_display() if (review and review.inspector_verdict) else '',
             'inspector_notes': review.inspector_notes if review else '',
             'inspector_responded_by': (review.inspector_responded_by.get_full_name()
                                        or review.inspector_responded_by.email)
@@ -2471,16 +2473,17 @@ class PunditAnalysisReviewView(APIView):
 
         is_director = user_is_director(request.user)
         inspector_notes = request.data.get('inspector_notes')
+        inspector_verdict = request.data.get('inspector_verdict')
         decision = request.data.get('decision')
         notes = request.data.get('notes')
 
         if not is_director and decision is not None:
             return Response({
-                'detail': 'Director-level role required to record or alter review decisions. Field inspectors can collaborate via inspector_notes.'
+                'detail': 'Director-level role required to record or alter review decisions. Field inspectors can submit inspector review and notes.'
             }, status=status.HTTP_403_FORBIDDEN)
 
-        if not is_director and inspector_notes is None:
-            return Response({'detail': 'inspector_notes required for field inspector collaboration.'},
+        if not is_director and inspector_notes is None and inspector_verdict is None:
+            return Response({'detail': 'inspector_notes or inspector_verdict required for field inspector review.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
         review, _ = PunditAnalysisReview.objects.get_or_create(
@@ -2505,26 +2508,30 @@ class PunditAnalysisReviewView(APIView):
             review.reviewed_at = timezone.now()
             audit_payload['decision'] = decision
 
-        if inspector_notes is not None:
-            clean_insp = str(inspector_notes).strip()
-            if len(clean_insp) > 4000:
-                return Response({'detail': 'inspector_notes: maximum 4000 characters.'},
-                                status=status.HTTP_400_BAD_REQUEST)
-            review.inspector_notes = clean_insp
+        if inspector_verdict is not None or inspector_notes is not None:
+            if inspector_verdict is not None:
+                review.inspector_verdict = str(inspector_verdict).strip()
+                audit_payload['inspector_verdict'] = review.inspector_verdict
+            if inspector_notes is not None:
+                clean_insp = str(inspector_notes).strip()
+                if len(clean_insp) > 4000:
+                    return Response({'detail': 'inspector_notes: maximum 4000 characters.'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                review.inspector_notes = clean_insp
+                audit_payload['inspector_notes'] = clean_insp
             review.inspector_responded_by = request.user
             review.inspector_responded_at = timezone.now()
-            audit_payload['inspector_notes'] = clean_insp
 
         review.save()
 
-        # Update the AIAnalysisRecord to reflect this Joint Review and Inspector Collaboration
+        # Update the AIAnalysisRecord to reflect this Joint Review and Inspector Review
         rev_by = (review.reviewed_by.get_full_name() or review.reviewed_by.email) if review.reviewed_by else 'Principal Engineer'
         rev_time = review.reviewed_at.strftime('%m/%d/%Y, %I:%M:%S %p') if review.reviewed_at else ''
         insp_by = (review.inspector_responded_by.get_full_name() or review.inspector_responded_by.email) if review.inspector_responded_by else 'Field Inspector'
         insp_time = review.inspector_responded_at.strftime('%m/%d/%Y, %I:%M:%S %p') if review.inspector_responded_at else ''
 
         curr_log = analysis.reasoning_log or ''
-        curr_obs = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW') and not str(o).startswith('[INSPECTOR RESPONSE')]
+        curr_obs = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW') and not str(o).startswith('[INSPECTOR')]
 
         new_obs = []
         if review.decision:
@@ -2537,11 +2544,13 @@ class PunditAnalysisReviewView(APIView):
             if trace_step not in curr_log:
                 curr_log = f"{curr_log}\n{trace_step}".strip()
 
-        if review.inspector_notes:
-            insp_headline = f"[INSPECTOR RESPONSE] {insp_by} responded on {insp_time}: “{review.inspector_notes}”"
+        if review.inspector_notes or review.inspector_verdict:
+            v_disp = f" [{review.get_inspector_verdict_display()}]" if review.inspector_verdict else ""
+            n_disp = f": “{review.inspector_notes}”" if review.inspector_notes else ""
+            insp_headline = f"[INSPECTOR REVIEW{v_disp}] {insp_by} reviewed on {insp_time}{n_disp}"
             new_obs.append(insp_headline)
 
-            insp_trace = f"[INSPECTOR COLLABORATION] {insp_by}: {review.inspector_notes}"
+            insp_trace = f"[INSPECTOR REVIEW{v_disp}] {insp_by}: {review.inspector_notes or 'Field verification recorded'}"
             if insp_trace not in curr_log:
                 curr_log = f"{curr_log}\n{insp_trace}".strip()
 

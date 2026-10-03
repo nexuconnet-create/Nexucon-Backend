@@ -678,14 +678,24 @@ class PUNDITAdapter:
                     "Do NOT introduce or comment on unmeasured test types or excesses; "
                 )
             peer_review_instruction = ""
+            review_parts = []
             if peer_review and getattr(peer_review, 'decision', None):
                 rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
                             if peer_review.reviewed_by else 'Principal Engineer')
+                review_parts.append(
+                    f"Principal Engineer ({rev_name}) recorded decision '{peer_review.decision.upper()}' with directives: '{peer_review.notes or 'Standard corroboration'}'"
+                )
+            if peer_review and (getattr(peer_review, 'inspector_notes', None) or getattr(peer_review, 'inspector_verdict', None)):
+                insp_name = (peer_review.inspector_responded_by.get_full_name() or peer_review.inspector_responded_by.email
+                             if peer_review.inspector_responded_by else 'Field Inspector')
+                v_str = f" verdict '{peer_review.get_inspector_verdict_display()}'" if getattr(peer_review, 'inspector_verdict', None) else ""
+                n_str = f" with field observations: '{peer_review.inspector_notes}'" if peer_review.inspector_notes else ""
+                review_parts.append(f"Field Inspector ({insp_name}) submitted review{v_str}{n_str}")
+
+            if review_parts:
                 peer_review_instruction = (
-                    f"(8) JOINT COLLABORATIVE REVIEW WITH PRINCIPAL ENGINEER: The reviewing Principal Engineer ({rev_name}) "
-                    f"recorded decision '{peer_review.decision.upper()}' with directives: '{peer_review.notes or 'Standard corroboration'}'. "
-                    f"You MUST synthesize this as a JOINT REVIEW: directly integrate the Principal Engineer's directives into "
-                    f"the structural assessment and explicitly reference how their judgment aligns with the ultrasonic measurements; "
+                    f"(8) JOINT COLLABORATIVE REVIEW (ENGINEER + INSPECTOR): The following two separate reviews were submitted: {'; '.join(review_parts)}. "
+                    f"You MUST synthesize a comprehensive JOINT AI ASSESSMENT that evaluates how the physical field observations of the Inspector and the engineering directives of the Principal Engineer align with the recorded ultrasonic velocities; "
                 )
             prompt_text = (
                 "You are the Nexucon PUNDIT ultrasonic NDT analysis layer, "
@@ -748,11 +758,13 @@ class PUNDITAdapter:
                 if not any(str(o).startswith('[JOINT REVIEW') for o in observations):
                     observations.insert(0, joint_lead)
 
-            if peer_review and getattr(peer_review, 'inspector_notes', None):
+            if peer_review and (getattr(peer_review, 'inspector_notes', None) or getattr(peer_review, 'inspector_verdict', None)):
                 insp_name = (peer_review.inspector_responded_by.get_full_name() or peer_review.inspector_responded_by.email
                              if peer_review.inspector_responded_by else 'Field Inspector')
-                insp_lead = f"[INSPECTOR RESPONSE] {insp_name}: “{peer_review.inspector_notes}”"
-                if not any(str(o).startswith('[INSPECTOR RESPONSE') for o in observations):
+                v_tag = f" [{peer_review.get_inspector_verdict_display()}]" if getattr(peer_review, 'inspector_verdict', None) else ""
+                n_tag = f": “{peer_review.inspector_notes}”" if peer_review.inspector_notes else ""
+                insp_lead = f"[INSPECTOR REVIEW{v_tag}] {insp_name}{n_tag}"
+                if not any(str(o).startswith('[INSPECTOR REVIEW') for o in observations):
                     idx = 1 if any(str(o).startswith('[JOINT REVIEW') for o in observations) else 0
                     observations.insert(idx, insp_lead)
             successful_provs = data.get('successful_providers') or []
@@ -773,10 +785,11 @@ class PUNDITAdapter:
             ensemble_active = True
 
             steps.append("[ENSEMBLE] Multi-Model Consensus active: dispatched parallel inference across analytical engines.")
-            if peer_review and getattr(peer_review, 'inspector_notes', None):
+            if peer_review and (getattr(peer_review, 'inspector_notes', None) or getattr(peer_review, 'inspector_verdict', None)):
                 insp_name = (peer_review.inspector_responded_by.get_full_name() or peer_review.inspector_responded_by.email
                              if peer_review.inspector_responded_by else 'Field Inspector')
-                steps.append(f"[INSPECTOR COLLABORATION] {insp_name}: {peer_review.inspector_notes}")
+                v_step = f" [{peer_review.get_inspector_verdict_display()}]" if getattr(peer_review, 'inspector_verdict', None) else ""
+                steps.append(f"[INSPECTOR REVIEW{v_step}] {insp_name}: {peer_review.inspector_notes or 'Field readings verified'}")
             for prov in successful_provs:
                 steps.append(f"[ENGINE:ONLINE] Engine '{prov}' active and corroborated structural integrity.")
             for prov, err in (data.get('failed_providers') or {}).items():
@@ -855,6 +868,7 @@ class PUNDITAdapter:
                         'notes': getattr(peer_review, 'notes', '') or '',
                         'reviewed_by': getattr(peer_review, 'reviewed_by', None),
                         'reviewed_at': getattr(peer_review, 'reviewed_at', timezone.now()),
+                        'inspector_verdict': getattr(peer_review, 'inspector_verdict', '') or '',
                         'inspector_notes': getattr(peer_review, 'inspector_notes', '') or '',
                         'inspector_responded_by': getattr(peer_review, 'inspector_responded_by', None),
                         'inspector_responded_at': getattr(peer_review, 'inspector_responded_at', None),

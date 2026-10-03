@@ -1200,6 +1200,12 @@ class PunditAnalysisReview(models.Model):
         ('corroborated', 'Corroborated by reviewing engineer'),
         ('returned', 'Returned — revisions / further testing required'),
     ]
+    INSPECTOR_VERDICTS = [
+        ('verified', 'Verified — field readings consistent'),
+        ('requires_coring', 'Secondary coring recommended'),
+        ('coupling_rechecked', 'Transducer coupling verified on site'),
+        ('retest_recommended', 'Further testing / revision required'),
+    ]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     analysis = models.OneToOneField(
         'evidence.AIAnalysisRecord', on_delete=models.CASCADE,
@@ -1211,6 +1217,7 @@ class PunditAnalysisReview(models.Model):
                                     null=True, blank=True,
                                     related_name='pundit_analysis_reviews')
     reviewed_at = models.DateTimeField(default=timezone.now)
+    inspector_verdict = models.CharField(max_length=30, choices=INSPECTOR_VERDICTS, blank=True, default='')
     inspector_notes = models.TextField(blank=True, default='')
     inspector_responded_by = models.ForeignKey(settings.AUTH_USER_MODEL,
                                                on_delete=models.SET_NULL,

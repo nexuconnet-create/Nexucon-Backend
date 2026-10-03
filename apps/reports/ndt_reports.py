@@ -3479,10 +3479,10 @@ class NDTReportService:
                     'engineer, who reviews and signs off this report.')
                 # Principal Engineer Peer Review & Inspector Collaboration (Joint Review)
                 review = getattr(ai_record, 'pundit_review', None)
-                if review and (review.decision or review.inspector_notes):
+                if review and (review.decision or review.inspector_notes or review.inspector_verdict):
                     rev_status = ('CORROBORATED BY PRINCIPAL ENGINEER' if review.decision == 'corroborated'
                                   else ('RETURNED FOR REVISION BY PRINCIPAL ENGINEER' if review.decision == 'returned'
-                                        else 'FIELD INSPECTOR COLLABORATION'))
+                                        else 'FIELD INSPECTOR REVIEW RECORDED'))
                     builder.inner_heading(f'JOINT REVIEW: {rev_status}')
                     if review.decision:
                         rev_name = (review.reviewed_by.get_full_name() or review.reviewed_by.email
@@ -3491,11 +3491,14 @@ class NDTReportService:
                         builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}")
                         if review.notes:
                             builder.para(f"**Review Directives:** “{review.notes}”")
-                    if review.inspector_notes:
+                    if review.inspector_notes or review.inspector_verdict:
                         insp_name = (review.inspector_responded_by.get_full_name() or review.inspector_responded_by.email
                                      if review.inspector_responded_by else 'Field Inspector')
                         insp_date = review.inspector_responded_at.strftime('%d/%m/%Y, %I:%M %p') if review.inspector_responded_at else ''
-                        builder.para(f"**Field Inspector Collaboration ({insp_name}{f' - {insp_date}' if insp_date else ''}):** “{review.inspector_notes}”")
+                        v_label = f" | **Verdict:** {review.get_inspector_verdict_display()}" if review.inspector_verdict else ""
+                        builder.para(f"**Field Inspector Review:** {insp_name} {f'({insp_date})' if insp_date else ''}{v_label}")
+                        if review.inspector_notes:
+                            builder.para(f"**Field Observations:** “{review.inspector_notes}”")
                     builder.ln_gap(2)
 
                 for obs in ai_record.observations:
