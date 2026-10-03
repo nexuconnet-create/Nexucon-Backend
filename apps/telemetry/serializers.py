@@ -223,6 +223,11 @@ class ImportExportRequestSerializer(serializers.Serializer):
         choices=['append', 'override', 'new_folder'],
         required=False, default='append'
     )
+    photos = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        allow_empty=True,
+    )
 
 
 class DeviceTokenSerializer(serializers.Serializer):

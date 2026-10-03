@@ -270,6 +270,37 @@ class TelemetrySessionFromFileView(APIView):
         if data.get('transducer_frequency_khz'):
             config['transducer_frequency_khz'] = data['transducer_frequency_khz']
 
+        # Handle attached visual observation photos
+        uploaded_photos = request.FILES.getlist('photos')
+        saved_photo_ids = []
+        saved_photo_urls = []
+        if uploaded_photos:
+            from apps.digital_eye.models import SensorDataFile
+            import hashlib
+            for p in uploaded_photos:
+                digest = hashlib.sha256()
+                for chunk in p.chunks():
+                    digest.update(chunk)
+                sdf = SensorDataFile.objects.create(
+                    file=p,
+                    file_type='photo',
+                    file_name=getattr(p, 'name', 'photo.jpg')[:255],
+                    file_size_bytes=getattr(p, 'size', 0),
+                    sha256_checksum=digest.hexdigest(),
+                    description=f"Visual observation photo for {device.name}",
+                    project=project,
+                    uploaded_by=request.user if (request.user and request.user.is_authenticated) else None,
+                )
+                saved_photo_ids.append(str(sdf.id))
+                try:
+                    saved_photo_urls.append(sdf.file.url)
+                except Exception:
+                    pass
+
+        if saved_photo_urls:
+            config['photos'] = saved_photo_urls
+            config['photo_ids'] = saved_photo_ids
+
         try:
             session, stats = SessionFromFileService.create(
                 uploaded_file=data['file'], device=device, project=project,

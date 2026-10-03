@@ -598,6 +598,34 @@ class TelemetryService:
                 operator=request.user if request else None,
                 operator_name=session.operator_name,
             )
+            # Attach any photos stored in session_config
+            photo_ids = config.get('photo_ids') or []
+            if photo_ids:
+                from apps.digital_eye.models import SensorDataFile
+                test.files.add(*SensorDataFile.objects.filter(id__in=photo_ids))
+
+            # Sync observations and photos with latest inspection on project
+            if session.project_id:
+                try:
+                    from apps.inspections.models import Inspection
+                    insp = Inspection.objects.filter(project_id=session.project_id).order_by('-created_at').first()
+                    if insp:
+                        updated_fields = []
+                        if config.get('visual_observation') and config['visual_observation'] not in (insp.visual_site_observations or ''):
+                            insp.visual_site_observations = ((insp.visual_site_observations + '\n') if insp.visual_site_observations else '') + config['visual_observation']
+                            updated_fields.append('visual_site_observations')
+                        if config.get('photos'):
+                            curr_photos = list(insp.visual_site_photos or [])
+                            for p_url in config['photos']:
+                                if p_url not in curr_photos:
+                                    curr_photos.append(p_url)
+                            insp.visual_site_photos = curr_photos
+                            updated_fields.append('visual_site_photos')
+                        if updated_fields:
+                            insp.save(update_fields=updated_fields)
+                except Exception as e:
+                    logger.warning("Failed syncing observations to inspection: %s", e)
+
             EvidenceIngestionService.ingest_pundit_test(
                 test, ingested_by=request.user if request else None)
 

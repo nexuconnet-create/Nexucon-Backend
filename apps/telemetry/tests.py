@@ -1409,6 +1409,7 @@ class FileImportTestBase(APITestCase):
                     'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
             },
             MEDIA_ROOT=media_root,
+            SECURE_SSL_REDIRECT=False,
         )
         self._storage_override.enable()
         self.addCleanup(self._storage_override.disable)
@@ -1832,6 +1833,24 @@ class FileImportParsingTests(FileImportTestBase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['packet_count'], 2)
+
+    def test_import_with_attached_photos_and_observations(self):
+        import json as _json
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        photo = SimpleUploadedFile("site_crack.jpg", b"\xff\xd8\xff\xe0fake_jpeg", content_type="image/jpeg")
+        content = _json.dumps([
+            {'STRUCTURAL ELEMENT': 'Column C5', 'TEST TYPE': 'Pulse Velocity',
+             'POINT': 'A', 'PATH LENGTH L (MM)': 300, 'TRANSIT TIME T (US)': 65.2},
+        ]).encode('utf-8')
+        response = self._upload(
+            content,
+            name='export.json',
+            visual_observation='Slight hairline crack near corner',
+            photos=[photo],
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['session_config']['visual_observation'], 'Slight hairline crack near corner')
+        self.assertEqual(len(response.data['session_config']['photos']), 1)
 
     def test_raw_pundit_pl_link_xlsx_export_is_accepted(self):
         """A raw Proceq PL-Link .xlsx export with preamble rows is parsed directly."""
