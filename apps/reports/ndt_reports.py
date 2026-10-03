@@ -3225,15 +3225,13 @@ class NDTReportService:
                     for e in floor_elements:
                         if e['member_type'] not in member_order:
                             member_order.append(e['member_type'])
+
+                    # Collect all rows for this floor (all members) before rendering table
+                    all_floor_rows = []
                     for member in member_order:
                         group = [e for e in floor_elements
                                  if e['member_type'] == member]
-                        plural = member if member.endswith('S') else member + 'S'
-                        builder.subheading(
-                            f'{floor.upper()} {plural}'
-                            + (f' OF {project.name.upper()}'
-                               if project.name else ''))
-                        table_rows = []
+
                         for e in group:
                             rows = e['rows']
                             mid = len(rows) // 2 if len(rows) > 1 else 0
@@ -3256,7 +3254,7 @@ class NDTReportService:
                                            f"{e['spread_km_s'] * 1000:.0f} M/S "
                                            f"(±{e['spread_pct'] / 2:.1f}%)")
                             for i, r in enumerate(rows):
-                                table_rows.append([
+                                all_floor_rows.append([
                                     element_cell if i == 0 else '',
                                     cls._fp(r['path_mm']),
                                     cls._f1(r['transit_us']),
@@ -3265,33 +3263,43 @@ class NDTReportService:
                                     cls._f1(e['mean_ecs']) if i == mid else '',
                                     remark if i == mid else '',
                                 ])
-                        builder.ruled_table(
-                            ['Structural Element', 'PATH LENGTH',
-                             'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
-                             'E.C.S',
-                             'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
-                             'REMARK'],
-                            table_rows,
-                            # REMARK now carries 'UNVERIFIED' as well as
-                            # 'GOOD' / 'POOR', and at its old width the
-                            # renderer broke that word mid-character
-                            # ("UNVERIFIE" / "D").
-                            #
-                            # The widths total 159 mm against 159.2 mm of
-                            # text area (A4 minus the 25.4 mm margins
-                            # `_setup` sets). The old vector totalled 164,
-                            # which `ruled_table` silently scaled down by
-                            # ~3% to fit — so every column was narrower
-                            # than its stated figure, and the room the
-                            # remark needed was being paid for by every
-                            # column including the ones whose headers were
-                            # already at their wrap point. Fitting the
-                            # budget unscaled gives REMARK its width back
-                            # without pushing any header over.
-                            [34, 16, 18, 26, 11, 29, 25],
-                            ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
-                        )
-                        builder.ln_gap(2)
+
+                    # Render heading and table once per floor with all members
+                    if member_order:
+                        member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
+                    else:
+                        member_label = 'STRUCTURAL ELEMENTS'
+                    builder.subheading(
+                        f'{floor.upper()} {member_label}'
+                        + (f' OF {project.name.upper()}'
+                           if project.name else ''))
+                    builder.ruled_table(
+                        ['Structural Element', 'PATH LENGTH',
+                         'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
+                         'E.C.S',
+                         'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
+                         'REMARK'],
+                        all_floor_rows,
+                        # REMARK now carries 'UNVERIFIED' as well as
+                        # 'GOOD' / 'POOR', and at its old width the
+                        # renderer broke that word mid-character
+                        # ("UNVERIFIE" / "D").
+                        #
+                        # The widths total 159 mm against 159.2 mm of
+                        # text area (A4 minus the 25.4 mm margins
+                        # `_setup` sets). The old vector totalled 164,
+                        # which `ruled_table` silently scaled down by
+                        # ~3% to fit — so every column was narrower
+                        # than its stated figure, and the room the
+                        # remark needed was being paid for by every
+                        # column including the ones whose headers were
+                        # already at their wrap point. Fitting the
+                        # budget unscaled gives REMARK its width back
+                        # without pushing any header over.
+                        [34, 16, 18, 26, 11, 29, 25],
+                        ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
+                    )
+                    builder.ln_gap(2)
 
                 # ---- Summary of Test Results: GOOD / POOR per member & floor
                 builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
