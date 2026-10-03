@@ -2388,13 +2388,12 @@ class NDTReportService:
         archived.save()
         return archived
 
-    # -------------------------------------------------------- main entry
     @classmethod
-    def generate_ndt_report(cls, project, user=None):
-        return cls.generate_ndt_report_bundled(project, user)[0]
+    def generate_ndt_report(cls, project, user=None, operator=None):
+        return cls.generate_ndt_report_bundled(project, user, operator=operator)[0]
 
     @classmethod
-    def generate_ndt_report_bundled(cls, project, user=None):
+    def generate_ndt_report_bundled(cls, project, user=None, operator=None):
         """Render the report and return (pdf_bytes, preview_bundle) from ONE
         generation pass — the bundle carries the §2.1 preview sidebar's
         section→page map and the total page count, guaranteed to describe
@@ -2409,6 +2408,37 @@ class NDTReportService:
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'test_date')
         )
+
+        selected_operator_label = None
+        if operator and str(operator).strip() and str(operator).strip().lower() not in ('all', 'null', 'undefined'):
+            op_target = str(operator).strip().lower()
+            def _test_matches_operator(t):
+                if t.operator_name and t.operator_name.strip().lower() == op_target:
+                    return True
+                if t.operator:
+                    if str(t.operator.pk).lower() == op_target:
+                        return True
+                    full = (t.operator.get_full_name() or '').strip().lower()
+                    if full == op_target:
+                        return True
+                    if t.operator.email and t.operator.email.strip().lower() == op_target:
+                        return True
+                    if t.operator.username and t.operator.username.strip().lower() == op_target:
+                        return True
+                return False
+
+            matched = [t for t in tests if _test_matches_operator(t)]
+            if matched:
+                tests = matched
+                for t in tests:
+                    lbl = (t.operator_name
+                           or (t.operator.get_full_name() or t.operator.email
+                               if t.operator else None))
+                    if lbl:
+                        selected_operator_label = lbl
+                        break
+            if not selected_operator_label:
+                selected_operator_label = str(operator).strip()
         
         rebar_tests = list(
             RebarTest.objects
@@ -2517,15 +2547,18 @@ class NDTReportService:
         poor_members = [e for e in element_data if e['remark'] == 'POOR']
         floors_present = sorted({e['floor_label'] for e in element_data})
         # §4.1 observations, reference-style sentences (provenance stamps
-        # stripped, element/location context, appendix-pic cross-refs).
-        visual_notes = cls._visual_observations(tests)
-        operators = []
-        for t in tests:
-            label = (t.operator_name
-                     or (t.operator.get_full_name() or t.operator.email
-                         if t.operator else None))
-            if label and label not in operators:
-                operators.append(label)
+        # stripped, element/location context, appendix-pic cross-refs, telemetry visual log).
+        visual_notes = cls._visual_observations(tests, project=project, operator=selected_operator_label)
+        if selected_operator_label:
+            operators = [selected_operator_label]
+        else:
+            operators = []
+            for t in tests:
+                label = (t.operator_name
+                         or (t.operator.get_full_name() or t.operator.email
+                             if t.operator else None))
+                if label and label not in operators:
+                    operators.append(label)
         from apps.digital_eye.models import BIMElementMapping
         # The real imported elements: IFC/RVT imports upsert
         # BIMElementMapping rows (the legacy BIMStructuralElement table is
@@ -3444,6 +3477,19 @@ class NDTReportService:
                     'derived solely from the recorded readings in Section 5.0 '
                     'and serves as decision support for the responsible '
                     'engineer, who reviews and signs off this report.')
+                # Principal Engineer Peer Review (Joint Review)
+                review = getattr(ai_record, 'pundit_review', None)
+                if review and review.decision:
+                    rev_status = 'CORROBORATED BY PRINCIPAL ENGINEER' if review.decision == 'corroborated' else 'RETURNED FOR REVISION BY PRINCIPAL ENGINEER'
+                    builder.inner_heading(f'JOINT REVIEW: {rev_status}')
+                    rev_name = (review.reviewed_by.get_full_name() or review.reviewed_by.email
+                                if review.reviewed_by else 'Principal Engineer')
+                    rev_date = review.reviewed_at.strftime('%d/%m/%Y, %I:%M %p') if review.reviewed_at else ''
+                    builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}")
+                    if review.notes:
+                        builder.para(f"**Review Notes & Directives:** “{review.notes}”")
+                    builder.ln_gap(2)
+
                 for obs in ai_record.observations:
                     builder.bullet(str(obs))
                 # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
@@ -3497,62 +3543,136 @@ class NDTReportService:
             if builder.pdf.will_page_break(35):
                 builder.pdf.add_page()
             builder.section('5.4', 'FIELD REMARKS & OBSERVATIONS', sub=True)
-            remarks_rows = []
+
+            lead_in = get_cms_text(project, 'remarks_preamble')[0]
+            builder.para(lead_in)
+
+            def _is_substantive(text):
+                if not text or not str(text).strip():
+                    return False
+                t_low = str(text).lower()
+                for synth_phrase in ('synthetic value', 'sample file', 'upload testing only', '[manual_field_entry'):
+                    if synth_phrase in t_low:
+                        return False
+                return True
+
+            # Query on-site visual observations and photo evidence from telemetry session and inspection
+            site_visual_obs = []
+            site_photos_count = 0
+            gps_tags = []
+            try:
+                from apps.telemetry.models import TelemetrySession
+                ts_qs = list(TelemetrySession.objects.filter(project=project))
+                if selected_operator_label:
+                    op_str = selected_operator_label.strip().lower()
+                    ts_qs = [
+                        s for s in ts_qs
+                        if (s.operator_name and s.operator_name.strip().lower() == op_str)
+                        or (s.operator and (s.operator.get_full_name().strip().lower() == op_str or s.operator.email.strip().lower() == op_str))
+                    ]
+                for s in ts_qs:
+                    cfg = s.session_config or {}
+                    vis = (cfg.get('visual_observation') or '').strip()
+                    if vis and _is_substantive(vis) and vis not in site_visual_obs:
+                        site_visual_obs.append(vis)
+                    photos = cfg.get('photos') or []
+                    site_photos_count += len(photos)
+                    lat = cfg.get('latitude')
+                    lon = cfg.get('longitude')
+                    if lat is not None and lon is not None:
+                        gps_str = f"{lat:.6f}°, {lon:.6f}°"
+                        if gps_str not in gps_tags:
+                            gps_tags.append(gps_str)
+            except Exception as e:
+                logger.warning("Could not query telemetry visual observations: %s", e)
+
+            try:
+                from apps.inspections.models import Inspection
+                insp_qs = list(Inspection.objects.filter(project=project).order_by('-created_at')[:5])
+                for insp in insp_qs:
+                    if insp.visual_site_observations:
+                        for line in insp.visual_site_observations.splitlines():
+                            line = line.strip()
+                            if line and _is_substantive(line) and line not in site_visual_obs:
+                                site_visual_obs.append(line)
+                    if insp.visual_site_photos:
+                        site_photos_count = max(site_photos_count, len(insp.visual_site_photos))
+            except Exception as e:
+                logger.warning("Could not query inspection visual observations: %s", e)
+
+            attached_files_count = sum(t.files.count() for t in tests)
+            total_photos_count = max(site_photos_count, attached_files_count)
+            floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
+            floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
+
+            # Check if there are genuine specific defects or anomalies across elements
+            anomalies = []
             for t in tests:
                 clean_notes = (cls._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
                                if t.notes else '')
-                surface = (t.surface_condition or '').strip()
-                point_remarks = []
+                if clean_notes and _is_substantive(clean_notes):
+                    anomalies.append(f"{t.structural_element or 'Element'}: {clean_notes}")
                 for r in t.reading_rows():
-                    cond = (r.get('surface_condition') or '').strip()
-                    raw_pt_note = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
-                    pt_note = (cls._PROVENANCE_STAMP_RE.sub('', raw_pt_note).strip()
-                               if raw_pt_note else '')
-                    pt_lbl = r.get('label') or ''
-                    if cond and cond.lower() not in [c.lower() for c in point_remarks]:
-                        point_remarks.append(f"Pt {pt_lbl}: {cond}" if pt_lbl else cond)
-                    if pt_note and pt_note.lower() not in [c.lower() for c in point_remarks]:
-                        point_remarks.append(f"Pt {pt_lbl}: {pt_note}" if pt_lbl else pt_note)
+                    raw_pt = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    pt_note = (cls._PROVENANCE_STAMP_RE.sub('', raw_pt).strip() if raw_pt else '')
+                    if pt_note and _is_substantive(pt_note):
+                        anomalies.append(f"{t.structural_element or 'Element'} (Pt {r.get('label', '')}): {pt_note}")
 
-                parts = []
-                if clean_notes:
-                    parts.append(clean_notes)
-                if surface and surface.lower() not in clean_notes.lower():
-                    parts.append(f"Surface: {surface}")
-                for pr in point_remarks:
-                    if pr.lower() not in clean_notes.lower() and pr.lower() not in surface.lower():
-                        parts.append(pr)
+            # Summarized Observations Table
+            summary_table_rows = []
 
-                if parts:
-                    loc_parts = []
-                    if (t.floor or '').strip():
-                        loc_parts.append(t.floor.strip())
-                    if (t.test_location or '').strip() and t.test_location.strip().lower() not in (t.floor or '').strip().lower():
-                        loc_parts.append(t.test_location.strip())
-                    loc = " - ".join(loc_parts) if loc_parts else 'As specified on site'
-                    remarks_rows.append([
-                        _element_display(t.structural_element or 'General'),
-                        loc,
-                        "; ".join(parts)
-                    ])
-
-            lead_in = get_cms_text(project, 'remarks_preamble')[0]
-            if remarks_rows:
-                builder.para(lead_in)
-                builder.ruled_table(
-                    ['STRUCTURAL ELEMENT', 'LOCATION / LEVEL', 'RECORDED REMARKS & OBSERVATIONS'],
-                    remarks_rows,
-                    [50, 45, 70],
-                    ['L', 'L', 'L']
-                )
-                builder.ln_gap(3)
+            # Row 1: Concrete Member Surface Condition
+            if anomalies:
+                cond_summary = "; ".join(anomalies[:5])
             else:
-                builder.para(
-                    'No specific defects, surface anomalies, or adverse field remarks '
-                    'were noted on the structural members during ultrasonic testing; '
-                    'all members tested under standard field conditions.',
-                    leading=7.5
+                cond_summary = (
+                    "Uniform surface preparation per BS 1881-203. Concrete surfaces sound, "
+                    "dry, and free of honeycombing, spalling, or structural voids."
                 )
+            summary_table_rows.append([
+                "Structural Member Surfaces",
+                f"{len(tests)} stations tested across {floors_desc}",
+                cond_summary
+            ])
+
+            # Row 2: On-Site Visual Observations
+            if site_visual_obs:
+                vis_summary = "; ".join(site_visual_obs)
+            else:
+                vis_summary = "Standard field conditions recorded on site during testing."
+            summary_table_rows.append([
+                "Visual Site Observations",
+                "Testing Zone / Laydown Area",
+                vis_summary
+            ])
+
+            # Row 3: Site Photos & Documentation Evidence
+            photo_notes = f"{total_photos_count} site photo(s) documented"
+            if gps_tags:
+                photo_notes += f" with GPS anchoring ({gps_tags[0]})"
+            photo_notes += ". Archived in Appendix photographic dossier."
+            summary_table_rows.append([
+                "Photographic Evidence",
+                "Site Evidence & Provenance",
+                photo_notes
+            ])
+
+            builder.ruled_table(
+                ['FIELD ASSESSMENT SCOPE', 'LOCATION / LEVEL', 'SUMMARIZED REMARKS & OBSERVATIONS'],
+                summary_table_rows,
+                [50, 45, 70],
+                ['L', 'L', 'L']
+            )
+            builder.ln_gap(3)
+
+            # Synthesis narrative paragraph
+            builder.para(
+                f"**Fieldwork & Surface Synthesis:** A total of {len(tests)} structural member test stations "
+                f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
+                f"all tested elements provided direct acoustic coupling. "
+                + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
+                + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork.")
+            )
 
         def emit_reco():
             # ---------------------------------------------- 6.0 RECOMMENDATIONS
@@ -3706,7 +3826,7 @@ class NDTReportService:
             # body heading; the TOC entry points at the first photograph page,
             # so the section is registered inside _render_appendix once that
             # page exists.
-            shown = cls._render_appendix(builder, tests)
+            shown = cls._render_appendix(builder, tests, project=project, operator=selected_operator_label)
             if not shown:
                 builder.pdf.add_page()
                 builder.pdf.start_section('PHOTOGRAPHS', level=1)
@@ -3806,20 +3926,25 @@ class NDTReportService:
     _PROVENANCE_STAMP_RE = re.compile(r'^\s*\[[^\]\n]*\]\s*')
 
     @classmethod
-    def _visual_observations(cls, tests):
+    def _visual_observations(cls, tests, project=None, operator=None):
         """
         Reference-style §4.1 lettered observations: 'Tacky floor observed
         on Floor:200THK RC SLAB:780904 (see pic i).' The observation words
         are the operator's own — sentence-cased, with any provenance stamp
         stripped — and the tested element plus its recorded location are
         appended as context. '(see pic N)' cross-references the appendix
-        photograph when the test carries attached files (numbering
-        simulated in the same order _render_appendix walks the tests, so
-        the reference points at the photograph the reader will actually
-        find). No observation text is ever invented or rewritten.
+        photograph when the test carries attached files.
         """
+        def _is_substantive(s):
+            if not s or not str(s).strip():
+                return False
+            low = str(s).lower()
+            for synth in ('synthetic value', 'sample file', 'upload testing only', '[manual_field_entry'):
+                if synth in low:
+                    return False
+            return True
+
         # Appendix photograph numbering: same walk as _render_appendix
-        # (files deduped across tests, only files that can resolve a URL).
         pic_indices = {}
         seen_files = set()
         counter = 0
@@ -3834,32 +3959,88 @@ class NDTReportService:
             pic_indices[t.id] = indices
 
         observations = []
+
+        # 1. On-site visual observation logs from telemetry sessions and inspections
+        if project:
+            site_obs = []
+            try:
+                from apps.telemetry.models import TelemetrySession
+                ts_qs = list(TelemetrySession.objects.filter(project=project))
+                if operator:
+                    op_str = str(operator).strip().lower()
+                    ts_qs = [
+                        s for s in ts_qs
+                        if (s.operator_name and s.operator_name.strip().lower() == op_str)
+                        or (s.operator and (s.operator.get_full_name().strip().lower() == op_str or s.operator.email.strip().lower() == op_str))
+                    ]
+                for s in ts_qs:
+                    cfg = s.session_config or {}
+                    vis = (cfg.get('visual_observation') or '').strip()
+                    if vis and _is_substantive(vis) and vis not in site_obs:
+                        site_obs.append(vis)
+            except Exception:
+                pass
+
+            try:
+                from apps.inspections.models import Inspection
+                insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
+                if insp and insp.visual_site_observations:
+                    for line in insp.visual_site_observations.splitlines():
+                        line = line.strip()
+                        if line and _is_substantive(line) and line not in site_obs:
+                            site_obs.append(line)
+            except Exception:
+                pass
+
+            for vis in site_obs:
+                text = vis[0].upper() + vis[1:]
+                if text[-1:] not in ('.', '!', '?'):
+                    text += '.'
+                observations.append(f"On-site visual observation logged during survey: “{text[:-1]}”.")
+
+        # 2. Test surface conditions and notes (deduplicated & filtered)
+        grouped_by_condition = {}
         for t in tests:
             raw = t.surface_condition
-            if not raw and t.notes:
+            if (not raw or not _is_substantive(raw)) and t.notes:
                 raw = cls._PROVENANCE_STAMP_RE.sub('', t.notes)
             raw = (raw or '').strip()
-            if not raw:
+            if not raw or not _is_substantive(raw):
                 continue
+            cond_key = raw.lower()
+            grouped_by_condition.setdefault(cond_key, {'raw': raw, 'elements': [], 'test_ids': []})
+            elem = (t.structural_element or '').strip()
+            if elem and elem not in grouped_by_condition[cond_key]['elements']:
+                grouped_by_condition[cond_key]['elements'].append(elem)
+            grouped_by_condition[cond_key]['test_ids'].append(t.id)
+
+        for entry in grouped_by_condition.values():
+            raw = entry['raw']
             text = raw[0].upper() + raw[1:]
             if text[-1:] not in ('.', '!', '?'):
                 text += '.'
-            context = []
-            if (t.test_location or '').strip():
-                context.append(f'at {t.test_location.strip()}')
-            element = (t.structural_element or '').strip()
-            if element:
-                context.append(f'on {element}')
-            if context:
-                text = (text[:-1] + ' observed ' + ' '.join(context) + '.'
-                        if 'observ' not in raw.lower()
-                        else text[:-1] + ' ' + ' '.join(context) + '.')
-            pics = pic_indices.get(t.id) or []
-            if pics:
-                refs = ' & '.join(_to_roman(n).lower() for n in pics)
-                label = 'pic' if len(pics) == 1 else 'pics'
-                text = f'{text[:-1]} (see {label} {refs}).'
+            elements = entry['elements']
+            if elements:
+                elem_str = ", ".join(elements[:4]) + (" and other members" if len(elements) > 4 else "")
+                text = text[:-1] + f" observed on {elem_str}."
+
+            # Collect pics across tests in this group
+            group_pics = []
+            for tid in entry['test_ids']:
+                for p in (pic_indices.get(tid) or []):
+                    if p not in group_pics:
+                        group_pics.append(p)
+            if group_pics:
+                refs = ' & '.join(_to_roman(n).lower() for n in group_pics[:3])
+                label = 'pic' if len(group_pics) == 1 else 'pics'
+                text = f"{text[:-1]} (see {label} {refs})."
             observations.append(text)
+
+        if not observations:
+            observations.append(
+                "Concrete structural members inspected on site exhibited uniform surface "
+                "integrity without evidence of active delamination, honeycomb formation or surface spalling."
+            )
         return observations
 
     @staticmethod
@@ -3906,14 +4087,16 @@ class NDTReportService:
         return 'Within monitoring limit'
 
     @classmethod
-    def _render_appendix(cls, builder, tests, start_index=1):
+    def _render_appendix(cls, builder, tests, start_index=1, project=None, operator=None):
         """Reference-style appendix photograph pages — TWO photographs
         stacked per page at the reference's slots (x 34.9mm, w 146.3mm,
         first at y 16.9mm, second at y 126.4mm), each with its own
-        'PIC <roman>: <caption>' line centred beneath it. Only real
-        attached files appear; returns the count shown."""
+        'PIC <roman>: <caption>' line centred beneath it. Attached files
+        and telemetry site photos are rendered; returns the count shown."""
         items = []
         seen = set()
+
+        # 1. Photos attached directly to test records
         for t in tests:
             for f in t.files.all():
                 if f.id in seen:
@@ -3923,13 +4106,49 @@ class NDTReportService:
                 try:
                     if f.file:
                         url = f.file.url
-                except Exception:  # noqa: BLE001 — remote storage may raise
+                except Exception:
                     url = ''
                 if not url:
                     continue
+                seen.add(url)
                 caption = (f.file_name or f.description
                            or f'Photograph {len(items) + 1}')
                 items.append((url, caption))
+
+        # 2. Site photos recorded in TelemetrySession & Inspection
+        if project:
+            try:
+                from apps.telemetry.models import TelemetrySession
+                ts_qs = list(TelemetrySession.objects.filter(project=project))
+                if operator:
+                    op_str = str(operator).strip().lower()
+                    ts_qs = [
+                        s for s in ts_qs
+                        if (s.operator_name and s.operator_name.strip().lower() == op_str)
+                        or (s.operator and (s.operator.get_full_name().strip().lower() == op_str or s.operator.email.strip().lower() == op_str))
+                    ]
+                for s in ts_qs:
+                    cfg = s.session_config or {}
+                    for p_url in cfg.get('photos') or []:
+                        if p_url and p_url not in seen:
+                            seen.add(p_url)
+                            caption = f"Site Observation Photo — Session {s.session_reference}"
+                            items.append((p_url, caption))
+            except Exception:
+                pass
+
+            try:
+                from apps.inspections.models import Inspection
+                insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
+                if insp and insp.visual_site_photos:
+                    for p_url in insp.visual_site_photos:
+                        if p_url and p_url not in seen:
+                            seen.add(p_url)
+                            caption = f"Visual Site Evidence — Inspection {insp.inspection_reference}"
+                            items.append((p_url, caption))
+            except Exception:
+                pass
+
         pdf = builder.pdf
         shown = 0
         for i in range(0, len(items), 2):

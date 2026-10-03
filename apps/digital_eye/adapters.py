@@ -471,7 +471,7 @@ class PUNDITAdapter:
 
     # ------------------------------------------------ project-level narrative
     @classmethod
-    def analyze_project(cls, project, requested_by=None):
+    def analyze_project(cls, project, requested_by=None, peer_review=None):
         """
         One project-level PUNDIT analysis (review meeting D1): aggregates the
         per-element verdicts of every PUNDITTest on the project, writes the
@@ -487,9 +487,24 @@ class PUNDITAdapter:
         from apps.evidence.models import AIAnalysisRecord
         from apps.digital_eye.models import PUNDITTest  # noqa: F401 — imported late to avoid cycles
 
+        if peer_review is None:
+            prev_record = (AIAnalysisRecord.objects
+                           .filter(project=project, analysis_type='pundit')
+                           .order_by('-created_at').first())
+            if prev_record and hasattr(prev_record, 'pundit_review'):
+                peer_review = prev_record.pundit_review
+
         tests = list(PUNDITTest.objects.filter(project=project))
 
         steps = [f"Project PUNDIT roll-up over {len(tests)} recorded element(s)."]
+        if peer_review and getattr(peer_review, 'decision', None):
+            rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
+                        if peer_review.reviewed_by else 'Principal Engineer')
+            steps.append(
+                f"[JOINT REVIEW] Incorporating Principal Engineer Peer Review ({peer_review.decision.upper()}) "
+                f"by {rev_name}: '{peer_review.notes or 'Standard review decision'}'"
+            )
+
         element_summaries = []
         worst = ('info', 0.0)
         rank = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
@@ -633,6 +648,16 @@ class PUNDITAdapter:
         if weather:
             fact_pack['weather_conditions'] = weather
 
+        if peer_review and getattr(peer_review, 'decision', None):
+            rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
+                        if peer_review.reviewed_by else 'Principal Engineer')
+            fact_pack['principal_engineer_peer_review'] = {
+                'decision': peer_review.decision,
+                'reviewed_by': rev_name,
+                'review_notes': peer_review.notes or '',
+                'reviewed_at': peer_review.reviewed_at.isoformat() if peer_review.reviewed_at else None,
+            }
+
         observations = deterministic_observations
         provider, model_version = 'deterministic', 'BS 1881-203 / ASTM C597 v1'
         ensemble_active = False
@@ -651,6 +676,16 @@ class PUNDITAdapter:
                     "cracks or crack attenuation, and do NOT include any crack-depth findings, headings, "
                     "or statements. Analyse ONLY the test types and parameters actually present in the data below. "
                     "Do NOT introduce or comment on unmeasured test types or excesses; "
+                )
+            peer_review_instruction = ""
+            if peer_review and getattr(peer_review, 'decision', None):
+                rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
+                            if peer_review.reviewed_by else 'Principal Engineer')
+                peer_review_instruction = (
+                    f"(8) JOINT COLLABORATIVE REVIEW WITH PRINCIPAL ENGINEER: The reviewing Principal Engineer ({rev_name}) "
+                    f"recorded decision '{peer_review.decision.upper()}' with directives: '{peer_review.notes or 'Standard corroboration'}'. "
+                    f"You MUST synthesize this as a JOINT REVIEW: directly integrate the Principal Engineer's directives into "
+                    f"the structural assessment and explicitly reference how their judgment aligns with the ultrasonic measurements; "
                 )
             prompt_text = (
                 "You are the Nexucon PUNDIT ultrasonic NDT analysis layer, "
@@ -681,7 +716,7 @@ class PUNDITAdapter:
                 "unit to be re-checked. Do NOT describe an unverified "
                 "element as poor-quality or defective concrete, do not give "
                 "it a severity, and do not include it in any strength or "
-                "quality verdict. Return JSON: "
+                f"quality verdict. {peer_review_instruction}Return JSON: "
                 '{"observations": ["..."]}\n\n'
                 f"Measured data: {fact_pack}"
             )
@@ -704,6 +739,14 @@ class PUNDITAdapter:
                 ]
             else:
                 observations = [str(o) for o in llm_obs]
+
+            if peer_review and getattr(peer_review, 'decision', None):
+                rev_label = "CORROBORATED" if peer_review.decision == 'corroborated' else "RETURNED FOR REVISION"
+                rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
+                            if peer_review.reviewed_by else 'Principal Engineer')
+                joint_lead = f"[JOINT REVIEW — {rev_label}] Principal Engineer {rev_name}" + (f": “{peer_review.notes}”" if peer_review.notes else "")
+                if not any(str(o).startswith('[JOINT REVIEW') for o in observations):
+                    observations.insert(0, joint_lead)
             successful_provs = data.get('successful_providers') or []
             if 'deterministic_acoustics' not in successful_provs:
                 successful_provs.append('deterministic_acoustics')
@@ -785,11 +828,24 @@ class PUNDITAdapter:
             correlations=cls._confidence_metrics(project, element_summaries),
             recommendations=cls._project_recommendations(element_summaries),
             reasoning_log="\n".join(steps),
-            requires_human_review=True,
+            requires_human_review=(peer_review is None or getattr(peer_review, 'decision', '') != 'corroborated'),
             confidence=confidence,
             model_provider=safe_provider,
             model_version=safe_version,
         )
+        if peer_review and getattr(peer_review, 'decision', None):
+            try:
+                from .models import PunditAnalysisReview
+                PunditAnalysisReview.objects.update_or_create(
+                    analysis=record,
+                    defaults={
+                        'decision': peer_review.decision,
+                        'notes': peer_review.notes or '',
+                        'reviewed_by': peer_review.reviewed_by,
+                    }
+                )
+            except Exception as e:
+                logger.warning("Could not link peer review to new analysis record: %s", e)
         return record
 
     @classmethod

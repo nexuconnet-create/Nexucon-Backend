@@ -2472,6 +2472,31 @@ class PunditAnalysisReviewView(APIView):
             analysis=analysis,
             defaults={'decision': decision, 'notes': notes,
                       'reviewed_by': request.user})
+
+        # Update the AIAnalysisRecord to reflect this Joint Review
+        rev_label = "CORROBORATED" if review.decision == 'corroborated' else "RETURNED FOR REVISION"
+        rev_by = (request.user.get_full_name() or request.user.email)
+        rev_time = review.reviewed_at.strftime('%m/%d/%Y, %I:%M:%S %p') if review.reviewed_at else ''
+        note_text = f': “{review.notes}”' if review.notes else ''
+        joint_headline = f"[JOINT REVIEW — {rev_label}] Principal Engineer {rev_by} reviewed on {rev_time}{note_text}"
+
+        curr_log = analysis.reasoning_log or ''
+        trace_step = f"[JOINT PEER REVIEW] Decision: {rev_label} | Reviewer: {rev_by} | Directives: {review.notes or 'None'}"
+        if trace_step not in curr_log:
+            analysis.reasoning_log = f"{curr_log}\n{trace_step}".strip()
+
+        curr_obs = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW')]
+        analysis.observations = [joint_headline] + curr_obs
+        analysis.requires_human_review = (decision != 'corroborated')
+        analysis.save(update_fields=['reasoning_log', 'observations', 'requires_human_review', 'updated_at'])
+
+        if request.data.get('regenerate'):
+            from .adapters import PUNDITAdapter
+            try:
+                analysis = PUNDITAdapter.analyze_project(analysis.project, requested_by=request.user, peer_review=review)
+            except Exception as e:
+                logger.warning("Could not re-run full LLM joint analysis: %s", e)
+
         _record_audit(request.user, 'digital_eye.pundit_analysis.review',
                       'AIAnalysisRecord', analysis.id,
                       {'decision': decision, 'analysis_reference':
@@ -2498,6 +2523,10 @@ class PunditAnalysisReviewView(APIView):
         review = getattr(analysis, 'pundit_review', None)
         if review is not None:
             review.delete()
+            # Remove joint review header from observations
+            analysis.observations = [o for o in (analysis.observations or []) if not str(o).startswith('[JOINT REVIEW')]
+            analysis.requires_human_review = True
+            analysis.save(update_fields=['observations', 'requires_human_review', 'updated_at'])
             _record_audit(request.user,
                           'digital_eye.pundit_analysis.review_withdrawn',
                           'AIAnalysisRecord', analysis.id,
@@ -2505,6 +2534,35 @@ class PunditAnalysisReviewView(APIView):
         return Response({'review_status': 'pending',
                          'requires_human_review':
                              analysis.requires_human_review})
+
+
+class PunditAnalysisJointRegenerateView(APIView):
+    """
+    POST /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/regenerate/
+    Regenerates the AI analysis incorporating the Principal Engineer's review directives.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, analysis_id):
+        from apps.evidence.models import AIAnalysisRecord
+        from .adapters import PUNDITAdapter
+        from .models import PunditAnalysisReview
+        if not user_is_director(request.user):
+            return Response({'detail': 'Director-level role required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        allowed = scoped_projects(request.user)
+        analysis = AIAnalysisRecord.objects.filter(project__in=allowed, pk=analysis_id).first()
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        review = getattr(analysis, 'pundit_review', None)
+        new_analysis = PUNDITAdapter.analyze_project(analysis.project, requested_by=request.user, peer_review=review)
+        return Response({
+            'analysis_id': str(new_analysis.id),
+            'analysis_reference': new_analysis.analysis_reference,
+            'observations': new_analysis.observations,
+            'reasoning_log': new_analysis.reasoning_log,
+        }, status=status.HTTP_200_OK)
 
 
 # NOTE: four endpoints were removed from this module because every value they

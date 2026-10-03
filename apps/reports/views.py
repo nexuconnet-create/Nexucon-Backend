@@ -302,8 +302,9 @@ class NDTReportView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
         try:
-            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user)
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report generation failed')
             return Response({'detail': f'Report generation failed: {exc}'},
@@ -312,7 +313,8 @@ class NDTReportView(APIView):
             NDTReportService.archive_ndt_report(project, request.user, pdf_bytes)
         except Exception:  # noqa: BLE001 — archive failure must not block the stream
             logger.exception('NDT report archiving failed')
-        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}.pdf')
+        safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
+        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}{safe_op}.pdf')
 
 
 class ArchivedReportListView(APIView):
@@ -949,8 +951,9 @@ class NDTWordExportView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
         try:
-            docx_bytes = NDTWordExporter.export_docx(project, request.user)
+            docx_bytes = NDTWordExporter.export_docx(project, request.user, operator=operator)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT Word export failed')
             return Response({'detail': f'Word export failed: {exc}'},
@@ -959,8 +962,9 @@ class NDTWordExportView(APIView):
             docx_bytes,
             content_type=('application/vnd.openxmlformats-officedocument'
                           '.wordprocessingml.document'))
+        safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         response['Content-Disposition'] = \
-            f'attachment; filename="ndt_report_{project_id}.docx"'
+            f'attachment; filename="ndt_report_{project_id}{safe_op}.docx"'
         return response
 
 
@@ -1093,15 +1097,18 @@ class NDTReportPreviewView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project,
-                                                             request.user)
+                                                             request.user,
+                                                             operator=operator)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         return _pdf_response(pdf_bytes,
-                             f'ndt_report_PREVIEW_{project_id}.pdf')
+                             f'ndt_report_PREVIEW_{project_id}{safe_op}.pdf')
 
 
 class NDTReportPreviewSectionsView(APIView):
@@ -1123,9 +1130,10 @@ class NDTReportPreviewSectionsView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
         try:
             pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
-                project, request.user)
+                project, request.user, operator=operator)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
