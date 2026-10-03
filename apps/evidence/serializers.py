@@ -42,8 +42,18 @@ class EvidenceFileSerializer(serializers.ModelSerializer):
 
 
 class EvidenceRecordSerializer(serializers.ModelSerializer):
+    """A registry record, with the file behind it when there is one.
+
+    The file is served on the *list* as well as the detail: the evidence
+    screen is a grid of captures that has to play each voice note and show
+    each photo, and it holds only what this serializer returned. Withholding
+    the file here would make the one screen a capture uploads to the one
+    screen that cannot play it back.
+    """
+
     project_name = serializers.CharField(source='project.name', read_only=True)
     source_type_display = serializers.CharField(source='get_source_type_display', read_only=True)
+    file = EvidenceFileSerializer(read_only=True)
 
     class Meta:
         model = EvidenceRecord
@@ -51,23 +61,9 @@ class EvidenceRecordSerializer(serializers.ModelSerializer):
             'id', 'evidence_reference', 'project', 'project_name', 'source_type',
             'source_type_display', 'structural_element_id', 'bim_guid', 'coordinates',
             'captured_at', 'confidence', 'source_model', 'source_id', 'inspection',
-            'payload', 'evidence_hash', 'created_at',
+            'payload', 'evidence_hash', 'created_at', 'file',
         ]
         read_only_fields = ['id', 'evidence_reference', 'evidence_hash', 'created_at', 'updated_at']
-
-
-class EvidenceRecordDetailSerializer(EvidenceRecordSerializer):
-    """A record with the file it attests. Used by the detail and upload endpoints.
-
-    Kept separate from ``EvidenceRecordSerializer`` so the list endpoint does not
-    pay for a storage URL per row.
-    """
-
-    file = EvidenceFileSerializer(read_only=True)
-
-    class Meta(EvidenceRecordSerializer.Meta):
-        fields = EvidenceRecordSerializer.Meta.fields + ['file']
-        read_only_fields = fields
 
 
 class EvidenceFileUploadSerializer(serializers.Serializer):
@@ -77,7 +73,18 @@ class EvidenceFileUploadSerializer(serializers.Serializer):
     None of them is required and none has a default: a capture with no recorded
     coordinates is one where the device reported none, which is not the same
     claim as coordinates recorded as zero.
+
+    The fields below ``description`` are the field app's own vocabulary — the
+    category and severity it asked the inspector to pick, the transcript the
+    device heard. They are recorded as *claims by the uploader* rather than
+    promoted into the registry's own columns, because the registry's severity
+    and element identifiers are the correlation engine's, not a picker's.
     """
+
+    #: The capture kinds a client may declare. A subset of
+    #: ``EvidenceRecord.SOURCE_TYPES`` — asserted by a test — so the registry
+    #: never records a type it cannot name.
+    UPLOAD_SOURCE_TYPES = ('uploaded_file', 'photo', 'voice_note')
 
     file = serializers.FileField(
         help_text='The capture itself — photo, scan export, PDF, instrument dump.')
@@ -86,6 +93,9 @@ class EvidenceFileUploadSerializer(serializers.Serializer):
         required=False, allow_null=True,
         help_text='The site visit this evidence belongs to, when it belongs to one.')
 
+    source_type = serializers.ChoiceField(
+        choices=UPLOAD_SOURCE_TYPES, required=False, default='uploaded_file',
+        help_text='What kind of capture this is. Defaults to a file of no declared kind.')
     structural_element_id = serializers.CharField(
         required=False, allow_blank=True, max_length=100)
     bim_guid = serializers.CharField(required=False, allow_blank=True, max_length=64)
@@ -98,6 +108,17 @@ class EvidenceFileUploadSerializer(serializers.Serializer):
     description = serializers.CharField(
         required=False, allow_blank=True, max_length=2000,
         help_text="The uploader's own note about what this is.")
+
+    category = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    severity = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    batch_id = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    transcript = serializers.CharField(required=False, allow_blank=True, max_length=5000)
+    translations = serializers.JSONField(
+        required=False, allow_null=True,
+        help_text="The same transcript in other languages, keyed by language code.")
+    duration_seconds = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0,
+        help_text='How long the recording runs, as the device measured it.')
 
     sha256 = serializers.CharField(
         required=False, allow_blank=True, max_length=64,
@@ -120,6 +141,16 @@ class EvidenceFileUploadSerializer(serializers.Serializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError(
                 'Must be an object of coordinate keys, e.g. {"latitude": 6.4}.')
+        return value
+
+    def validate_translations(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            raise serializers.ValidationError(
+                'Must be an object of language code to translated text, '
+                'e.g. {"yo": "..."}.')
         return value
 
 

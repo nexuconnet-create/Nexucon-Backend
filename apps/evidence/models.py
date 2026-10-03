@@ -63,6 +63,8 @@ class EvidenceRecord(models.Model):
         ('live_stream', 'Live Stream Observation'),
         ('corrective_action', 'Corrective Action'),
         ('uploaded_file', 'Uploaded File'),
+        ('photo', 'Field Photo Capture'),
+        ('voice_note', 'Field Voice Note'),
         ('other', 'Other Source'),
     ]
 

@@ -27,8 +27,8 @@ from .models import AIAnalysisRecord, CorrelationFinding, EvidenceRecord
 from .review import HumanReviewService, ReviewError, record_audit
 from .serializers import (
     AIAnalysisRecordSerializer, CorrelationFindingSerializer,
-    EvidenceFileUploadSerializer, EvidenceRecordDetailSerializer,
-    EvidenceRecordSerializer, EvidenceVerificationSerializer,
+    EvidenceFileUploadSerializer, EvidenceRecordSerializer,
+    EvidenceVerificationSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class EvidenceRecordViewSet(ScopedEvidenceMixin, viewsets.ReadOnlyModelViewSet):
     ordering_fields = ['created_at', 'captured_at']
 
     def get_queryset(self):
-        qs = EvidenceRecord.objects.select_related('project').all()
+        qs = EvidenceRecord.objects.select_related('project', 'file').all()
         allowed = scoped_projects(self.request.user)
         return qs.filter(project__in=allowed)
 
@@ -692,7 +692,7 @@ class EvidenceFileUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(request=EvidenceFileUploadSerializer,
-                   responses={201: EvidenceRecordDetailSerializer})
+                   responses={201: EvidenceRecordSerializer})
     def post(self, request):
         serializer = EvidenceFileUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -714,12 +714,22 @@ class EvidenceFileUploadView(APIView):
                     {'detail': 'That inspection was not found in this project.'},
                     status=status.HTTP_404_NOT_FOUND)
 
+        # The uploader's own context, recorded as they gave it. Nothing is
+        # inferred and nothing is filled in: a capture with no coordinates is
+        # one where the device reported none, and ``file_backed_record`` drops
+        # the blanks rather than writing them as empty values.
         context = {
             'structural_element_id': data.get('structural_element_id') or '',
             'bim_guid': data.get('bim_guid') or '',
             'coordinates': data.get('coordinates'),
             'captured_at': data.get('captured_at'),
             'confidence': data.get('confidence'),
+            'category': data.get('category') or '',
+            'severity': data.get('severity') or '',
+            'batch_id': data.get('batch_id') or '',
+            'transcript': data.get('transcript') or '',
+            'translations': data.get('translations'),
+            'duration_seconds': data.get('duration_seconds'),
         }
         description = (data.get('description') or '').strip()
         if description:
@@ -730,6 +740,7 @@ class EvidenceFileUploadView(APIView):
             uploaded_file=data['file'],
             request=request,
             inspection=inspection,
+            source_type=data.get('source_type') or 'uploaded_file',
             **context,
         )
         try:
@@ -759,7 +770,7 @@ class EvidenceFileUploadView(APIView):
             },
         )
         return Response(
-            EvidenceRecordDetailSerializer(record, context={'request': request}).data,
+            EvidenceRecordSerializer(record, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -769,13 +780,13 @@ class EvidenceRecordDetailView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    @extend_schema(responses={200: EvidenceRecordDetailSerializer})
+    @extend_schema(responses={200: EvidenceRecordSerializer})
     def get(self, request, pk):
         record = _record_in_scope(request.user, pk)
         if record is None:
             return Response({'detail': 'Evidence record not found.'},
                             status=status.HTTP_404_NOT_FOUND)
-        return Response(EvidenceRecordDetailSerializer(
+        return Response(EvidenceRecordSerializer(
             record, context={'request': request}).data)
 
 
@@ -836,7 +847,7 @@ class EvidenceByInspectionView(APIView):
     @extend_schema(
         parameters=[OpenApiParameter('source_type', str,
                                      description='Filter to one source type.')],
-        responses={200: EvidenceRecordDetailSerializer(many=True)},
+        responses={200: EvidenceRecordSerializer(many=True)},
     )
     def get(self, request, inspection_id):
         from apps.inspections.models import Inspection
@@ -867,4 +878,4 @@ class EvidenceByInspectionView(APIView):
             queryset = queryset.filter(source_type=wanted)
 
         return Response(
-            EvidenceRecordDetailSerializer(queryset, many=True).data)
+            EvidenceRecordSerializer(queryset, many=True).data)

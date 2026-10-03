@@ -12,12 +12,40 @@ Ingestion is idempotent on (source_model, source_id) and computes a SHA-256
 evidence hash over the canonical payload for tamper evidence.
 """
 import logging
+from datetime import date, datetime, time
+from decimal import Decimal
+from uuid import UUID
 
 from django.utils import timezone
 
 from .models import EvidenceRecord
 
 logger = logging.getLogger(__name__)
+
+
+def json_native(value):
+    """``value`` reduced to what a ``JSONField`` can store and hand back.
+
+    A ``JSONField`` is written with ``json.dumps``, so a ``datetime`` handed to
+    one raises rather than being stored — and a value that did survive would
+    come back as something else. Payloads carry the capture timestamp the
+    uploader's device reported, which the request parses into a ``datetime``.
+
+    Normalising *before* the record is written is the point, not merely before
+    it is serialised: ``evidence_hash`` is a hash of the payload, and the
+    uploader is promised that the hash taken at ingest is the hash ``/verify/``
+    recomputes from storage. Those two only agree if what was hashed is already
+    the JSON the database will give back.
+    """
+    if isinstance(value, dict):
+        return {str(key): json_native(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_native(item) for item in value]
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, (Decimal, UUID)):
+        return str(value)
+    return value
 
 
 class EvidenceIngestionService:
@@ -33,7 +61,8 @@ class EvidenceIngestionService:
         structural_element_id='', bim_guid='', coordinates=None,
         captured_at=None, confidence=None, payload=None, ingested_by=None,
     ) -> EvidenceRecord:
-        payload = payload or {}
+        payload = json_native(payload or {})
+        coordinates = json_native(coordinates) if coordinates is not None else None
         defaults = {
             'project': project,
             'source_type': source_type,

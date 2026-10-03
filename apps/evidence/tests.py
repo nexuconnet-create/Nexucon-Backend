@@ -43,6 +43,7 @@ from apps.evidence.models import (
     AIAnalysisRecord, CorrelationFinding, EvidenceFile, EvidenceRecord,
 )
 from apps.evidence.review import HumanReviewService, ReviewError
+from apps.evidence.serializers import EvidenceFileUploadSerializer
 from apps.evidence.tasks import correlate_projects, detect_recurring_anomalies
 from apps.government.models import District, Profile
 from apps.inspections.models import Finding as InspectionFinding
@@ -1998,6 +1999,86 @@ class EvidenceFileAPITestCase(_CleanMediaMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         record = EvidenceRecord.objects.get(pk=response.data['id'])
         self.assertEqual(record.coordinates['latitude'], 6.4281)
+
+    def test_a_voice_note_upload_keeps_everything_the_field_app_sent(self):
+        """The capture timestamp is a datetime, and a datetime is not JSON.
+
+        Writing it straight into the payload made the whole upload a 500 —
+        every field of a voice note was lost to it.
+        """
+        response = self._upload(
+            source_type='voice_note',
+            captured_at='2026-10-03T09:15:00Z',
+            coordinates='{"latitude": 6.573054, "longitude": 3.265}',
+            structural_element_id='S-10',
+            category='structural_cracking',
+            severity='MEDIUM',
+            description='hello',
+            transcript='how you doing',
+            translations='{"en": "how you doing", "yo": "Báwo ni"}',
+            duration_seconds='4',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=getattr(response, 'data', None))
+        record = EvidenceRecord.objects.get(pk=response.data['id'])
+        self.assertEqual(record.source_type, 'voice_note')
+        self.assertEqual(response.data['source_type_display'], 'Field Voice Note')
+        self.assertEqual(record.payload['transcript'], 'how you doing')
+        self.assertEqual(record.payload['translations']['yo'], 'Báwo ni')
+        self.assertEqual(record.payload['duration_seconds'], 4)
+        self.assertEqual(record.payload['category'], 'structural_cracking')
+        self.assertEqual(record.payload['severity'], 'MEDIUM')
+        self.assertEqual(record.payload['description'], 'hello')
+        self.assertEqual(record.payload['captured_at'], '2026-10-03T09:15:00+00:00')
+        self.assertEqual(record.coordinates['latitude'], 6.573054)
+
+    def test_the_payload_hash_survives_a_reload(self):
+        """`evidence_hash` is taken at ingest and recomputed from storage.
+
+        They only agree if what was hashed is already the JSON the database
+        hands back — so a datetime normalised at serialisation time rather than
+        before the write would have made every such record fail `/verify/`.
+        """
+        record = self._stored_record(
+            captured_at='2026-10-03T09:15:00Z', transcript='how you doing')
+        record.refresh_from_db()
+
+        self.assertEqual(record.compute_hash(), record.evidence_hash)
+        self.assertTrue(EvidenceFileService.verify(record)['payload_ok'])
+
+    def test_upload_rejects_a_source_type_the_registry_cannot_name(self):
+        response = self._upload(source_type='mainframe_dump')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(EvidenceRecord.objects.exists())
+
+    def test_upload_rejects_translations_that_are_not_language_to_text(self):
+        response = self._upload(translations='["yo", "ig"]')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(EvidenceRecord.objects.exists())
+
+    def test_the_uploadable_source_types_are_registry_types(self):
+        registry = {value for value, _label in EvidenceRecord.SOURCE_TYPES}
+        self.assertTrue(
+            set(EvidenceFileUploadSerializer.UPLOAD_SOURCE_TYPES) <= registry)
+
+    def test_the_registry_list_carries_the_file_the_board_plays(self):
+        """The evidence screen plays each voice note from the list response.
+
+        It holds only what the list returned, so a list without the file is a
+        screen that cannot play back the capture it just accepted.
+        """
+        record = self._stored_record(source_type='voice_note')
+
+        response = self.client.get(reverse('evidence-record-list'))
+
+        rows = response.data['results'] if isinstance(
+            response.data, dict) else response.data
+        row = next(r for r in rows if r['id'] == str(record.id))
+        self.assertEqual(row['file']['file_name'], 'cover.jpg')
+        self.assertIsNotNone(row['file']['file_url'])
 
     def test_upload_writes_an_audit_event(self):
         response = self._upload()

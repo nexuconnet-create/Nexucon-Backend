@@ -163,7 +163,8 @@ class EvidenceFileService:
 
     @classmethod
     def file_backed_record(cls, *, project, uploaded_file, request=None,
-                           extraction=None, inspection=None, **context):
+                           extraction=None, inspection=None,
+                           source_type='uploaded_file', **context):
         """A record whose whole evidence *is* the file.
 
         Used by the upload endpoint, which has no source row to normalise: the
@@ -173,11 +174,16 @@ class EvidenceFileService:
         constraint compare a row against itself and block a second upload of the
         same name.
 
+        ``source_type`` is the uploader's own declaration of what the capture
+        is — a photo, a voice note, or a file of no declared kind — and is
+        limited to the types the registry can name.
+
         The payload is the caller's own context plus the file's own measured
         facts. Nothing is inferred: a field the uploader left out is absent from
         the payload rather than present as a placeholder.
         """
-        payload = {k: v for k, v in (context or {}).items() if v not in ('', None)}
+        payload = {k: v for k, v in (context or {}).items()
+                   if v not in ('', None, {}, [])}
         payload['file_name'] = safe_file_name(getattr(uploaded_file, 'name', ''))
         declared_type = getattr(uploaded_file, 'content_type', '') or ''
         if declared_type:
@@ -187,7 +193,7 @@ class EvidenceFileService:
 
         record = EvidenceIngestionService.ingest_record(
             project=project,
-            source_type='uploaded_file',
+            source_type=source_type,
             source_model='',
             source_id='',
             structural_element_id=context.get('structural_element_id') or '',
