@@ -860,7 +860,8 @@ class PUNDITAdapter:
         )
         if peer_review:
             try:
-                from .models import PunditAnalysisReview
+                from .models import PunditAnalysisReview, PunditAnalysisComment
+                old_analysis = getattr(peer_review, 'analysis', None)
                 PunditAnalysisReview.objects.update_or_create(
                     analysis=record,
                     defaults={
@@ -874,8 +875,10 @@ class PUNDITAdapter:
                         'inspector_responded_at': getattr(peer_review, 'inspector_responded_at', None),
                     }
                 )
+                if old_analysis and old_analysis != record:
+                    PunditAnalysisComment.objects.filter(analysis=old_analysis).update(analysis=record)
             except Exception as e:
-                logger.warning("Could not link peer review to new analysis record: %s", e)
+                logger.warning("Could not link peer review or chat comments to new analysis record: %s", e)
         return record
 
     @classmethod
