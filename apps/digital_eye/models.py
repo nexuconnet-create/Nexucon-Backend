@@ -1234,6 +1234,43 @@ class PunditAnalysisReview(models.Model):
         return f"{self.analysis_id} — {self.get_decision_display() or 'pending'}"
 
 
+class PunditAnalysisComment(models.Model):
+    """
+    Collaborative discussion comments on a PUNDIT AI Analysis.
+    Government officials and project field inspectors can converse here;
+    their chat thread is stored and fed into the Joint Review AI regeneration
+    to produce a consensus opinion.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    analysis = models.ForeignKey(
+        'evidence.AIAnalysisRecord', on_delete=models.CASCADE,
+        related_name='discussion_comments')
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                               related_name='pundit_analysis_comments')
+    author_name = models.CharField(max_length=255, blank=True, default='')
+    author_role = models.CharField(max_length=100, blank=True, default='')
+    comment = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.author_name} on {self.analysis_id}: {self.comment[:30]}"
+
+    def save(self, *args, **kwargs):
+        if not self.author_name and self.author:
+            self.author_name = self.author.get_full_name() or self.author.email
+        if not self.author_role and self.author:
+            if hasattr(self.author, 'role') and self.author.role:
+                self.author_role = str(self.author.role).replace('_', ' ').title()
+            elif hasattr(self.author, 'is_staff') and self.author.is_staff:
+                self.author_role = 'Government Official'
+            else:
+                self.author_role = 'Field Inspector'
+        super().save(*args, **kwargs)
+
+
 # ======================================================================
 # Rebar Scanning (Profoscope / Electromagnetic Locator)
 # ======================================================================

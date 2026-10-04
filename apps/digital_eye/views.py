@@ -2453,6 +2453,10 @@ class PunditAnalysisReviewView(APIView):
             'analysis_id': str(analysis.id),
             'analysis_reference': analysis.analysis_reference,
             'analysis_title': getattr(analysis, 'title', '') or analysis.analysis_reference,
+            'ai_summary': getattr(analysis, 'summary', '') or '',
+            'ai_observations': getattr(analysis, 'observations', []) or [],
+            'ai_reasoning_log': getattr(analysis, 'reasoning_log', '') or '',
+            'ai_confidence_score': getattr(analysis, 'confidence_score', None),
         }
 
     def get(self, request, analysis_id):
@@ -2620,6 +2624,80 @@ class PunditAnalysisJointRegenerateView(APIView):
             'observations': new_analysis.observations,
             'reasoning_log': new_analysis.reasoning_log,
         }, status=status.HTTP_200_OK)
+
+
+class PunditAnalysisCommentView(APIView):
+    """
+    GET  /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/comments/
+    POST /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/comments/
+         body: {"comment": "..."}
+    Allows government officials, inspectors, and engineers on the project to chat
+    collaboratively on AI reviews. The chat thread is preserved and fed into the AI
+    when regenerating the joint analysis.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _analysis(self, request, analysis_id):
+        from apps.evidence.models import AIAnalysisRecord
+        allowed = scoped_projects(request.user)
+        return AIAnalysisRecord.objects.filter(project__in=allowed, pk=analysis_id).first()
+
+    def get(self, request, analysis_id):
+        from .models import PunditAnalysisComment
+        analysis = self._analysis(request, analysis_id)
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        comments = PunditAnalysisComment.objects.filter(analysis=analysis).order_by('created_at')
+        res = [{
+            'id': str(c.id),
+            'analysis_id': str(c.analysis_id),
+            'author_id': str(c.author_id),
+            'author_name': c.author_name or (c.author.get_full_name() or c.author.email),
+            'author_role': c.author_role or 'Team Member',
+            'comment': c.comment,
+            'created_at': c.created_at.isoformat(),
+        } for c in comments]
+        return Response(res, status=status.HTTP_200_OK)
+
+    def post(self, request, analysis_id):
+        from .models import PunditAnalysisComment
+        analysis = self._analysis(request, analysis_id)
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        text = str(request.data.get('comment') or '').strip()
+        if not text:
+            return Response({'detail': 'comment text is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = PunditAnalysisComment.objects.create(
+            analysis=analysis,
+            author=request.user,
+            comment=text,
+        )
+
+        author_display = comment.author_name or (request.user.get_full_name() or request.user.email)
+        role_display = comment.author_role or 'Team Member'
+        trace_entry = f"[TEAM COLLABORATION] {role_display} ({author_display}): “{text}”"
+        
+        curr_log = analysis.reasoning_log or ''
+        if trace_entry not in curr_log:
+            analysis.reasoning_log = f"{curr_log}\n{trace_entry}".strip()
+            analysis.save(update_fields=['reasoning_log', 'updated_at'])
+
+        _record_audit(request.user, 'digital_eye.pundit_analysis.comment',
+                      'AIAnalysisRecord', analysis.id,
+                      {'author': author_display, 'comment': text[:100]})
+
+        return Response({
+            'id': str(comment.id),
+            'analysis_id': str(comment.analysis_id),
+            'author_id': str(comment.author_id),
+            'author_name': author_display,
+            'author_role': role_display,
+            'comment': comment.comment,
+            'created_at': comment.created_at.isoformat(),
+        }, status=status.HTTP_201_CREATED)
 
 
 # NOTE: four endpoints were removed from this module because every value they

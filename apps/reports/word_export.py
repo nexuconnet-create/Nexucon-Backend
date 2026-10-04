@@ -1,3 +1,4 @@
+
 """
 Word (.docx) export of the statutory NDT report (8 Sep 2026 review
 meeting, item H7; 4 Sep register C5): an editable Word document carrying
