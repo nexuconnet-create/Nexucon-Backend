@@ -59,6 +59,10 @@ urlpatterns = [
          name='pundit-batch-calibrate'),
     path('pundit-batches/', views.PunditBatchesView.as_view(),
          name='pundit-batches'),
+    path('visual-observations/', views.VisualObservationsView.as_view(),
+         name='visual-observations'),
+    path('site-attendance/', views.SiteAttendanceView.as_view(),
+         name='site-attendance'),
 
     # Removed: 'stats/', 'trimble/status/', 'trimble/sync/' and
     # 'reports/download/pdf/' returned fabricated counters, a fake CONNECTED

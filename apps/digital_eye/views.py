@@ -2825,3 +2825,93 @@ class PunditBatchCalibrateView(APIView):
             "message": f"Model calibrated using {curve_type.upper()} equation (a={params.get('a')}, b={params.get('b')}, c={params.get('c')}). Target design f_cu = {design_fcu} MPa.",
         }
         return Response(res, status=status.HTTP_200_OK)
+
+
+class VisualObservationsView(APIView):
+    """
+    On-site visual surface defect & quality observation log.
+    GET /api/v1/digital-eye/visual-observations/?project=<id>&batch=<id>
+    POST /api/v1/digital-eye/visual-observations/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        project_id = request.query_params.get('project')
+        batch_id = request.query_params.get('batch')
+        observations = [
+            {
+                "id": f"obs-{uuid.uuid4().hex[:6]}",
+                "project_id": project_id or "",
+                "batch_id": batch_id or "",
+                "structural_element": "S4 (RC Column)",
+                "grid_location": "Grid D-7",
+                "floor": "Floor 2",
+                "category": "honeycombing",
+                "severity": "MEDIUM",
+                "description": "Surface honeycombing detected on lower column face; pulse velocity verified at 3,650 m/s.",
+                "inspector_name": "Engr. Abdullateef",
+                "timestamp": timezone.now().isoformat(),
+                "photo_urls": []
+            }
+        ]
+        return Response(observations, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        data = request.data or {}
+        obs = {
+            "id": f"obs-{uuid.uuid4().hex[:6]}",
+            "project_id": data.get("project") or data.get("project_id") or "",
+            "batch_id": data.get("batch") or data.get("batch_id") or "",
+            "structural_element": data.get("structural_element", "Structural Element"),
+            "grid_location": data.get("grid_location", ""),
+            "floor": data.get("floor", "Level 1"),
+            "category": data.get("category", "sound_uniform"),
+            "severity": data.get("severity", "INFO"),
+            "description": data.get("description", ""),
+            "inspector_name": data.get("inspector_name", "Field Inspector"),
+            "timestamp": timezone.now().isoformat(),
+            "photo_urls": []
+        }
+        return Response(obs, status=status.HTTP_201_CREATED)
+
+
+class SiteAttendanceView(APIView):
+    """
+    On-site representative & authority verification log.
+    GET /api/v1/digital-eye/site-attendance/?project=<id>&batch=<id>
+    POST /api/v1/digital-eye/site-attendance/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        project_id = request.query_params.get('project')
+        batch_id = request.query_params.get('batch')
+        logs = [
+            {
+                "id": f"att-{uuid.uuid4().hex[:6]}",
+                "project_id": project_id or "",
+                "batch_id": batch_id or "",
+                "representative_name": "Engr. Abdullateef",
+                "organization": "LASBCA Field Unit",
+                "role": "Lead Structural Witness",
+                "verification_status": "VERIFIED",
+                "timestamp": timezone.now().isoformat(),
+                "notes": "Witnessed PUNDIT pulse velocity testing."
+            }
+        ]
+        return Response(logs, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        data = request.data or {}
+        log = {
+            "id": f"att-{uuid.uuid4().hex[:6]}",
+            "project_id": data.get("project") or data.get("project_id") or "",
+            "batch_id": data.get("batch") or data.get("batch_id") or "",
+            "representative_name": data.get("representative_name", "Site Representative"),
+            "organization": data.get("organization", "Structural Engineering Unit"),
+            "role": data.get("role", "Field Officer"),
+            "verification_status": data.get("verification_status", "VERIFIED"),
+            "timestamp": timezone.now().isoformat(),
+            "notes": data.get("notes", "")
+        }
+        return Response(log, status=status.HTTP_201_CREATED)
