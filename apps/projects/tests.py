@@ -288,3 +288,80 @@ class AgencyHeadScopeTestCase(TestCase):
 
         self.assertFalse(user_is_agency_head(staff))
         self.assertEqual(scoped_projects(staff).count(), 0)
+
+
+class CoordinateConversionTestCase(APITestCase):
+    """Tests for 4-corner coordinate transformation, center point, and footprint area calculation."""
+
+    def test_convert_four_corners_dd(self):
+        url = '/api/v1/projects/convert-coordinates/'
+        data = {
+            'system': 'WGS84_DD',
+            'corners': [
+                {'id': 1, 'label': 'Corner 1 (NW)', 'lat': 6.5244, 'lng': 3.3792},
+                {'id': 2, 'label': 'Corner 2 (NE)', 'lat': 6.5244, 'lng': 3.3798},
+                {'id': 3, 'label': 'Corner 3 (SE)', 'lat': 6.5238, 'lng': 3.3798},
+                {'id': 4, 'label': 'Corner 4 (SW)', 'lat': 6.5238, 'lng': 3.3792},
+            ]
+        }
+        res = self.client.post(url, data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('center', res.data)
+        self.assertAlmostEqual(res.data['center']['lat'], 6.5241, places=3)
+        self.assertAlmostEqual(res.data['center']['lng'], 3.3795, places=3)
+        self.assertIn('footprintAreaSqm', res.data)
+        self.assertGreater(res.data['footprintAreaSqm'], 0)
+        self.assertIn('googleMapsUrl', res.data)
+        self.assertEqual(len(res.data['corners']), 4)
+        self.assertIn('formattedLatDms', res.data['corners'][0])
+
+    def test_convert_four_corners_utm_minna(self):
+        url = '/api/v1/projects/convert-coordinates/'
+        data = {
+            'system': 'UTM_31N_MINNA',
+            'corners': [
+                {'id': 1, 'label': 'Corner 1', 'easting': 542000, 'northing': 721000},
+                {'id': 2, 'label': 'Corner 2', 'easting': 542050, 'northing': 721000},
+                {'id': 3, 'label': 'Corner 3', 'easting': 542050, 'northing': 720950},
+                {'id': 4, 'label': 'Corner 4', 'easting': 542000, 'northing': 720950},
+            ]
+        }
+        res = self.client.post(url, data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('center', res.data)
+        self.assertIn('footprintAreaSqm', res.data)
+        self.assertAlmostEqual(res.data['footprintAreaSqm'], 2500.0, places=0)
+
+    def test_create_project_with_corner_coordinates(self):
+        user = User.objects.create_superuser(username='coordadmin', email='coordadmin@test.com', password='password123')
+        token = str(RefreshToken.for_user(user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        payload = {
+            'name': 'Marina Harbour Tower',
+            'coordinate_system': 'UTM_31N_WGS84',
+            'latitude': 6.4532,
+            'longitude': 3.3958,
+            'corner_coordinates': {
+                'corners': [
+                    {'id': 1, 'lat': 6.4535, 'lng': 3.3955},
+                    {'id': 2, 'lat': 6.4535, 'lng': 3.3961},
+                    {'id': 3, 'lat': 6.4529, 'lng': 3.3961},
+                    {'id': 4, 'lat': 6.4529, 'lng': 3.3955},
+                ],
+                'footprintAreaSqm': 4420.5
+            },
+            'professionals': [
+                {
+                    'name': 'Engr. Babatunde Adeleke',
+                    'role': 'Others',
+                    'organization': 'Apex GeoTech Consultants',
+                    'email': 'adeleke@apexgeotech.ng'
+                }
+            ]
+        }
+        res = self.client.post('/api/v1/projects/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['coordinate_system'], 'UTM_31N_WGS84')
+        self.assertEqual(res.data['corner_coordinates']['footprintAreaSqm'], 4420.5)
+        self.assertEqual(res.data['professionals'][0]['role'], 'Others')

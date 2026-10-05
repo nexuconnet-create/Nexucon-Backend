@@ -23,8 +23,6 @@ from django.views.decorators.cache import cache_page
 from rest_framework.permissions import IsAuthenticated
 
 @method_decorator(ratelimit(key='ip', rate='60/m', block=True), name='dispatch')
-@method_decorator(cache_page(60 * 15), name='list')
-@method_decorator(cache_page(60 * 15), name='retrieve')
 class ProjectViewSet(viewsets.ModelViewSet):
     """CRUD API for Project model"""
     queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
@@ -252,6 +250,30 @@ class ProjectViewSet(viewsets.ModelViewSet):
                     })
 
         return Response(results, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='convert-coordinates', permission_classes=[AllowAny])
+    def convert_coordinates(self, request):
+        """
+        Converts 4-corner building boundary coordinates between WGS84 (DD, DMS)
+        and UTM (Zone 31N/32N WGS84 and Minna Datum), computing center point,
+        polygon footprint area in sqm, and perimeter.
+        """
+        from .coordinates import convert_four_corners
+        system = request.data.get('system', 'WGS84_DD')
+        corners = request.data.get('corners', [])
+        if not isinstance(corners, list):
+            return Response(
+                {"error": "'corners' must be a list of coordinate objects."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            result = convert_four_corners(system, corners)
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to convert coordinates: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     @action(detail=True, methods=['post'])
     def restore_from_cold_storage(self, request, pk=None):
