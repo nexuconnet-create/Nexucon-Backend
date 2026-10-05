@@ -2737,17 +2737,26 @@ class PunditBatchesView(APIView):
 
     def get(self, request):
         project_id = request.query_params.get('project')
+        count = 20
+        if project_id:
+            try:
+                c = PUNDITTest.objects.filter(project_id=project_id).count()
+                if c > 0:
+                    count = c
+            except Exception:
+                pass
+
         batches = [
             {
-                "id": "batch-primary-grid",
+                "id": f"batch-{project_id or 'primary-grid'}",
                 "project_id": project_id or "",
                 "project_name": "Active Project",
                 "folder_name": "Floor 2 RC Slab - Primary Grid",
-                "batch_reference": "BATCH-2026-09-048",
+                "batch_reference": f"BATCH-{timezone.now().strftime('%Y-%m')}-020",
                 "inspector_name": "Engr. Abdullateef (LASBCA Warrant #LAG-042)",
                 "device_serial": "PE-LIVE-54K",
                 "device_name": "Screening Eagle Pundit Live",
-                "element_count": 48,
+                "element_count": count,
                 "scan_date": timezone.now().isoformat(),
                 "status": "RAW_INGESTED",
                 "floor": "Floor 2",
