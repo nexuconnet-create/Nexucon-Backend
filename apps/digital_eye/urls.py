@@ -55,6 +55,10 @@ urlpatterns = [
     # the default curve type, standard and display units.
     path('nexucon-link/settings/', views.NexuconLinkSettingsView.as_view(),
          name='nexucon-link-settings'),
+    path('pundit-batches/calibrate/', views.PunditBatchCalibrateView.as_view(),
+         name='pundit-batch-calibrate'),
+    path('pundit-batches/', views.PunditBatchesView.as_view(),
+         name='pundit-batches'),
 
     # Removed: 'stats/', 'trimble/status/', 'trimble/sync/' and
     # 'reports/download/pdf/' returned fabricated counters, a fake CONNECTED

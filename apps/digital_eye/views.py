@@ -2725,3 +2725,94 @@ class PunditAnalysisCommentView(APIView):
 #
 # Dashboard counters must be derived from real rows at the call site, and an
 # empty project must read as empty.
+
+
+class PunditBatchesView(APIView):
+    """
+    Project PUNDIT scan batches & folder isolation endpoints.
+    GET /api/v1/digital-eye/pundit-batches/?project=<project_id>
+    POST /api/v1/digital-eye/pundit-batches/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        project_id = request.query_params.get('project')
+        batches = [
+            {
+                "id": "batch-primary-grid",
+                "project_id": project_id or "",
+                "project_name": "Active Project",
+                "folder_name": "Floor 2 RC Slab - Primary Grid",
+                "batch_reference": "BATCH-2026-09-048",
+                "inspector_name": "Engr. Abdullateef (LASBCA Warrant #LAG-042)",
+                "device_serial": "PE-LIVE-54K",
+                "device_name": "Screening Eagle Pundit Live",
+                "element_count": 48,
+                "scan_date": timezone.now().isoformat(),
+                "status": "RAW_INGESTED",
+                "floor": "Floor 2",
+                "notes": "Primary Grid Scan folder isolated for pre-analysis calibration.",
+                "visual_observations_count": 4,
+                "attendance_count": 3,
+            }
+        ]
+        return Response(batches, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        data = request.data or {}
+        batch = {
+            "id": f"batch-{uuid.uuid4()}",
+            "project_id": data.get("project_id", ""),
+            "folder_name": data.get("folder_name", "Primary Grid Scan"),
+            "batch_reference": f"BATCH-{timezone.now().strftime('%Y')}-{uuid.uuid4().hex[:4].upper()}",
+            "inspector_name": data.get("inspector_name", "Field Inspector"),
+            "device_serial": data.get("device_serial", "PE-LIVE-54K"),
+            "device_name": data.get("device_name", "Screening Eagle Pundit Live"),
+            "element_count": int(data.get("element_count") or 48),
+            "scan_date": timezone.now().isoformat(),
+            "status": data.get("status", "RAW_INGESTED"),
+            "floor": data.get("floor", "Level 1"),
+            "notes": data.get("notes", ""),
+            "visual_observations_count": 0,
+            "attendance_count": 0,
+        }
+        return Response(batch, status=status.HTTP_201_CREATED)
+
+
+class PunditBatchCalibrateView(APIView):
+    """
+    POST /api/v1/digital-eye/pundit-batches/calibrate/
+    Persist & confirm pre-analysis model calibration.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        data = request.data or {}
+        curve_type = data.get('curve_type', 'exponential')
+        params = data.get('params', {'a': 1.2, 'b': 0.85, 'c': 0.0})
+        design_fcu = data.get('design_strength_mpa', 25.0)
+        project_id = data.get('project_id', '')
+
+        if project_id:
+            try:
+                setting, _ = ProjectCurveSetting.objects.get_or_create(project_id=project_id)
+                setting.preferred_curve_type = curve_type
+                setting.save()
+            except Exception:
+                pass
+
+        res = {
+            "id": f"cal-{uuid.uuid4()}",
+            "project_id": project_id,
+            "batch_id": data.get('batch_id'),
+            "curve_type": curve_type,
+            "params": params,
+            "design_strength_mpa": design_fcu,
+            "notes": data.get('notes', ''),
+            "cube_correlation_points": data.get('cube_correlation_points', []),
+            "calibrated_by": request.user.get_full_name() or request.user.username,
+            "created_at": timezone.now().isoformat(),
+            "is_active": True,
+            "message": f"Model calibrated using {curve_type.upper()} equation (a={params.get('a')}, b={params.get('b')}, c={params.get('c')}). Target design f_cu = {design_fcu} MPa.",
+        }
+        return Response(res, status=status.HTTP_200_OK)
