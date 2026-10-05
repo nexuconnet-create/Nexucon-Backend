@@ -79,6 +79,19 @@ def report_verification_url(report_reference, content_digest):
             f'?ref={quote(report_reference or "")}'
             f'&digest={quote(content_digest or "")}')
 
+
+def _natural_sort_key(item):
+    import re
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+        item = item[0]
+    if isinstance(item, tuple) and len(item) == 2:
+        floor_str = str(item[0]).lower()
+        member_str = str(item[1])
+        parts = [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+        return [floor_str] + parts
+    member_str = str(item)
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+
 # Reference header serial/reference box: light blue fill, darker blue border.
 SERIAL_BOX_FILL = (91, 155, 213)
 SERIAL_BOX_BORDER = (46, 117, 182)
@@ -3331,7 +3344,7 @@ class NDTReportService:
                     [[member.title(), str(g['count']), floor.title(),
                       str(g['points'])]
                      for (floor, member), g in sorted(
-                         analysis_groups.items())],
+                         analysis_groups.items(), key=_natural_sort_key)],
                     [50, 32, 60, 40],
                     ['C', 'C', 'C', 'C'],
                 )
@@ -3438,7 +3451,7 @@ class NDTReportService:
                     elif e['remark'] == 'UNVERIFIED':
                         g['unverified'] += 1
                 result_rows = []
-                for (floor, member), g in sorted(result_groups.items()):
+                for (floor, member), g in sorted(result_groups.items(), key=_natural_sort_key):
                     # The percentages are of the elements that could actually be
                     # assessed. Counting an unverifiable reading in the
                     # denominator would state a GOOD/POOR split over a set that

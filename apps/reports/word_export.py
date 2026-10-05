@@ -25,7 +25,17 @@ from .ndt_reports import (
     ECS_FORMULA_LINE, NDTReportService, _element_display,
     ecs_report_disclosure,
 )
-from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
+def _natural_sort_key(item):
+    import re
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+        item = item[0]
+    if isinstance(item, tuple) and len(item) == 2:
+        floor_str = str(item[0]).lower()
+        member_str = str(item[1])
+        parts = [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+        return [floor_str] + parts
+    member_str = str(item)
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
 
 
 def _add_para(doc, text, *, bold=False, size=11, align=None, space_after=6):
@@ -431,7 +441,7 @@ class NDTWordExporter:
                     [[member.title(), str(g['count']), floor.title(),
                       str(g['points'])]
                      for (floor, member), g in sorted(
-                         analysis_groups.items())])
+                         analysis_groups.items(), key=_natural_sort_key)])
 
                 _add_heading(doc, 'SUMMARY OF TEST RESULTS', level=2)
                 for floor in floors_present:
@@ -440,6 +450,7 @@ class NDTWordExporter:
                     for e in floor_elements:
                         if e['member_type'] not in member_order:
                             member_order.append(e['member_type'])
+                    member_order = sorted(member_order, key=_natural_sort_key)
                     for member in member_order:
                         group = [e for e in floor_elements if e['member_type'] == member]
                         plural = member if member.endswith('S') else member + 'S'
@@ -498,7 +509,7 @@ class NDTWordExporter:
                      'POOR (NO, %)'],
                     [[member.title(), floor.title(),
                       _pct(g['good'], g), _pct(g['poor'], g)]
-                     for (floor, member), g in sorted(result_groups.items())])
+                     for (floor, member), g in sorted(result_groups.items(), key=_natural_sort_key)])
                 unverified_members = [e for e in element_data
                                       if e['remark'] == 'UNVERIFIED']
                 if unverified_members:
