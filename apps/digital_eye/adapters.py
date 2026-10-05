@@ -773,13 +773,13 @@ class PUNDITAdapter:
 
             prov_names = [p.capitalize() for p in successful_provs if p != 'deterministic_acoustics']
             if not prov_names:
-                prov_names = ['Gemini', 'Inversion']
-            provider = "Multi-Model Ensemble"
+                prov_names = ['DeepSeek', 'Inversion']
+            provider = "DeepSeek Active Engine"
 
             model_names = data.get('models_used') or []
             if not model_names:
-                model_names = ['gemini-3.5-flash-lite', 'BS 1881-203 Inversion']
-            model_version = f"Ensemble Consensus v2.4 ({', '.join(model_names[:2])})"
+                model_names = ['deepseek-reasoner', 'BS 1881-203 Inversion']
+            model_version = f"DeepSeek R1 / V3 Consensus ({', '.join(model_names[:2])})"
             if len(model_version) > 95:
                 model_version = model_version[:92] + "..."
             ensemble_active = True
