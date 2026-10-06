@@ -213,6 +213,12 @@ class ImportExportRequestSerializer(serializers.Serializer):
     floor = serializers.CharField(required=False, allow_blank=True, default='')
     test_location = serializers.CharField(
         required=False, allow_blank=True, default='')
+    # The inspector's description of where the capture was taken. Free text
+    # and never geocoded: the platform has no geocoding service, and an
+    # address it produced itself would be an invented location on a statutory
+    # record.
+    location_address = serializers.CharField(
+        required=False, allow_blank=True, default='')
     weather_condition = serializers.CharField(
         required=False, allow_blank=True, default='')
     transducer_type = serializers.CharField(

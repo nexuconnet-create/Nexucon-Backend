@@ -4042,21 +4042,23 @@ class NexuconLinkEngineTestCase(TestCase):
         defaults = StrengthCurve.objects.filter(is_default=True)
         self.assertEqual(defaults.count(), 1)
         curve = defaults.get()
-        self.assertEqual(curve.curve_type, 'linear')
-        self.assertEqual(curve.formula_params['m'], 0.008961)
-        self.assertEqual(curve.formula_params['c'], -7.97)
+        self.assertEqual(curve.curve_type, 'exponential')
+        self.assertEqual(curve.formula_params['a'], 1.20)
+        self.assertEqual(curve.formula_params['b'], 0.00085)
+        self.assertEqual(curve.formula_params.get('c', 0.0), 0.0)
         self.assertEqual([curve.valid_range_min_ms, curve.valid_range_max_ms],
                          [2000.0, 5000.0])
 
-    def test_default_curve_matches_legacy_fixed_formula(self):
-        """The seeded curve is mathematically identical to the fixed linear
-        f_cu = 8.961*V(km/s) - 7.97 every prior result used."""
+    def test_default_curve_matches_exponential_formula(self):
+        """The seeded curve matches the default exponential calibration
+        f_cu = 1.20 * exp(0.00085*V_ms)."""
+        import math
         from .strength_curves import apply_curve_params
         for v_km_s in (2.0, 3.0, 4.0, 4.28571, 5.0):
             self.assertAlmostEqual(
-                apply_curve_params('linear', {'m': 0.008961, 'c': -7.97}, v_km_s,
+                apply_curve_params('exponential', {'a': 1.20, 'b': 0.00085, 'c': 0.0}, v_km_s,
                                    valid_range_ms=[2000.0, 5000.0]),
-                8.961 * v_km_s - 7.97, places=9)
+                1.20 * math.exp(0.00085 * (v_km_s * 1000.0)), places=9)
 
     def test_each_curve_type_applies_correctly(self):
         import math

@@ -501,6 +501,16 @@ class PUNDITTest(models.Model):
 
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
+    # The inspector's own description of where the test was taken — street
+    # address, building, access note. Free text rather than a geocoded string:
+    # no geocoder is configured, so an address the platform filled in itself
+    # would be invented. Blank means nobody described the location, and the
+    # report prints nothing for it rather than a placeholder.
+    location_address = models.TextField(
+        blank=True, default='',
+        help_text="Inspector's description of the test location: street address, "
+                  "building, or how to reach the station",
+    )
 
     # Computed outputs & metrics
     velocity_km_s = models.FloatField(null=True, blank=True, help_text="Computed pulse velocity in km/s")

@@ -51,6 +51,9 @@ urlpatterns = [
     path('pundit-analysis-review/<uuid:analysis_id>/comments/',
          views.PunditAnalysisCommentView.as_view(),
          name='pundit-analysis-comments'),
+    path('pundit-analysis-review/<uuid:analysis_id>/chat/',
+         views.PunditAnalysisChatView.as_view(),
+         name='pundit-analysis-chat'),
     # Nexucon Link platform system settings (wireframe "System Settings"):
     # the default curve type, standard and display units.
     path('nexucon-link/settings/', views.NexuconLinkSettingsView.as_view(),

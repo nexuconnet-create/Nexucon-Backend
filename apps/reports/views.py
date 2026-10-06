@@ -303,10 +303,11 @@ class NDTReportView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
-            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator, element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report generation failed')
             return Response({'detail': f'Report generation failed: {exc}'},
@@ -989,10 +990,11 @@ class NDTWordExportView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
-            docx_bytes = NDTWordExporter.export_docx(project, request.user, operator=operator)
+            docx_bytes = NDTWordExporter.export_docx(project, request.user, operator=operator, element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT Word export failed')
             return Response({'detail': f'Word export failed: {exc}'},
@@ -1137,12 +1139,14 @@ class NDTReportPreviewView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project,
                                                              request.user,
-                                                             operator=operator)
+                                                             operator=operator,
+                                                             element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview failed')
             return Response({'detail': f'Report preview failed: {exc}'},
@@ -1172,11 +1176,12 @@ class NDTReportPreviewSectionsView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
-                project, request.user, operator=operator)
+                project, request.user, operator=operator, element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
@@ -1480,6 +1485,7 @@ class ReportMapView(APIView):
                 'element': t.structural_element or 'element',
                 'floor': t.floor or '',
                 'grid_location': t.test_location or '',
+                'location_address': t.location_address or '',
                 'tested_at': t.tested_at,
                 'velocity_m_s': velocity,
             }

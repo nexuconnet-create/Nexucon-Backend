@@ -232,11 +232,17 @@ CMS_SECTIONS = {
                 'description, capability list and the calibration '
                 'conversion statement are computed.',
     },
+    'discussion_of_results': {
+        'label': 'Discussion of Results — editable text (Section 5.4)',
+        'kind': 'paragraphs',
+        'default': 'The analysis of the non-destructive tests indicates varying degrees of concrete quality across the structure. The detailed test points reflect the structural integrity in accordance with BS EN 12504-4:2021.',
+        'help': 'Editable text for the discussion of the test results.',
+    },
     'remarks_preamble': {
-        'label': 'Field remarks — opening lead-in (Section 5.4)',
+        'label': 'Remarks — opening lead-in (Section 5.5)',
         'kind': 'paragraphs',
         'default': REMARKS_PREAMBLE_DEFAULT,
-        'help': 'Precedes the recorded field remarks and observations table or fallback notice.',
+        'help': 'Precedes the remarks and observations table or fallback notice.',
     },
     'recommendation_preamble': {
         'label': 'Recommendation — opening lead-in (Section 6.0)',

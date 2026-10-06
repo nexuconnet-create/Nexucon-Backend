@@ -17,6 +17,7 @@ disclosed in full in Section 3.0 of the rendered report.
 import hashlib
 import io
 import logging
+import math
 import os
 import re
 from datetime import datetime
@@ -114,7 +115,7 @@ TOC_TITLES = {
     '4.3': 'Reinforcing Bar (Rebar) Assessment',
     '4.4': 'Equipment/Rebar Assessment Table',
     '5.0': 'Analysis of Test Results',
-    '5.4': 'Field Remarks & Observations',
+    '5.4': 'Discussion of Results',
     '6.0': 'Recommendations',
     '7.0': 'Conclusion',
 }
@@ -160,45 +161,45 @@ def preview_section_map(section_pages):
 # ---------------------------------------------------------------------------
 # E.C.S calibration (disclosed in Section 3.0 of the rendered report)
 # ---------------------------------------------------------------------------
-ECS_SLOPE = 8.961        # N/mm2 per km/s
-ECS_INTERCEPT = -7.97    # N/mm2
+ECS_EXP_A = 1.20
+ECS_EXP_B_KM_S = 0.85
+ECS_EXP_B_MS = 0.00085
+ECS_EXP_C = 0.0
 ECS_VALID_MIN_KM_S = 2.0
 ECS_VALID_MAX_KM_S = 5.0
 
+# Legacy linear constants preserved for explicit linear curve instances
+ECS_SLOPE = 8.961        # N/mm2 per km/s
+ECS_INTERCEPT = -7.97    # N/mm2
+
 ECS_CALIBRATION_SOURCE = (
     "Estimated compressive strength (E.C.S) values in this report are derived "
-    "from the laboratory's fixed ultrasonic pulse-velocity calibration curve "
-    "f_cu = 8.961 x V - 7.97 (f_cu in N/mm2, V in km/s), established by "
-    "least-squares regression over the laboratory's reference control pairs "
-    "(2.9, 19), (3.9, 25), (4.0, 27), (4.2, 29) and (4.4, 34) and valid over "
-    "the range 2.0 - 5.0 km/s. BS 1881-203:1999 notes that no unique "
-    "velocity-strength relationship exists for all concretes; the curve above "
-    "is the documented calibration applied by this laboratory for Nigerian "
-    "site concrete and is applied uniformly to every result in Section 5.0. "
+    "from the laboratory's default ultrasonic pulse-velocity exponential calibration model "
+    "f_cu = 1.20 x exp(0.85 x V) (f_cu in N/mm2, V in km/s, equivalent to "
+    "f_cu = 1.20 x exp(0.00085 x V) with V in m/s), established in accordance with "
+    "ACI 228.2R and BS EN 12504-4 for non-linear acoustic wave propagation in concrete "
+    "and valid over the range 2.0 - 5.0 km/s (2000 - 5000 m/s). BS 1881-203 and BS EN 13791 "
+    "note that concrete compressive strength behaviour is inherently non-linear with acoustic "
+    "wave velocity; the exponential model above is the documented default calibration applied "
+    "by this laboratory and is applied uniformly to every result in Section 5.0. "
     "Velocities outside the calibrated range are reported without an E.C.S "
     "estimate rather than extrapolated."
 )
 
-ECS_FORMULA_LINE = "E.C.S: f_cu = 8.961 x V - 7.97  (f_cu in N/mm2, V in km/s; valid 2.0 - 5.0 km/s)"
+ECS_FORMULA_LINE = "E.C.S: f_cu = 1.20 x exp(0.85 x V)  (f_cu in N/mm2, V in km/s; valid 2.0 - 5.0 km/s)"
 
 
 def estimated_compressive_strength(velocity_km_s):
     """
-    E.C.S (N/mm2) from pulse velocity via the fixed calibration curve.
+    E.C.S (N/mm2) from pulse velocity via the default exponential calibration curve.
     Returns None when the velocity is missing or outside the calibrated
     2.0 - 5.0 km/s range (values are never extrapolated).
-
-    Historical note: this fixed path is now only the built-in fallback of
-    the Nexucon Link module (apps/digital_eye/strength_curves.py) — every
-    platform E.C.S flows through apply_active_curve(), which resolves the
-    project's active calibration curve and falls back to maths identical
-    to this function.
     """
     if velocity_km_s is None:
         return None
     if not (ECS_VALID_MIN_KM_S <= velocity_km_s <= ECS_VALID_MAX_KM_S):
         return None
-    return ECS_SLOPE * velocity_km_s + ECS_INTERCEPT
+    return ECS_EXP_A * math.exp(ECS_EXP_B_KM_S * velocity_km_s) + ECS_EXP_C
 
 
 def ecs_report_disclosure(project):
@@ -212,7 +213,8 @@ def ecs_report_disclosure(project):
         curve_snapshot, formula_display, resolve_active_curve)
 
     default_derivation = (
-        'f_cu = 8.961 x V - 7.97, with V expressed in km/s')
+        'f_cu = 1.20 x exp(0.85 x V), with V expressed in km/s '
+        '(f_cu = 1.20 x exp(0.00085 x V) in m/s)')
     try:
         curve = resolve_active_curve(project)
     except Exception:
@@ -1811,11 +1813,12 @@ class NDTReportService:
             return 'UNSPECIFIED'
         token = re.split(r'[-\s]', label)[0]
         mapping = {
-            'COL': 'COLUMN', 'COLUMN': 'COLUMN', 'CS': 'COLUMN', 'G1': 'COLUMN',
-            'BM': 'BEAM', 'BEAM': 'BEAM', 'G2': 'BEAM',
+            'C': 'COLUMN', 'COL': 'COLUMN', 'COLUMN': 'COLUMN', 'CS': 'COLUMN', 'G1': 'COLUMN',
+            'B': 'BEAM', 'BM': 'BEAM', 'BEAM': 'BEAM', 'G2': 'BEAM',
             'SL': 'SLAB', 'SLAB': 'SLAB', 'G4': 'SLAB',
+            'S': 'STRUCTURAL ELEMENT', 'SE': 'STRUCTURAL ELEMENT', 'ST': 'STRUCTURAL ELEMENT',
             'WL': 'WALL', 'WALL': 'WALL', 'G3': 'WALL',
-            'FDN': 'FOUNDATION', 'FOUND': 'FOUNDATION', 'FOUNDATION': 'FOUNDATION',
+            'F': 'FOUNDATION', 'FDN': 'FOUNDATION', 'FOUND': 'FOUNDATION', 'FOUNDATION': 'FOUNDATION',
         }
         if token in mapping:
             return mapping[token]
@@ -1860,7 +1863,8 @@ class NDTReportService:
     @staticmethod
     def _member_code(member_type):
         return {'COLUMN': 'C', 'BEAM': 'B', 'SLAB': 'S', 'WALL': 'W',
-                'FOUNDATION': 'F'}.get(member_type, member_type[:1] or 'X')
+                'FOUNDATION': 'F', 'STRUCTURAL ELEMENT': 'S',
+                'STRUCTURAL ELEMENTS': 'S'}.get(member_type, member_type[:1] or 'X')
 
     @classmethod
     def _element_data(cls, pulse_tests):
@@ -1870,6 +1874,7 @@ class NDTReportService:
         statutory 25 N/mm2 threshold.
         """
         out = []
+        pulse_tests = sorted(pulse_tests, key=lambda t: t.created_at)
         for t in pulse_tests:
             rows = t.reading_rows()
             velocities = [r['velocity_km_s'] for r in rows
@@ -1905,6 +1910,16 @@ class NDTReportService:
                     # mean_v is the element mean of these points: the
                     # curve's confidence margin narrows as sqrt(n) of them.
                     n_points=len(velocities))
+            # Keep per-reading ecs_mpa in sync with active curve
+            for r in rows:
+                if r.get('velocity_km_s') is not None:
+                    recomputed_ecs, _ = apply_active_curve(
+                        t.project, r['velocity_km_s'],
+                        rebound_number=t.rebound_number,
+                        temperature_c=t.surface_temperature_c
+                    )
+                    if recomputed_ecs is not None:
+                        r['ecs_mpa'] = recomputed_ecs
             # The figure the curve arithmetic itself yields, before any
             # standard-error policy moved it. The worked example prints THIS
             # as the result of "f_cu = m x V + c" so the printed equation is
@@ -1950,6 +1965,7 @@ class NDTReportService:
                 'spread_km_s': spread_km_s,
                 'spread_pct': spread_pct,
             })
+        out.sort(key=lambda e: (_natural_sort_key(e['floor_label']), _natural_sort_key(e['member_type']), e['test'].created_at))
         return out
 
     @classmethod
@@ -2011,15 +2027,25 @@ class NDTReportService:
                                 f"{arithmetic_ecs:.2f} N/mm2 "
                                 "(V in m/s).")
                 elif (active_curve is not None
+                      and active_curve.project_id
+                      and active_curve.curve_type == 'exponential'):
+                    p = active_curve.formula_params or {}
+                    c_val = p.get('c', 0.0)
+                    sign_part = (f" - {abs(c_val):g}" if c_val < 0
+                                 else (f" + {c_val:g}" if c_val > 0 else ""))
+                    example += (f" f_cu = {p.get('a', 1.2):g} x "
+                                f"exp({p.get('b', 0.00085):g} x {e0['mean_v'] * 1000:.2f})"
+                                f"{sign_part} = {arithmetic_ecs:.2f} N/mm2 "
+                                "(V in m/s).")
+                elif (active_curve is not None
                       and active_curve.project_id):
                     example += (f" f_cu from the project calibration "
                                 f"above at V = "
                                 f"{e0['mean_v'] * 1000:.2f} m/s = "
                                 f"{arithmetic_ecs:.2f} N/mm2.")
                 else:
-                    example += (f" f_cu = 8.961 x {e0['mean_v']:.3f} "
-                                f"- 7.97 = {arithmetic_ecs:.2f} "
-                                f"N/mm2.")
+                    example += (f" f_cu = 1.20 x exp(0.85 x {e0['mean_v']:.3f}) "
+                                f"= {arithmetic_ecs:.2f} N/mm2.")
                 # The standard-error policy step, stated in the report's own
                 # words, so the reported Section 5.0 figure is reachable from
                 # the arithmetic above by hand.
@@ -2033,6 +2059,38 @@ class NDTReportService:
                                 f"{e0['mean_ecs']:.2f} N/mm2.")
         return example
 
+    @classmethod
+    def _has_visual_defects(cls, visual_notes):
+        """
+        True when the visual observations include substantive defects
+        (e.g., cracks, spalling, honeycombing, delamination, exposed rebar).
+        Benign descriptions (e.g. 'uniform surface integrity without evidence of...',
+        'smooth finished', 'good', 'sound') are not structural defects.
+        """
+        if not visual_notes:
+            return False
+        
+        defect_keywords = (
+            'crack', 'spall', 'honeycomb', 'void', 'delaminat', 'defect',
+            'damage', 'corros', 'rust', 'rot', 'deteriorat', 'exposed rebar',
+            'sagging', 'hogging', 'settlement', 'distress', 'tacky', 'failure',
+            'cavity', 'leak', 'efflorescence', 'crushing', 'shear', 'buckl',
+            'severe', 'poor'
+        )
+        non_defect_negations = (
+            'without evidence of', 'no visible', 'no evidence of', 'free of',
+            'without sign of', 'not observed', 'no structural defect'
+        )
+        
+        for note in visual_notes:
+            note_lower = note.lower()
+            is_negated = any(neg in note_lower for neg in non_defect_negations)
+            if is_negated:
+                continue
+            if any(k in note_lower for k in defect_keywords):
+                return True
+        return False
+
     # ---------------------------------------------------------------
     # Generated-content CMS bodies (11 Sep 2026 client request): the
     # computed wording of the report, pre-filled into the CMS so the
@@ -2043,9 +2101,9 @@ class NDTReportService:
     # ---------------------------------------------------------------
     @classmethod
     def _computed_bodies(cls, project, *, tests, rebar_tests, element_data,
-                         good_members, poor_members, visual_notes,
-                         floors_present, bim_levels, has_drawings, tested,
-                         same_day, date_min, date_max):
+                          good_members, poor_members, visual_notes,
+                          floors_present, bim_levels, has_drawings, tested,
+                          same_day, date_min, date_max):
         bodies = {}
 
         # -- report reference (11 Sep client request): the deterministic
@@ -2086,7 +2144,8 @@ class NDTReportService:
                   'general safety of the entire structure in its present '
                   'state.'
             )
-            if visual_notes:
+            has_visual_defects = cls._has_visual_defects(visual_notes)
+            if has_visual_defects:
                 visual_sentence = (
                     'The visual inspection revealed structural defects as '
                     'recorded in Section 4.1 of this report')
@@ -2114,16 +2173,32 @@ class NDTReportService:
                     'drawing was provided.')
             para3 = ' '.join([visual_sentence, analysis_sentence,
                               arrangement_sentence])
-            para4 = (
-                'In view of the above, it is advised that a qualified '
-                'structural engineer should be engaged to proffer solution '
-                'to the defects observed, give technical advice on the poor '
-                'structural members tested and further analyse the '
-                'structural arrangement to guarantee the stability, '
-                'integrity and the serviceability of the structure.'
-            )
-            bodies['executive_summary'] = '\n\n'.join(
-                [para1, para2, para3, para4])
+            exec_paras = [para1, para2, para3]
+            if has_visual_defects or poor_members:
+                if has_visual_defects and poor_members:
+                    action_clause = (
+                        'proffer solution to the defects observed, give technical '
+                        'advice on the poor structural members tested and further '
+                        'analyse the structural arrangement'
+                    )
+                elif has_visual_defects:
+                    action_clause = (
+                        'proffer solution to the defects observed and further '
+                        'analyse the structural arrangement'
+                    )
+                else:
+                    action_clause = (
+                        'give technical advice on the poor structural members '
+                        'tested and further analyse the structural arrangement'
+                    )
+                para4 = (
+                    'In view of the above, it is advised that a qualified '
+                    f'structural engineer should be engaged to {action_clause} '
+                    'to guarantee the stability, integrity and the serviceability '
+                    'of the structure.'
+                )
+                exec_paras.append(para4)
+            bodies['executive_summary'] = '\n\n'.join(exec_paras)
 
         # -- introduction, computed project paragraphs (always available)
         site_line = ', '.join(
@@ -2195,20 +2270,36 @@ class NDTReportService:
                    if poor_members else '')
                 + '.'
             )
-            advice_sentence = (
-                'It is advised that '
-                + (project.client_name.upper() if project.client_name
-                   else 'the client')
-                + ' engage a qualified structural engineer and other '
-                  'relevant professionals in the built environment to '
-                  'proffer solution to the defects observed, technical '
-                  'advice on the poor structural members tested and further '
-                  'analyse the structural arrangement to guarantee the '
-                  'stability, integrity and the serviceability of the '
-                  'building.'
-            )
-            bodies['findings_statement'] = (strength_sentence + ' '
-                                            + advice_sentence)
+            if has_visual_defects or poor_members:
+                client_target = (project.client_name.upper() if project.client_name
+                                 else 'the client')
+                if has_visual_defects and poor_members:
+                    reco_clause = (
+                        'proffer solution to the defects observed, technical '
+                        'advice on the poor structural members tested and further '
+                        'analyse the structural arrangement'
+                    )
+                elif has_visual_defects:
+                    reco_clause = (
+                        'proffer solution to the defects observed and further '
+                        'analyse the structural arrangement'
+                    )
+                else:
+                    reco_clause = (
+                        'technical advice on the poor structural members '
+                        'tested and further analyse the structural arrangement'
+                    )
+                advice_sentence = (
+                    f'It is advised that {client_target} engage a qualified '
+                    f'structural engineer and other relevant professionals in the '
+                    f'built environment to {reco_clause} to guarantee the '
+                    'stability, integrity and the serviceability of the '
+                    'building.'
+                )
+                bodies['findings_statement'] = (strength_sentence + ' '
+                                                + advice_sentence)
+            else:
+                bodies['findings_statement'] = strength_sentence
 
         # -- conclusion items (needs results: they state percentages)
         if element_data:
@@ -2421,11 +2512,11 @@ class NDTReportService:
         return archived
 
     @classmethod
-    def generate_ndt_report(cls, project, user=None, operator=None):
-        return cls.generate_ndt_report_bundled(project, user, operator=operator)[0]
+    def generate_ndt_report(cls, project, user=None, operator=None, element_id=None):
+        return cls.generate_ndt_report_bundled(project, user, operator=operator, element_id=element_id)[0]
 
     @classmethod
-    def generate_ndt_report_bundled(cls, project, user=None, operator=None):
+    def generate_ndt_report_bundled(cls, project, user=None, operator=None, element_id=None):
         """Render the report and return (pdf_bytes, preview_bundle) from ONE
         generation pass — the bundle carries the §2.1 preview sidebar's
         section→page map and the total page count, guaranteed to describe
@@ -2545,6 +2636,9 @@ class NDTReportService:
                 tests = lbl_matched if lbl_matched else all_tests
         else:
             tests = all_tests
+            
+        if element_id:
+            tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
         
         rebar_tests = list(
             RebarTest.objects
@@ -2774,7 +2868,8 @@ class NDTReportService:
                 # Reference p3 paragraph 3 is ONE paragraph: visual findings + the
                 # Non-Destructive analysis outcome + the structural-arrangement /
                 # drawing-availability statement.
-                if visual_notes:
+                has_visual_defects = cls._has_visual_defects(visual_notes)
+                if has_visual_defects:
                     visual_sentence = (
                         'The visual inspection revealed structural defects as '
                         'recorded in Section 4.1 of this report')
@@ -2807,14 +2902,29 @@ class NDTReportService:
                         'was provided.')
                 builder.para(' '.join(
                     [visual_sentence, analysis_sentence, arrangement_sentence]))
-                builder.para(
-                    'In view of the above, it is advised that a qualified structural '
-                    'engineer should be engaged to proffer solution to the defects '
-                    'observed, give technical advice on the poor structural members '
-                    'tested and further analyse the structural arrangement to '
-                    'guarantee the stability, integrity and the serviceability of the '
-                    'structure.'
-                )
+                if has_visual_defects or poor_members:
+                    if has_visual_defects and poor_members:
+                        remedial_clause = (
+                            'proffer solution to the defects observed, give technical '
+                            'advice on the poor structural members tested and further '
+                            'analyse the structural arrangement'
+                        )
+                    elif has_visual_defects:
+                        remedial_clause = (
+                            'proffer solution to the defects observed and further '
+                            'analyse the structural arrangement'
+                        )
+                    else:
+                        remedial_clause = (
+                            'give technical advice on the poor structural members '
+                            'tested and further analyse the structural arrangement'
+                        )
+                    builder.para(
+                        'In view of the above, it is advised that a qualified structural '
+                        f'engineer should be engaged to {remedial_clause} to '
+                        'guarantee the stability, integrity and the serviceability of the '
+                        'structure.'
+                    )
 
         def emit_intro():
             # ------------------------------------------------------ 1.0 INTRO
@@ -3229,7 +3339,7 @@ class NDTReportService:
                 builder.ln_gap()
             if rebar_tests:
                 rebar_data = []
-                for idx, rt in enumerate(rebar_tests):
+                for idx, rt in enumerate(sorted(rebar_tests, key=lambda r: r.created_at)):
                     main_bar = str(int(rt.main_bar_mm)) if rt.main_bar_mm else '-'
                     links = str(int(rt.links_mm)) if rt.links_mm else '-'
                     spacing = str(rt.spacing_mm) if rt.spacing_mm else '-'
@@ -3300,7 +3410,7 @@ class NDTReportService:
                 # the element's name once, one row per test point (its t_c/t_0
                 # pair and the computed per-point depth), and the element
                 # verdict (mean depth + remark) on the middle row.
-                for t in crack_tests:
+                for t in sorted(crack_tests, key=lambda ct: ct.created_at):
                     rows = t.reading_rows()
                     mid = len(rows) // 2 if len(rows) > 1 else 0
                     mean_depth = cls._crack_depth(t)
@@ -3354,18 +3464,23 @@ class NDTReportService:
                 # element name once, A/B/C reading rows, average + remark on the
                 # middle row)
                 for floor in floors_present:
-                    floor_elements = [e for e in element_data
-                                      if e['floor_label'] == floor]
+                    floor_elements = sorted(
+                        [e for e in element_data if e['floor_label'] == floor],
+                        key=lambda e: e['test'].created_at
+                    )
                     member_order = []
                     for e in floor_elements:
                         if e['member_type'] not in member_order:
                             member_order.append(e['member_type'])
+                    member_order = sorted(member_order, key=_natural_sort_key)
 
                     # Collect all rows for this floor (all members) before rendering table
                     all_floor_rows = []
                     for member in member_order:
-                        group = [e for e in floor_elements
-                                 if e['member_type'] == member]
+                        group = sorted(
+                            [e for e in floor_elements if e['member_type'] == member],
+                            key=lambda e: e['test'].created_at
+                        )
 
                         for e in group:
                             rows = e['rows']
@@ -3404,6 +3519,10 @@ class NDTReportService:
                         member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
                     else:
                         member_label = 'STRUCTURAL ELEMENTS'
+                    if member_label in ('STRUCTURAL ELEMENT', 'STRUCTURAL ELEMENTS'):
+                        member_label = 'STRUCTURAL ELEMENTS'
+                    elif not member_label.endswith('S'):
+                        member_label = f'{member_label}S'
                     builder.subheading(
                         f'{floor.upper()} {member_label}'
                         + (f' OF {project.name.upper()}'
@@ -3497,7 +3616,7 @@ class NDTReportService:
                 builder.section('5.2', 'SURFACE QUALITY OBSERVATIONS', sub=True)
                 # One row per test point carrying the condition observed there;
                 # the element's name and the test-level notes print once.
-                for t in surface_tests:
+                for t in sorted(surface_tests, key=lambda st: st.created_at):
                     rows = t.reading_rows()
                     # Observation words only — the '[MANUAL_FIELD_ENTRY —
                     # Station …]' provenance stamp never prints.
@@ -3651,14 +3770,24 @@ class NDTReportService:
                     for i, step in enumerate(m.get('reasoning_trace') or [], 1):
                         builder.para(f'{i}. {step}', leading=7.5)
 
-        def emit_remarks():
-            # ----------------------------- 5.4 FIELD REMARKS & OBSERVATIONS
+        def emit_discussion_of_results():
+            # ----------------------------- 5.4 DISCUSSION OF RESULTS
             if builder.pdf.will_page_break(35):
                 builder.pdf.add_page()
-            builder.section('5.4', 'FIELD REMARKS & OBSERVATIONS', sub=True)
+            builder.section('5.4', 'DISCUSSION OF RESULTS', sub=True)
+            body = get_cms_text(project, 'discussion_of_results')[0]
+            for para in cms_paragraphs(body):
+                builder.para(para)
+
+        def emit_remarks():
+            # ----------------------------- 5.5 REMARKS
+            if builder.pdf.will_page_break(35):
+                builder.pdf.add_page()
+            builder.section('5.5', 'REMARKS', sub=True)
 
             lead_in = get_cms_text(project, 'remarks_preamble')[0]
-            builder.para(lead_in)
+            for para in cms_paragraphs(lead_in):
+                builder.para(para)
 
             def _is_substantive(text):
                 if not text or not str(text).strip():
@@ -3673,6 +3802,10 @@ class NDTReportService:
             site_visual_obs = []
             site_photos_count = 0
             gps_tags = []
+            # The inspector's own description of the test location, if any
+            # session carried one. Free text, taken verbatim — the platform
+            # never geocodes it, so what prints is what was typed.
+            site_addresses = []
             try:
                 from apps.telemetry.models import TelemetrySession
                 ts_qs = list(TelemetrySession.objects.filter(project=project))
@@ -3696,6 +3829,9 @@ class NDTReportService:
                         gps_str = f"{lat:.6f}°, {lon:.6f}°"
                         if gps_str not in gps_tags:
                             gps_tags.append(gps_str)
+                    address = (cfg.get('location_address') or '').strip()
+                    if address and _is_substantive(address) and address not in site_addresses:
+                        site_addresses.append(address)
             except Exception as e:
                 logger.warning("Could not query telemetry visual observations: %s", e)
 
@@ -3755,7 +3891,10 @@ class NDTReportService:
                 vis_summary = "Standard field conditions recorded on site during testing."
             summary_table_rows.append([
                 "Visual Site Observations",
-                "Testing Zone / Laydown Area",
+                # The location column carries the address the inspector
+                # recorded, when one was recorded. With none, the previous
+                # generic label stands — the report does not invent a place.
+                site_addresses[0] if site_addresses else "Testing Zone / Laydown Area",
                 vis_summary
             ])
 
@@ -3975,7 +4114,8 @@ class NDTReportService:
             '4.2': emit_methodology,
             '5.0': emit_analysis,
             '5.3': emit_ai,
-            '5.4': emit_remarks,
+            '5.4': emit_discussion_of_results,
+            '5.5': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
             'APPENDIX': emit_appendix,
@@ -4121,10 +4261,13 @@ class NDTReportService:
             if not raw or not _is_substantive(raw):
                 continue
             cond_key = raw.lower()
-            grouped_by_condition.setdefault(cond_key, {'raw': raw, 'elements': [], 'test_ids': []})
+            grouped_by_condition.setdefault(cond_key, {'raw': raw, 'elements': [], 'locations': [], 'test_ids': []})
             elem = (t.structural_element or '').strip()
             if elem and elem not in grouped_by_condition[cond_key]['elements']:
                 grouped_by_condition[cond_key]['elements'].append(elem)
+            loc = (getattr(t, 'test_location', None) or getattr(t, 'floor', None) or '').strip()
+            if loc and loc not in grouped_by_condition[cond_key]['locations']:
+                grouped_by_condition[cond_key]['locations'].append(loc)
             grouped_by_condition[cond_key]['test_ids'].append(t.id)
 
         for entry in grouped_by_condition.values():
@@ -4133,9 +4276,19 @@ class NDTReportService:
             if text[-1:] not in ('.', '!', '?'):
                 text += '.'
             elements = entry['elements']
+            locations = entry['locations']
+            context = []
+            if locations:
+                loc_str = ", ".join(locations[:2])
+                context.append(f"at {loc_str}")
             if elements:
                 elem_str = ", ".join(elements[:4]) + (" and other members" if len(elements) > 4 else "")
-                text = text[:-1] + f" observed on {elem_str}."
+                context.append(f"on {elem_str}")
+            if context:
+                if 'observ' in raw.lower():
+                    text = text[:-1] + f" {' '.join(context)}."
+                else:
+                    text = text[:-1] + f" observed {' '.join(context)}."
 
             # Collect pics across tests in this group
             group_pics = []

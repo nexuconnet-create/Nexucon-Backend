@@ -606,6 +606,10 @@ class TelemetryService:
                  'device': session.device_id,
                  'latitude': config.get('latitude'),
                  'longitude': config.get('longitude'),
+                 # Text, not a nullable column: a session that recorded no
+                 # address supplies the empty string rather than None, which
+                 # would read as "the field was refused" to the serializer.
+                 'location_address': config.get('location_address') or '',
                  'readings': readings},
                 session, request,
                 created_by=request.user if request else None,

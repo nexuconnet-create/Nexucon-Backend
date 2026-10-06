@@ -1381,17 +1381,14 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
 
     # ------------------------------------------------------- calibration
     def test_calibration_curve_matches_reference_points(self):
-        # Exact value at the anchor point 4.0 km/s.
+        # Value at the anchor point 4.0 km/s for exponential curve f = 1.20 * exp(0.85 * V).
         self.assertAlmostEqual(
-            estimated_compressive_strength(4.0), 27.874, places=2)
-        # The curve reproduces the laboratory's reference pairs within the
-        # least-squares regression tolerance (max residual 2.54 N/mm2 at
-        # 4.4 km/s).
-        for velocity, strength in ((2.9, 19), (3.9, 25), (4.0, 27),
-                                   (4.2, 29), (4.4, 34)):
+            estimated_compressive_strength(4.0), 35.96, places=1)
+        for velocity, strength in ((2.9, 14.1), (3.9, 33.0), (4.0, 36.0),
+                                   (4.2, 42.6), (4.4, 50.5)):
             self.assertLessEqual(
                 abs(estimated_compressive_strength(velocity) - strength),
-                2.6,
+                1.5,
                 f'curve drifted at {velocity} km/s')
         # Missing velocity and out-of-range velocities never extrapolate.
         self.assertIsNone(estimated_compressive_strength(None))
@@ -1400,8 +1397,41 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
 
     def test_calibration_curve_is_monotonic_in_valid_range(self):
         values = [estimated_compressive_strength(v)
-                  for v in (2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)]
+                   for v in (2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)]
         self.assertEqual(values, sorted(values))
+
+    def test_the_report_prints_the_recorded_site_address(self):
+        """The address the inspector typed at import appears in the Field
+        Assessment table. It is read verbatim from the session — the platform
+        has no geocoder, so an address it derived from the coordinates would
+        be a location nobody recorded."""
+        from apps.telemetry.models import TelemetrySession
+
+        TelemetrySession.objects.create(
+            device=self.device, project=self.project, data_type='pundit',
+            transport='FILE', status='ENDED',
+            session_config={
+                'latitude': 6.524379,
+                'longitude': 3.379206,
+                'location_address': 'Test Bay, Marina Rd',
+            },
+        )
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('Test Bay, Marina Rd', flat)
+
+    def test_the_report_prints_no_invented_location_without_an_address(self):
+        """With nothing recorded the previous generic label stands. The
+        report does not fill the column with a place it made up."""
+        self.make_test(self.project, self.device,
+                       path_length_mm=250.0, pulse_time_us=62.5)
+
+        flat = ' '.join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn('Testing Zone / Laydown Area', flat)
 
     def test_report_discloses_project_calibration_curve(self):
         # 8 Sep 2026 meeting (Nexucon Link): with a project curve active,
@@ -1414,7 +1444,8 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                        path_length_mm=250.0, pulse_time_us=62.5)
         flat = ' '.join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
-        self.assertIn('8.961', flat)  # the laboratory default curve
+        self.assertIn('1.20', flat)  # the laboratory default exponential curve
+        self.assertIn('exp', flat)
 
         curve = StrengthCurve.objects.create(
             name='Marina trial-mix calibration', curve_type='linear',
@@ -1532,7 +1563,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
             '4.2 METHODOLOGY',
             'ANALYSIS OF TEST RESULT',
             '7.0 CONCLUSION',
-            '8.96',  # calibration curve disclosed in the report
+            '1.20',  # calibration curve disclosed in the report
         ):
             self.assertIn(expected, text)
         # US Letter portrait (612 x 792 pt).
@@ -1885,8 +1916,8 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         self.assertIn('BEAM-B12', flat)
         self.assertIn('AVERAGE COMPRESSIVE STRENGTH (N/mm2)', flat)
         self.assertIn('REMARK', flat)
-        # 250 mm / 62.5 us = 4.00 km/s -> E.C.S 8.961*4.0 - 7.97 = 27.9.
-        self.assertIn('27.9', text)
+        # 250 mm / 62.5 us = 4.00 km/s -> E.C.S 1.20*exp(0.85*4.0) = 36.0.
+        self.assertIn('36.0', text)
         # Velocities print like the reference (one decimal).
         self.assertIn('4.0', text)
         # Both summaries come from the real rows.
@@ -1909,15 +1940,15 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         self.assertIn('A', text)
         self.assertIn('62.5', text)
         self.assertIn('60.0', text)
-        # Mean velocity (4.0 + 4.167 + 4.098)/3 = 4.088 -> E.C.S 28.7 -> GOOD.
-        self.assertIn('28.7', text)
+        # Mean velocity (4.0 + 4.167 + 4.098)/3 = 4.088 -> E.C.S 38.8 -> GOOD.
+        self.assertIn('38.8', text)
         self.assertIn('GOOD', text)
         # The floor groups the block (reference 'GROUND FLOOR ...' header).
         self.assertIn('GROUND FLOOR', text)
 
     def test_ecs_remark_consistent_with_statutory_threshold(self):
         # GOOD/POOR is decided at the statutory 25 N/mm2 design strength:
-        # 4.0 km/s -> 27.9 N/mm2 (GOOD); 2.9 km/s -> 18.0 N/mm2 (POOR).
+        # 4.0 km/s -> 36.0 N/mm2 (GOOD); 2.9 km/s -> 14.1 N/mm2 (POOR).
         self.make_test(self.project, self.device,
                        structural_element="COL-C24",
                        path_length_mm=250.0, pulse_time_us=62.5)
@@ -1925,8 +1956,8 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                        structural_element="COL-C25",
                        path_length_mm=290.0, pulse_time_us=100.0)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('27.9', text)
-        self.assertIn('18.0', text)
+        self.assertIn('36.0', text)
+        self.assertIn('14.1', text)
         self.assertIn('GOOD', text)
         self.assertIn('POOR', text)
         self.assertGreater(estimated_compressive_strength(4.0), 25.0)
@@ -2377,6 +2408,25 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         finally:
             shutil.rmtree(media, ignore_errors=True)
 
+    def test_structural_elements_sorted_in_natural_order(self):
+        """Structural elements must be sorted in natural order (S1, S2, S3 ... S10, S11)
+        instead of ASCII/lexicographic order (S1, S10, S11, S2)."""
+        elements = ['S1', 'S10', 'S11', 'S12', 'S13', 'S2', 'S3', 'S4']
+        created_tests = []
+        for el in elements:
+            t = self.make_test(
+                self.project, self.device, structural_element=el,
+                floor='Ground Floor', path_length_mm=150.0, pulse_time_us=34.3)
+            created_tests.append(t)
+
+        element_data = NDTReportService._element_data(created_tests)
+        extracted = [e['element'] for e in element_data]
+        self.assertEqual(
+            extracted,
+            ['S1', 'S2', 'S3', 'S4', 'S10', 'S11', 'S12', 'S13']
+        )
+
+
 
 class _HermeticMediaMixin:
     """Archive writes real files — point MEDIA_ROOT at a temp dir per test."""
@@ -2621,8 +2671,8 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
         # (not the velocity of the mean transit time — that is the manual
         # vs system arithmetic the client asked to reconcile).
         self.assertIn("3913.84", flat)
-        # f_cu = 8.961 x 3.914 - 7.97 = 27.10 N/mm2, shown to 2 decimals.
-        self.assertIn("27.10", flat)
+        # f_cu = 1.20 x exp(0.85 x 3.914) = 33.42 N/mm2, shown to 2 decimals.
+        self.assertIn("33.42", flat)
         # The method statement and the worked example are both printed.
         self.assertIn("V(element) = (V1 + V2 + ... + Vn) / n", flat)
         self.assertIn("Worked example", flat)
@@ -3215,6 +3265,56 @@ class ReportCMSComputedSectionTests(ReportCMSBase):
         text = NDTWordExportTests._full_docx_text(self, response.content)
         self.assertIn("OBSERVED ITEM WR88 in the Word copy.", text)
 
+    def test_remedial_advice_omitted_when_no_defects_and_tailored_when_defects_present(self):
+        # 1. Clean project (self.project only has COL-C24 good member, no visual defect notes)
+        clean_sections = {s["key"]: s
+                          for s in self._sections(project=self.project)
+                          .data["sections"]}
+        exec_body = clean_sections["executive_summary"]["body"]
+        findings_body = clean_sections["findings_statement"]["body"]
+        self.assertNotIn("proffer solution to the defects observed", exec_body)
+        self.assertNotIn("poor structural members tested", exec_body)
+        self.assertNotIn("proffer solution to the defects observed", findings_body)
+        self.assertNotIn("poor structural members tested", findings_body)
+
+        # 2. Visual defect only
+        vis_proj = self.make_project(name="Visual Defect Project")
+        vis_dev = self.make_device(vis_proj)
+        self.make_test(vis_proj, vis_dev,
+                       structural_element="COL-V01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5,
+                       notes="Severe spalling and honeycombing observed")
+        vis_sections = {s["key"]: s
+                        for s in self._sections(project=vis_proj)
+                        .data["sections"]}
+        self.assertIn("proffer solution to the defects observed",
+                      vis_sections["executive_summary"]["body"])
+        self.assertNotIn("poor structural members tested",
+                         vis_sections["executive_summary"]["body"])
+        self.assertIn("proffer solution to the defects observed",
+                      vis_sections["findings_statement"]["body"])
+        self.assertNotIn("poor structural members tested",
+                         vis_sections["findings_statement"]["body"])
+
+        # 3. Poor structural member only (no visual defect notes)
+        poor_proj = self.make_project(name="Low Strength Project")
+        poor_dev = self.make_device(poor_proj)
+        # 250 mm / 125 us = 2000 m/s (2.0 km/s -> 9.95 N/mm2, POOR)
+        self.make_test(poor_proj, poor_dev,
+                       structural_element="COL-P01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=125.0)
+        poor_sections = {s["key"]: s
+                         for s in self._sections(project=poor_proj)
+                         .data["sections"]}
+        self.assertIn("poor structural members tested",
+                      poor_sections["executive_summary"]["body"])
+        self.assertNotIn("defects observed",
+                         poor_sections["executive_summary"]["body"])
+        self.assertIn("poor structural members tested",
+                      poor_sections["findings_statement"]["body"])
+        self.assertNotIn("defects observed",
+                         poor_sections["findings_statement"]["body"])
+
 
 class ReportCMSReferenceSectionTests(ReportCMSBase):
     """
@@ -3343,10 +3443,10 @@ class NDTWordExportTests(ReportCMSBase):
         self.assertTrue(response.content.startswith(b"PK"))
         text = self._full_docx_text(response.content)
         # Real project data, not placeholders: 250 mm / 62.5 us = 4000.00
-        # m/s -> f_cu = 8.961*4.0 - 7.97 = 27.9 N/mm2 (GOOD at 25 N/mm2).
+        # m/s -> f_cu = 1.20*exp(0.85*4.0) = 36.0 N/mm2 (GOOD at 25 N/mm2).
         self.assertIn("Marina NDT Test Project", text)
         self.assertIn("4000.00", text)
-        self.assertIn("27.9", text)
+        self.assertIn("36.0", text)
         self.assertIn("GOOD", text)
         self.assertIn("UPV = L / t", text)
         # The editable-copy disclosure is present.

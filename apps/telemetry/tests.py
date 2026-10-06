@@ -1550,6 +1550,39 @@ class FileImportParsingTests(FileImportTestBase):
         self.assertIsNotNone(test.estimated_compressive_strength_mpa)
         self.assertEqual(EvidenceRecord.objects.count(), 1)
 
+    def test_a_location_description_reaches_the_promoted_test(self):
+        """The address the inspector types is the one the record carries.
+
+        It is stored on the session and on the promoted test, so the report
+        and the site-map marker can print it. Nothing derives it: the platform
+        has no geocoder, and a location the record invented would be worse
+        than one it left blank.
+        """
+        address = '14 Marina Rd, Lagos Island, opposite the old toll gate'
+        session_id = self._upload(UPV_CSV, location_address=address).data['id']
+        session = TelemetrySession.objects.get(pk=session_id)
+        self.assertEqual(session.session_config['location_address'], address)
+
+        ended = self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': session_id}),
+            {}, format='json')
+        self.assertEqual(ended.status_code, status.HTTP_200_OK)
+        test = PUNDITTest.objects.get(pk=ended.data['promoted']['test_id'])
+        self.assertEqual(test.location_address, address)
+
+    def test_an_import_without_a_location_description_records_an_empty_one(self):
+        """Blank, not None — the column is text, and `None` would read as a
+        field the platform refused rather than one nobody filled in."""
+        session_id = self._upload(UPV_CSV).data['id']
+        session = TelemetrySession.objects.get(pk=session_id)
+        self.assertNotIn('location_address', session.session_config)
+
+        ended = self.client.post(
+            reverse('telemetry-session-end', kwargs={'session_id': session_id}),
+            {}, format='json')
+        test = PUNDITTest.objects.get(pk=ended.data['promoted']['test_id'])
+        self.assertEqual(test.location_address, '')
+
     def test_the_packet_chain_is_intact_for_an_imported_session(self):
         session_id = self._upload(UPV_CSV).data['id']
         session = TelemetrySession.objects.get(pk=session_id)

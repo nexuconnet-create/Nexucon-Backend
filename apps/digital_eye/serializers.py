@@ -361,6 +361,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         required=False, write_only=True,
     )
     files = SensorDataFileSerializer(many=True, read_only=True)
+    file_count = serializers.SerializerMethodField()
     project_name = serializers.CharField(source='project.name', read_only=True)
     # Multiple test points per element (review meeting A1): a test accepts a
     # list of readings instead of a single scalar measurement. Labels are
@@ -389,6 +390,9 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
 
+    def get_file_count(self, obj):
+        return obj.files.count()
+
     class Meta:
         model = PUNDITTest
         fields = [
@@ -402,7 +406,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'path_length_mm', 'pulse_time_us', 'transit_time_us',
             'crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us',
             'surface_temperature_c', 'surface_condition', 'rebound_number',
-            'latitude', 'longitude',
+            'latitude', 'longitude', 'location_address',
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
             'strength_curve_snapshot',
@@ -410,7 +414,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'ai_data_quality', 'ai_reasoning_traces',
             'crack_depth_mm', 'estimated_crack_depth_mm', 'waveform_samples',
             'operator', 'operator_name', 'tested_at', 'test_date', 'status', 'notes',
-            'file_ids', 'files', 'created_by', 'created_at', 'updated_at',
+            'file_ids', 'files', 'file_count', 'created_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'test_reference', 'velocity_km_s', 'quality_grade',
                             'strength_curve_snapshot',
@@ -604,6 +608,11 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
 
 class PunditTestSerializer(serializers.ModelSerializer):
+    file_count = serializers.SerializerMethodField()
+
+    def get_file_count(self, obj):
+        return obj.files.count()
+
     class Meta:
         model = PUNDITTest
         fields = '__all__'

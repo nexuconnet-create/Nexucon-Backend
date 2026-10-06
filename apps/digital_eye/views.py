@@ -1542,7 +1542,7 @@ class BIMModelGeometryView(APIView):
 # ======================================================================
 
 class BIMStructuralElementViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = BIMStructuralElement.objects.all().order_by('-created_at')
+    queryset = BIMStructuralElement.objects.all().order_by('level', 'name')
     serializer_class = BIMStructuralElementSerializer
     permission_classes = [IsAuthenticated]
 
@@ -1606,7 +1606,7 @@ class PunditTestViewSet(viewsets.ReadOnlyModelViewSet):
         element_id = self.request.query_params.get('element_id') or self.request.query_params.get('structural_element_id')
         element_name = self.request.query_params.get('element_name')
         if project:
-            qs = qs.filter(Q(project__id=project) | Q(project_id_str=project) | Q(project_name__icontains=project))
+            qs = qs.filter(Q(project__id=project) | Q(project_id_str=project) | Q(project_name=project))
         if element_id:
             qs = qs.filter(Q(structural_element_id_str=element_id) | Q(structural_element__icontains=element_id))
         if element_name:
@@ -1671,7 +1671,7 @@ class AIAnalysisViewSet(viewsets.ReadOnlyModelViewSet):
         qs = _scoped_legacy_queryset(super().get_queryset(), self.request.user)
         project = self.request.query_params.get('project') or self.request.query_params.get('project_id')
         if project:
-            qs = qs.filter(Q(project__id=project) | Q(project_id_str=project))
+            qs = qs.filter(Q(project__id=project) | Q(project_id_str=project) | Q(project_name=project))
         return qs
 
     def list(self, request, *args, **kwargs):
@@ -1788,7 +1788,7 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
     Nexucon Link calibration curves: the project-specific relationship
     between pulse velocity (m/s), optional rebound number and compressive
     strength (f_cu, MPa). The project's active curve replaces the fixed
-    linear f_cu formula in every strength computation.
+    exponential f_cu formula in every strength computation.
 
     Reads are authenticated and scope-limited (platform default curve plus
     the caller's scoped projects' curves); create/update/delete and curve
@@ -2571,6 +2571,16 @@ class PunditAnalysisReviewView(APIView):
             except Exception as e:
                 logger.warning("Could not re-run full LLM joint analysis: %s", e)
 
+        if is_director and decision:
+            from django.core.mail import send_mail
+            subject = f"NDT Report {analysis.analysis_reference} has been {decision}"
+            message = f"Hello Inspector,\n\nThe AI Analysis {analysis.analysis_reference} for project '{getattr(analysis.project, 'name', '')}' has been {decision} by {rev_by}.\n\nNotes:\n{review.notes}\n\nPlease review the dashboard for more details."
+            try:
+                # We should ideally fetch all inspectors for the project. For now, simulate sending to inspector email.
+                send_mail(subject, message, 'notifications@nexucon.com', ['inspector@nexucon.com'], fail_silently=True)
+            except Exception as e:
+                pass
+
         _record_audit(request.user, 'digital_eye.pundit_analysis.review',
                       'AIAnalysisRecord', analysis.id,
                       {**audit_payload, 'analysis_reference': analysis.analysis_reference})
@@ -2624,6 +2634,55 @@ class PunditAnalysisJointRegenerateView(APIView):
             'observations': new_analysis.observations,
             'reasoning_log': new_analysis.reasoning_log,
         }, status=status.HTTP_200_OK)
+
+
+class PunditAnalysisChatView(APIView):
+    """
+    POST /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/chat/
+    Sends a message to the AI for reasoning context and returns the response.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, analysis_id):
+        from apps.evidence.models import AIAnalysisRecord
+        from apps.common.ai_service import AIService
+        allowed = scoped_projects(request.user)
+        analysis = AIAnalysisRecord.objects.filter(project__in=allowed, pk=analysis_id).first()
+        if analysis is None:
+            return Response({'detail': 'Analysis not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        
+        chat_history = request.data.get('history', [])
+        new_message = request.data.get('message', '').strip()
+        
+        if not new_message:
+            return Response({'detail': 'Message is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build prompt
+        prompt = (
+            f"You are the Nexucon AI engineering assistant. An engineer is reviewing the following structural AI analysis "
+            f"you generated. Please answer their question or provide reasoning.\n\n"
+            f"Analysis Observations:\n{analysis.observations}\n\n"
+            f"Analysis Reasoning Log:\n{analysis.reasoning_log}\n\n"
+            f"Chat History:\n"
+        )
+        for msg in chat_history:
+            role = "Engineer" if msg.get("role") == "user" else "AI"
+            prompt += f"{role}: {msg.get('text')}\n"
+        
+        prompt += f"Engineer: {new_message}\nAI:"
+
+        try:
+            res = AIService.generate_structured_json(prompt, schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The AI's text response to the engineer."}
+                },
+                "required": ["text"]
+            })
+            return Response({'text': res.get('text', '')}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class PunditAnalysisCommentView(APIView):

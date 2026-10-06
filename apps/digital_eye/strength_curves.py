@@ -246,18 +246,18 @@ def strength_plausibility_error(f_mpa):
 # ---------------------------------------------------------------------------
 
 def _builtin_default_params():
-    """The fixed laboratory curve expressed in the module's m/s domain.
+    """The default exponential laboratory curve expressed in the module's m/s domain.
 
-    f_cu = 8.961 x V_km_s - 7.97 == f_cu = 0.008961 x V_m_s - 7.97.
+    f_cu = 1.20 * exp(0.85 * V_km_s) == 1.20 * exp(0.00085 * V_m_s).
     Params live in the SAME dict shape a stored StrengthCurve row uses so
     the fallback path and the DB path are interchangeable.
     """
     from apps.reports.ndt_reports import (
-        ECS_SLOPE, ECS_INTERCEPT, ECS_VALID_MIN_KM_S, ECS_VALID_MAX_KM_S,
+        ECS_EXP_A, ECS_EXP_B_MS, ECS_EXP_C, ECS_VALID_MIN_KM_S, ECS_VALID_MAX_KM_S,
     )
     return {
-        'curve_type': 'linear',
-        'formula_params': {'m': ECS_SLOPE / 1000.0, 'c': ECS_INTERCEPT},
+        'curve_type': 'exponential',
+        'formula_params': {'a': ECS_EXP_A, 'b': ECS_EXP_B_MS, 'c': ECS_EXP_C},
         'valid_range_ms': [ECS_VALID_MIN_KM_S * 1000.0, ECS_VALID_MAX_KM_S * 1000.0],
     }
 
@@ -272,14 +272,14 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None):
     return {
         'curve_id': None,
         'name': BUILTIN_CURVE_NAME,
-        'curve_type': 'linear',
-        'standard': 'BS 1881-203:1999',
-        'formula': formula_display('linear', p['formula_params']),
+        'curve_type': 'exponential',
+        'standard': 'BS 1881-203 / BS EN 12504-4',
+        'formula': formula_display('exponential', p['formula_params']),
         'formula_params': p['formula_params'],
         'valid_range_ms': p['valid_range_ms'],
         'r2_score': None,
         'standard_error': None,  # fixed curve: no regression, no error estimate
-        'provenance_source': 'Laboratory fixed calibration curve (documented in report section 3.0)',
+        'provenance_source': 'Laboratory default exponential calibration curve (documented in report section 3.0)',
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
         'se_adjustment': None,
     }
@@ -493,9 +493,13 @@ def formula_display(curve_type, params):
                 for i, x in enumerate(params['coeffs']))
             return f"f_cu = {terms}"
         if curve_type == 'exponential':
-            return (f"f_cu = {c(params['a'])} x exp({c(params['b'])} x V)"
-                    + (f" - {c(abs(params['c']))}" if params['c'] < 0
-                       else f" + {c(params['c'])}"))
+            c_val = params.get('c', 0.0) or 0.0
+            c_str = ""
+            if c_val < 0:
+                c_str = f" - {c(abs(c_val))}"
+            elif c_val > 0:
+                c_str = f" + {c(c_val)}"
+            return f"f_cu = {c(params['a'])} x exp({c(params['b'])} x V){c_str}"
         if curve_type == 'sonreb':
             return (f"f_cu = {c(params['a'])} x V^{c(params['b'])} "
                     f"x R^{c(params['c'])}  (R = rebound number)")

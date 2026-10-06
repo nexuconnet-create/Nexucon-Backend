@@ -25,6 +25,9 @@ from .ndt_reports import (
     ECS_FORMULA_LINE, NDTReportService, _element_display,
     ecs_report_disclosure,
 )
+from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
+
+
 def _natural_sort_key(item):
     import re
     if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
@@ -85,7 +88,7 @@ class NDTWordExporter:
     """Builds the .docx edition of the statutory NDT report."""
 
     @classmethod
-    def export_docx(cls, project, user=None, operator=None):
+    def export_docx(cls, project, user=None, operator=None, element_id=None):
         from apps.digital_eye.models import PUNDITTest, RebarTest
 
         S = NDTReportService
@@ -195,6 +198,9 @@ class NDTWordExporter:
                 tests = lbl_matched if lbl_matched else all_tests
         else:
             tests = all_tests
+            
+        if element_id:
+            tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
 
         rebar_tests = list(
             RebarTest.objects.filter(project=project).order_by('recorded_at')
@@ -385,7 +391,7 @@ class NDTWordExporter:
                       str(int(rt.links_mm)) if rt.links_mm else '-',
                       str(rt.spacing_mm) if rt.spacing_mm else '-',
                       str(int(rt.cover_depth_mm)) if rt.cover_depth_mm else '-']
-                     for i, rt in enumerate(rebar_tests)])
+                     for i, rt in enumerate(sorted(rebar_tests, key=lambda r: _natural_sort_key(r.structural_element or '')))])
             else:
                 _add_para(doc, 'No rebar assessment was recorded during this '
                                'investigation.')
@@ -406,7 +412,7 @@ class NDTWordExporter:
             if crack_tests:
                 _add_heading(doc, '5.1 CRACK DEPTH MEASUREMENTS '
                                   '(TIME-DIFFERENCE METHOD)', level=2)
-                for t in crack_tests:
+                for t in sorted(crack_tests, key=lambda ct: _natural_sort_key(ct.structural_element or '')):
                     rows = t.reading_rows()
                     mean_depth = S._crack_depth(t)
                     _add_table(
@@ -445,14 +451,20 @@ class NDTWordExporter:
 
                 _add_heading(doc, 'SUMMARY OF TEST RESULTS', level=2)
                 for floor in floors_present:
-                    floor_elements = [e for e in element_data if e['floor_label'] == floor]
+                    floor_elements = sorted(
+                        [e for e in element_data if e['floor_label'] == floor],
+                        key=lambda e: _natural_sort_key(e['element'])
+                    )
                     member_order = []
                     for e in floor_elements:
                         if e['member_type'] not in member_order:
                             member_order.append(e['member_type'])
                     member_order = sorted(member_order, key=_natural_sort_key)
                     for member in member_order:
-                        group = [e for e in floor_elements if e['member_type'] == member]
+                        group = sorted(
+                            [e for e in floor_elements if e['member_type'] == member],
+                            key=lambda e: _natural_sort_key(e['element'])
+                        )
                         plural = member if member.endswith('S') else member + 'S'
                         _add_heading(doc, f'{floor.upper()} {plural}', level=3)
                         table_rows = []
@@ -526,7 +538,7 @@ class NDTWordExporter:
                         _add_para(doc, f"{e['element']}: {e['implausibility_note']}")
             if surface_tests:
                 _add_heading(doc, '5.2 SURFACE QUALITY OBSERVATIONS', level=2)
-                for t in surface_tests:
+                for t in sorted(surface_tests, key=lambda st: _natural_sort_key(st.structural_element or '')):
                     for r in t.reading_rows():
                         condition = r.get('surface_condition') \
                             or 'condition not recorded'
@@ -535,12 +547,20 @@ class NDTWordExporter:
                             f"{_element_display(t.structural_element)} "
                             f"{r['label'] or '-'}: {condition}")
 
-        def emit_remarks():
+        def emit_discussion_of_results():
             # ------------------------------------------------------------ 5.4
-            _add_heading(doc, '5.4 FIELD REMARKS & OBSERVATIONS', level=2)
+            _add_heading(doc, '5.4 DISCUSSION OF RESULTS', level=2)
+            body = get_cms_text(project, 'discussion_of_results')[0]
+            for para in cms_paragraphs(body):
+                _add_para(doc, para)
+
+        def emit_remarks():
+            # ------------------------------------------------------------ 5.5
+            _add_heading(doc, '5.5 REMARKS', level=2)
 
             lead_in = get_cms_text(project, 'remarks_preamble')[0]
-            _add_para(doc, lead_in)
+            for para in cms_paragraphs(lead_in):
+                _add_para(doc, para)
 
             def _is_substantive(text):
                 if not text or not str(text).strip():
@@ -735,7 +755,8 @@ class NDTWordExporter:
             '4.1': emit_visual,
             '4.2': emit_methodology,   # 4.2 + 4.3 + 4.4, as one unit
             '5.0': emit_analysis,
-            '5.4': emit_remarks,
+            '5.4': emit_discussion_of_results,
+            '5.5': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
         }
