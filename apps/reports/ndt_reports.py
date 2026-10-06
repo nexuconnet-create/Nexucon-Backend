@@ -3722,53 +3722,77 @@ class NDTReportService:
                             builder.para(f"**Field Observations:** “{review.inspector_notes}”")
                     builder.ln_gap(2)
 
-                for obs in ai_record.observations:
-                    builder.bullet(str(obs))
-                # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
-                # intervals, probability below design strength, cross-element
-                # outlier checks, data quality and the reasoning trace — computed
-                # from the recorded data by the analysis engine and stored on the
-                # record. Rendered verbatim; nothing here is editable prose.
-                for m in (ai_record.correlations or []):
-                    if not isinstance(m, dict) or 'mean_ecs_n_mm2' not in m:
+                # Summarised: distinct key observations only, capped, each
+                # trimmed to its first two sentences so nothing is dropped
+                # mid-thought but the section stays short.
+                def _brief(text, max_sentences=2, max_chars=320):
+                    import re
+                    text = ' '.join(str(text).split())
+                    parts = re.split(r'(?<=[.!?])\s+', text)
+                    out = ' '.join(parts[:max_sentences])
+                    if len(out) > max_chars:
+                        out = out[:max_chars].rsplit(' ', 1)[0] + '...'
+                    return out
+                seen_obs = set()
+                shown = 0
+                for obs in (ai_record.observations or []):
+                    brief = _brief(obs)
+                    key = brief.lower()
+                    if not brief or key in seen_obs:
                         continue
+                    seen_obs.add(key)
+                    builder.bullet(brief)
+                    shown += 1
+                    if shown >= 5:
+                        break
+                # ---- Confidence metrics (11 Sep 2026, PART B §2.2): one
+                # compact line per element with the key figures; the full
+                # reasoning trace is kept only for flagged elements
+                # (outlier, notable risk below design strength, weak data).
+                metrics = [m for m in (ai_record.correlations or [])
+                           if isinstance(m, dict) and 'mean_ecs_n_mm2' in m]
+                if metrics:
+                    builder.inner_heading('KEY METRICS PER ELEMENT')
+                flagged = []
+                for m in metrics:
                     element = m.get('element') or 'element'
                     floor = f" ({m['floor']})" if m.get('floor') else ''
-                    builder.inner_heading(
-                        f"{_element_display(element).upper()}{floor}")
-                    rows = [
-                        ('Mean pulse velocity',
-                         '-' if m.get('mean_velocity_m_s') is None
-                         else f"{m['mean_velocity_m_s']:.0f} m/s"),
-                        ('Estimated compressive strength',
-                         f"{m['mean_ecs_n_mm2']:.1f} N/mm2"),
-                    ]
+                    parts = []
+                    if m.get('mean_velocity_m_s') is not None:
+                        parts.append(f"{m['mean_velocity_m_s']:.0f} m/s")
+                    parts.append(f"ECS {m['mean_ecs_n_mm2']:.1f} N/mm2")
                     ci = m.get('confidence_interval_n_mm2')
-                    rows.append(('95% confidence interval',
-                                 f"{ci[0]:.1f} - {ci[1]:.1f} N/mm2"
-                                 if ci else
-                                 'Not available — the active calibration curve '
-                                 'carries no regression standard error'))
+                    if ci:
+                        parts.append(f"95% CI {ci[0]:.1f}-{ci[1]:.1f}")
                     p_below = m.get('probability_below_design')
-                    rows.append(('Probability of strength below the 25 N/mm2 '
-                                 'design strength',
-                                 f"{p_below * 100:.1f}%"
-                                 if p_below is not None else 'Not computable'))
+                    if p_below is not None:
+                        parts.append(f"P(<25 N/mm2) {p_below * 100:.1f}%")
                     dq = m.get('data_quality')
-                    rows.append(('Data quality',
-                                 f"{dq['label']} — {dq['reason']}"
-                                 if dq else 'Not scored'))
+                    if dq:
+                        parts.append(f"data quality: {dq['label']}")
                     outlier = m.get('cross_element_outlier')
-                    rows.append(('Cross-element check',
-                                 (f"OUTLIER — deviates {outlier['deviation_pct']:+.1f}% "
-                                  f"from the {outlier['peer_median_m_s']:.0f} m/s "
-                                  f"median of its {outlier['group']}")
-                                 if outlier else
-                                 'Consistent with its peer group'))
-                    builder.kv_table(rows)
-                    builder.inner_heading('AI REASONING TRACE')
-                    for i, step in enumerate(m.get('reasoning_trace') or [], 1):
-                        builder.para(f'{i}. {step}', leading=7.5)
+                    if outlier:
+                        parts.append(
+                            f"OUTLIER {outlier['deviation_pct']:+.1f}% vs "
+                            f"{outlier['group']} median")
+                    builder.bullet(
+                        f"{_element_display(element)}{floor}: "
+                        + '; '.join(parts))
+                    risky = p_below is not None and p_below >= 0.05
+                    weak = bool(dq) and str(dq.get('label', '')).lower() in (
+                        'low', 'poor', 'weak', 'insufficient')
+                    if outlier or risky or weak:
+                        flagged.append(m)
+                for m in flagged[:3]:
+                    steps = (m.get('reasoning_trace') or [])[:2]
+                    if not steps:
+                        continue
+                    element = m.get('element') or 'element'
+                    builder.inner_heading(
+                        f"REASONING — {_element_display(element).upper()}")
+                    for i, step in enumerate(steps, 1):
+                        builder.para(f'{i}. {_brief(step, 1, 260)}',
+                                     leading=7.5)
 
         def emit_discussion_of_results():
             # ----------------------------- 5.4 DISCUSSION OF RESULTS
@@ -4418,6 +4442,33 @@ class NDTReportService:
 
         pdf = builder.pdf
         shown = 0
+
+        # Pre-load every photo; unreadable ones are left out of the report
+        # altogether rather than printed as an 'IMAGE FILE NOT AVAILABLE'
+        # placeholder caption.
+        import io
+        loaded = []
+        for url, caption in items:
+            try:
+                src = url
+                if isinstance(src, str) and src.startswith('/media/'):
+                    from django.conf import settings
+                    src = os.path.join(settings.MEDIA_ROOT,
+                                       src[len('/media/'):])
+                if isinstance(src, str) and src.startswith('http'):
+                    import urllib.request
+                    req = urllib.request.Request(
+                        src, headers={'User-Agent': 'Mozilla/5.0'})
+                    data = urllib.request.urlopen(req, timeout=15).read()
+                else:
+                    with open(src, 'rb') as fh:
+                        data = fh.read()
+                if data:
+                    loaded.append((io.BytesIO(data), caption))
+            except Exception as exc:        # noqa: BLE001 — skip, don't print
+                logger.error('appendix photo skipped (%s): %s', url, exc)
+        items = loaded
+
         for i in range(0, len(items), 2):
             pdf.add_page()
             if i == 0:
@@ -4428,8 +4479,7 @@ class NDTReportService:
                 y_img = 16.9 + slot * 109.5
                 embedded = cls._boxed_image(pdf, url, 34.9, y_img,
                                             146.3, 100.0)
-                label = (caption if embedded
-                         else f'{caption} (IMAGE FILE NOT AVAILABLE)')
+                label = caption
                 pdf.set_xy(pdf.l_margin, y_img + 100.4)
                 builder.photo_caption(cls._roman(start_index + shown), label)
                 shown += 1
