@@ -989,6 +989,7 @@ class ReportVerifyView(APIView):
 
     def get(self, request):
         from .models import ArchivedReport
+        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -997,9 +998,41 @@ class ReportVerifyView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
+        # 1. Exact match
         report = (ArchivedReport.objects
                   .filter(report_reference=ref, content_key=digest)
                   .first())
+        # 2. Match by digest directly (handles whitespace or URL encoding variances in ref)
+        if report is None:
+            report = ArchivedReport.objects.filter(content_key=digest).first()
+            if report and ref:
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(report.report_reference.split())
+                if norm_query != norm_stored:
+                    report = None
+        # 3. If still None, check if any archived report's live statutory digest matches
+        if report is None:
+            for cand in ArchivedReport.objects.all():
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(cand.report_reference.split())
+                if not norm_query or norm_query == norm_stored:
+                    try:
+                        from apps.digital_eye.models import PUNDITTest
+                        c_tests = list(
+                            PUNDITTest.objects.filter(project=cand.project)
+                            .select_related('device', 'operator')
+                            .prefetch_related('files', 'readings')
+                            .order_by('structural_element', 'test_date')
+                        )
+                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
+                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
+                        if c_digest == digest:
+                            cand.content_key = digest
+                            cand.save(update_fields=['content_key'])
+                            report = cand
+                            break
+                    except Exception:
+                        pass
         if report is None:
             return Response(
                 {'verified': False,
@@ -1037,6 +1070,7 @@ class ReportVerifyDownloadView(APIView):
 
     def get(self, request):
         from .models import ArchivedReport
+        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -1045,9 +1079,41 @@ class ReportVerifyDownloadView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
+        # 1. Exact match
         report = (ArchivedReport.objects
                   .filter(report_reference=ref, content_key=digest)
                   .first())
+        # 2. Match by digest directly
+        if report is None:
+            report = ArchivedReport.objects.filter(content_key=digest).first()
+            if report and ref:
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(report.report_reference.split())
+                if norm_query != norm_stored:
+                    report = None
+        # 3. Live digest match fallback
+        if report is None:
+            for cand in ArchivedReport.objects.all():
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(cand.report_reference.split())
+                if not norm_query or norm_query == norm_stored:
+                    try:
+                        from apps.digital_eye.models import PUNDITTest
+                        c_tests = list(
+                            PUNDITTest.objects.filter(project=cand.project)
+                            .select_related('device', 'operator')
+                            .prefetch_related('files', 'readings')
+                            .order_by('structural_element', 'test_date')
+                        )
+                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
+                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
+                        if c_digest == digest:
+                            cand.content_key = digest
+                            cand.save(update_fields=['content_key'])
+                            report = cand
+                            break
+                    except Exception:
+                        pass
         if report is None:
             return Response(
                 {'verified': False,

@@ -2263,16 +2263,24 @@ class NDTReportService:
         """SHA-256 over the underlying test identifiers, results AND reading
         rows — printed in the PDF and keyed by the archive, so "archived
         once" and "digest in the document" always agree."""
+        tests_ordered = sorted(
+            tests,
+            key=lambda t: (
+                getattr(t, 'structural_element', '') or '',
+                t.test_date.isoformat() if getattr(t, 'test_date', None) else '',
+                str(t.id)
+            )
+        )
         reading_material = [
             (str(t.id), [(r['label'], r['transit_us'], r['path_mm'])
                          for r in t.reading_rows()])
-            for t in tests
+            for t in tests_ordered
         ]
         return cls._content_hash(
-            ['ndt', project.id, sorted(str(t.id) for t in tests),
-             len(tests),
+            ['ndt', project.id, sorted(str(t.id) for t in tests_ordered),
+             len(tests_ordered),
              [round(cls._velocity(t), 6) if cls._velocity(t) is not None
-              else None for t in tests],
+              else None for t in tests_ordered],
              reading_material,
              report_no])
 
@@ -2291,8 +2299,13 @@ class NDTReportService:
         from apps.digital_eye.models import PUNDITTest
         from .models import ArchivedReport
 
-        tests = list(PUNDITTest.objects.filter(project=project)
-                     .prefetch_related('readings'))
+        tests = list(
+            PUNDITTest.objects
+            .filter(project=project)
+            .select_related('device', 'operator')
+            .prefetch_related('files', 'readings')
+            .order_by('structural_element', 'test_date')
+        )
         # The effective reference (CMS override honoured) — the archived
         # reference and content_key must match what the report printed and
         # what the cover QR digests, never the un-overridden serial.
