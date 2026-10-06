@@ -603,8 +603,8 @@ class NDTWordExporter:
 
             try:
                 from apps.inspections.models import Inspection
-                insp_qs = list(Inspection.objects.filter(project=project).order_by('-created_at')[:5])
-                for insp in insp_qs:
+                insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
+                if insp:
                     if insp.visual_site_observations:
                         for line in insp.visual_site_observations.splitlines():
                             line = line.strip()
@@ -695,10 +695,11 @@ class NDTWordExporter:
                                'quality can be made.')
             from apps.evidence.models import AIAnalysisRecord
             recommendations = []
-            for record in (AIAnalysisRecord.objects
-                           .filter(project=project, analysis_type='pundit')
-                           .order_by('-created_at')[:20]):
-                for rec in (record.recommendations or []):
+            ai_record = (AIAnalysisRecord.objects
+                             .filter(project=project, analysis_type='pundit')
+                             .order_by('-created_at').first())
+            if ai_record:
+                for rec in (ai_record.recommendations or []):
                     if isinstance(rec, dict):
                         line = f'[{str(rec.get("priority", "Routine")).upper()}] ' \
                                f'{rec.get("recommendation", "")}'
