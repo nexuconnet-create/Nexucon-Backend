@@ -7,7 +7,8 @@ cryptographic digital sign-off and independent integrity verification.
 """
 import hashlib
 
-from rest_framework import status
+from drf_spectacular.utils import extend_schema
+from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,7 +16,22 @@ from rest_framework.views import APIView
 from common.permissions import scoped_projects
 
 from .execution import ExecutionError, InspectionExecutionService
+from .geofence import effective_geofence_radius
 from .models import Inspection
+
+
+class CheckoutResponseSerializer(serializers.Serializer):
+    """Response to `POST {id}/execution/checkout/`.
+
+    ``check_out_time`` is the only field always populated; the coordinates are
+    null when the device had no fix on leaving, which is a real state and not
+    an error. `status` is echoed to show it was **not** changed by check-out.
+    """
+
+    status = serializers.CharField()
+    check_out_time = serializers.DateTimeField(allow_null=True)
+    checkout_latitude = serializers.FloatField(allow_null=True)
+    checkout_longitude = serializers.FloatField(allow_null=True)
 
 
 def _get_scoped_inspection(request, inspection_id):
@@ -39,6 +55,7 @@ class InspectionExecutionView(APIView):
             return Response({'detail': 'Inspection not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         service = InspectionExecutionService
+        radius_m, radius_source = effective_geofence_radius(inspection.project)
         data = {
             'inspection': inspection.inspection_reference,
             'status': inspection.status,
@@ -46,7 +63,19 @@ class InspectionExecutionView(APIView):
             'gps_verified': inspection.gps_verified,
             'gps_latitude': inspection.gps_latitude,
             'gps_longitude': inspection.gps_longitude,
+            'gps_accuracy_m': inspection.gps_accuracy_m,
             'checkin_time': inspection.checkin_time,
+            'check_out_time': inspection.check_out_time,
+            'checkout_latitude': inspection.checkout_latitude,
+            'checkout_longitude': inspection.checkout_longitude,
+            'geofence': {
+                'state': inspection.geofence_state,
+                'reason': inspection.geofence_reason,
+                'distance_m': inspection.geofence_distance_m,
+                'radius_m': radius_m,
+                'radius_source': radius_source,
+                'evaluated': inspection.geofence_state != '',
+            },
         }
         submission = getattr(inspection, 'submission', None)
         if submission:
@@ -72,8 +101,19 @@ class InspectionExecutionView(APIView):
 class InspectionCheckinView(APIView):
     """
     POST /api/v1/inspections/{id}/execution/checkin/
-    Mandatory GPS + timestamp check-in that starts the inspection.
-    Body: {latitude, longitude, device_time?}
+    Mandatory GPS + timestamp check-in that starts the inspection, evaluated
+    against the project's site geofence.
+
+    Body: {latitude, longitude, gps_accuracy_m?, device_time?}
+
+    `gps_accuracy_m` is the device's own reported horizontal accuracy. It is
+    required for the check-in to be *verified*: a 50 m geofence cannot be
+    certified by a fix whose error is wider than the fence. Omitting it
+    produces an honest UNVERIFIABLE result rather than a pass.
+
+    Response `geofence.state` is one of VERIFIED / OUTSIDE / UNVERIFIABLE, and
+    `geofence.radius_source` says whether the radius came from the project or
+    from the platform default.
     """
     permission_classes = [IsAuthenticated]
 
@@ -88,15 +128,65 @@ class InspectionCheckinView(APIView):
                 latitude=request.data.get('latitude'),
                 longitude=request.data.get('longitude'),
                 device_time=request.data.get('device_time'),
+                accuracy_m=request.data.get('gps_accuracy_m'),
             )
         except ExecutionError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        radius_m, radius_source = effective_geofence_radius(inspection.project)
         return Response({
             'status': inspection.status,
             'gps_verified': inspection.gps_verified,
             'gps_latitude': inspection.gps_latitude,
             'gps_longitude': inspection.gps_longitude,
             'checkin_time': inspection.checkin_time,
+            'geofence': {
+                'state': inspection.geofence_state,
+                'reason': inspection.geofence_reason,
+                'distance_m': inspection.geofence_distance_m,
+                'radius_m': radius_m,
+                # Which radius *applied*: the project's own, or the platform
+                # default. Reported separately so a client can never present
+                # the platform policy as a value the project recorded.
+                'radius_source': radius_source,
+                'accuracy_m': inspection.gps_accuracy_m,
+            },
+        })
+
+
+class InspectionCheckoutView(APIView):
+    """
+    POST /api/v1/inspections/{id}/execution/checkout/
+    Record that the inspector has left the site.
+
+    Body: {latitude?, longitude?, gps_accuracy_m?, device_time?}
+
+    Position is optional — a device may have no fix when leaving. This
+    endpoint does not change the inspection's status; check-out is a recorded
+    fact, not a workflow transition (see InspectionExecutionService.checkout).
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=None, responses={200: CheckoutResponseSerializer})
+    def post(self, request, inspection_id):
+        inspection = _get_scoped_inspection(request, inspection_id)
+        if not inspection:
+            return Response({'detail': 'Inspection not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            inspection = InspectionExecutionService.checkout(
+                inspection, request.user,
+                latitude=request.data.get('latitude'),
+                longitude=request.data.get('longitude'),
+                device_time=request.data.get('device_time'),
+                accuracy_m=request.data.get('gps_accuracy_m'),
+            )
+        except ExecutionError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'status': inspection.status,
+            'check_out_time': inspection.check_out_time,
+            'checkout_latitude': inspection.checkout_latitude,
+            'checkout_longitude': inspection.checkout_longitude,
         })
 
 

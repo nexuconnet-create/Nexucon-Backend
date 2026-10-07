@@ -65,6 +65,12 @@ class FieldDevice(models.Model):
         ('gpr', 'Ground Penetrating Radar'),
         ('pundit', 'PUNDIT Ultrasonic NDT'),
         ('scanner', '3D Laser Scanner'),
+        # SLAM and thermal are added alongside 'scanner' rather than replacing
+        # it: the existing value is referenced by live rows, and a capture
+        # from a handheld SLAM rig is a different instrument from a tripod
+        # laser scanner even though both produce a point cloud.
+        ('slam', 'SLAM Handheld Scanner'),
+        ('thermal', 'Thermal Imaging Camera'),
         ('other', 'Other Sensor'),
     ]
     STATUS_CHOICES = [
@@ -95,7 +101,72 @@ class FieldDevice(models.Model):
 
     calibration_date = models.DateField(null=True, blank=True)
     calibration_certificate_url = models.URLField(max_length=500, blank=True, default='')
+    
+    CONNECTION_PROTOCOLS = [
+        ('usb', 'USB Wired'),
+        ('bluetooth', 'Bluetooth Wireless'),
+        ('wifi', 'Wi-Fi Hotspot / Network'),
+    ]
+    connection_protocol = models.CharField(max_length=30, choices=CONNECTION_PROTOCOLS, blank=True, default='', help_text="Wireless or wired connection method (e.g. Wi-Fi, Bluetooth)")
+    
+    calibration_expiry = models.DateField(
+        null=True, blank=True,
+        help_text=(
+            "Date the calibration certificate lapses. Null means no expiry has "
+            "been recorded — never defaulted to a computed date, because an "
+            "instrument with no certificate on file must not appear calibrated "
+            "until some assumed point."
+        ),
+    )
     notes = models.TextField(blank=True, default='')
+    # How this instrument's export names the platform's columns. Keys are the
+    # header text as it appears in the file the unit writes; values are the
+    # contract keys the importer accepts (`path_length_l_mm` and friends).
+    #
+    # Held here rather than in a field gateway's config on purpose. A gateway
+    # that rewrote the file before sending it would mean the retained export
+    # was no longer the instrument's own output — and that retained bytes are
+    # the only ground truth left if a parse is ever found to be wrong. Keeping
+    # the mapping server-side also means a mis-mapped column is corrected once,
+    # for every site, rather than on each laptop that happens to send a file.
+    #
+    # Empty is the honest default: it means the export already speaks the
+    # documented template. It is never seeded with a guess at what a unit
+    # "probably" writes, because a wrong mapping is indistinguishable from a
+    # right one once rows have been written from it.
+    column_mapping = models.JSONField(
+        default=dict, blank=True,
+        help_text=(
+            "Maps this instrument's own export headers to the platform's "
+            "contract keys. Empty means the export already speaks the template."
+        ),
+    )
+    default_test_type = models.CharField(max_length=30, blank=True, default='',
+                                         help_text="Default test type for gateway-pushed files")
+    default_structural_element = models.CharField(max_length=100, blank=True, default='',
+                                                  help_text="Default structural element for gateway-pushed files")
+    default_floor = models.CharField(max_length=100, blank=True, default='',
+                                     help_text="Default floor for gateway-pushed files")
+    default_test_location = models.CharField(max_length=255, blank=True, default='',
+                                             help_text="Default test location for gateway-pushed files")
+
+    # Whether the field gateway holds this instrument's config, so its exports
+    # are pushed without anyone opening an upload form.
+    #
+    # Set only through the gateway action on the device, never by a plain
+    # PATCH: turning it on mints a credential and writes it into the gateway's
+    # config directory in one step, and a boolean that could be flipped on its
+    # own would say "sync is on" while no config existed — the failure this
+    # whole feature is built to remove. It is also why this field is read-only
+    # in the serializer.
+    gateway_enabled = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when the platform has written this instrument's config for "
+            "the field gateway. False means sync was never set up, not that it "
+            "was set up and is idle."
+        ),
+    )
     is_active = models.BooleanField(default=True)
 
     registered_by = models.ForeignKey(
@@ -110,6 +181,69 @@ class FieldDevice(models.Model):
 
     def __str__(self):
         return f"{self.device_id} ({self.get_device_type_display()})"
+
+
+class DeviceConnectionLog(models.Model):
+    """
+    Auditable log of Bluetooth / Wi-Fi / Cloud connection events for a
+    FieldDevice. Each row records a connection or disconnection attempt,
+    its protocol, whether it succeeded, and optional diagnostic detail
+    (RSSI, firmware banner, cloud workspace ID).
+
+    The inspector dashboard writes a row every time a user pairs via Web
+    Bluetooth, connects to a device hotspot, or authenticates with the
+    Screening Eagle cloud, and another when they deliberately disconnect.
+    Backend-initiated heartbeats do NOT write rows here — those are device
+    telemetry, not user actions.
+    """
+    EVENT_CONNECTED = 'connected'
+    EVENT_DISCONNECTED = 'disconnected'
+    EVENT_FAILED = 'failed'
+    EVENT_CHOICES = [
+        (EVENT_CONNECTED, 'Connected'),
+        (EVENT_DISCONNECTED, 'Disconnected'),
+        (EVENT_FAILED, 'Failed'),
+    ]
+
+    PROTOCOL_BLE = 'bluetooth'
+    PROTOCOL_WIFI = 'wifi'
+    PROTOCOL_CLOUD = 'cloud'
+    PROTOCOL_CHOICES = [
+        (PROTOCOL_BLE, 'Bluetooth Wireless'),
+        (PROTOCOL_WIFI, 'Wi-Fi Hotspot / Network'),
+        (PROTOCOL_CLOUD, 'Cloud Push (Screening Eagle)'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    device = models.ForeignKey(
+        FieldDevice, on_delete=models.CASCADE,
+        related_name='connection_logs',
+    )
+    event = models.CharField(max_length=20, choices=EVENT_CHOICES, db_index=True)
+    protocol = models.CharField(max_length=20, choices=PROTOCOL_CHOICES, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='device_connections',
+    )
+    # Optional diagnostic context — never required, never fabricated.
+    rssi_dbm = models.IntegerField(null=True, blank=True,
+                                   help_text="Received signal strength (dBm) at connection time")
+    ip_address = models.GenericIPAddressField(null=True, blank=True,
+                                             help_text="Device IP (Wi-Fi) or client IP (Cloud)")
+    cloud_workspace_id = models.CharField(max_length=255, blank=True, default='',
+                                          help_text="Screening Eagle workspace ID for cloud connections")
+    firmware_banner = models.CharField(max_length=255, blank=True, default='',
+                                      help_text="Firmware version string received at handshake")
+    error_message = models.TextField(blank=True, default='',
+                                     help_text="Diagnostic message when event is 'failed'")
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.device.device_id} {self.event} ({self.protocol}) @ {self.created_at}"
 
 
 class SensorDataFile(models.Model):
@@ -365,6 +499,11 @@ class PUNDITTest(models.Model):
         ('questionable', 'Questionable (3.0 – 3.75 km/s)'),
         ('poor', 'Poor (2.0 – 3.0 km/s)'),
         ('very_poor', 'Very Poor (< 2.0 km/s)'),
+        # Not a grade: the recorded velocity falls outside the range
+        # physically possible for concrete, so no quality may be asserted and
+        # no risk is scored. See PUNDITAdapter.grade_quality. Kept distinct
+        # from 'very_poor', which is a real (bad) concrete verdict.
+        ('unverified', 'Unverified — velocity not plausible for concrete'),
         ('pending', 'Pending Analysis'),
         ('EXCELLENT', 'Excellent'),
         ('GOOD', 'Good'),
@@ -445,6 +584,16 @@ class PUNDITTest(models.Model):
 
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
+    # The inspector's own description of where the test was taken — street
+    # address, building, access note. Free text rather than a geocoded string:
+    # no geocoder is configured, so an address the platform filled in itself
+    # would be invented. Blank means nobody described the location, and the
+    # report prints nothing for it rather than a placeholder.
+    location_address = models.TextField(
+        blank=True, default='',
+        help_text="Inspector's description of the test location: street address, "
+                  "building, or how to reach the station",
+    )
 
     # Computed outputs & metrics
     velocity_km_s = models.FloatField(null=True, blank=True, help_text="Computed pulse velocity in km/s")
@@ -506,22 +655,25 @@ class PUNDITTest(models.Model):
         """
         readings = list(self.readings.all())
         if readings:
+            is_crack = (self.test_type == 'crack_depth')
             return [
                 {'label': r.point_label,
                  'path_mm': r.path_length_mm,
                  'transit_us': r.transit_time_us,
                  'velocity_km_s': r.velocity_km_s,
                  'ecs_mpa': r.ecs_mpa,
-                 'uncracked_us': r.uncracked_transit_time_us,
-                 'crack_depth_mm': r.crack_depth_mm,
-                 'surface_condition': r.surface_condition}
+                 'uncracked_us': r.uncracked_transit_time_us if is_crack else None,
+                 'crack_depth_mm': r.crack_depth_mm if is_crack else None,
+                 'surface_condition': r.surface_condition,
+                 'notes': r.notes or ''}
                 for r in readings
             ]
         from apps.digital_eye.adapters import PUNDITAdapter
         from apps.digital_eye.strength_curves import apply_active_curve
         row = {'label': 'A', 'path_mm': None, 'transit_us': None,
                'velocity_km_s': None, 'ecs_mpa': None, 'uncracked_us': None,
-               'crack_depth_mm': None, 'surface_condition': None}
+               'crack_depth_mm': None, 'surface_condition': None,
+               'notes': self.notes or ''}
         if self.test_type == 'crack_depth':
             row.update({
                 'path_mm': self.crack_path_length_mm,
@@ -577,6 +729,8 @@ class PUNDITTest(models.Model):
     def element_mean_crack_depth_mm(self):
         """Mean crack depth over this test's readings (the element verdict
         for multi-point crack tests); None when no point yields a depth."""
+        if self.test_type != 'crack_depth':
+            return None
         depths = [row['crack_depth_mm'] for row in self.reading_rows()
                   if row['crack_depth_mm'] is not None]
         return (sum(depths) / len(depths)) if depths else None
@@ -1366,17 +1520,30 @@ class PunditAnalysisReview(models.Model):
         ('corroborated', 'Corroborated by reviewing engineer'),
         ('returned', 'Returned — revisions / further testing required'),
     ]
+    INSPECTOR_VERDICTS = [
+        ('verified', 'Verified — field readings consistent'),
+        ('requires_coring', 'Secondary coring recommended'),
+        ('coupling_rechecked', 'Transducer coupling verified on site'),
+        ('retest_recommended', 'Further testing / revision required'),
+    ]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     analysis = models.OneToOneField(
         'evidence.AIAnalysisRecord', on_delete=models.CASCADE,
         related_name='pundit_review')
-    decision = models.CharField(max_length=20, choices=DECISIONS)
+    decision = models.CharField(max_length=20, choices=DECISIONS, blank=True, default='')
     notes = models.TextField(blank=True, default='')
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL,
                                     on_delete=models.SET_NULL,
                                     null=True, blank=True,
                                     related_name='pundit_analysis_reviews')
     reviewed_at = models.DateTimeField(default=timezone.now)
+    inspector_verdict = models.CharField(max_length=30, choices=INSPECTOR_VERDICTS, blank=True, default='')
+    inspector_notes = models.TextField(blank=True, default='')
+    inspector_responded_by = models.ForeignKey(settings.AUTH_USER_MODEL,
+                                               on_delete=models.SET_NULL,
+                                               null=True, blank=True,
+                                               related_name='pundit_analysis_inspector_responses')
+    inspector_responded_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1384,7 +1551,44 @@ class PunditAnalysisReview(models.Model):
         ordering = ['-reviewed_at']
 
     def __str__(self):
-        return f"{self.analysis_id} — {self.get_decision_display()}"
+        return f"{self.analysis_id} — {self.get_decision_display() or 'pending'}"
+
+
+class PunditAnalysisComment(models.Model):
+    """
+    Collaborative discussion comments on a PUNDIT AI Analysis.
+    Government officials and project field inspectors can converse here;
+    their chat thread is stored and fed into the Joint Review AI regeneration
+    to produce a consensus opinion.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    analysis = models.ForeignKey(
+        'evidence.AIAnalysisRecord', on_delete=models.CASCADE,
+        related_name='discussion_comments')
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                               related_name='pundit_analysis_comments')
+    author_name = models.CharField(max_length=255, blank=True, default='')
+    author_role = models.CharField(max_length=100, blank=True, default='')
+    comment = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.author_name} on {self.analysis_id}: {self.comment[:30]}"
+
+    def save(self, *args, **kwargs):
+        if not self.author_name and self.author:
+            self.author_name = self.author.get_full_name() or self.author.email
+        if not self.author_role and self.author:
+            if hasattr(self.author, 'role') and self.author.role:
+                self.author_role = str(self.author.role).replace('_', ' ').title()
+            elif hasattr(self.author, 'is_staff') and self.author.is_staff:
+                self.author_role = 'Government Official'
+            else:
+                self.author_role = 'Field Inspector'
+        super().save(*args, **kwargs)
 
 
 # ======================================================================

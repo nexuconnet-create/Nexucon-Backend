@@ -1,13 +1,18 @@
 """
 Digital Eye API serializers.
 """
+import math
+
 from rest_framework import serializers
 
+from apps.data_import.readers import normalise_key
+from apps.data_import.registry import UPV_ACCEPTED_KEYS
 from common.permissions import scoped_projects
 from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMStructuralElement, CalibrationProfile,
-    CoreSample, DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint,
-    FieldDevice, GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
+    CoreSample, DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding,
+    EvidenceSpatialPoint, FieldDevice,
+    GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
     GnssSurvey, LiveStream, NexuconLinkSettings, ProjectCurveSetting,
     PunditScanBatch, PUNDITReading, PUNDITTest, ProcessingQueueJob,
     SensorDataFile, SiteAttendanceRecord, StrengthCurve, TrimbleConnection,
@@ -27,6 +32,7 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
     assigned_project = ScopedProjectField(required=False, allow_null=True)
     device_type_display = serializers.CharField(source='get_device_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    gateway_inbox = serializers.SerializerMethodField()
 
     class Meta:
         model = FieldDevice
@@ -35,12 +41,190 @@ class FieldDeviceSerializer(serializers.ModelSerializer):
             'device_type_display', 'model', 'manufacturer', 'firmware_version',
             'status', 'status_display', 'assigned_project', 'battery_level',
             'latitude', 'longitude', 'last_seen', 'calibration_date',
-            'calibration_certificate_url', 'notes', 'is_active', 'registered_by',
+            'calibration_expiry', 'calibration_certificate_url', 'notes', 'is_active',
+            'registered_by', 'column_mapping',
+            'connection_protocol',
+            'default_test_type', 'default_structural_element',
+            'default_floor', 'default_test_location',
+            # Read-only: it is set by the gateway action, which mints a
+            # credential and writes the config in the same step. A writable
+            # boolean here would let a client say "sync is on" with no config
+            # behind it, and the panel would then claim something untrue.
+            'gateway_enabled',
+            # Derived from a deployment setting, never from a request, so it is
+            # not a field anyone can write either.
+            'gateway_inbox',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'device_reference', 'status', 'battery_level',
                             'latitude', 'longitude', 'last_seen', 'registered_by',
+                            'gateway_enabled', 'gateway_inbox',
                             'created_at', 'updated_at']
+
+    def get_gateway_inbox(self, obj):
+        """The folder this instrument's exports are watched in, or ``None``.
+
+        The **gateway container's** path (``/inbox/DE-XXXXXXXX``), which the
+        site cannot derive and which the panel shows so a gateway log can be
+        read against it. It is deliberately not presented as the path the site
+        syncs to: that is a host path this deployment is never told, and the
+        actionable half for the site is the folder *name*.
+
+        ``None`` means this deployment cannot say — provisioning is switched
+        off, or the inbox root is unset. That is a different claim from a path,
+        and the panel says so rather than showing a folder that does not exist.
+        Imported here rather than at module level because
+        ``apps.telemetry.services`` reaches back into this module, and the
+        house way out of that cycle is a local import.
+        """
+        from apps.telemetry.gateway_config import (
+            GatewayConfigError, inbox_dir_for)
+
+        try:
+            return inbox_dir_for(obj)
+        except GatewayConfigError:
+            return None
+
+    def validate_column_mapping(self, value):
+        """Refuse a mapping the importer could never honour.
+
+        The mapping is a declaration of what this instrument's export columns
+        are called, and the importer reads it on every upload from this device.
+        A value that is not a contract key would not fail here — it would fail
+        weeks later, on a laptop at a site, as a refusal naming a column nobody
+        present had written. The form that made the mistake is the right place
+        to catch it.
+
+        Only the *values* are checked. The keys are the instrument's own column
+        names and are deliberately not constrained: they are whatever the
+        export says, and the platform has no business having an opinion about
+        them.
+
+        A value is either the platform column on its own, an object naming it
+        with the scale that gets from the instrument's unit to the contract's —
+        ``{"Distance": {"to": "path_length_l_mm", "scale": 1000}}`` — or
+        ``null``, which says the column was accounted for and is deliberately
+        not read. The scale is validated here rather than left to the reader
+        because a multiplier the importer refuses is a refusal that arrives on
+        a laptop at a site, weeks after the form that made the mistake.
+
+        Checked against the UPV contract, which is the only file contract that
+        describes a whole capture. When a second instrument gets one, this
+        validator has to branch on ``device_type`` rather than widen the set —
+        a GPR mapping that named a pulse-velocity key would be accepted here
+        and then read as nothing.
+        """
+        if not value:
+            # Empty is the honest default: the export speaks the template.
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'Column mapping must be an object of "their column": '
+                '"platform column" pairs.')
+
+        blank_sources = sorted(str(k) for k in value if not str(k).strip())
+        if blank_sources:
+            raise serializers.ValidationError(
+                'Every entry needs the instrument\'s own column name as its '
+                'key. Remove the entry with the blank name, or fill it in.')
+
+        targets = {}
+        for source, target in value.items():
+            if isinstance(target, dict):
+                scale = target.get('scale')
+                if scale is not None and scale != '':
+                    try:
+                        scale = float(scale)
+                    except (TypeError, ValueError):
+                        raise serializers.ValidationError(
+                            f'The scale given for "{source}" is not a number. '
+                            'A scale the platform cannot read would be ignored '
+                            'on import, writing every value in that column '
+                            'unconverted.')
+                    if not math.isfinite(scale) or scale <= 0:
+                        raise serializers.ValidationError(
+                            f'The scale given for "{source}" cannot convert '
+                            'anything. Use a positive number, or leave the '
+                            'scale out to record the column as written.')
+                key = target.get('to')
+                if key is None:
+                    # An object with no destination is a mistyped rename, not a
+                    # decline — `null` is how a column is declined, and reading
+                    # this as one would throw away a column somebody meant to
+                    # map because they misspelled "to".
+                    raise serializers.ValidationError(
+                        f'The entry for "{source}" names no platform column. '
+                        'Give it a "to" column, or use null to record it as '
+                        'deliberately not imported.')
+                targets[source] = key
+            elif isinstance(target, str):
+                targets[source] = target
+            elif target is None:
+                # Accounted for and set aside. This is what lets an instrument
+                # that writes six columns be read by a contract that wants two:
+                # without it, the other four would refuse the file forever.
+                targets[source] = None
+            else:
+                raise serializers.ValidationError(
+                    f'The mapping for "{source}" must be a platform column '
+                    'name, an object naming one with a scale, or null to '
+                    'record it as deliberately not imported.')
+
+        # Folded on both sides, exactly as the reader folds them, so a mapping
+        # written as "PATH LENGTH L (MM)" is accepted — it resolves to the same
+        # contract key, and rejecting it would refuse a mapping that works.
+        # A declined column is not looked up as though it were a name.
+        unknown = sorted({
+            str(target) for target in targets.values()
+            if target is not None
+            and normalise_key(target) not in UPV_ACCEPTED_KEYS
+        })
+        if unknown:
+            raise serializers.ValidationError(
+                f'Not platform columns: {", ".join(unknown)}. Accepted columns '
+                f'are: {", ".join(sorted(UPV_ACCEPTED_KEYS))}.')
+        return value
+
+
+class DeviceConnectionLogSerializer(serializers.ModelSerializer):
+    """Connection events (pair / disconnect / fail) for auditing."""
+    device_id = serializers.CharField(source='device.device_id', read_only=True)
+    device_name = serializers.CharField(source='device.name', read_only=True)
+    device_type = serializers.CharField(source='device.device_type', read_only=True)
+    event_display = serializers.CharField(source='get_event_display', read_only=True)
+    protocol_display = serializers.CharField(source='get_protocol_display', read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DeviceConnectionLog
+        fields = [
+            'id', 'device', 'device_id', 'device_name', 'device_type',
+            'event', 'event_display', 'protocol', 'protocol_display',
+            'user', 'user_name',
+            'rssi_dbm', 'ip_address', 'cloud_workspace_id',
+            'firmware_banner', 'error_message', 'notes',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'user', 'user_name', 'created_at']
+
+    def get_user_name(self, obj):
+        if obj.user:
+            return obj.user.get_full_name() or obj.user.email or str(obj.user)
+        return None
+
+    def validate_event(self, value):
+        valid = {c[0] for c in DeviceConnectionLog.EVENT_CHOICES}
+        if value not in valid:
+            raise serializers.ValidationError(
+                f'Event must be one of: {", ".join(sorted(valid))}')
+        return value
+
+    def validate_protocol(self, value):
+        valid = {c[0] for c in DeviceConnectionLog.PROTOCOL_CHOICES}
+        if value not in valid:
+            raise serializers.ValidationError(
+                f'Protocol must be one of: {", ".join(sorted(valid))}')
+        return value
 
 
 class SensorDataFileSerializer(serializers.ModelSerializer):
@@ -178,6 +362,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         required=False, write_only=True,
     )
     files = SensorDataFileSerializer(many=True, read_only=True)
+    file_count = serializers.SerializerMethodField()
     project_name = serializers.CharField(source='project.name', read_only=True)
     # Multiple test points per element (review meeting A1): a test accepts a
     # list of readings instead of a single scalar measurement. Labels are
@@ -206,6 +391,9 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
 
+    def get_file_count(self, obj):
+        return obj.files.count()
+
     class Meta:
         model = PUNDITTest
         fields = [
@@ -219,7 +407,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'path_length_mm', 'pulse_time_us', 'transit_time_us',
             'crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us',
             'surface_temperature_c', 'surface_condition', 'rebound_number',
-            'latitude', 'longitude',
+            'latitude', 'longitude', 'location_address',
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
             'strength_curve_snapshot',
@@ -227,7 +415,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'ai_data_quality', 'ai_reasoning_traces',
             'crack_depth_mm', 'estimated_crack_depth_mm', 'waveform_samples',
             'operator', 'operator_name', 'tested_at', 'test_date', 'status', 'notes',
-            'file_ids', 'files', 'created_by', 'created_at', 'updated_at',
+            'file_ids', 'files', 'file_count', 'created_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'test_reference', 'velocity_km_s', 'quality_grade',
                             'strength_curve_snapshot',
@@ -421,6 +609,11 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
 
 class PunditTestSerializer(serializers.ModelSerializer):
+    file_count = serializers.SerializerMethodField()
+
+    def get_file_count(self, obj):
+        return obj.files.count()
+
     class Meta:
         model = PUNDITTest
         fields = '__all__'

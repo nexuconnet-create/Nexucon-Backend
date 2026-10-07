@@ -54,7 +54,7 @@ Status legend: ✅ implemented + tested · ⚠️ implemented, blocked from live
 |---|---|---|
 | GPR survey & PUNDIT/NDT test models | ✅ | GPRSurvey, GPRAnomaly, PUNDITTest (pulse velocity μs / km/s, crack depth) |
 | GPR AI analysis adapter (depth slices & voids) | ✅ | GPR analysis service producing real anomaly records with confidence |
-| PUNDIT AI analysis adapter (velocity math & QA) | ✅ | `compute_velocity_km_s`, `grade_quality` per BS 1881-203 / ASTM C597 bands, crack-depth time-difference formula — unit tested incl. boundary bands and invalid inputs |
+| PUNDIT AI analysis adapter (velocity math & QA) | ✅ | `compute_velocity_km_s`, `grade_quality` per BS 1881-203 / ASTM C597 bands, crack-depth time-difference formula — unit tested incl. boundary bands and invalid inputs. A velocity outside the `PUNDIT_PLAUSIBLE_VELOCITY_KM_S` band (1.0–6.0 km/s, BS EN 12504-4) is graded **`unverified`**, not `very_poor`: no risk score is asserted and the NDT report and Word export state that the reading must be re-checked rather than reporting a strength for it |
 | Register devices (Tersus GNSS MVP SI, GPR, PUNDIT) | ✅ | FieldDevice registry + heartbeat telemetry (battery/GPS validated, read-only telemetry on create) — tested |
 | Object storage integration (Cloudflare R2 / S3) | ✅ / ⚠️ live | R2-backed default storage with signed URLs |
 | Persist AI Analysis Records with confidence scores | ✅ | confidence stored from real adapter output; null when unmeasured (nothing fabricated) |
@@ -232,7 +232,19 @@ No credentials are invented anywhere in the codebase; every integration reads fr
 | `GOOGLE_MEETING_PROJECT_ID`, `GOOGLE_MEETING_CLIENT_EMAIL`, `GOOGLE_MEETING_PRIVATE_KEY` | Google Cloud service account | Meet/Calendar integration **and** FCM HTTP v1 push tokens | Google Cloud Console — SA with Calendar + FCM roles | Optional (push + meetings) |
 | `AUTODESK_CLIENT_ID`, `AUTODESK_CLIENT_SECRET` | Autodesk Platform Services | RVT → IFC model derivative translation | Autodesk Developer Portal | Optional (needed only for RVT models) |
 | `GEMINI_API_KEY` (+ `GEMINI_MODEL`) | Google AI (Gemini) | LLM defect/anomaly detection & synthesis | Google AI Studio | Optional — deterministic analysis runs without it |
+| `NEXUCON_ANTHROPIC_API_KEY` (+ `_MODEL`, `_BASE_URL`, `_MAX_TOKENS`) | Anthropic (Claude) | Vision detection **and** text synthesis | console.anthropic.com | Optional — the chain skips a provider with no key |
+| `NEXUCON_DEEPSEEK_API_KEY` (+ `_MODEL`, `_BASE_URL`) | DeepSeek | Text synthesis only (its public API has no vision endpoint) | platform.deepseek.com | Optional — text-only; never entered for a vision call |
+| `AI_PROVIDER`, `AI_PROVIDER_ORDER` | — | Which provider is tried first, and the order of the rest | — | Optional — every configured provider is still attempted |
+| `AI_MAX_RETRIES`, `AI_REQUEST_TIMEOUT_SECONDS`, `AI_FAILOVER_DEADLINE_SECONDS` | — | Per-provider retries, per-request timeout, and the wall-clock ceiling for one call's whole provider chain | — | Optional (defaults 2 / 60s / 300s) |
 | `SENTRY_DSN` | Sentry | Error monitoring | sentry.io | Optional prod |
+
+### AI provider failover
+
+The four providers above are independent: one being down, rate-limited or out of credit never stops the others. `AIService` attempts each **configured** provider in turn and returns the first that answers; a provider with no key is skipped rather than attempted. Which providers can serve which call is **derived from the code**, not configured — DeepSeek has no vision endpoint, so it is never entered for a defect/thermal/delamination call. The provider that actually answered is what is recorded on the statutory `AIAnalysisRecord`, never the configured one.
+
+With no key set at all, nothing is fabricated: deterministic analysis still runs and the narrative is simply absent.
+
+Note the `NEXUCON_` prefix on the Anthropic and DeepSeek variables. The bare `ANTHROPIC_*` names are read by unrelated tooling on a developer machine (the Claude Code CLI sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` for its own routing), so the service deliberately does not read them — an unprefixed lookup could redirect these requests, and the key travelling on them, to a host nobody chose. A Django setting of the same name still takes priority.
 
 ## 7. Environment configuration
 

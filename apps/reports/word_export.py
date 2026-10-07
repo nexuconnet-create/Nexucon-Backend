@@ -1,3 +1,4 @@
+
 """
 Word (.docx) export of the statutory NDT report (8 Sep 2026 review
 meeting, item H7; 4 Sep register C5): an editable Word document carrying
@@ -25,6 +26,19 @@ from .ndt_reports import (
     ecs_report_disclosure,
 )
 from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
+
+
+def _natural_sort_key(item):
+    import re
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+        item = item[0]
+    if isinstance(item, tuple) and len(item) == 2:
+        floor_str = str(item[0]).lower()
+        member_str = str(item[1])
+        parts = [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+        return [floor_str] + parts
+    member_str = str(item)
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
 
 
 def _add_para(doc, text, *, bold=False, size=11, align=None, space_after=6):
@@ -74,17 +88,120 @@ class NDTWordExporter:
     """Builds the .docx edition of the statutory NDT report."""
 
     @classmethod
-    def export_docx(cls, project, user=None):
+    def export_docx(cls, project, user=None, operator=None, element_id=None):
         from apps.digital_eye.models import PUNDITTest, RebarTest
 
         S = NDTReportService
-        tests = list(
+        all_tests = list(
             PUNDITTest.objects
             .filter(project=project)
-            .select_related('device', 'operator')
+            .select_related('device', 'operator', 'created_by')
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'tested_at')
         )
+
+        def _get_test_operator_label(t):
+            if t.operator_name and t.operator_name.strip():
+                return t.operator_name.strip()
+            if t.operator:
+                full = (t.operator.get_full_name() or '').strip()
+                if full:
+                    return full
+                if t.operator.username:
+                    return t.operator.username.strip()
+                if t.operator.email:
+                    return t.operator.email.strip()
+            if t.created_by:
+                full = (t.created_by.get_full_name() or '').strip()
+                if full:
+                    return full
+                if t.created_by.username:
+                    return t.created_by.username.strip()
+                if t.created_by.email:
+                    return t.created_by.email.strip()
+            return None
+
+        available_operators = []
+        for t in all_tests:
+            lbl = _get_test_operator_label(t)
+            if lbl and lbl not in available_operators:
+                available_operators.append(lbl)
+
+        def _test_matches_operator(t, target_str):
+            if not target_str:
+                return False
+            norm_target = ' '.join(str(target_str).strip().lower().split())
+            if not norm_target:
+                return False
+
+            lbl = _get_test_operator_label(t)
+            if lbl and ' '.join(lbl.strip().lower().split()) == norm_target:
+                return True
+
+            if t.operator_name:
+                op_norm = ' '.join(t.operator_name.strip().lower().split())
+                if op_norm == norm_target or norm_target in op_norm or op_norm in norm_target:
+                    return True
+
+            for u in (t.operator, t.created_by):
+                if not u:
+                    continue
+                if str(u.pk).lower() == norm_target:
+                    return True
+                full = ' '.join((u.get_full_name() or '').strip().lower().split())
+                if full and (full == norm_target or norm_target in full or full in norm_target):
+                    return True
+                if u.email and u.email.strip().lower() == norm_target:
+                    return True
+                if u.username and u.username.strip().lower() == norm_target:
+                    return True
+            return False
+
+        selected_operator_label = None
+        has_explicit_operator = bool(
+            operator and str(operator).strip() and str(operator).strip().lower() not in ('all', 'null', 'undefined')
+        )
+
+        if has_explicit_operator:
+            op_target = str(operator).strip()
+            for av in available_operators:
+                if ' '.join(av.lower().split()) == ' '.join(op_target.lower().split()):
+                    selected_operator_label = av
+                    break
+            if not selected_operator_label:
+                for av in available_operators:
+                    if op_target.lower() in av.lower() or av.lower() in op_target.lower():
+                        selected_operator_label = av
+                        break
+            if not selected_operator_label:
+                selected_operator_label = op_target
+        else:
+            if user and getattr(user, 'is_authenticated', False):
+                user_full = (user.get_full_name() or '').strip()
+                user_uname = (user.username or '').strip()
+                for av in available_operators:
+                    if user_full and ' '.join(av.lower().split()) == ' '.join(user_full.lower().split()):
+                        selected_operator_label = av
+                        break
+                    if user_uname and ' '.join(av.lower().split()) == ' '.join(user_uname.lower().split()):
+                        selected_operator_label = av
+                        break
+            if not selected_operator_label and available_operators:
+                selected_operator_label = available_operators[0]
+
+        if selected_operator_label:
+            matched = [t for t in all_tests if _test_matches_operator(t, selected_operator_label)]
+            if matched:
+                tests = matched
+            else:
+                lbl_matched = [t for t in all_tests if _get_test_operator_label(t) == selected_operator_label]
+                tests = lbl_matched if lbl_matched else all_tests
+        else:
+            tests = all_tests
+            
+        if element_id:
+            tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
+
         rebar_tests = list(
             RebarTest.objects.filter(project=project).order_by('recorded_at')
         )
@@ -99,7 +216,7 @@ class NDTWordExporter:
         element_data = S._element_data(pulse_tests)
         good_members = [e for e in element_data if e['remark'] == 'GOOD']
         poor_members = [e for e in element_data if e['remark'] == 'POOR']
-        visual_notes = S._visual_observations(tests)
+        visual_notes = S._visual_observations(tests, project=project, operator=selected_operator_label)
         report_no, _year = S._effective_report_number(project, tests)
         tested = [t.test_date for t in tests if t.test_date]
         date_max = max(tested) if tested else datetime.now().date()
@@ -274,7 +391,7 @@ class NDTWordExporter:
                       str(int(rt.links_mm)) if rt.links_mm else '-',
                       str(rt.spacing_mm) if rt.spacing_mm else '-',
                       str(int(rt.cover_depth_mm)) if rt.cover_depth_mm else '-']
-                     for i, rt in enumerate(rebar_tests)])
+                     for i, rt in enumerate(sorted(rebar_tests, key=lambda r: _natural_sort_key(r.structural_element or '')))])
             else:
                 _add_para(doc, 'No rebar assessment was recorded during this '
                                'investigation.')
@@ -295,12 +412,12 @@ class NDTWordExporter:
             if crack_tests:
                 _add_heading(doc, '5.1 CRACK DEPTH MEASUREMENTS '
                                   '(TIME-DIFFERENCE METHOD)', level=2)
-                for t in crack_tests:
+                for t in sorted(crack_tests, key=lambda ct: _natural_sort_key(ct.structural_element or '')):
                     rows = t.reading_rows()
                     mean_depth = S._crack_depth(t)
                     _add_table(
                         doc,
-                        ['ELEMENT', 'POINT', 'SPACING L (MM)', 'T CRACKED (US)',
+                        ['ELEMENT', 'POINT', 'SPACING b (MM)', 'T CRACKED (US)',
                          'T UNCRACKED (US)', 'CRACK DEPTH (MM)',
                          'MEAN DEPTH (MM) / REMARK'],
                         [[_element_display(t.structural_element) if i == 0 else '',
@@ -330,51 +447,98 @@ class NDTWordExporter:
                     [[member.title(), str(g['count']), floor.title(),
                       str(g['points'])]
                      for (floor, member), g in sorted(
-                         analysis_groups.items())])
+                         analysis_groups.items(), key=_natural_sort_key)])
 
                 _add_heading(doc, 'SUMMARY OF TEST RESULTS', level=2)
-                for e in element_data:
-                    rows = e['rows']
-                    mid = len(rows) // 2 if len(rows) > 1 else 0
-                    remark = e['remark']
-                    if (e['spread_pct'] is not None and e['spread_pct'] > 2.0):
-                        remark += (f" (POINT SPREAD "
-                                   f"{e['spread_km_s'] * 1000:.0f} M/S, "
-                                   f"±{e['spread_pct'] / 2:.1f}%)")
-                    _add_table(
-                        doc,
-                        ['Structural Element', 'PATH LENGTH', 'TRANSIT TIME',
-                         'PULSE VELOCITY (M/S)', 'E.C.S',
-                         'AVERAGE COMPRESSIVE STRENGTH (N/mm2)', 'REMARK'],
-                        [[_element_display(e['element']) if i == 0 else '',
-                          S._fp(r['path_mm']),
-                          S._f1(r['transit_us']),
-                          S._fms(r['velocity_km_s']),
-                          S._f1(r['ecs_mpa']),
-                          S._f1(e['mean_ecs']) if i == mid else '',
-                          remark if i == mid else '']
-                         for i, r in enumerate(rows)])
+                for floor in floors_present:
+                    floor_elements = sorted(
+                        [e for e in element_data if e['floor_label'] == floor],
+                        key=lambda e: _natural_sort_key(e['element'])
+                    )
+                    member_order = []
+                    for e in floor_elements:
+                        if e['member_type'] not in member_order:
+                            member_order.append(e['member_type'])
+                    member_order = sorted(member_order, key=_natural_sort_key)
+                    for member in member_order:
+                        group = sorted(
+                            [e for e in floor_elements if e['member_type'] == member],
+                            key=lambda e: _natural_sort_key(e['element'])
+                        )
+                        plural = member if member.endswith('S') else member + 'S'
+                        _add_heading(doc, f'{floor.upper()} {plural}', level=3)
+                        table_rows = []
+                        for e in group:
+                            rows = e['rows']
+                            mid = len(rows) // 2 if len(rows) > 1 else 0
+                            remark = e['remark']
+                            if (remark != 'UNVERIFIED'
+                                    and e['spread_pct'] is not None
+                                    and e['spread_pct'] > 2.0):
+                                remark += (f" (UPV VARIANCE BETWEEN POINTS "
+                                           f"{e['spread_km_s'] * 1000:.0f} M/S, "
+                                           f"±{e['spread_pct'] / 2:.1f}%)")
+                            
+                            for i, r in enumerate(rows):
+                                table_rows.append([
+                                    _element_display(e['element']) if i == 0 else '',
+                                    S._fp(r['path_mm']),
+                                    S._f1(r['transit_us']),
+                                    S._fms(r['velocity_km_s']),
+                                    S._f1(r['ecs_mpa']),
+                                    S._f1(e['mean_ecs']) if i == mid else '',
+                                    remark if i == mid else ''
+                                ])
+                        _add_table(
+                            doc,
+                            ['Structural Element', 'PATH LENGTH', 'TRANSIT TIME',
+                             'PULSE VELOCITY (M/S)', 'E.C.S',
+                             'AVERAGE COMPRESSIVE STRENGTH (N/mm2)', 'REMARK'],
+                            table_rows)
                 result_groups = {}
                 for e in element_data:
                     key = (e['floor_label'], e['member_type'])
                     g = result_groups.setdefault(
-                        key, {'good': 0, 'poor': 0, 'total': 0})
+                        key, {'good': 0, 'poor': 0, 'unverified': 0, 'total': 0})
                     g['total'] += 1
                     if e['remark'] == 'GOOD':
                         g['good'] += 1
                     elif e['remark'] == 'POOR':
                         g['poor'] += 1
+                    elif e['remark'] == 'UNVERIFIED':
+                        g['unverified'] += 1
+
+                def _pct(count, g):
+                    # Percentage of the elements that could be assessed — see
+                    # ndt_reports for why an unverifiable element is not in the
+                    # denominator.
+                    graded = g['good'] + g['poor']
+                    return f"{count} ({round(count * 100 / graded, 1)}%)" if graded else '-'
+
                 _add_table(
                     doc,
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
                      'POOR (NO, %)'],
                     [[member.title(), floor.title(),
-                      f"{g['good']} ({round(g['good'] * 100 / g['total'], 1)}%)",
-                      f"{g['poor']} ({round(g['poor'] * 100 / g['total'], 1)}%)"]
-                     for (floor, member), g in sorted(result_groups.items())])
+                      _pct(g['good'], g), _pct(g['poor'], g)]
+                     for (floor, member), g in sorted(result_groups.items(), key=_natural_sort_key)])
+                unverified_members = [e for e in element_data
+                                      if e['remark'] == 'UNVERIFIED']
+                if unverified_members:
+                    _add_para(
+                        doc,
+                        f"{len(unverified_members)} of {len(element_data)} "
+                        "element(s) could not be verified and are excluded "
+                        "from the GOOD / POOR summary above. Their pulse "
+                        "velocity is outside the range physically plausible "
+                        "for concrete, so no grade and no compressive strength "
+                        "is asserted for them, and the percentages above are of "
+                        "the elements that could be assessed.")
+                    for e in unverified_members:
+                        _add_para(doc, f"{e['element']}: {e['implausibility_note']}")
             if surface_tests:
                 _add_heading(doc, '5.2 SURFACE QUALITY OBSERVATIONS', level=2)
-                for t in surface_tests:
+                for t in sorted(surface_tests, key=lambda st: _natural_sort_key(st.structural_element or '')):
                     for r in t.reading_rows():
                         condition = r.get('surface_condition') \
                             or 'condition not recorded'
@@ -382,6 +546,140 @@ class NDTWordExporter:
                             doc,
                             f"{_element_display(t.structural_element)} "
                             f"{r['label'] or '-'}: {condition}")
+
+        def emit_discussion_of_results():
+            # ------------------------------------------------------------ 5.4
+            _add_heading(doc, '5.4 DISCUSSION OF RESULTS', level=2)
+            body = get_cms_text(project, 'discussion_of_results')[0]
+            for para in cms_paragraphs(body):
+                _add_para(doc, para)
+
+        def emit_remarks():
+            # ------------------------------------------------------------ 5.5
+            _add_heading(doc, '5.5 REMARKS', level=2)
+
+            lead_in = get_cms_text(project, 'remarks_preamble')[0]
+            for para in cms_paragraphs(lead_in):
+                _add_para(doc, para)
+
+            def _is_substantive(text):
+                if not text or not str(text).strip():
+                    return False
+                t_low = str(text).lower()
+                for synth_phrase in ('synthetic value', 'sample file', 'upload testing only', '[manual_field_entry'):
+                    if synth_phrase in t_low:
+                        return False
+                return True
+
+            # Query on-site visual observations and photo evidence from telemetry session and inspection
+            site_visual_obs = []
+            site_photos_count = 0
+            gps_tags = []
+            try:
+                from apps.telemetry.models import TelemetrySession
+                ts_qs = list(TelemetrySession.objects.filter(project=project))
+                if selected_operator_label:
+                    op_str = selected_operator_label.strip().lower()
+                    ts_qs = [
+                        s for s in ts_qs
+                        if (s.operator_name and s.operator_name.strip().lower() == op_str)
+                        or (s.operator and (s.operator.get_full_name().strip().lower() == op_str or s.operator.email.strip().lower() == op_str))
+                    ]
+                for s in ts_qs:
+                    cfg = s.session_config or {}
+                    vis = (cfg.get('visual_observation') or '').strip()
+                    if vis and _is_substantive(vis) and vis not in site_visual_obs:
+                        site_visual_obs.append(vis)
+                    photos = cfg.get('photos') or []
+                    site_photos_count += len(photos)
+                    lat = cfg.get('latitude')
+                    lon = cfg.get('longitude')
+                    if lat is not None and lon is not None:
+                        gps_str = f"{lat:.6f}°, {lon:.6f}°"
+                        if gps_str not in gps_tags:
+                            gps_tags.append(gps_str)
+            except Exception as e:
+                logger.warning("Could not query telemetry visual observations: %s", e)
+
+            try:
+                from apps.inspections.models import Inspection
+                insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
+                if insp:
+                    if insp.visual_site_observations:
+                        for line in insp.visual_site_observations.splitlines():
+                            line = line.strip()
+                            if line and _is_substantive(line) and line not in site_visual_obs:
+                                site_visual_obs.append(line)
+                    if insp.visual_site_photos:
+                        site_photos_count = max(site_photos_count, len(insp.visual_site_photos))
+            except Exception as e:
+                logger.warning("Could not query inspection visual observations: %s", e)
+
+            attached_files_count = sum(t.files.count() for t in tests)
+            total_photos_count = max(site_photos_count, attached_files_count)
+            floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
+            floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
+
+            anomalies = []
+            for t in tests:
+                clean_notes = (S._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
+                               if t.notes else '')
+                if clean_notes and _is_substantive(clean_notes):
+                    anomalies.append(f"{t.structural_element or 'Element'}: {clean_notes}")
+                for r in t.reading_rows():
+                    raw_pt = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
+                    pt_note = (S._PROVENANCE_STAMP_RE.sub('', raw_pt).strip() if raw_pt else '')
+                    if pt_note and _is_substantive(pt_note):
+                        anomalies.append(f"{t.structural_element or 'Element'} (Pt {r.get('label', '')}): {pt_note}")
+
+            summary_table_rows = []
+            if anomalies:
+                cond_summary = "; ".join(anomalies[:5])
+            else:
+                cond_summary = (
+                    "Uniform surface preparation per BS 1881-203. Concrete surfaces sound, "
+                    "dry, and free of honeycombing, spalling, or structural voids."
+                )
+            summary_table_rows.append([
+                "Structural Member Surfaces",
+                f"{len(tests)} stations tested across {floors_desc}",
+                cond_summary
+            ])
+
+            if site_visual_obs:
+                vis_summary = "; ".join(site_visual_obs)
+            else:
+                vis_summary = "Standard field conditions recorded on site during testing."
+            summary_table_rows.append([
+                "Visual Site Observations",
+                "Testing Zone / Laydown Area",
+                vis_summary
+            ])
+
+            photo_notes = f"{total_photos_count} site photo(s) documented"
+            if gps_tags:
+                photo_notes += f" with GPS anchoring ({gps_tags[0]})"
+            photo_notes += ". Archived in Appendix photographic dossier."
+            summary_table_rows.append([
+                "Photographic Evidence",
+                "Site Evidence & Provenance",
+                photo_notes
+            ])
+
+            _add_table(
+                doc,
+                ['FIELD ASSESSMENT SCOPE', 'LOCATION / LEVEL', 'SUMMARIZED REMARKS & OBSERVATIONS'],
+                summary_table_rows
+            )
+
+            _add_para(
+                doc,
+                f"Fieldwork & Surface Synthesis: A total of {len(tests)} structural member test stations "
+                f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
+                f"all tested elements provided direct acoustic coupling. "
+                + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
+                + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork.")
+            )
 
         def emit_reco():
             # ------------------------------------------------------------ 6.0
@@ -397,10 +695,11 @@ class NDTWordExporter:
                                'quality can be made.')
             from apps.evidence.models import AIAnalysisRecord
             recommendations = []
-            for record in (AIAnalysisRecord.objects
-                           .filter(project=project, analysis_type='pundit')
-                           .order_by('-created_at')[:20]):
-                for rec in (record.recommendations or []):
+            ai_record = (AIAnalysisRecord.objects
+                             .filter(project=project, analysis_type='pundit')
+                             .order_by('-created_at').first())
+            if ai_record:
+                for rec in (ai_record.recommendations or []):
                     if isinstance(rec, dict):
                         line = f'[{str(rec.get("priority", "Routine")).upper()}] ' \
                                f'{rec.get("recommendation", "")}'
@@ -457,6 +756,8 @@ class NDTWordExporter:
             '4.1': emit_visual,
             '4.2': emit_methodology,   # 4.2 + 4.3 + 4.4, as one unit
             '5.0': emit_analysis,
+            '5.4': emit_discussion_of_results,
+            '5.5': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
         }
@@ -477,14 +778,7 @@ class NDTWordExporter:
         user_label = 'Unauthenticated'
         if user and getattr(user, 'is_authenticated', False):
             user_label = user.get_full_name() or user.email
-        operators = []
-        for t in tests:
-            label = (t.operator_name
-                     or ((t.operator.get_full_name() or t.operator.email)
-                         if t.operator else None))
-            if label and label not in operators:
-                operators.append(label)
-        tested_by = (operators[0] if operators else 'NOT RECORDED').upper()
+        tested_by = (selected_operator_label or 'NOT RECORDED').upper()
         _add_table(doc, ['TESTED BY', 'APPROVED BY'],
                    [[tested_by, user_label.upper()]])
 

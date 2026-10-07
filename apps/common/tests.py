@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 import csv
 import json
+import os
 import tempfile
 
 import requests
@@ -14,6 +15,35 @@ from PIL import Image
 from apps.common.ai_service import (
     AIService, AIServiceError, AIQuotaExceeded, AIProviderUnavailable,
 )
+from common.geo import haversine_m
+
+
+# Every API key the AI service can route through, forced empty.
+#
+# `_provider_has_key` is checked before an attempt is made, so a test that
+# wants "no provider is configured" must clear EVERY provider — not just the
+# two that existed when these tests were written. `config.settings.base`
+# loads `.env` into `os.environ`, so a real ANTHROPIC_API_KEY or
+# DEEPSEEK_API_KEY on the machine would otherwise give the chain a live,
+# unmocked provider and these tests would make real outbound HTTP calls.
+NO_PROVIDER_KEYS = dict(
+    OPENAI_API_KEY="",
+    GEMINI_API_KEY="",
+    ANTHROPIC_API_KEY="",
+    DEEPSEEK_API_KEY="",
+)
+
+
+def _provider_settings(**configured):
+    """`override_settings` kwargs for a test that exercises the provider chain.
+
+    Every provider key starts empty, then `configured` is layered on top, so a
+    test names only the providers it actually means to configure and cannot
+    inherit a live key from the environment by accident. The merge happens in
+    a dict because `override_settings(**NO_PROVIDER_KEYS, OPENAI_API_KEY=...)`
+    is a TypeError — the same keyword arrives twice.
+    """
+    return dict(NO_PROVIDER_KEYS, **configured)
 
 
 def _png_bytes(color=(255, 0, 0), size=(10, 10), mode="RGB"):
@@ -32,7 +62,7 @@ def _openai_client_with_content(content):
 
 class AIServiceTests(TestCase):
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="", OPENAI_API_KEY="")
+    @override_settings(AI_PROVIDER="gemini", **_provider_settings())
     def test_fallback_mock_responses(self):
         """Without provider keys the AI service must NOT fabricate findings.
 
@@ -500,8 +530,9 @@ class AIServiceVisualDefectFlowTests(TestCase):
         self.assertEqual(defects[0]["confidence_score"], 0.91)
         self.assertEqual(defects[0]["image_bbox"]["xmax"], 0.4)
 
-    @override_settings(AI_PROVIDER="openai", OPENAI_API_KEY="sk-test",
-                       GEMINI_API_KEY="gm-test")
+    @override_settings(
+        AI_PROVIDER="openai",
+        **_provider_settings(OPENAI_API_KEY="sk-test", GEMINI_API_KEY="gm-test"))
     @patch("google.generativeai.GenerativeModel")
     @patch("apps.common.ai_service.OpenAI")
     def test_malformed_primary_json_falls_back_to_secondary(self, mock_openai, mock_gm):
@@ -522,7 +553,7 @@ class AIServiceVisualDefectFlowTests(TestCase):
         self.assertEqual(
             AIService.detect_visual_defects("http://example.com/clean.jpg"), [])
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="", OPENAI_API_KEY="")
+    @override_settings(AI_PROVIDER="gemini", **_provider_settings())
     def test_all_providers_unconfigured_returns_empty_no_fabrication(self):
         self.assertEqual(AIService.detect_visual_defects("http://example.com/x.jpg"), [])
 
@@ -564,8 +595,9 @@ class AIServiceThermalFlowTests(TestCase):
         self.assertEqual(anomalies[0]["temperature_variance"], 4.5)
         self.assertEqual(anomalies[0]["severity"], "high")
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="gm-test",
-                       OPENAI_API_KEY="sk-test")
+    @override_settings(
+        AI_PROVIDER="gemini",
+        **_provider_settings(GEMINI_API_KEY="gm-test", OPENAI_API_KEY="sk-test"))
     @patch("apps.common.ai_service.OpenAI")
     @patch("google.generativeai.GenerativeModel")
     def test_gemini_failure_falls_back_to_openai(self, mock_gm, mock_openai):
@@ -578,8 +610,8 @@ class AIServiceThermalFlowTests(TestCase):
         self.assertEqual(len(anomalies), 1)
         self.assertEqual(anomalies[0]["severity"], "low")
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="", OPENAI_API_KEY="")
-    def test_all_providers_fail_returns_empty_no_fabrication(self):
+    @override_settings(AI_PROVIDER="gemini", **_provider_settings())
+    def test_all_providers_unconfigured_returns_empty_no_fabrication(self):
         self.assertEqual(
             AIService.detect_thermal_anomalies("http://example.com/t.jpg"), [])
 
@@ -651,8 +683,8 @@ class AIServiceDelaminationFlowTests(TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["severity"], "high")
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="", OPENAI_API_KEY="")
-    def test_all_providers_fail_returns_empty_no_fabrication(self):
+    @override_settings(AI_PROVIDER="gemini", **_provider_settings())
+    def test_all_providers_unconfigured_returns_empty_no_fabrication(self):
         self.assertEqual(
             AIService.detect_delamination_multimodal(
                 "http://example.com/t.jpg", "http://example.com/v.jpg"), [])
@@ -676,8 +708,9 @@ class AIServiceStructuredJSONTests(TestCase):
         result = AIService.generate_structured_json("prompt")
         self.assertEqual(result, {"via": "gemini"})
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="gm-test",
-                       OPENAI_API_KEY="sk-test")
+    @override_settings(
+        AI_PROVIDER="gemini",
+        **_provider_settings(GEMINI_API_KEY="gm-test", OPENAI_API_KEY="sk-test"))
     @patch("apps.common.ai_service.OpenAI")
     @patch("google.generativeai.GenerativeModel")
     def test_gemini_failure_falls_back_to_openai(self, mock_gm, mock_openai):
@@ -688,8 +721,9 @@ class AIServiceStructuredJSONTests(TestCase):
         result = AIService.generate_structured_json("prompt")
         self.assertEqual(result, {"fallback": True})
 
-    @override_settings(AI_PROVIDER="openai", OPENAI_API_KEY="sk-test",
-                       GEMINI_API_KEY="gm-test")
+    @override_settings(
+        AI_PROVIDER="openai",
+        **_provider_settings(OPENAI_API_KEY="sk-test", GEMINI_API_KEY="gm-test"))
     @patch("google.generativeai.GenerativeModel")
     @patch("apps.common.ai_service.OpenAI")
     def test_all_providers_fail_raises_no_silent_fabrication(self, mock_openai, mock_gm):
@@ -742,8 +776,9 @@ class AIServiceRecommendationsTests(TestCase):
         self.assertEqual(len(result["recommendations"]), 1)
         self.assertIsNone(result["text_confidence"])
 
-    @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="gm-test",
-                       OPENAI_API_KEY="sk-test")
+    @override_settings(
+        AI_PROVIDER="gemini",
+        **_provider_settings(GEMINI_API_KEY="gm-test", OPENAI_API_KEY="sk-test"))
     @patch("apps.common.ai_service.OpenAI")
     @patch("google.generativeai.GenerativeModel")
     def test_primary_failure_falls_back_to_secondary(self, mock_gm, mock_openai):
@@ -759,8 +794,9 @@ class AIServiceRecommendationsTests(TestCase):
         self.assertEqual(result["recommendations"][0]["priority"], "High")
         self.assertEqual(result["text_confidence"], 0.6)
 
-    @override_settings(AI_PROVIDER="openai", OPENAI_API_KEY="sk-test",
-                       GEMINI_API_KEY="gm-test")
+    @override_settings(
+        AI_PROVIDER="openai",
+        **_provider_settings(OPENAI_API_KEY="sk-test", GEMINI_API_KEY="gm-test"))
     @patch("google.generativeai.GenerativeModel")
     @patch("apps.common.ai_service.OpenAI")
     def test_total_failure_returns_honest_empty(self, mock_openai, mock_gm):
@@ -771,6 +807,575 @@ class AIServiceRecommendationsTests(TestCase):
         result = AIService.generate_recommendations(
             [{"type": "crack", "severity": "low"}], [], 0.02)
         self.assertEqual(result, {"recommendations": [], "text_confidence": None})
+
+
+# ============================================================================
+# Multi-provider chain: capability tables, ordering, failover, provenance
+# ============================================================================
+
+from apps.common.ai_service import (  # noqa: E402
+    CAPABILITIES, StructuredResult, _CANONICAL_ORDER, _PROVIDER_KEY_GETTERS,
+    _RUNNER_NAMES,
+)
+
+
+class ProviderCapabilityTableTests(TestCase):
+    """The capability tables must be DERIVED, not asserted in parallel.
+
+    A provider advertising a capability it has no code for is worse than one
+    that lacks it: the chain would build a runner, call it, and fail at
+    runtime instead of skipping. These tests pin the derivation.
+    """
+
+    def test_every_capability_table_entry_has_a_real_method(self):
+        for capability, table in _RUNNER_NAMES.items():
+            for provider, method_name in table.items():
+                self.assertTrue(
+                    callable(getattr(AIService, method_name, None)),
+                    f"{capability}/{provider} names {method_name}, which does not exist",
+                )
+
+    def test_every_provider_is_covered_by_at_least_one_capability(self):
+        for provider in _PROVIDER_KEY_GETTERS:
+            self.assertTrue(
+                CAPABILITIES[provider],
+                f"{provider} is registered but can serve no call shape at all",
+            )
+
+    def test_deepseek_capability_is_text_only(self):
+        # DeepSeek's public API has no vision endpoint. This is the derived
+        # consequence of there being no vision runner — not a separate claim
+        # that could drift away from the code.
+        self.assertEqual(CAPABILITIES["deepseek"], frozenset({"text"}))
+
+    def test_vision_capabilities_exclude_deepseek(self):
+        for provider in ("openai", "gemini", "anthropic"):
+            self.assertIn("vision", CAPABILITIES[provider])
+
+    def test_every_key_getter_and_model_getter_resolves(self):
+        for provider, getter_name in _PROVIDER_KEY_GETTERS.items():
+            self.assertTrue(callable(getattr(AIService, getter_name, None)))
+            self.assertIsNotNone(AIService._model_for(provider))
+
+
+class ProviderOrderTests(TestCase):
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a"))
+    def test_configured_provider_goes_first(self):
+        with override_settings(AI_PROVIDER="openai"):
+            order = AIService._provider_order({"openai", "gemini", "anthropic", "deepseek"})
+        self.assertEqual(order[0], "openai")
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a", GEMINI_API_KEY="gm-a",
+                                            ANTHROPIC_API_KEY="an-a", DEEPSEEK_API_KEY="ds-a"))
+    def test_order_is_deterministic_and_complete(self):
+        with override_settings(AI_PROVIDER="gemini"):
+            first = AIService._provider_order(set(_PROVIDER_KEY_GETTERS))
+            second = AIService._provider_order(set(_PROVIDER_KEY_GETTERS))
+        self.assertEqual(first, second)
+        self.assertEqual(set(first), set(_PROVIDER_KEY_GETTERS))
+        self.assertEqual(
+            first, ["gemini"] + [p for p in _CANONICAL_ORDER if p != "gemini"])
+
+    @override_settings(**_provider_settings(GEMINI_API_KEY="gm-a"))
+    def test_keyless_providers_are_skipped_not_attempted(self):
+        with override_settings(AI_PROVIDER="openai"):
+            order = AIService._provider_order(set(_PROVIDER_KEY_GETTERS))
+        # openai is the configured provider but has no key, so it is not
+        # first — it is absent entirely.
+        self.assertEqual(order, ["gemini"])
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a", ANTHROPIC_API_KEY="an-a"))
+    def test_vision_order_never_contains_deepseek(self):
+        runners = AIService._build_runners("vision", "prompt", (), {})
+        order = AIService._provider_order(set(runners))
+        self.assertNotIn("deepseek", order)
+        self.assertEqual(set(order), {"openai", "anthropic"})
+
+    @override_settings(AI_PROVIDER_ORDER="deepseek, openai", **_provider_settings(
+        OPENAI_API_KEY="sk-a", GEMINI_API_KEY="gm-a",
+        ANTHROPIC_API_KEY="an-a", DEEPSEEK_API_KEY="ds-a"))
+    def test_provider_order_setting_is_honoured_after_the_configured_provider(self):
+        with override_settings(AI_PROVIDER="gemini"):
+            order = AIService._provider_order(set(_PROVIDER_KEY_GETTERS))
+        self.assertEqual(order[:3], ["gemini", "deepseek", "openai"])
+
+    @override_settings(**_provider_settings())
+    def test_no_configured_provider_yields_empty_order(self):
+        self.assertEqual(AIService._provider_order(set(_PROVIDER_KEY_GETTERS)), [])
+
+
+class ProviderFailoverTests(TestCase):
+    """One provider breaking must not stop the others."""
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a", GEMINI_API_KEY="gm-a",
+                                            ANTHROPIC_API_KEY="an-a", DEEPSEEK_API_KEY="ds-a"))
+    @patch("apps.common.ai_service.requests.post")
+    @patch("google.generativeai.GenerativeModel")
+    @patch("apps.common.ai_service.OpenAI")
+    def test_three_providers_attempted_in_order_until_one_answers(
+            self, mock_openai, mock_gm, mock_post):
+        # OpenAI and Gemini both break; Anthropic answers. Every earlier
+        # provider must have been tried, and the chain must not have stopped
+        # at the first failure.
+        mock_openai.return_value = _openai_client_with_content("not json")
+        instance = MagicMock()
+        instance.generate_content.side_effect = RuntimeError("gemini down")
+        mock_gm.return_value = instance
+        anthropic_response = MagicMock(status_code=200, headers={})
+        anthropic_response.json.return_value = {
+            "content": [{"type": "text", "text": '{"defects": [{"type": "crack"}]}'}],
+            "stop_reason": "end_turn",
+        }
+        mock_post.return_value = anthropic_response
+
+        with override_settings(AI_PROVIDER="openai"):
+            defects = AIService.detect_visual_defects("http://example.com/col.jpg")
+
+        self.assertEqual([d["type"] for d in defects], ["crack"])
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertIn("api.anthropic.com", mock_post.call_args[0][0])
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a", GEMINI_API_KEY="gm-a",
+                                            ANTHROPIC_API_KEY="an-a"))
+    @patch("apps.common.ai_service.requests.post")
+    @patch("google.generativeai.GenerativeModel")
+    @patch("apps.common.ai_service.OpenAI")
+    def test_keyless_deepseek_is_never_called(self, mock_openai, mock_gm, mock_post):
+        # DeepSeek has no key in this test. It must be skipped WITHOUT an
+        # attempt — a skipped provider cannot produce an error, and it must
+        # not cost a request's worth of latency to discover there is no key.
+        mock_openai.return_value = _openai_client_with_content("not json")
+        instance = MagicMock()
+        instance.generate_content.side_effect = RuntimeError("gemini down")
+        mock_gm.return_value = instance
+        anthropic_response = MagicMock(status_code=200, headers={})
+        anthropic_response.json.return_value = {"content": [{"type": "text", "text": '{"defects": []}'}]}
+        mock_post.return_value = anthropic_response
+
+        with override_settings(AI_PROVIDER="openai"):
+            AIService.detect_visual_defects("http://example.com/col.jpg")
+
+        # Exactly one HTTP call, and it went to Anthropic — never DeepSeek,
+        # whose vision endpoint does not exist.
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(mock_post.call_args[0][0], "https://api.anthropic.com/v1/messages")
+
+    @override_settings(**_provider_settings(GEMINI_API_KEY="gm-a"))
+    @patch("google.generativeai.GenerativeModel")
+    def test_an_unconfigured_openai_client_is_never_built(self, mock_gm):
+        # The configured provider has no key here, so its client factory must
+        # not run at all — building it would raise AIProviderUnavailable and
+        # be recorded as a failure rather than a skip.
+        mock_gm.return_value = MagicMock(**{
+            "generate_content.return_value": MagicMock(text='{"defects": []}'),
+        })
+        with override_settings(AI_PROVIDER="openai"):
+            with patch.object(AIService, "_get_openai_client") as mock_client:
+                AIService.detect_visual_defects("http://example.com/col.jpg")
+        mock_client.assert_not_called()
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a", GEMINI_API_KEY="gm-a"))
+    @patch("google.generativeai.GenerativeModel")
+    @patch("apps.common.ai_service.OpenAI")
+    def test_unconfigured_raises_unavailable_but_all_failed_raises_service_error(
+            self, mock_openai, mock_gm):
+        # Two distinct states that were previously conflated: "nothing is
+        # configured" and "everything was tried and failed". Callers need to
+        # tell them apart — the first is a deployment problem, the second is
+        # an outage.
+        mock_openai.return_value = _openai_client_with_content("not json")
+        instance = MagicMock()
+        instance.generate_content.side_effect = RuntimeError("down")
+        mock_gm.return_value = instance
+
+        with override_settings(AI_PROVIDER="openai"):
+            with self.assertRaises(AIServiceError) as ctx:
+                AIService.generate_structured_json("prompt")
+        self.assertNotIsInstance(ctx.exception, AIProviderUnavailable)
+        self.assertEqual(
+            [a["provider"] for a in ctx.exception.attempts], ["openai", "gemini"])
+        self.assertTrue(all("error" in a for a in ctx.exception.attempts))
+
+        with override_settings(AI_PROVIDER="openai", **_provider_settings()):
+            with self.assertRaises(AIProviderUnavailable):
+                AIService.generate_structured_json("prompt")
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a", GEMINI_API_KEY="gm-a",
+                                            ANTHROPIC_API_KEY="an-a"),
+                       AI_FAILOVER_DEADLINE_SECONDS=0)
+    @patch("apps.common.ai_service.requests.post")
+    @patch("google.generativeai.GenerativeModel")
+    @patch("apps.common.ai_service.OpenAI")
+    def test_one_image_is_downloaded_once_across_the_whole_chain(
+            self, mock_openai, mock_gm, mock_post):
+        # Every provider must be shown the SAME bytes. A per-provider fetch
+        # would let an expiring signed URL fail only the later providers,
+        # making the winner an artefact of timing rather than of the models.
+        mock_openai.return_value = _openai_client_with_content("not json")
+        instance = MagicMock()
+        instance.generate_content.side_effect = RuntimeError("gemini down")
+        mock_gm.return_value = instance
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {"content": [{"type": "text", "text": '{"defects": []}'}]},
+        })
+
+        image_response = MagicMock(content=_png_bytes(size=(200, 100)))
+        image_response.raise_for_status.return_value = None
+
+        with override_settings(AI_PROVIDER="openai"):
+            with patch("apps.common.ai_service.requests.get",
+                       return_value=image_response) as mock_get:
+                AIService.detect_visual_defects("https://cdn.nexucon-pilot.site/real.jpg")
+
+        self.assertEqual(mock_get.call_count, 1)
+
+
+class DeepSeekTests(TestCase):
+    """DeepSeek runs through the OpenAI SDK against its own base URL."""
+
+    @override_settings(**_provider_settings(DEEPSEEK_API_KEY="ds-test",
+                                            DEEPSEEK_BASE_URL="https://api.deepseek.com"))
+    @patch("apps.common.ai_service.OpenAI")
+    def test_deepseek_client_uses_its_own_key_and_base_url(self, mock_openai):
+        AIService._get_deepseek_client()
+        mock_openai.assert_called_once_with(
+            api_key="ds-test", base_url="https://api.deepseek.com", max_retries=0)
+
+    @override_settings(**_provider_settings(DEEPSEEK_API_KEY="ds-test"))
+    @patch("apps.common.ai_service.OpenAI")
+    def test_deepseek_uses_a_chat_model_that_accepts_json_mode(self, mock_openai):
+        # The configured model must accept `response_format`. DeepSeek's
+        # thinking/reasoning variants reject it, and every caller here asks
+        # for JSON — so this pins the default to a non-thinking model.
+        mock_openai.return_value = _openai_client_with_content('{"result": 1}')
+        AIService._run_text_deepseek("prompt")
+        kwargs = mock_openai.return_value.chat.completions.create.call_args[1]
+        self.assertEqual(kwargs["model"], "deepseek-flash")
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+
+    @override_settings(**_provider_settings(DEEPSEEK_API_KEY="ds-test"), AI_MAX_RETRIES=3)
+    @patch("apps.common.ai_service.time.sleep")
+    @patch("apps.common.ai_service.OpenAI")
+    def test_insufficient_balance_is_permanent_and_never_retried(
+            self, mock_openai, mock_sleep):
+        # HTTP 402 means an unfunded account. Retrying reproduces the same
+        # answer at the cost of the failover budget, so it must be classified
+        # as quota exhaustion and passed straight to the next provider.
+        error = Exception("Error code: 402 - Insufficient Balance")
+        error.status_code = 402
+        mock_openai.return_value.chat.completions.create.side_effect = error
+
+        with self.assertRaises(AIQuotaExceeded):
+            AIService._run_text_deepseek("prompt")
+
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @override_settings(**_provider_settings(DEEPSEEK_API_KEY="ds-test", OPENAI_API_KEY="sk-a"),
+                       AI_PROVIDER_ORDER="deepseek", AI_MAX_RETRIES=0)
+    @patch("apps.common.ai_service.OpenAI")
+    def test_a_402_moves_the_chain_to_the_next_provider(self, mock_openai):
+        error = Exception("Error code: 402 - Insufficient Balance")
+        error.status_code = 402
+        deepseek_client = MagicMock()
+        deepseek_client.chat.completions.create.side_effect = error
+        openai_client = _openai_client_with_content('{"result": "from openai"}')
+        mock_openai.side_effect = [deepseek_client, openai_client]
+
+        with override_settings(AI_PROVIDER="deepseek"):
+            result = AIService.generate_structured_json("prompt")
+
+        self.assertEqual(result.get("result"), "from openai")
+        self.assertEqual(result.provider, "openai")
+
+
+class AnthropicTransportTests(TestCase):
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"))
+    @patch("apps.common.ai_service.requests.post")
+    def test_request_shape_matches_the_messages_api(self, mock_post):
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {"content": [{"type": "text", "text": '{"ok": true}'}],
+                                  "stop_reason": "end_turn"},
+        })
+        AIService._run_text_anthropic("analyse this")
+
+        url = mock_post.call_args[0][0]
+        headers = mock_post.call_args[1]["headers"]
+        payload = mock_post.call_args[1]["json"]
+        self.assertEqual(url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(headers["x-api-key"], "an-test")
+        self.assertEqual(headers["anthropic-version"], "2023-06-01")
+        self.assertEqual(headers["content-type"], "application/json")
+        self.assertEqual(payload["model"], "claude-haiku-4-5")
+        # max_tokens is REQUIRED by this API, so it must always be present.
+        self.assertIsInstance(payload["max_tokens"], int)
+        self.assertGreater(payload["max_tokens"], 0)
+        # Opus models reject sampling parameters, so sending one is a 400.
+        self.assertNotIn("temperature", payload)
+        # A prefill would be the old way to force JSON; it is rejected on
+        # these models, so the system prompt is the only lever used.
+        self.assertNotIn("assistant", [m["role"] for m in payload["messages"]])
+        self.assertIn("system", payload)
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"))
+    @patch("apps.common.ai_service.requests.post")
+    def test_thinking_blocks_are_ignored_and_only_text_is_read(self, mock_post):
+        # Thinking is on by default on these models and its blocks carry no
+        # text, so a naive join over `content` would return "".
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {
+                "content": [
+                    {"type": "thinking", "thinking": ""},
+                    {"type": "text", "text": '{"ok": true}'},
+                ],
+                "stop_reason": "end_turn",
+            },
+        })
+        self.assertEqual(AIService._run_text_anthropic("prompt"), {"ok": True})
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"))
+    @patch("apps.common.ai_service.requests.post")
+    def test_a_refusal_is_raised_not_read_as_an_empty_answer(self, mock_post):
+        # A refusal arrives as HTTP 200. Treating it as a clean empty result
+        # would report a policy decline as "no defects found".
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {
+                "content": [],
+                "stop_reason": "refusal",
+                "stop_details": {"category": "cyber"},
+            },
+        })
+        with self.assertRaises(AIServiceError) as ctx:
+            AIService._run_text_anthropic("prompt")
+        self.assertIn("declined", str(ctx.exception))
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"), AI_MAX_RETRIES=2)
+    @patch("apps.common.ai_service.time.sleep")
+    @patch("apps.common.ai_service.requests.post")
+    def test_a_rejected_key_is_not_retried(self, mock_post, mock_sleep):
+        mock_post.return_value = MagicMock(status_code=401, headers={}, text="bad key")
+        with self.assertRaises(AIServiceError):
+            AIService._run_text_anthropic("prompt")
+        self.assertEqual(mock_post.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"), AI_MAX_RETRIES=1)
+    @patch("apps.common.ai_service.time.sleep")
+    @patch("apps.common.ai_service.requests.post")
+    def test_a_server_error_is_retried_then_gives_up(self, mock_post, mock_sleep):
+        mock_post.return_value = MagicMock(status_code=503, headers={}, text="busy")
+        with self.assertRaises(AIServiceError):
+            AIService._run_text_anthropic("prompt")
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"))
+    @patch("apps.common.ai_service.requests.post")
+    def test_image_blocks_precede_the_text_block(self, mock_post):
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {"content": [{"type": "text", "text": '{"defects": []}'}],
+                                  "stop_reason": "end_turn"},
+        })
+        AIService._run_vision_anthropic("find defects", ("http://example.com/a.jpg",), {})
+
+        blocks = mock_post.call_args[1]["json"]["messages"][0]["content"]
+        self.assertEqual([b["type"] for b in blocks], ["image", "text"])
+        self.assertEqual(blocks[0]["source"]["type"], "base64")
+        self.assertEqual(blocks[0]["source"]["media_type"], "image/jpeg")
+
+    def test_media_type_is_read_from_the_url_extension(self):
+        self.assertEqual(AIService._media_type_for("https://x/a.png"), "image/png")
+        self.assertEqual(AIService._media_type_for("https://x/a.webp?sig=1"), "image/webp")
+        # A signed URL with no extension is the common case — JPEG, not a crash.
+        self.assertEqual(AIService._media_type_for("https://x/asset"), "image/jpeg")
+
+
+class ProviderEnvironmentIsolationTests(TestCase):
+    """Provider configuration must not be readable from the ambient environment.
+
+    `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` are generic names that unrelated
+    tooling on the same host already sets — the Claude Code CLI exports both
+    for its own routing, and they were present in the shell this was built in.
+    Reading them bare would point this service's outbound requests, carrying
+    its API key, at whatever host the ambient environment happens to name.
+    These tests fail if that isolation is ever removed.
+    """
+
+    def test_ambient_anthropic_variables_are_ignored(self):
+        with mock.patch.dict(os.environ, {
+            "ANTHROPIC_BASE_URL": "https://not-our-endpoint.example",
+            "ANTHROPIC_MODEL": "some-other-tooling-model",
+            "ANTHROPIC_API_KEY": "ambient-tooling-key",
+        }):
+            self.assertEqual(AIService._get_anthropic_base_url(), "https://api.anthropic.com")
+            self.assertEqual(AIService._get_anthropic_model(), "claude-haiku-4-5")
+            self.assertEqual(AIService._get_anthropic_key(), "")
+            # And a key found only in the ambient environment must not make
+            # the chain believe Anthropic is configured.
+            self.assertFalse(AIService._provider_has_key("anthropic"))
+
+    def test_ambient_deepseek_variables_are_ignored(self):
+        with mock.patch.dict(os.environ, {
+            "DEEPSEEK_BASE_URL": "https://not-our-endpoint.example",
+            "DEEPSEEK_MODEL": "not-our-model",
+            "DEEPSEEK_API_KEY": "ambient-tooling-key",
+        }):
+            self.assertEqual(AIService._get_deepseek_base_url(), "https://api.deepseek.com")
+            self.assertEqual(AIService._get_deepseek_model(), "deepseek-flash")
+            self.assertFalse(AIService._provider_has_key("deepseek"))
+
+    def test_namespaced_variables_are_read(self):
+        with mock.patch.dict(os.environ, {
+            "NEXUCON_ANTHROPIC_BASE_URL": "https://gateway.internal",
+            "NEXUCON_ANTHROPIC_MODEL": "claude-haiku-4-5",
+            "NEXUCON_ANTHROPIC_API_KEY": "nx-key",
+            "NEXUCON_ANTHROPIC_MAX_TOKENS": "4096",
+            "NEXUCON_DEEPSEEK_BASE_URL": "https://ds.internal",
+            "NEXUCON_DEEPSEEK_MODEL": "deepseek-flash",
+            "NEXUCON_DEEPSEEK_API_KEY": "nx-ds-key",
+        }):
+            self.assertEqual(AIService._get_anthropic_base_url(), "https://gateway.internal")
+            self.assertEqual(AIService._get_anthropic_model(), "claude-haiku-4-5")
+            self.assertEqual(AIService._get_anthropic_key(), "nx-key")
+            self.assertEqual(AIService._get_anthropic_max_tokens(), 4096)
+            self.assertEqual(AIService._get_deepseek_base_url(), "https://ds.internal")
+            self.assertEqual(AIService._get_deepseek_model(), "deepseek-flash")
+            self.assertTrue(AIService._provider_has_key("deepseek"))
+
+    def test_a_django_setting_still_wins_over_the_environment(self):
+        with mock.patch.dict(os.environ, {"NEXUCON_ANTHROPIC_MODEL": "from-env"}):
+            with override_settings(ANTHROPIC_MODEL="from-settings"):
+                self.assertEqual(AIService._get_anthropic_model(), "from-settings")
+
+
+class MaxTokensTests(TestCase):
+
+    def test_a_non_integer_max_tokens_falls_back_to_the_default(self):
+        # The parameter was documented as `max_tokens` but never used, so at
+        # least one call site passes a JSON schema through it. Anthropic
+        # requires a real integer, so a schema must not be forwarded.
+        self.assertEqual(AIService._coerce_max_tokens({"type": "object"}, 8192), 8192)
+        self.assertEqual(AIService._coerce_max_tokens(None, 4096), 4096)
+        self.assertEqual(AIService._coerce_max_tokens(True, 4096), 4096)
+        self.assertEqual(AIService._coerce_max_tokens(0, 4096), 4096)
+        self.assertEqual(AIService._coerce_max_tokens(-5, 4096), 4096)
+
+    def test_a_real_token_budget_is_used(self):
+        self.assertEqual(AIService._coerce_max_tokens(1234, 8192), 1234)
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"))
+    @patch("apps.common.ai_service.requests.post")
+    def test_the_token_budget_reaches_anthropic(self, mock_post):
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {"content": [{"type": "text", "text": "{}"}],
+                                  "stop_reason": "end_turn"},
+        })
+        AIService._run_text_anthropic("prompt", 1234)
+        self.assertEqual(mock_post.call_args[1]["json"]["max_tokens"], 1234)
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a"))
+    @patch("apps.common.ai_service.OpenAI")
+    def test_the_token_budget_reaches_openai(self, mock_openai):
+        mock_openai.return_value = _openai_client_with_content("{}")
+        AIService._run_text_openai("prompt", 777)
+        kwargs = mock_openai.return_value.chat.completions.create.call_args[1]
+        self.assertEqual(kwargs["max_tokens"], 777)
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a"))
+    @patch("apps.common.ai_service.OpenAI")
+    def test_no_token_budget_leaves_the_kwarg_absent(self, mock_openai):
+        mock_openai.return_value = _openai_client_with_content("{}")
+        AIService._run_text_openai("prompt")
+        kwargs = mock_openai.return_value.chat.completions.create.call_args[1]
+        self.assertNotIn("max_tokens", kwargs)
+
+
+class StructuredResultTests(TestCase):
+    """Provenance must ride on attributes, never on keys."""
+
+    def test_it_is_still_a_dict_in_every_way_callers_rely_on(self):
+        result = StructuredResult({"root_cause": "x"}, provider="anthropic", model="claude-haiku-4-5")
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result, {"root_cause": "x"})
+        self.assertEqual(result.get("root_cause"), "x")
+        self.assertEqual(json.loads(json.dumps(result)), {"root_cause": "x"})
+
+    def test_provenance_never_becomes_a_payload_key(self):
+        result = StructuredResult({"a": 1}, provider="gemini", model="gemini-flash-latest")
+        self.assertNotIn("provider", dict(result))
+        self.assertNotIn("model", dict(result))
+
+    @override_settings(**_provider_settings(ANTHROPIC_API_KEY="an-test"))
+    @patch("apps.common.ai_service.requests.post")
+    def test_the_winner_is_recorded_not_the_configured_provider(self, mock_post):
+        # The bug this fixes: a statutory analysis record used to name the
+        # CONFIGURED provider, so a fallback winner produced a false
+        # provenance claim on a document an engineer relies on.
+        mock_post.return_value = MagicMock(**{
+            "status_code": 200, "headers": {},
+            "json.return_value": {"content": [{"type": "text", "text": '{"a": 1}'}],
+                                  "stop_reason": "end_turn"},
+        })
+        with override_settings(AI_PROVIDER="gemini"):
+            result = AIService.generate_structured_json("prompt")
+        self.assertEqual(result.provider, "anthropic")
+        self.assertEqual(result.model, "claude-haiku-4-5")
+        self.assertEqual(result, {"a": 1})
+
+    @override_settings(**_provider_settings(GEMINI_API_KEY="gm-test"))
+    @patch("google.generativeai.GenerativeModel")
+    def test_recommendations_carry_their_provenance_too(self, mock_gm):
+        mock_gm.return_value = MagicMock(**{
+            "generate_content.return_value": MagicMock(
+                text='{"recommendations": [{"recommendation": "x"}], "text_confidence": 0.7}'),
+        })
+        with override_settings(AI_PROVIDER="gemini"):
+            result = AIService.generate_recommendations([], [], 0.01)
+        self.assertEqual(result.provider, "gemini")
+        self.assertEqual(len(result["recommendations"]), 1)
+
+    @override_settings(**_provider_settings())
+    def test_a_total_failure_carries_no_provenance(self):
+        # Nothing answered, so nothing may be attributed. An empty detection
+        # result is honest; naming a provider for it would not be.
+        result = AIService.generate_recommendations([], [], 0.0)
+        self.assertEqual(result, {"recommendations": [], "text_confidence": None})
+        self.assertIsNone(result.provider)
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a"))
+    @patch("apps.common.ai_service.OpenAI")
+    def test_a_plain_dict_return_still_resolves_to_the_configured_provider(self, mock_openai):
+        # The adapter reads `getattr(data, "provider", None) or <configured>`.
+        # A patched plain-dict return must therefore still work, so the shim
+        # cannot rot into a None provenance.
+        mock_openai.return_value = _openai_client_with_content('{"root_cause": "x"}')
+        with override_settings(AI_PROVIDER="openai"):
+            result = AIService.generate_structured_json("prompt")
+        # The real return carries the winner...
+        self.assertEqual(result.provider, "openai")
+        # ...and the fallback expression the adapter uses also resolves for a
+        # bare dict, which is what a patched test double hands back.
+        plain = {"root_cause": "x"}
+        self.assertEqual(getattr(plain, "provider", None) or "openai", "openai")
+
+    @override_settings(**_provider_settings(OPENAI_API_KEY="sk-a"))
+    @patch("apps.common.ai_service.OpenAI")
+    def test_schema_is_stated_in_the_prompt(self, mock_openai):
+        mock_openai.return_value = _openai_client_with_content("{}")
+        with override_settings(AI_PROVIDER="openai"):
+            AIService.generate_structured_json(
+                "analyse", 500, schema={"type": "object", "required": ["a"]})
+        kwargs = mock_openai.return_value.chat.completions.create.call_args[1]
+        self.assertIn('"required": ["a"]', kwargs["messages"][0]["content"])
+        self.assertEqual(kwargs["max_tokens"], 500)
 
 
 # ============================================================================
@@ -1442,3 +2047,60 @@ class MLPipelineTorchPathTests(TestCase):
             self.assertEqual(item["severity"], "low")
             self.assertEqual(item["confidence_score"], 0.20)
             self.assertIn("False Positive", item["description"])
+
+
+# ==========================================================================
+# common.geo
+#
+# `haversine_m` lived in apps/evidence/correlation.py, which meant
+# apps.inspections had to import apps.evidence in order to measure a distance
+# between two points — evidence depending on nothing, inspections depending on
+# evidence for arithmetic. It now lives here, in the pure-helper layer, and
+# correlation.py re-exports it so no call site changed.
+# ==========================================================================
+
+class HaversineTests(TestCase):
+    """The distance primitive the site geofence is built on."""
+
+    def test_identical_points_are_zero_metres(self):
+        self.assertEqual(haversine_m((6.4281, 3.4219), (6.4281, 3.4219)), 0.0)
+
+    def test_no_coordinate_returns_infinity_not_a_number(self):
+        """An unknown position must never read as "0 m away" — that would
+        place an inspector at a site they never visited."""
+        self.assertEqual(haversine_m((None, None), (6.4281, 3.4219)), float('inf'))
+        self.assertEqual(haversine_m((6.4281, 3.4219), (None, None)), float('inf'))
+        self.assertEqual(haversine_m((6.4281, None), (6.4281, 3.4219)), float('inf'))
+
+    def test_one_degree_of_latitude_is_the_published_arc_length(self):
+        """One degree of latitude is pi*R/180 = 111.19 km everywhere on a
+        sphere. Derivable by hand, so it is a real check on the formula."""
+        distance_km = haversine_m((0.0, 0.0), (1.0, 0.0)) / 1000.0
+        self.assertAlmostEqual(distance_km, 111.19, delta=0.5)
+
+    def test_quarter_of_the_equator_matches_the_sphere(self):
+        """(0,0) to (0,90) is a quarter great circle = pi*R/2 = 10007.5 km."""
+        distance_km = haversine_m((0.0, 0.0), (0.0, 90.0)) / 1000.0
+        self.assertAlmostEqual(distance_km, 10007.5, delta=10.0)
+
+    def test_known_lagos_to_abuja_pair_within_one_percent(self):
+        """Lagos (6.5244, 3.3792) to Abuja (9.0765, 7.3986) is ~526 km."""
+        distance_km = haversine_m((6.5244, 3.3792), (9.0765, 7.3986)) / 1000.0
+        self.assertAlmostEqual(distance_km, 526.0, delta=526.0 * 0.01)
+
+    def test_short_offsets_match_the_local_scale(self):
+        """At this latitude one 0.00045 degree step of latitude is ~50 m —
+        the scale the geofence tests are written against."""
+        self.assertAlmostEqual(
+            haversine_m((6.4281, 3.4219), (6.4281 + 0.00045, 3.4219)),
+            50.0, delta=1.0)
+
+    def test_distance_is_symmetric(self):
+        a, b = (6.4281, 3.4219), (6.5000, 3.5000)
+        self.assertAlmostEqual(haversine_m(a, b), haversine_m(b, a), places=6)
+
+    def test_correlation_module_re_exports_the_same_function(self):
+        """The re-export is what keeps every existing call site and test
+        working; if it ever becomes a copy instead, this asserts it."""
+        from apps.evidence import correlation
+        self.assertIs(correlation.haversine_m, haversine_m)

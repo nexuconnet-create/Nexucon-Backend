@@ -98,6 +98,11 @@ CONCLUSION_PREAMBLE_DEFAULT = (
     'BS EN 12504-4:2021.'
 )
 
+REMARKS_PREAMBLE_DEFAULT = (
+    'The following field remarks, surface observations and operator notes '
+    'were recorded during testing of the structural members:'
+)
+
 # key -> section descriptor. Ordered; the CMS editor lists sections in
 # this order. ``kind`` tells the editor how to parse the body:
 #   'paragraphs' — blank lines separate paragraphs
@@ -226,6 +231,18 @@ CMS_SECTIONS = {
                 'sit under the CONCRETE heading; the PUNDIT equipment '
                 'description, capability list and the calibration '
                 'conversion statement are computed.',
+    },
+    'discussion_of_results': {
+        'label': 'Discussion of Results — editable text (Section 5.4)',
+        'kind': 'paragraphs',
+        'default': 'The analysis of the non-destructive tests indicates varying degrees of concrete quality across the structure. The detailed test points reflect the structural integrity in accordance with BS EN 12504-4:2021.',
+        'help': 'Editable text for the discussion of the test results.',
+    },
+    'remarks_preamble': {
+        'label': 'Remarks — opening lead-in (Section 5.5)',
+        'kind': 'paragraphs',
+        'default': REMARKS_PREAMBLE_DEFAULT,
+        'help': 'Precedes the remarks and observations table or fallback notice.',
     },
     'recommendation_preamble': {
         'label': 'Recommendation — opening lead-in (Section 6.0)',

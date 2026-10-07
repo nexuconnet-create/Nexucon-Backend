@@ -13,6 +13,9 @@ Covers:
 """
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 from datetime import date
 from io import StringIO
 from unittest import mock
@@ -31,13 +34,20 @@ from apps.audit.models import AuditEvent
 from apps.common.ai_service import AIProviderUnavailable
 from apps.evidence.models import AIAnalysisRecord, EvidenceRecord
 from apps.projects.models import Project
+from apps.telemetry.models import DeviceToken, TelemetrySession
 
-from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
+from .adapters import (
+    GNSSProjection,
+    GPRAdapter,
+    PUNDITAdapter,
+    PUNDIT_GRADE_RISK,
+    PUNDIT_PLAUSIBLE_VELOCITY_KM_S,
+)
 from .models import (
-    BIMElementMapping, BIMModelGeometry, FieldDevice, GPRAnomaly, GPRSurvey,
-    GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, PUNDITReading,
-    PUNDITTest, RebarTest, SensorDataFile, StrengthCurve, TrimbleConnection,
-    TrimbleProject,
+    BIMElementMapping, BIMModelGeometry, EvidenceSpatialPoint, FieldDevice,
+    GPRAnomaly, GPRSurvey, GnssBenchmark, GnssBoundaryPoint, GnssSurvey,
+    LiveStream, PUNDITReading, PUNDITTest, RebarTest, SensorDataFile,
+    StrengthCurve, TrimbleConnection, TrimbleProject,
 )
 
 User = get_user_model()
@@ -86,12 +96,44 @@ class PUNDITMathTestCase(TestCase):
             (2.99, 'poor'),
             (2.0, 'poor'),
             (1.99, 'very_poor'),
-            (0.5, 'very_poor'),
+            (1.0, 'very_poor'),  # the plausible floor is inclusive
         ]
         for velocity, expected_grade in cases:
             self.assertEqual(
                 PUNDITAdapter.grade_quality(velocity), expected_grade,
                 msg=f"grade for v={velocity!r}")
+
+    def test_implausible_velocity_is_not_graded_as_concrete(self):
+        # 20 Sep 2026. The bands above are open-ended downward, so without a
+        # plausibility floor a path-length or unit error is indistinguishable
+        # from the worst possible concrete: it graded 'very_poor', scored
+        # risk 'critical', and the AI then narrated a measurement error as a
+        # real structural defect. 694.17 m/s is the reading the client was
+        # shown. Nothing may be asserted about a measurement that is not
+        # physically concrete.
+        for velocity in (0.694, 0.5, 0.1, 0.0, 6.01, 8.0, -3.0):
+            self.assertEqual(
+                PUNDITAdapter.grade_quality(velocity), 'unverified',
+                msg=f"v={velocity!r} must not be graded")
+        # And the standing must not read as a defect verdict anywhere.
+        self.assertEqual(PUNDIT_GRADE_RISK['unverified'], (None, None))
+
+    def test_unverified_velocity_is_never_risk_scored(self):
+        # The grade is what feeds the risk table, so this is the point of the
+        # floor: an impossible reading asserts no risk at all.
+        grade = PUNDITAdapter.grade_quality(0.694)
+        risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
+        self.assertIsNone(risk_level)
+        self.assertIsNone(risk_score)
+
+    def test_implausibility_note_names_the_check_and_silent_when_plausible(self):
+        note = PUNDITAdapter.implausibility_note(0.694)
+        self.assertIn('path length', note)
+        self.assertIn('BS EN 12504-4', note)
+        # A plausible velocity says nothing — the note is printed
+        # unconditionally by callers, so silence has to be the default.
+        self.assertIsNone(PUNDITAdapter.implausibility_note(4.0))
+        self.assertIsNone(PUNDITAdapter.implausibility_note(None))
 
     def test_crack_depth_time_difference_method(self):
         # d = L/2 * sqrt((t_c/t_0)^2 - 1)
@@ -1053,7 +1095,20 @@ class PUNDITSearchFilterTestCase(DigitalEyeAPITestBase):
     def test_search_matches_test_reference_substring(self):
         ref = PUNDITTest.objects.filter(structural_element='COL-C24').first().test_reference
         # Use a distinctive middle slice of the real reference.
-        needle = ref[4:-4]
+        #
+        # The slice is longer than it looks like it needs to be, and that is
+        # the point. A reference is ``PND-<year>-<6 random hex>`` — fifteen
+        # characters — so slicing four off each end yields only *two* of those
+        # random characters (``2026-XX``). Two of the three references built in
+        # setUp then collide on that slice about once in eighty-five runs, and
+        # when they do, ``len(rows) == 1`` fails on a search that is working
+        # correctly: both references genuinely contain the needle. Taking one
+        # character off the back instead keeps five random characters, which
+        # two references share about once in a million runs. The slice still
+        # drops the prefix and the final character, so it neither starts at the
+        # beginning nor ends at the end — which is what makes it a test that
+        # the search is a substring match rather than an anchored one.
+        needle = ref[4:-1]
         rows = self.client.get(reverse('pundit-test-list'),
                                {'search': needle}).data
         self.assertEqual(len(rows), 1)
@@ -1593,6 +1648,501 @@ class PUNDITProjectAnalysisTestCase(TestCase):
 # Field device registry CRUD + project-scoped listing
 # ======================================================================
 
+class FieldDeviceColumnMappingTestCase(DigitalEyeAPITestBase):
+    """A device's declared export-column mapping, validated where it is written.
+
+    The mapping is read on every file import from this device. A value that is
+    not a platform column would not fail on this form — it would fail weeks
+    later, on a laptop at a site, as a refusal naming a column nobody present
+    had written. So it is refused here instead.
+    """
+
+    def _patch(self, device_id, mapping):
+        return self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': device_id}),
+            {'column_mapping': mapping}, format='json')
+
+    def _device(self, **overrides):
+        payload = {'device_id': 'PUNDIT-MAP-01', 'device_type': 'pundit'}
+        payload.update(overrides)
+        response = self.client.post(reverse('field-device-list'), payload,
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return response.data['id']
+
+    def test_a_mapping_of_contract_keys_is_accepted(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance (mm)': 'path_length_l_mm',
+            'Time (us)': 'transit_time_t_us',
+            'Location': 'point',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['column_mapping'],
+                         {'Distance (mm)': 'path_length_l_mm',
+                          'Time (us)': 'transit_time_t_us',
+                          'Location': 'point'})
+
+    def test_a_value_that_is_not_a_platform_column_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'Distance (mm)': 'distance_mm'})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('distance_mm', str(response.data['errors']))
+        # And nothing was stored, so the device is not left half-configured.
+        device = FieldDevice.objects.get(pk=device_id)
+        self.assertEqual(device.column_mapping, {})
+
+    def test_the_refusal_lists_the_columns_that_would_have_worked(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'Distance (mm)': 'nonsense'})
+
+        self.assertIn('path_length_l_mm', str(response.data['errors']))
+
+    def test_a_mapping_written_in_the_template_s_spelling_is_accepted(self):
+        # Folded the same way the reader folds it, so this resolves to the same
+        # contract key. Refusing it would reject a mapping that works.
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance (mm)': 'PATH LENGTH L (MM)',
+            'Time (us)': 'TRANSIT TIME T (US)',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_a_blank_source_column_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'  ': 'path_length_l_mm'})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('blank', str(response.data['errors']).lower())
+
+    def test_a_mapping_that_is_not_an_object_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, ['path_length_l_mm'])
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_clearing_a_mapping_is_allowed(self):
+        """The honest default: the export speaks the template."""
+        device_id = self._device()
+        self._patch(device_id, {'Distance (mm)': 'path_length_l_mm'})
+
+        response = self._patch(device_id, {})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['column_mapping'], {})
+
+    # ------------------------------------------------------------------
+    # A value may carry the scale from the instrument's unit to the
+    # contract's. Without this the metres a PL-200 writes cannot be
+    # declared at all, and a column of them reads as millimetres.
+    # ------------------------------------------------------------------
+
+    def test_a_mapping_that_declares_a_scale_is_accepted(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['column_mapping']['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000})
+
+    def test_a_scale_that_is_not_a_number_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 'lots'}})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('not a number', str(response.data['errors']))
+
+    def test_a_scale_that_cannot_convert_is_refused(self):
+        device_id = self._device()
+
+        for scale in (0, -5):
+            response = self._patch(device_id, {
+                'Distance': {'to': 'path_length_l_mm', 'scale': scale}})
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST,
+                             msg=f'scale={scale} should be refused')
+
+    def test_a_scaled_value_still_has_to_name_a_platform_column(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'distance_mm', 'scale': 1000}})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('distance_mm', str(response.data['errors']))
+
+    def test_a_value_that_is_neither_a_key_nor_an_object_is_refused(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {'Distance': ['path_length_l_mm']})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ------------------------------------------------------------------
+    # A column may be declared and deliberately not read. Without this,
+    # accepting a proposed mapping would leave an instrument's own export
+    # exactly as refused as it was — the four PL-200 columns the contract
+    # has no home for would refuse the file every time.
+    # ------------------------------------------------------------------
+
+    def test_a_null_value_records_a_column_as_deliberately_not_imported(self):
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'to': 'path_length_l_mm', 'scale': 1000},
+            'Time 1': 'transit_time_t_us',
+            'Velocity': None,
+            'Time 2': None,
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(response.data['column_mapping']['Velocity'])
+        self.assertEqual(response.data['column_mapping']['Time 1'],
+                         'transit_time_t_us')
+
+    def test_an_object_naming_no_column_is_refused_rather_than_declined(self):
+        """A mistyped "to" must not read as a decision to drop the column —
+        that would throw away a measurement because of a spelling mistake."""
+        device_id = self._device()
+
+        response = self._patch(device_id, {
+            'Distance': {'too': 'path_length_l_mm', 'scale': 1000}})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('to', str(response.data['errors']))
+        self.assertEqual(
+            FieldDevice.objects.get(pk=device_id).column_mapping, {})
+
+
+class FieldDeviceSuggestColumnsTestCase(DigitalEyeAPITestBase):
+    """Reading an export to propose a mapping — and writing nothing.
+
+    The proposal and the acceptance are two requests on purpose. A device's
+    column mapping is indistinguishable from a right one once rows have been
+    written from it, so the platform may read a file and say what it makes of
+    it, but a person saves it. These tests hold both halves: that the reading
+    is useful, and that it changes nothing on its own.
+    """
+
+    PL200 = (
+        b'Id,Distance,Time 1,Time 2,Velocity,Measurement Type\n'
+        b'1,0.100,25.1,25.3,3984,Direct\n'
+        b'2,0.150,25.4,25.6,5905,Direct\n')
+
+    def _device(self, **overrides):
+        payload = {'device_id': 'PUNDIT-SUGGEST-01', 'device_type': 'pundit'}
+        payload.update(overrides)
+        response = self.client.post(reverse('field-device-list'), payload,
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return response.data['id']
+
+    def _suggest(self, device_id, content=None, name='export.csv'):
+        upload = SimpleUploadedFile(
+            name, self.PL200 if content is None else content,
+            content_type='text/csv')
+        return self.client.post(
+            reverse('field-device-suggest-columns', kwargs={'pk': device_id}),
+            {'file': upload}, format='multipart')
+
+    def test_it_returns_the_file_s_own_columns_and_a_proposed_mapping(self):
+        response = self._suggest(self._device())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['file_name'], 'export.csv')
+        headers = [column['header'] for column in response.data['columns']]
+        self.assertEqual(headers, ['Id', 'Distance', 'Time 1', 'Time 2',
+                                   'Velocity', 'Measurement Type'])
+        self.assertEqual(response.data['mapping']['Time 1'], 'transit_time_t_us')
+
+    def test_it_proposes_the_conversion_the_values_need(self):
+        response = self._suggest(self._device())
+
+        self.assertEqual(response.data['mapping']['Distance'],
+                         {'to': 'path_length_l_mm', 'scale': 1000.0})
+
+    def test_it_offers_the_contract_for_a_picker(self):
+        response = self._suggest(self._device())
+
+        keys = {entry['key'] for entry in response.data['accepted']}
+        self.assertIn('path_length_l_mm', keys)
+        self.assertIn('structural_element', keys)
+
+    def test_it_writes_nothing_at_all(self):
+        """No mapping saved, no bytes stored, no session opened."""
+        device_id = self._device()
+
+        self._suggest(device_id)
+
+        device = FieldDevice.objects.get(pk=device_id)
+        self.assertEqual(device.column_mapping, {})
+        self.assertFalse(
+            TelemetrySession.objects.filter(device_id=device_id).exists())
+
+    def test_a_file_with_no_columns_to_read_is_refused(self):
+        response = self._suggest(self._device(), content=b'')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('empty', str(response.data['detail']).lower())
+
+    def test_with_no_file_it_answers_with_the_contract_alone(self):
+        """An inspector editing a mapping already recorded has no export in
+        hand, and the picker still has to offer the platform's own columns.
+
+        Answering with the contract rather than a hardcoded list in the frontend
+        is what stops the two drifting apart.
+        """
+        response = self.client.post(
+            reverse('field-device-suggest-columns',
+                    kwargs={'pk': self._device()}), {}, format='multipart')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['columns'], [])
+        self.assertEqual(response.data['mapping'], {})
+        keys = {entry['key'] for entry in response.data['accepted']}
+        self.assertIn('path_length_l_mm', keys)
+        self.assertIn('structural_element', keys)
+
+    def test_answering_with_the_contract_writes_nothing_either(self):
+        device_id = self._device()
+
+        self.client.post(
+            reverse('field-device-suggest-columns', kwargs={'pk': device_id}),
+            {}, format='multipart')
+
+        self.assertEqual(
+            FieldDevice.objects.get(pk=device_id).column_mapping, {})
+
+    def test_a_pdf_is_refused_with_the_reason(self):
+        response = self._suggest(self._device(), content=b'%PDF-1.7\n...',
+                                 name='scan.pdf')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('PDF', str(response.data['detail']))
+
+    def test_a_device_outside_the_caller_s_sight_is_not_found(self):
+        """The scope check that matters, because this viewset's own queryset
+        would answer for every device in the system."""
+        from apps.government.models import Profile, Role
+
+        owner = User.objects.create_user(
+            username='other_engineer@nexucon.com',
+            email='other_engineer@nexucon.com', password='Password123!')
+        device = FieldDevice.objects.create(
+            device_id='SOMEBODY-ELSES-01', device_type='pundit',
+            registered_by=owner)
+
+        officer = User.objects.create_user(
+            username='officer@lasbca.gov', email='officer@lasbca.gov',
+            password='Password123!')
+        role, _ = Role.objects.get_or_create(name='Inspector')
+        Profile.objects.create(user=officer, role=role)
+        refresh = RefreshToken.for_user(officer)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+        response = self._suggest(device.id)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_an_anonymous_caller_is_refused(self):
+        device_id = self._device()
+        self.client.force_authenticate(None)
+
+        response = self._suggest(device_id)
+
+        self.assertIn(response.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+
+class FieldDeviceProjectAssignmentTestCase(DigitalEyeAPITestBase):
+    """Putting an instrument on a project *after* it was registered.
+
+    Registration is where a project is normally chosen. An instrument
+    registered without one — or registered by somebody else, before its project
+    existed — is invisible to every project-scoped screen: it is missing from
+    the telemetry device list, which feeds both the Devices panel and the
+    import form's instrument picker, and no session can be opened for it. It
+    sits on the Instruments page looking perfectly healthy while every other
+    screen ignores it.
+
+    ``_scoped_devices`` is what answers that question, so these tests assert
+    against the real endpoint rather than the PATCH response alone. A PATCH
+    that returned 200 and left the instrument unscoped would be no fix at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The instrument is somebody else's: not registered by the officer
+        # looking at it, on no project, with no sessions. That is the exact
+        # shape that falls out of scope, because the three relationships
+        # ``_scoped_devices`` matches on are the only ways in.
+        self.other_user = User.objects.create_user(
+            username='site_engineer@nexucon.com',
+            email='site_engineer@nexucon.com',
+            password='Password123!',
+        )
+
+    def _foreign_device(self, **overrides):
+        payload = {
+            'device_id': 'PL-200-ASSIGN-01',
+            'device_type': 'pundit',
+            'registered_by': self.other_user,
+        }
+        payload.update(overrides)
+        return FieldDevice.objects.create(**payload)
+
+    def _patch_project(self, device, project):
+        return self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': device.id}),
+            {'assigned_project': project}, format='json')
+
+    def _visible_device_ids(self):
+        response = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [str(row['id']) for row in response.data]
+
+    def test_an_unassigned_instrument_is_absent_from_the_device_list(self):
+        device = self._foreign_device()
+
+        self.assertNotIn(str(device.id), self._visible_device_ids())
+
+    def test_assigning_a_project_puts_it_on_the_device_list(self):
+        device = self._foreign_device()
+        self.assertNotIn(str(device.id), self._visible_device_ids())
+
+        response = self._patch_project(device, str(self.project.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        device.refresh_from_db()
+        self.assertEqual(device.assigned_project_id, self.project.id)
+        # The instrument the officer just attached is now the instrument the
+        # picker offers them — which is the whole point of the change.
+        self.assertIn(str(device.id), self._visible_device_ids())
+
+    def test_the_project_can_be_removed_again(self):
+        """Detaching is a real operation, not an accident of a blank field."""
+        device = self._foreign_device(assigned_project=self.project)
+        self.assertIn(str(device.id), self._visible_device_ids())
+
+        response = self._patch_project(device, None)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        device.refresh_from_db()
+        self.assertIsNone(device.assigned_project_id)
+        self.assertNotIn(str(device.id), self._visible_device_ids())
+
+
+class FieldDeviceProjectAssignmentAsInspectorTestCase(DigitalEyeAPITestBase):
+    """The same attach, done by the role that will actually do it.
+
+    The tests above run as a superuser, for whom ``scoped_projects`` is
+    ``Project.objects.all()`` — so they prove the field is writable and that
+    the telemetry list follows it, but they cannot prove anything about
+    *scoping*, because a superuser has none. The officer holding the PL-200 is
+    not a superuser, and the panel this backs is deliberately ungated on the
+    frontend, so the scope check has to be the thing that holds. These two
+    tests are that check: one that the attach succeeds inside the officer's
+    scope, and one that it is refused outside it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from apps.government.models import Profile, Role
+
+        role, _ = Role.objects.get_or_create(name='Inspector')
+        self.inspector = User.objects.create_user(
+            username='inspector@lasbca.gov',
+            email='inspector@lasbca.gov',
+            password='Password123!',
+        )
+        Profile.objects.create(user=self.inspector, role=role)
+        # Being named on the project is what puts it in `scoped_projects` for
+        # an Inspector — the FK, not the display name.
+        self.project.assigned_inspector_user = self.inspector
+        self.project.save(update_fields=['assigned_inspector_user'])
+
+        # The instrument is somebody else's and on no project: the shape that
+        # falls out of every scoped screen.
+        self.owner = User.objects.create_user(
+            username='site_engineer@nexucon.com',
+            email='site_engineer@nexucon.com',
+            password='Password123!',
+        )
+        self.device = FieldDevice.objects.create(
+            device_id='PL-200-INSPECTOR-01',
+            device_type='pundit',
+            registered_by=self.owner,
+        )
+
+        refresh = RefreshToken.for_user(self.inspector)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+    def _patch_project(self, project):
+        return self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': self.device.id}),
+            {'assigned_project': project}, format='json')
+
+    def _visible_device_ids(self):
+        response = self.client.get(reverse('telemetry-device-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [str(row['id']) for row in response.data]
+
+    def test_an_inspector_can_attach_a_foreign_instrument_to_their_project(self):
+        """The claim the ungated button rests on."""
+        self.assertNotIn(str(self.device.id), self._visible_device_ids())
+
+        response = self._patch_project(str(self.project.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.assigned_project_id, self.project.id)
+        self.assertIn(str(self.device.id), self._visible_device_ids())
+
+    def test_an_inspector_cannot_attach_it_to_a_project_outside_their_scope(self):
+        """Dropping the frontend gate must not become a way to reach anyone's project.
+
+        This is why the button could be ungated safely: `assigned_project` is a
+        ``ScopedProjectField``, so the set of projects the dropdown offers and
+        the set the server accepts are the same set.
+        """
+        from apps.government.models import Profile, Role
+
+        stranger = User.objects.create_user(
+            username='other-inspector@lasbca.gov',
+            email='other-inspector@lasbca.gov',
+            password='Password123!',
+        )
+        Profile.objects.create(user=stranger, role=Role.objects.get(name='Inspector'))
+        theirs = Project.objects.create(
+            name='A Site This Officer Is Not On',
+            project_type='Commercial',
+            status='ACTIVE',
+            assigned_inspector_user=stranger,
+        )
+
+        response = self._patch_project(str(theirs.id))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.assigned_project_id)
+
+
 class FieldDeviceRegistryTestCase(DigitalEyeAPITestBase):
     def test_device_create_requires_serial_device_id(self):
         response = self.client.post(reverse('field-device-list'),
@@ -1660,6 +2210,202 @@ class FieldDeviceRegistryTestCase(DigitalEyeAPITestBase):
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('assigned_project', response.data['errors'])
+
+
+# ======================================================================
+# Gateway provisioning from the panel
+# ======================================================================
+
+class FieldDeviceGatewayActionTestCase(DigitalEyeAPITestBase):
+    """`POST digital-eye/devices/<uuid>/gateway/` — turning sync on and off.
+
+    The officer presses a button; the platform mints the credential and writes
+    the gateway's config. The thing under test as much as anything is what does
+    *not* come back: the secret is never in a response, so no screen and no
+    client ever holds it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.config_dir = tempfile.mkdtemp(prefix='nexucon_de_gw_cfg_')
+        self.inbox_dir = tempfile.mkdtemp(prefix='nexucon_de_gw_inbox_')
+        self.addCleanup(shutil.rmtree, self.config_dir, True)
+        self.addCleanup(shutil.rmtree, self.inbox_dir, True)
+        self._settings = override_settings(
+            GATEWAY_CONFIG_DIR=self.config_dir,
+            GATEWAY_INBOX_DIR=self.inbox_dir,
+            GATEWAY_API_URL='http://web:8000',
+        )
+        self._settings.enable()
+        self.addCleanup(self._settings.disable)
+        self.device = FieldDevice.objects.create(
+            device_id='PUNDIT-PL200-01', device_type='pundit',
+            assigned_project=self.project, is_active=True)
+        self.url = reverse('field-device-gateway', kwargs={'pk': self.device.id})
+
+    def _set(self, enabled):
+        return self.client.post(self.url, {'enabled': enabled}, format='json')
+
+    def test_enabling_writes_the_config_and_reports_the_state(self):
+        response = self._set(True)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['gateway_enabled'])
+        self.assertTrue(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+        self.device.refresh_from_db()
+        self.assertTrue(self.device.gateway_enabled)
+
+    def test_the_response_never_carries_the_credential(self):
+        """The whole point of provisioning here rather than by hand.
+
+        A token in a response is a token in a browser's memory, in the network
+        tab, in anything that logs a body. It goes from the mint into the file
+        and nowhere else.
+        """
+        response = self._set(True)
+
+        # The serialised body, not the parsed dict: this is the assertion about
+        # what actually crossed the wire.
+        body = response.content.decode()
+        self.assertNotIn('nxdev_', body)
+        self.assertNotIn('device_token', body)
+        with open(os.path.join(self.config_dir, f'{self.device.id}.json'),
+                  encoding='utf-8') as handle:
+            self.assertTrue(json.load(handle)['device_token'].startswith('nxdev_'))
+
+    def test_disabling_revokes_the_credential_and_removes_the_config(self):
+        self._set(True)
+
+        response = self._set(False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gateway_enabled'])
+        self.assertFalse(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device,
+                                       revoked_at__isnull=True).count(), 0)
+
+    def test_enabling_is_audited(self):
+        self._set(True)
+
+        event = AuditEvent.objects.filter(
+            action='digital_eye.device.gateway.enable',
+            resource_id=str(self.device.id)).first()
+        self.assertIsNotNone(event, 'provisioning was not recorded')
+        self.assertEqual(event.metadata.get('device_id'), 'PUNDIT-PL200-01')
+        # The path is recorded; the credential inside it is not.
+        self.assertNotIn('nxdev_', json.dumps(event.metadata))
+
+    def test_disabling_is_audited(self):
+        self._set(True)
+
+        self._set(False)
+
+        self.assertTrue(AuditEvent.objects.filter(
+            action='digital_eye.device.gateway.disable',
+            resource_id=str(self.device.id)).exists())
+
+    def test_an_instrument_outside_the_callers_scope_is_not_found(self):
+        """Scoped through the device helper, not the viewset's queryset.
+
+        ``FieldDeviceViewSet.get_queryset`` returns every device in the system
+        to any authenticated user, and this action mints a credential — so
+        provisioning would be a way round the hole rather than a victim of it.
+        404 rather than 403, matching the credentials endpoint: a 403 would
+        confirm the instrument exists.
+        """
+        outsider = User.objects.create_user(
+            username='unscoped_gateway@nexucon.com',
+            email='unscoped_gateway@nexucon.com', password='Password123!')
+        self.client.credentials(
+            HTTP_AUTHORIZATION=
+            f'Bearer {RefreshToken.for_user(outsider).access_token}')
+
+        response = self._set(True)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+        self.assertEqual(
+            DeviceToken.objects.filter(device=self.device).count(), 0)
+
+    def test_a_body_that_is_not_a_boolean_is_refused(self):
+        """``"false"`` is a truthy string, and this action mints credentials."""
+        for value in ('true', 1, None):
+            with self.subTest(value=value):
+                response = self._set(value)
+
+                self.assertEqual(response.status_code,
+                                 status.HTTP_400_BAD_REQUEST)
+                self.device.refresh_from_db()
+                self.assertFalse(self.device.gateway_enabled)
+
+    def test_an_instrument_with_no_file_contract_is_refused_with_a_reason(self):
+        device = FieldDevice.objects.create(
+            device_id='GPR-CART-GW-01', device_type='gpr',
+            assigned_project=self.project, is_active=True)
+
+        response = self.client.post(
+            reverse('field-device-gateway', kwargs={'pk': device.id}),
+            {'enabled': True}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('GPR file contract', response.data['detail'])
+
+    def test_the_flag_cannot_be_set_by_a_plain_patch(self):
+        """It is read-only, and it has to be.
+
+        A writable boolean would let a client say "sync is on" with no config
+        behind it, and the panel would then be telling the officer something
+        untrue — the failure this whole feature exists to remove.
+        """
+        response = self.client.patch(
+            reverse('field-device-detail', kwargs={'pk': self.device.id}),
+            {'gateway_enabled': True}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.gateway_enabled)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.config_dir, f'{self.device.id}.json')))
+
+    def test_provisioning_is_refused_when_the_deployment_has_no_config_dir(self):
+        with override_settings(GATEWAY_CONFIG_DIR=''):
+            response = self._set(True)
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('GATEWAY_CONFIG_DIR', response.data['detail'])
+
+    def test_the_card_is_told_where_the_site_must_sync_to(self):
+        """The folder is the gateway container's path, which only we know.
+
+        The site's sync client is pointed at a directory that is a deployment
+        setting on this server; nobody at the site can derive it. So it is
+        stated by the platform, on the device itself, so the panel can show it
+        after any reload rather than only in the response to enabling.
+        """
+        response = self.client.get(
+            reverse('field-device-detail', kwargs={'pk': self.device.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data['gateway_inbox'],
+            os.path.join(self.inbox_dir, self.device.device_reference))
+
+    def test_the_folder_is_not_invented_when_the_deployment_cannot_say(self):
+        """``None``, not a plausible-looking path.
+
+        A guessed folder is worse than no folder: the officer would point a
+        sync client at it and the gateway would never see a file.
+        """
+        with override_settings(GATEWAY_INBOX_DIR=''):
+            response = self.client.get(
+                reverse('field-device-detail', kwargs={'pk': self.device.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['gateway_inbox'])
 
 
 # ======================================================================
@@ -2887,6 +3633,123 @@ class HonestModelDefaultsTestCase(DigitalEyeAPITestBase):
 
 
 # ======================================================================
+# Spatial evidence register (the inspector frontend's Spatial Evidence Map)
+# ======================================================================
+
+class SpatialEvidencePointTestCase(DigitalEyeAPITestBase):
+    """
+    `GET /api/v1/digital-eye/spatial-map/` — what the Spatial Evidence Map reads.
+
+    The inspector frontend calls this endpoint with **no** filter and lets the
+    viewset's own project scoping decide what comes back, then positions each
+    point on a canvas from its `lat`/`lng`. Both halves of that are pinned here,
+    because the map was previously drawn from data of its own: pins placed by
+    array index and a fixed coordinate readout, on a canvas that was handed a
+    literal empty array. A frontend can only be honest about this register if
+    the register's contract holds, so the contract is asserted server-side.
+
+    The coordinate assertions are the load-bearing ones. `lat`, `lng`,
+    `elevation_m` and `accuracy_mm` are all `null=True` on the model, and the
+    canvas renders a recorded point with no measured position as exactly that
+    ("no measured position") rather than drawing it. A `null=False` or a
+    coordinate default added later would not fail loudly in Python — it would
+    silently plot an unsurveyed point, and the map would state a position
+    nobody measured.
+    """
+
+    LIST_URL = 'digital-eye-spatial-map-list'
+
+    def _point(self, name, **kwargs):
+        return EvidenceSpatialPoint.objects.create(name=name, **kwargs)
+
+    def _names(self, response):
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['success'])
+        return sorted(row['name'] for row in response.data['data'])
+
+    def test_an_unmeasured_point_is_returned_with_null_coordinates(self):
+        """A row recorded before it was surveyed stays null, and is not dropped.
+
+        Withholding it would be worse than returning it: the map reports the
+        count it holds, so a silently omitted row would read as a point that
+        was never recorded at all.
+        """
+        self._point('Beacon with no fix yet', project=self.project)
+
+        response = self.client.get(reverse(self.LIST_URL))
+        self.assertEqual(self._names(response), ['Beacon with no fix yet'])
+
+        row = response.data['data'][0]
+        self.assertIsNone(row['lat'])
+        self.assertIsNone(row['lng'])
+        self.assertIsNone(row['elevation_m'])
+        self.assertIsNone(row['accuracy_mm'])
+
+    def test_recorded_coordinates_and_precision_come_back_unchanged(self):
+        self._point(
+            'Beacon A',
+            project=self.project,
+            layer_type='GNSS_RTK_BEACON',
+            lat=6.4478,
+            lng=3.4723,
+            elevation_m=18.2,
+            accuracy_mm=14.0,
+        )
+
+        row = self.client.get(reverse(self.LIST_URL)).data['data'][0]
+        self.assertEqual(row['lat'], 6.4478)
+        self.assertEqual(row['lng'], 3.4723)
+        self.assertEqual(row['elevation_m'], 18.2)
+        self.assertEqual(row['accuracy_mm'], 14.0)
+
+    def test_unfiltered_read_withholds_a_point_that_names_no_project(self):
+        """An unattributable statutory record is not shown to anyone.
+
+        This is why the frontend can call the endpoint unfiltered: the viewset,
+        not the client, decides what is in scope. A point naming no project has
+        no scope to be checked against, so it is withheld rather than served to
+        every caller.
+        """
+        self._point('Scoped point', project=self.project)
+        self._point('Unattributable point')
+
+        self.assertEqual(self._names(self.client.get(reverse(self.LIST_URL))), ['Scoped point'])
+
+    def test_layer_type_filter_selects_only_that_layer(self):
+        self._point('Beacon A', project=self.project, layer_type='GNSS_RTK_BEACON')
+        self._point('Transect 1', project=self.project, layer_type='GPR_TRANSECT')
+
+        response = self.client.get(reverse(self.LIST_URL), {'layer_type': 'GPR_TRANSECT'})
+        self.assertEqual(self._names(response), ['Transect 1'])
+
+    def test_project_filter_matches_the_foreign_key_and_the_legacy_string(self):
+        """Both filters the frontend may send are honoured.
+
+        These rows carry a real `project` FK *and* a denormalised `project_id_str`
+        copy written by older import paths, so filtering on the FK alone would
+        hide rows imported under the string.
+        """
+        other = Project.objects.create(
+            name='Second Digital Eye Site', project_type='Commercial', status='ACTIVE',
+        )
+        self._point('On the FK', project=other)
+        self._point('On the legacy string', project_id_str=str(other.pk))
+        self._point('On another site', project=self.project)
+
+        response = self.client.get(reverse(self.LIST_URL), {'project': str(other.pk)})
+        self.assertEqual(self._names(response), ['On the FK', 'On the legacy string'])
+
+    def test_the_register_requires_authentication(self):
+        self.client.credentials()
+        # 401 rather than a redirect, so the frontend's axios interceptor sees
+        # an auth failure and not an HTML login page.
+        self.assertEqual(
+            self.client.get(reverse(self.LIST_URL)).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+
+# ======================================================================
 # 7 Sep 2026 review meeting (meeting #2) — free-text floors, concrete
 # maturity, evidence-based confidence and the Excel results export.
 # ======================================================================
@@ -2924,9 +3787,19 @@ class ReviewMeeting2PunditFieldsTestCase(DigitalEyeAPITestBase):
 
 class EvidenceConfidenceTestCase(TestCase):
     """Item 6: the analysis confidence is evidence-based — a 0-1 fraction
-    (the AIAnalysisRecord scale) built from points-per-element, spread,
-    calibration validity and LLM success. Good field data reaches the 0.95
-    cap; thin data scores honestly lower; nothing graded returns None."""
+    (the AIAnalysisRecord scale) built from points-per-element, spread and
+    E.C.S. Good field data reaches the 0.95 cap; thin data scores honestly
+    lower; nothing graded returns None.
+
+    20 Sep 2026 — the evidence block became PROPORTIONAL and size-weighted.
+    It was three conjunctive `all()` gates over every element, so the score
+    was `70 + 10*min + 10*min + 5*min` (the project's worst element counted
+    three times), and it FELL as more evidence was collected. The
+    expectations below are the honest arithmetic of the proportional rule;
+    each test's *intent* is unchanged and in several cases is now asserted
+    more directly (e.g. the model bonus is asserted as a 0.05 delta rather
+    than a hardcoded total).
+    """
 
     @staticmethod
     def _summary(**overrides):
@@ -2945,39 +3818,105 @@ class EvidenceConfidenceTestCase(TestCase):
         self.assertEqual(confidence, 0.95)
 
     def test_thin_evidence_scores_lower(self):
+        # One point, no spread to check, no E.C.S: the element earns only
+        # the points share of its credit (0.25 * 1/3) = 0.0833 of 20 points.
         confidence = PUNDITAdapter._evidence_confidence(
             [self._summary(n_points=1, point_velocities_m_s=[4000.0],
                            point_spread_pct=None, mean_ecs_n_mm2=None)],
             llm_used=False)
-        self.assertEqual(confidence, 0.70)
+        self.assertEqual(confidence, 0.717)
 
     def test_high_spread_loses_the_consistency_bonus(self):
         # 3+ points and an E.C.S, but the points genuinely disagree by
         # > 2% (the velocities themselves — the score no longer trusts a
-        # stored spread field that can contradict its own points).
+        # stored spread field that can contradict its own points). At a 5%
+        # spread the agreement share is gone entirely, so the element keeps
+        # only points + E.C.S = 0.55 of its 20-point block.
         confidence = PUNDITAdapter._evidence_confidence(
             [self._summary(point_velocities_m_s=[3900.0, 4000.0, 4100.0],
                            point_spread_pct=5.0)], llm_used=True)
-        self.assertEqual(confidence, 0.90)
+        self.assertEqual(confidence, 0.86)
 
     def test_no_llm_loses_the_model_bonus(self):
-        # Without the provider narrative the same evidence scores 5 lower.
-        # The E.C.S bonus is dropped here because 70+10+10+5 already hits
-        # the 95 cap — the cap would mask the model bonus being absent.
-        confidence = PUNDITAdapter._evidence_confidence(
-            [self._summary(mean_ecs_n_mm2=None)], llm_used=False)
-        self.assertEqual(confidence, 0.90)
+        # Without the provider narrative the same evidence scores exactly 5
+        # lower. Asserted as a DELTA so it cannot drift with the evidence
+        # arithmetic, and so the cap cannot mask it.
+        summary = [self._summary()]
+        with_llm = PUNDITAdapter._evidence_confidence(summary, llm_used=True)
+        without = PUNDITAdapter._evidence_confidence(summary, llm_used=False)
+        self.assertEqual(round((with_llm - without) * 100), 5)
 
     def test_ungraded_elements_return_none(self):
         self.assertIsNone(PUNDITAdapter._evidence_confidence(
             [self._summary(grade='pending')], llm_used=True))
 
+    def test_unverified_elements_are_excluded_not_counted_against(self):
+        # 20 Sep 2026: an element whose velocity is outside the range
+        # physically possible for concrete is NOT graded. It must neither
+        # earn credit nor withhold it from the elements that were measured
+        # successfully — so the score is identical to the good element alone.
+        good_only = PUNDITAdapter._evidence_confidence(
+            [self._summary()], llm_used=True)
+        with_unverified = PUNDITAdapter._evidence_confidence(
+            [self._summary(),
+             self._summary(element='COL-IMPOSSIBLE', grade='unverified',
+                           mean_velocity_m_s=694.17,
+                           point_velocities_m_s=[694.17, 700.0, 690.0])],
+            llm_used=True)
+        self.assertEqual(with_unverified, good_only)
+
+    def test_an_unverifiable_element_cannot_return_none_alone(self):
+        # Only 'unverified' present => nothing was established => None, the
+        # same honest answer as no evidence at all.
+        self.assertIsNone(PUNDITAdapter._evidence_confidence(
+            [self._summary(grade='unverified')], llm_used=True))
+
+    def test_breakdown_states_the_composition(self):
+        # A better-composed figure nobody can inspect is a better-hidden
+        # constant: the disclosure must add up to the score.
+        confidence, breakdown = PUNDITAdapter._evidence_confidence(
+            [self._summary()], llm_used=True, with_breakdown=True)
+        self.assertEqual(confidence, 0.95)
+        self.assertEqual(breakdown['base'], 70.0)
+        self.assertEqual(breakdown['elements'], 1)
+        self.assertEqual(breakdown['narrative_bonus'], 5.0)
+        # 70 base + 20 credit + 5 narrative = exactly 95 — the cap is
+        # reached, not exceeded, and the raw figure says so.
+        self.assertEqual(breakdown['raw_score'], 95.0)
+        self.assertEqual(
+            round(breakdown['base'] + breakdown['evidence_credit']
+                  + breakdown['narrative_bonus'], 2),
+            breakdown['raw_score'])
+
+    def test_adding_good_evidence_never_lowers_the_score(self):
+        # The old rule was non-monotone: a conjunctive gate can only be
+        # broken by a new element, never satisfied, so confidence FELL as
+        # more evidence arrived. Confidence must not be punished for
+        # collecting more data.
+        one = [self._summary(element='COL-1')]
+        two = one + [self._summary(element='COL-2')]
+        self.assertGreaterEqual(
+            PUNDITAdapter._evidence_confidence(two, llm_used=True),
+            PUNDITAdapter._evidence_confidence(one, llm_used=True))
+
+    def test_one_weak_element_does_not_zero_the_whole_project(self):
+        # The specific defect the client hit: a single short element used to
+        # wipe 20 points off every other element's work. It must now cost
+        # only its own share.
+        strong = [self._summary(element=f'COL-{i}') for i in range(1, 10)]
+        with_weak = strong + [self._summary(
+            element='COL-WEAK', n_points=2,
+            point_velocities_m_s=[4000.0, 4050.0])]
+        before = PUNDITAdapter._evidence_confidence(strong, llm_used=True)
+        after = PUNDITAdapter._evidence_confidence(with_weak, llm_used=True)
+        self.assertGreater(after, before - 0.01)
+
     def test_cross_test_points_pool_per_element(self):
         # 12 Sep 2026: the registry and device ingestion record each station
         # measurement as its own test row — an element's 3+ real points
         # (BS EN 12504-4) arrive as several single-point tests. Pooled per
-        # element they earn the coverage and consistency bonuses; scored
-        # per test row (the old behaviour) the same data read as thin.
+        # element they earn the coverage and consistency credit; scored
+        # per test row the same data reads as thin.
         stations = [
             self._summary(element='WALL-W1', floor='Ground Floor',
                           n_points=1, point_velocities_m_s=[4000.0],
@@ -2995,7 +3934,7 @@ class EvidenceConfidenceTestCase(TestCase):
             0.95)
         # The identical measurements on DISTINCT elements stay thin data —
         # each element genuinely has one point only. (No E.C.S so the
-        # score isolates the pooling behaviour: 70 base + 5 LLM.)
+        # score isolates the pooling behaviour: 70 base + 1.67 credit + 5.)
         distinct = [self._summary(element=f'WALL-W{i}', floor='Ground Floor',
                                   n_points=1,
                                   point_velocities_m_s=[4000.0 + 10 * i],
@@ -3004,11 +3943,11 @@ class EvidenceConfidenceTestCase(TestCase):
                     for i in (1, 2, 3)]
         self.assertEqual(
             PUNDITAdapter._evidence_confidence(distinct, llm_used=True),
-            0.75)
+            0.767)
 
     def test_same_element_name_on_different_floors_stays_separate(self):
-        # A name repeated on two floors is two elements — never pooled.
-        # (No E.C.S: 70 base only.)
+        # A name repeated on two floors is two elements — never pooled, so
+        # neither inherits the other's points. (No E.C.S: 70 base + 1.67.)
         stations = [
             self._summary(element='COL-A1', floor='Ground Floor',
                           n_points=1, point_velocities_m_s=[4000.0],
@@ -3019,7 +3958,7 @@ class EvidenceConfidenceTestCase(TestCase):
         ]
         self.assertEqual(
             PUNDITAdapter._evidence_confidence(stations, llm_used=False),
-            0.70)
+            0.717)
 
 
 class PunditResultsExportTestCase(DigitalEyeAPITestBase):
@@ -3086,7 +4025,7 @@ class PunditResultsExportTestCase(DigitalEyeAPITestBase):
         self.assertAlmostEqual(element['mean_v'] * 1000, 3913.84, places=1)
         # The spread of these points exceeds 2% — disclosed, not hidden.
         self.assertGreater(element['spread_pct'], 2.0)
-        self.assertIn('POINT SPREAD', sheet[5][8].value)
+        self.assertIn('UPV VARIANCE BETWEEN POINTS', sheet[5][8].value)
 
 
 # ======================================================================
@@ -3103,21 +4042,23 @@ class NexuconLinkEngineTestCase(TestCase):
         defaults = StrengthCurve.objects.filter(is_default=True)
         self.assertEqual(defaults.count(), 1)
         curve = defaults.get()
-        self.assertEqual(curve.curve_type, 'linear')
-        self.assertEqual(curve.formula_params['m'], 0.008961)
-        self.assertEqual(curve.formula_params['c'], -7.97)
+        self.assertEqual(curve.curve_type, 'exponential')
+        self.assertEqual(curve.formula_params['a'], 1.20)
+        self.assertEqual(curve.formula_params['b'], 0.00085)
+        self.assertEqual(curve.formula_params.get('c', 0.0), 0.0)
         self.assertEqual([curve.valid_range_min_ms, curve.valid_range_max_ms],
                          [2000.0, 5000.0])
 
-    def test_default_curve_matches_legacy_fixed_formula(self):
-        """The seeded curve is mathematically identical to the fixed linear
-        f_cu = 8.961*V(km/s) - 7.97 every prior result used."""
+    def test_default_curve_matches_exponential_formula(self):
+        """The seeded curve matches the default exponential calibration
+        f_cu = 1.20 * exp(0.00085*V_ms)."""
+        import math
         from .strength_curves import apply_curve_params
         for v_km_s in (2.0, 3.0, 4.0, 4.28571, 5.0):
             self.assertAlmostEqual(
-                apply_curve_params('linear', {'m': 0.008961, 'c': -7.97}, v_km_s,
+                apply_curve_params('exponential', {'a': 1.20, 'b': 0.00085, 'c': 0.0}, v_km_s,
                                    valid_range_ms=[2000.0, 5000.0]),
-                8.961 * v_km_s - 7.97, places=9)
+                1.20 * math.exp(0.00085 * (v_km_s * 1000.0)), places=9)
 
     def test_each_curve_type_applies_correctly(self):
         import math

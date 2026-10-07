@@ -6,6 +6,7 @@ from django.db.models import Q
 from .models import Project, ProjectMilestone, ProjectDocument
 from .serializers import ProjectSerializer, ProjectMilestoneSerializer, ProjectDocumentSerializer
 from apps.applications.models import Application
+from common.permissions import scoped_projects
 
 
 class ProjectMilestoneViewSet(viewsets.ModelViewSet):
@@ -19,13 +20,25 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiRespo
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
 from django.views.decorators.cache import cache_page
+from django.views.decorators.vary import vary_on_headers
 
 from rest_framework.permissions import IsAuthenticated
 
+# `get_queryset` below answers a different question for every caller — an
+# ordinary user sees only their own projects, and the seeded mock projects are
+# hidden from everyone else. A cached response is keyed by URL alone, so
+# without the `Vary` these two decorators set, the first caller to miss the
+# cache would serve *their* project list to every other user for the next
+# fifteen minutes. `vary_on_headers` sits inside `cache_page` on purpose: the
+# header has to be on the response before the cache decides what to key on.
 @method_decorator(ratelimit(key='ip', rate='60/m', block=True), name='dispatch')
+@method_decorator(cache_page(60 * 15), name='list')
+@method_decorator(vary_on_headers('Authorization'), name='list')
+@method_decorator(cache_page(60 * 15), name='retrieve')
+@method_decorator(vary_on_headers('Authorization'), name='retrieve')
 class ProjectViewSet(viewsets.ModelViewSet):
     """CRUD API for Project model"""
-    queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
+    queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -34,7 +47,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
-        queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
+        queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
         status_param = self.request.query_params.get('status')
         search_param = self.request.query_params.get('search')
 
@@ -84,47 +97,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+    @extend_schema(responses={200: ProjectSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='assignable', permission_classes=[IsAuthenticated])
     def assignable(self, request):
-        """
-        Returns active projects available for assignment to inspections, findings, or field evidence,
-        strictly scoped to the authenticated user's permissions, assigned projects, or district jurisdiction.
-        """
+        """The projects this caller may actually name in a write."""
         from common.permissions import scoped_projects
         user = request.user
-
-        # 1. Scope projects strictly based on organizational role, district, and assignments
         qs = scoped_projects(user)
-
-        # 2. For external non-government users (contractors, developers, client contacts),
-        # combine with projects where they are listed as developer or contact
         if not user.is_superuser and not (hasattr(user, 'government_profile') and user.government_profile):
             qs = (qs | self.get_queryset()).distinct()
-
-        # 3. Only ACTIVE or APPROVED projects that are currently under construction
-        # Exclude cold storage, draft, planning, suspended, completed, or abandoned projects.
-        projects = qs.filter(
-            cold_storage=False,
-            status__in=['ACTIVE', 'APPROVED']
-        ).order_by('name')
-
-        data = [
-            {
-                'id': str(p.id),
-                'name': p.name,
-                'reference_number': p.reference_number,
-                'permit_number': p.permit_number,
-                'status': p.status,
-                'lga': p.lga,
-                'state': p.state,
-                'site_address': p.site_address,
-                'developer_organization': p.developer_organization,
-                'latitude': float(p.latitude) if p.latitude is not None else None,
-                'longitude': float(p.longitude) if p.longitude is not None else None,
-            }
-            for p in projects
-        ]
-        return Response(data, status=status.HTTP_200_OK)
+        queryset = qs.order_by('name')
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['get'], url_path='inspectors', permission_classes=[IsAuthenticated])
     def inspectors(self, request, pk=None):

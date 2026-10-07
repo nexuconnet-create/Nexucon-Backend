@@ -13,6 +13,17 @@ db.sqlite3.bak*
 .DS_Store
 cookies.txt
 *.json
+# The gateway's example config is a template with no secret in it, so it is
+# committed on purpose. The real gateway.json holds a device credential and
+# stays ignored by the *.json rule above, exactly as it should.
+!gateway.example.json
+# The directory the platform writes provisioned configs into, and the folder a
+# site syncs its exports into. Both are volumes in the deployment and are only
+# ever populated on a machine running this locally. The configs inside hold
+# live device credentials, so the whole directory stays out rather than relying
+# on the *.json rule — which would still leave the atomic-write temp files.
+gateway-config/
+gateway-inbox/
 *.log
 _tmp_runserver.log
 runserver.log

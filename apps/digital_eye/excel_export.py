@@ -122,7 +122,7 @@ def build_results_workbook(project):
             rows = e['rows']
             remark = e['remark']
             if (e['spread_pct'] is not None and e['spread_pct'] > 2.0):
-                remark = (f"{remark} (POINT SPREAD "
+                remark = (f"{remark} (UPV VARIANCE BETWEEN POINTS: "
                           f"{e['spread_km_s'] * 1000:.0f} M/S, "
                           f"±{e['spread_pct'] / 2:.1f}%)")
             for i, r in enumerate(rows):

@@ -303,10 +303,11 @@ class NDTReportView(APIView):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
-            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator, element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report generation failed')
             return Response({'detail': f'Report generation failed: {exc}'},
@@ -988,8 +989,12 @@ class NDTWordExportView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
-            docx_bytes = NDTWordExporter.export_docx(project, request.user)
+            docx_bytes = NDTWordExporter.export_docx(project, request.user, operator=operator, element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT Word export failed')
             return Response({'detail': f'Word export failed: {exc}'},
@@ -998,8 +1003,9 @@ class NDTWordExportView(APIView):
             docx_bytes,
             content_type=('application/vnd.openxmlformats-officedocument'
                           '.wordprocessingml.document'))
+        safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         response['Content-Disposition'] = \
-            f'attachment; filename="ndt_report_{project_id}.docx"'
+            f'attachment; filename="ndt_report_{project_id}{safe_op}.docx"'
         return response
 
 
@@ -1232,15 +1238,22 @@ class NDTReportPreviewView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project,
-                                                             request.user)
+                                                             request.user,
+                                                             operator=operator,
+                                                             element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         return _pdf_response(pdf_bytes,
-                             f'ndt_report_PREVIEW_{project_id}.pdf')
+                             f'ndt_report_PREVIEW_{project_id}{safe_op}.pdf')
 
 
 class NDTReportPreviewSectionsView(APIView):
@@ -1262,9 +1275,13 @@ class NDTReportPreviewSectionsView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
+        element_id = request.query_params.get('elementId')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
-                project, request.user)
+                project, request.user, operator=operator, element_id=element_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
@@ -1568,6 +1585,7 @@ class ReportMapView(APIView):
                 'element': t.structural_element or 'element',
                 'floor': t.floor or '',
                 'grid_location': t.test_location or '',
+                'location_address': t.location_address or '',
                 'tested_at': t.tested_at,
                 'velocity_m_s': velocity,
             }

@@ -1,0 +1,86 @@
+{
+  "_comment": [
+    "Template for a site's field gateway. Copy this to gateway.json beside it,",
+    "fill in the three values marked CHANGE ME, and keep the copy out of",
+    "version control — it holds a device credential. *.json is gitignored, so",
+    "a copy here is already excluded; a copy anywhere else is not.",
+    "",
+    "Every key is documented in FIELD_GATEWAY.md. The gateway refuses to start",
+    "on a config it cannot honour, and names the key at fault."
+  ],
+
+  "_comment_api_url": [
+    "The platform's address alone. The gateway appends the endpoint path",
+    "itself, so a path here is refused at startup rather than 404ing on every",
+    "sweep — a 404 is retried as a transient failure, which is a bad way to",
+    "learn about a typo.",
+    "",
+    "https://api.nexucon.net for a machine at the site. http://web:8000 when",
+    "the gateway runs as the compose service on the platform itself, where it",
+    "talks to gunicorn directly and never leaves the host."
+  ],
+  "api_url": "https://api.nexucon.net",
+
+  "_comment_device_token": [
+    "CHANGE ME. A device credential (nxdev_...) issued by an officer for THIS",
+    "instrument. Not the instrument's serial number, and not a login token.",
+    "Issue one from the platform: POST /api/v1/telemetry/device-tokens/ with",
+    "the device's id. The plaintext is shown once and cannot be recovered."
+  ],
+  "device_token": "CHANGE ME",
+
+  "_comment_device": [
+    "CHANGE ME. The platform's UUID for this instrument's FieldDevice row —",
+    "not the serial printed on the unit. The credential above and this id must",
+    "belong to the same row; a mismatch is refused rather than corrected."
+  ],
+  "device": "CHANGE ME",
+
+  "_comment_project": "Optional. The platform UUID of the project captures land on. Left out, the device's assigned project is used.",
+  "project": "",
+
+  "_comment_watch_dir": [
+    "CHANGE ME. The folder the instrument exports into — most often the synced",
+    "folder (OneDrive/Dropbox/share) the export is saved to. Use doubled",
+    "backslashes in JSON, and keep the folder free of anything that is not an",
+    "export: every *.csv and *.json in it will be sent."
+  ],
+  "watch_dir": "C:\\Nexucon\\exports",
+
+  "_comment_data_type": "Only 'pundit' has a file contract that describes a whole capture. Leave it.",
+  "data_type": "pundit",
+
+  "_comment_context": [
+    "Optional. Values the platform applies to every reading the gateway sends,",
+    "for an instrument whose export carries no structural element or test type",
+    "of its own. A value already in the file wins over the one here.",
+    "Accepted: test_type, structural_element, floor, test_location,",
+    "weather_condition, transducer_type, transducer_frequency_khz."
+  ],
+  "context": {},
+
+  "_comment_patterns": "Optional. Which files in the folder are exports. Narrow this if the folder holds anything else.",
+  "patterns": ["*.csv", "*.json"],
+
+  "_comment_settle_seconds": "How long a file's size and timestamp must hold still before it is sent. Raise it on a slow link.",
+  "settle_seconds": 20,
+
+  "_comment_interval_seconds": "How often the folder is checked.",
+  "interval_seconds": 30,
+
+  "_comment_timeout_seconds": "How long to wait on the platform before treating the attempt as failed and retrying later.",
+  "timeout_seconds": 120,
+
+  "_comment_wait_for_watch_dir": [
+    "Leave false for a folder that is always there — a OneDrive folder or a",
+    "permanent share — where a missing folder means watch_dir is wrong and you",
+    "want to be told. Set true for a folder that comes and goes: a USB stick",
+    "unplugged between visits, or a share that is not always mounted. The",
+    "gateway then waits for it to appear instead of stopping.",
+    "",
+    "This matters under Task Scheduler. A task that stops is restarted, and",
+    "the documented 'restart every 1 minute, up to 999 times' budget is spent",
+    "in about 17 hours — after which the task is dead until someone notices."
+  ],
+  "wait_for_watch_dir": false
+}

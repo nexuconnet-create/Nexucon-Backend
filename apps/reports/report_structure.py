@@ -34,6 +34,8 @@ DEFAULT_STRUCTURE = (
     ('4.2', 'Methodology'),
     ('5.0', 'Analysis'),
     ('5.3', 'AI Interpretation'),
+    ('5.4', 'Discussion of Results'),
+    ('5.5', 'Remarks'),
     ('6.0', 'Recommendations'),
     ('7.0', 'Conclusion'),
     ('APPENDIX', 'Appendix'),

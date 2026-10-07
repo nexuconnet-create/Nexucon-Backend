@@ -12,12 +12,40 @@ Ingestion is idempotent on (source_model, source_id) and computes a SHA-256
 evidence hash over the canonical payload for tamper evidence.
 """
 import logging
+from datetime import date, datetime, time
+from decimal import Decimal
+from uuid import UUID
 
 from django.utils import timezone
 
 from .models import EvidenceRecord
 
 logger = logging.getLogger(__name__)
+
+
+def json_native(value):
+    """``value`` reduced to what a ``JSONField`` can store and hand back.
+
+    A ``JSONField`` is written with ``json.dumps``, so a ``datetime`` handed to
+    one raises rather than being stored — and a value that did survive would
+    come back as something else. Payloads carry the capture timestamp the
+    uploader's device reported, which the request parses into a ``datetime``.
+
+    Normalising *before* the record is written is the point, not merely before
+    it is serialised: ``evidence_hash`` is a hash of the payload, and the
+    uploader is promised that the hash taken at ingest is the hash ``/verify/``
+    recomputes from storage. Those two only agree if what was hashed is already
+    the JSON the database will give back.
+    """
+    if isinstance(value, dict):
+        return {str(key): json_native(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_native(item) for item in value]
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, (Decimal, UUID)):
+        return str(value)
+    return value
 
 
 class EvidenceIngestionService:
@@ -33,7 +61,8 @@ class EvidenceIngestionService:
         structural_element_id='', bim_guid='', coordinates=None,
         captured_at=None, confidence=None, payload=None, ingested_by=None,
     ) -> EvidenceRecord:
-        payload = payload or {}
+        payload = json_native(payload or {})
+        coordinates = json_native(coordinates) if coordinates is not None else None
         defaults = {
             'project': project,
             'source_type': source_type,
@@ -67,6 +96,19 @@ class EvidenceIngestionService:
     # ------------------------------------------------------------------
     # Producer-specific normalisers
     # ------------------------------------------------------------------
+
+    @classmethod
+    def ingest_record(cls, **kwargs) -> EvidenceRecord:
+        """Public entry point for a caller that has already normalised.
+
+        Every producer method below this line knows how to read one instrument
+        and hands ``_ingest`` a shaped record. The offline sync queue is not a
+        producer: it replays a record the client already normalised, and its
+        only job is to land it idempotently. Exposing ``_ingest`` through a
+        named public method keeps that caller out of a private one without
+        pretending the queue knows anything about GPR or PUNDIT.
+        """
+        return cls._ingest(**kwargs)
 
     @classmethod
     def ingest_defect(cls, defect, ingested_by=None):
@@ -333,6 +375,16 @@ def pundit_confidence(test):
     - Capped at 0.95 (AI confidence never reaches 1.0)
 
     Well-instrumented tests with multiple readings typically score 0.93–0.95.
+
+    NOT the same figure as `PUNDITAdapter._evidence_confidence`, and the two
+    disagreeing is correct rather than a bug. This one answers a per-record
+    question — *is this one measurement complete enough to trust?* — and is
+    grade-independent, so a velocity that is later declared `unverified` still
+    carries the same confidence it always had. `_evidence_confidence` answers
+    a project-level question — *how much does this project's evidence support
+    the analysis drawn from it?* — and is size-weighted across elements. Do
+    not raise one to match the other; surface both, labelled, so a reader can
+    see they are two figures and not one that is broken.
     """
     if not (test.path_length_mm and test.pulse_time_us):
         return None

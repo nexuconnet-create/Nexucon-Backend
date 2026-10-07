@@ -10,3 +10,32 @@ __pycache__/
 *.sqlite3
 staticfiles/
 media/
+
+# Secrets. `.gitignore` keeps these out of the repository, but it does NOT
+# govern the Docker build context — `.dockerignore` does, and without these
+# lines `COPY . /app/` puts them in *every* image built here.
+#
+# This is not hypothetical tidiness. The `gateway` service in
+# docker-compose.yml deliberately has no `.:/app` bind mount so that `.env` is
+# absent from its filesystem rather than merely unreachable, and
+# config.settings.gateway sets DATABASES = {} so credentials in hand reach
+# nothing. Both of those claims are only true if the file is not in the image.
+# An image built before this line existed had /app/.env inside it.
+.env
+.env.*
+new_info.txt
+
+# The gateway's own state. The configs the platform writes here hold live
+# device credentials, and the inbox holds site exports. Both are volumes in a
+# deployment; a copy left in the working tree is only ever a developer's local
+# run — and it must never reach an image, because Docker seeds a new named
+# volume from whatever already sits at that path in the image.
+gateway-config/
+gateway-inbox/
+
+# Local snapshots, data dumps and logs. Not code, and the sqlite snapshots and
+# the dump carry real client evidence that has no business in a container.
+db.sqlite3
+db.sqlite3.bak*
+full_data_dump.json
+*.log

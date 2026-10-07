@@ -185,7 +185,14 @@ def parse_readings_workbook(file_obj):
                 'transducer_type': _transducer_type(cell(row_number, 'TRANSDUCER TYPE')),
                 'test_location': _text(cell(row_number, 'TEST LOCATION')) or '',
                 'weather_condition': _text(cell(row_number, 'WEATHER CONDITION')) or '',
-                'notes': _text(cell(row_number, 'NOTES')) or '',
+                'notes': (_text(cell(row_number, 'NOTES'))
+                          or _text(cell(row_number, 'REMARK'))
+                          or _text(cell(row_number, 'REMARKS'))
+                          or _text(cell(row_number, 'FIELD REMARKS'))
+                          or _text(cell(row_number, 'FIELD REMARK'))
+                          or _text(cell(row_number, 'OBSERVATIONS'))
+                          or _text(cell(row_number, 'OBSERVATION'))
+                          or ''),
             })
     finally:
         workbook.close()
@@ -240,8 +247,8 @@ def parse_readings_workbook(file_obj):
                 'rows': f"{row['row']}-{row['row']}",
                 'message': f"Rows for element {row['element']!r} ({row['test_type']}, "
                            f"floor {row['floor'] or 'not recorded'}) appear in two separate "
-                           f"blocks (first block started at row {first}). Keep one element's "
-                           'points on consecutive rows so they form a single test.'})
+                            'blocks (first block started at row {first}). Keep one element\'s '
+                            'points on consecutive rows so they form a single test.'})
             continue
         seen_keys[key] = row['row']
         groups.append({'element': row['element'], 'test_type': row['test_type'],
@@ -270,6 +277,8 @@ def parse_readings_workbook(file_obj):
                 reading['notes'] = row['notes']
             readings.append(reading)
 
+        group_notes = [r['notes'] for r in group['rows'] if r.get('notes')]
+        distinct_notes = list(dict.fromkeys(group_notes))
         payload = {
             'test_type': group['test_type'],
             'structural_element': group['element'],
@@ -277,6 +286,8 @@ def parse_readings_workbook(file_obj):
             'transducer_type': first['transducer_type'],
             'test_location': first['test_location'],
             'weather_condition': first['weather_condition'],
+            'surface_condition': first['surface_condition'],
+            'notes': '; '.join(distinct_notes),
             'readings': readings,
         }
         if first['transducer_frequency_khz'] is not None:

@@ -7,10 +7,17 @@ import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
+from decimal import Decimal
+
 from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError, PermissionDenied
+
+from common.permissions import (
+    ROLE_AGENCY_HEAD, ROLE_CLIENT_DEVELOPER, ROLE_DIRECTOR, ROLE_INSPECTOR,
+    user_district, user_is_agency_head, user_is_state_hq,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +32,74 @@ from .models import (
 from apps.audit.models import AuditEvent
 
 User = get_user_model()
+
+
+# ===========================================================================
+# INVITATION STANDING
+# ===========================================================================
+#
+# The admin panel's drawer offers the CustomRole vocabulary configured under
+# Settings — apps.settings.CustomRole, whose own docstring lists "System
+# Administrator, City Planner, Lead Inspector, Reviewer". `Profile.role` is a
+# different thing: a foreign key to apps.government.Role, and it is the ONLY
+# role the permission layer reads (common.permissions.scoped_projects). Two
+# parallel role systems sharing the same names, with nothing mapping one onto
+# the other.
+#
+# The consequence was a silent one. An invitation for "Lead Inspector" created
+# a government.Role row of that name, which no permission check recognises;
+# scoped_projects fell through to its last branch, found no district either
+# (the drawer's zone was optional), and returned Project.objects.none(). The
+# officer saw an empty dashboard and no profile edit could fix it, because the
+# role NAME is what gets checked.
+#
+# The map below normalises the labels that genuinely denote one of the
+# platform's four standings.
+ROLE_STANDINGS = {
+    'inspector': ROLE_INSPECTOR,
+    'lead inspector': ROLE_INSPECTOR,
+    'field inspector': ROLE_INSPECTOR,
+    'director': ROLE_DIRECTOR,
+    'state director': ROLE_DIRECTOR,
+    'agency head': ROLE_AGENCY_HEAD,
+    'client developer': ROLE_CLIENT_DEVELOPER,
+}
+
+# Standings that see every project regardless of zone. They are the only ones
+# for which a zone is optional, because a zone does not scope them.
+STATE_WIDE_STANDINGS = {ROLE_DIRECTOR, ROLE_AGENCY_HEAD}
+
+# A label that denotes no standing — City Planner, Reviewer, Compliance
+# Officer, System Administrator — is deliberately NOT refused and NOT silently
+# promoted to one. City Planner and Reviewer are seeded CustomRoles with a
+# permission-matrix column and a workflow step of their own; refusing them
+# would break a shipped feature. System Administrator must never be promoted
+# to Agency Head either: `user_is_agency_head` is what `IsDirector` checks, so
+# that mapping would hand Director-level API authority to whoever the label
+# was typed for. A platform administrator is a Django superuser, which
+# `user_is_director` already honours.
+#
+# Such a label keeps its own name on the Role row, so User Management still
+# shows what the inviter actually picked, and the officer's scope comes from
+# their ZONE — the branch scoped_projects already implements for every role it
+# does not recognise.
+def role_standing(role_name):
+    """Map a role label to a recognised standing, or None if it denotes none."""
+    return ROLE_STANDINGS.get((role_name or '').strip().lower())
+
+
+# Approval ceilings, matching apps.government.management.commands.seed_rbac.
+#
+# STATED PLAINLY: `Profile.approval_limit` is read NOWHERE in this codebase.
+# It is written by seed_rbac and by this function, and no view, serializer,
+# permission or service consults it. Setting it here makes the admin panel
+# display a figure consistent with the officer's role; it does not grant or
+# restrict any authority. It must not be presented as a control it is not.
+APPROVAL_LIMIT_BY_STANDING = {
+    ROLE_DIRECTOR: Decimal('50000000.00'),
+    ROLE_AGENCY_HEAD: Decimal('50000000.00'),
+}
+DEFAULT_APPROVAL_LIMIT = Decimal('0.00')
 
 
 def _http_probe(url, headers=None, timeout=10):
@@ -961,6 +1036,84 @@ class SettingsService:
         district = District.objects.filter(id=district_id).first() if district_id else None
         projects_list = assigned_projects if isinstance(assigned_projects, list) else []
 
+        standing = role_standing(role)
+
+        inviter_is_state_level = bool(
+            getattr(invited_by, 'is_superuser', False)
+            or user_is_state_hq(invited_by)
+            or user_is_agency_head(invited_by)
+        )
+
+        if standing in STATE_WIDE_STANDINGS:
+            # A state-wide standing is REFUSED from an inviter who does not
+            # hold one. This is not belt-and-braces: `scoped_projects` grants
+            # every project to `user_is_director`, which is true from the ROLE
+            # NAME alone — so writing the name "Director" makes a state-wide
+            # peer regardless of `is_state_hq`. Clamping the flag while still
+            # writing the name would leave the clamp decorative.
+            #
+            # Refused rather than quietly downgraded: a downgrade would put a
+            # "Director" label on an officer who is not one, which is a false
+            # entry in the staff register.
+            if not inviter_is_state_level:
+                raise ValidationError(
+                    f"Only a State HQ or Agency Head officer can appoint a "
+                    f"{role}. Your own account is scoped to a zone, so it "
+                    "cannot create a state-wide peer."
+                )
+        else:
+            # A zone is required for every role the zone actually scopes.
+            #
+            # Not a formality: scoped_projects reads a missing district as "no
+            # scope", and for a label it does not recognise that means NO
+            # projects at all. This is the reported defect — a Lead Inspector
+            # invited with, as the drawer put it, "No zone — state-wide scope"
+            # saw an empty dashboard, and the zone cannot be changed
+            # afterwards. Refusing is also the safe direction: the alternative
+            # grants state-wide visibility from a field nobody filled in.
+            if district_id and not district:
+                raise ValidationError(
+                    "The selected zone could not be found. Pick a zone from the "
+                    "register, or create it under Settings > Zones first."
+                )
+            if not district:
+                raise ValidationError(
+                    f"'{role}' is scoped by zone, so a zone is required. The "
+                    "zone decides which projects this officer can see, and it "
+                    "cannot be changed after the invitation is accepted."
+                )
+            # And the zone must be the inviter's own. Without this, any
+            # authenticated officer could post an arbitrary `district_id` and
+            # create a peer with visibility into a zone they do not belong to —
+            # the endpoint's own permission class does not narrow who may call
+            # it (`IsAuthenticatedOrReadOnly`), so the scope has to be checked
+            # here. A state-level inviter is exempt: appointing across zones is
+            # the whole point of a state-wide standing.
+            #
+            # The check applies only to an authenticated inviter. A call with
+            # no inviter is system-initiated — a management command or a seed —
+            # and has no jurisdiction to compare against; constraining it would
+            # refuse a caller that is trusted by construction rather than
+            # closing a hole, since such a caller can already write any row it
+            # likes.
+            if (getattr(invited_by, 'is_authenticated', False)
+                    and not inviter_is_state_level
+                    and district != user_district(invited_by)):
+                raise ValidationError(
+                    "You can only invite officers into your own zone. "
+                    f"'{district.name}' is outside your jurisdiction."
+                )
+
+        # DERIVED, never taken from the request. The refusal above is what
+        # makes this reachable, so it is written as the conjunction it is
+        # rather than as a constant that happens to hold.
+        grant_state_hq = standing in STATE_WIDE_STANDINGS and inviter_is_state_level
+
+        # Derived, never passed through. See APPROVAL_LIMIT_BY_STANDING: this
+        # makes the admin panel show a figure consistent with the role, and
+        # gates nothing.
+        approval_limit = APPROVAL_LIMIT_BY_STANDING.get(standing, DEFAULT_APPROVAL_LIMIT)
+
         invitation, _ = UserInvitation.objects.update_or_create(
             email=email.strip().lower(),
             defaults={
@@ -1000,11 +1153,22 @@ class SettingsService:
             user.set_password(temp_password)
             user.save()
 
-        # Link Profile
+        # Link Profile.
+        #
+        # The Role row carries the STANDING when the label denotes one, so
+        # `user_role_name` and `scoped_projects` agree with what the inviter
+        # picked. "Lead Inspector" is a label the drawer offers and the
+        # permission layer has never heard of; writing it verbatim is what left
+        # those officers with an empty dashboard. A label denoting no standing
+        # ("City Planner", "Reviewer") keeps its own name — it is still a real
+        # label in User Management, and that officer's scope comes from their
+        # zone. Either way the name is never left absent, so the permission
+        # layer always sees a role it can reason about.
         from apps.government.models import Profile, Role
-        role_obj = Role.objects.filter(name__iexact=role).first()
+        role_name = standing or role
+        role_obj = Role.objects.filter(name__iexact=role_name).first()
         if not role_obj:
-            role_obj = Role.objects.create(name=role)
+            role_obj = Role.objects.create(name=role_name)
 
         profile, _ = Profile.objects.get_or_create(user=user)
         if agency:
@@ -1012,6 +1176,8 @@ class SettingsService:
         if district:
             profile.district = district
         profile.role = role_obj
+        profile.is_state_hq = grant_state_hq
+        profile.approval_limit = approval_limit
         profile.save()
 
         if getattr(invited_by, 'is_authenticated', False):
@@ -1028,7 +1194,13 @@ class SettingsService:
                     "agency": agency.name if agency else None,
                     "district": district.name if district else None,
                     "assigned_projects": projects_list,
-                    "invite_code": code
+                    "invite_code": code,
+                    # What scope the invitation actually granted, so the audit
+                    # trail records the decision rather than requiring it to be
+                    # re-derived from the role label later.
+                    "recognised_standing": standing,
+                    "granted_state_hq": grant_state_hq,
+                    "approval_limit": str(approval_limit),
                 }
             )
 
@@ -1282,8 +1454,13 @@ class SettingsService:
             for proj_id in invitation.assigned_projects:
                 proj = Project.objects.filter(id=proj_id).first()
                 if proj:
-                    proj.assigned_inspector = user.get_full_name() or user.email
-                    proj.save(update_fields=['assigned_inspector'])
+                    # The key, not the name. This flow knows exactly which user
+                    # accepted the invitation, so there is nothing to resolve
+                    # and no name ambiguity to inherit. `Project.save()` writes
+                    # `assigned_inspector` from the key, so the display mirror
+                    # stays in step without being the thing access depends on.
+                    proj.assigned_inspector_user = user
+                    proj.save(update_fields=['assigned_inspector_user'])
                     Inspection.objects.filter(
                         project=proj,
                         status__in=['REQUESTED', 'SCHEDULED'],

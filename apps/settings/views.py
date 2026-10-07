@@ -217,17 +217,28 @@ class StaffUserViewSet(viewsets.ViewSet):
         if not email or not name:
             return Response({"error": "Name and email are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        inv = SettingsService.invite_user(
-            email=email,
-            name=name,
-            role=role,
-            department=department,
-            invited_by=request.user,
-            agency_id=agency_id,
-            district_id=district_id,
-            assigned_projects=assigned_projects,
-            invite_code=invite_code
-        )
+        from django.core.exceptions import ValidationError
+        try:
+            inv = SettingsService.invite_user(
+                email=email,
+                name=name,
+                role=role,
+                department=department,
+                invited_by=request.user,
+                agency_id=agency_id,
+                district_id=district_id,
+                assigned_projects=assigned_projects,
+                invite_code=invite_code
+            )
+        except ValidationError as e:
+            # A refused invitation is the caller's mistake, not a server
+            # fault. `detail` is the key the invite drawer already reads, so
+            # the reason ("a zone is required") reaches the officer who typed
+            # it instead of a generic failure toast.
+            return Response(
+                {"detail": " ".join(e.messages) if e.messages else str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return Response(UserInvitationSerializer(inv).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='toggle-status')

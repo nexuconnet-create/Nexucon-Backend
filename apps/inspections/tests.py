@@ -1,4 +1,4 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
@@ -18,13 +18,27 @@ from apps.inspections.services import InspectionService
 from apps.inspections.execution import (
     ExecutionError, InspectionExecutionService, sha256_hex,
 )
+from apps.inspections.geofence import (
+    evaluate_geofence, effective_geofence_radius,
+    STATE_OUTSIDE, STATE_UNVERIFIABLE, STATE_VERIFIED,
+    REASON_ACCURACY_NOT_REPORTED, REASON_DEVICE_ACCURACY_EXCEEDS_RADIUS,
+    REASON_OUTSIDE_RADIUS, REASON_PROJECT_COORDINATES_NOT_RECORDED,
+    REASON_WITHIN_RADIUS,
+)
 from apps.stakeholders.models import Developer
 from apps.government.models import District, Profile, Role
 from apps.audit.models import AuditEvent
 from apps.settings.models import ChecklistItem, InspectionTemplate
+from common.geo import haversine_m
 from common.permissions import scoped_projects
 
 User = get_user_model()
+
+# A real Lagos site point, and offsets from it that are unambiguous at the
+# scale of a 50 m fence:
+#   0.00045° of latitude  ~= 50.0 m
+#   0.00090° of latitude  ~= 100.0 m
+SITE_LAT, SITE_LON = 6.4281, 3.4219
 
 class InspectionWorkflowTestCase(TestCase):
     def setUp(self):
@@ -184,6 +198,14 @@ class InspectionExecutionServiceTestCase(TestCase):
             template=self.template, item_order=2, title="PPE compliance verified")
 
     def _submit(self, inspection=None, **overrides):
+        target = inspection or self.inspection
+        # A submission now requires a recorded check-in: the geofence verdict
+        # that `gps_verified` carries comes from check-in, and submit() no
+        # longer fabricates one. Check the target in first, as the field client
+        # does.
+        if not target.checkin_time:
+            InspectionExecutionService.checkin(
+                target, self.inspector_user, 6.4281, 3.4219)
         kwargs = dict(
             checklist_results=[
                 {"item_id": str(self.item_1.id), "title": self.item_1.title, "result": "PASS", "notes": ""},
@@ -197,7 +219,7 @@ class InspectionExecutionServiceTestCase(TestCase):
         )
         kwargs.update(overrides)
         return InspectionExecutionService.submit(
-            inspection or self.inspection, self.inspector_user, **kwargs)
+            target, self.inspector_user, **kwargs)
 
     # ------------------------------------------------------- submission seal
     def test_submit_seals_content_in_submission_hash(self):
@@ -256,13 +278,23 @@ class InspectionExecutionServiceTestCase(TestCase):
 
     # ---------------------------------------------------------- check-in
     def test_checkin_records_gps_and_starts_inspection(self):
-        InspectionExecutionService.checkin(self.inspection, self.inspector_user, 6.4281, 3.4219)
+        InspectionExecutionService.checkin(
+            self.inspection, self.inspector_user, 6.4281, 3.4219,
+            accuracy_m=8.0)
         self.inspection.refresh_from_db()
         self.assertEqual(self.inspection.status, "IN_PROGRESS")
-        self.assertTrue(self.inspection.gps_verified)
         self.assertAlmostEqual(self.inspection.gps_latitude, 6.4281)
         self.assertAlmostEqual(self.inspection.gps_longitude, 3.4219)
         self.assertEqual(self.inspection.inspector, self.inspector_user)
+        # `gps_verified` now means something specific: this project records no
+        # site coordinates, so the check-in cannot be verified. The old
+        # implementation asserted True here regardless — which is exactly the
+        # bug. See GeofenceCheckinTests for the verified cases.
+        self.assertFalse(self.inspection.gps_verified)
+        self.assertEqual(self.inspection.geofence_state, "UNVERIFIABLE")
+        self.assertEqual(self.inspection.geofence_reason,
+                         "PROJECT_COORDINATES_NOT_RECORDED")
+        self.assertIsNone(self.inspection.geofence_distance_m)
 
     def test_checkin_rejects_missing_or_out_of_range_gps(self):
         invalid = [(None, 3.4219), (6.4281, None), ("x", "y"), (91.0, 3.4219), (-91.0, 3.4219),
@@ -322,7 +354,10 @@ class InspectionExecutionAPITestCase(APITestCase):
             password="Password123!",
         )
         self.project = Project.objects.create(
-            name="Execution API Site", project_type="Commercial", status="ACTIVE")
+            name="Execution API Site", project_type="Commercial", status="ACTIVE",
+            # A recorded site point, so the geofence can actually be evaluated.
+            latitude=6.4281, longitude=3.4219,
+        )
         self.inspection = Inspection.objects.create(
             project=self.project, inspection_type="Foundation Inspection")
         refresh = RefreshToken.for_user(self.officer)
@@ -334,19 +369,26 @@ class InspectionExecutionAPITestCase(APITestCase):
     def test_execution_endpoints_require_authentication(self):
         self.client.credentials()  # anonymous
         for url_name in ("inspection-execution", "inspection-checkin",
-                         "inspection-submit", "inspection-signoff", "inspection-verify"):
+                         "inspection-checkout", "inspection-submit",
+                         "inspection-signoff", "inspection-verify"):
             response = self.client.post(self._url(url_name), {}, format="json")
             self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED,
                              msg=f"{url_name} should require authentication")
 
     def test_full_execution_flow_checkin_submit_signoff_verify(self):
-        # 1. GPS + device-time check-in.
+        # 1. GPS + device-time check-in, on site and with a usable accuracy.
         checkin = self.client.post(self._url("inspection-checkin"), {
             "latitude": 6.4281, "longitude": 3.4219,
+            "gps_accuracy_m": 8.0,
             "device_time": "2026-09-01T09:30:00Z",
         }, format="json")
         self.assertEqual(checkin.status_code, status.HTTP_200_OK)
         self.assertTrue(checkin.data["gps_verified"])
+        self.assertEqual(checkin.data["geofence"]["state"], "VERIFIED")
+        self.assertEqual(checkin.data["geofence"]["reason"], "WITHIN_RADIUS")
+        self.assertEqual(checkin.data["geofence"]["radius_source"], "platform_default")
+        self.assertEqual(checkin.data["geofence"]["radius_m"], 50)
+        self.assertEqual(checkin.data["geofence"]["accuracy_m"], 8.0)
 
         # 2. Tamper-evident submission.
         submit = self.client.post(self._url("inspection-submit"), {
@@ -889,6 +931,60 @@ class InspectionWorkflowActionsAPITestCase(InspectionViewTestBase):
         self.inspection_a.refresh_from_db()
         self.assertEqual(self.inspection_a.status, "REQUESTED")  # nothing persisted
 
+    def test_complete_with_failed_outcome_moves_status_to_failed(self):
+        """A `FAILED` verdict must move `status`, not just the `outcome` column.
+
+        `InspectionExecutionService.submit` sets `status='COMPLETED'` for every
+        submission, so the verdict is what distinguishes a passed inspection
+        from a failed one at the status level. The inspector PWA reaches this
+        endpoint (it used to PATCH the two columns directly, which wrote
+        `outcome='FAILED'` and left `status='COMPLETED'` standing) — this
+        asserts the behaviour that re-pointing it depends on.
+        """
+        response = self.client.post(self.url + "complete/", {
+            "outcome": "FAILED", "summary_notes": "Spalling at column B3"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.inspection_a.refresh_from_db()
+        self.assertEqual(self.inspection_a.outcome, "FAILED")
+        self.assertEqual(self.inspection_a.status, "FAILED")
+
+    def test_complete_writes_outcome_to_the_audit_log(self):
+        """The verdict gets its own audit entry, naming the outcome.
+
+        This is the second reason the inspector PWA posts here rather than
+        PATCHing the serializer: the generic update writes columns and nothing
+        else, so the audit trail carried the sealed submission but never the
+        verdict that submission existed to support.
+        """
+        self.client.post(self.url + "complete/", {
+            "outcome": "CONDITIONAL_PASS", "summary_notes": "Recheck in 14 days"}, format="json")
+        event = AuditEvent.objects.filter(
+            resource_id=str(self.inspection_a.id),
+            action="INSPECTION_COMPLETED_CONDITIONAL_PASS",
+        ).first()
+        self.assertIsNotNone(event, "the outcome was not recorded in the audit log")
+        self.assertEqual(event.resource_type, "Inspection")
+        self.assertEqual(event.user, self.officer)
+        self.assertEqual(event.new_state["outcome"], "CONDITIONAL_PASS")
+        self.assertEqual(event.new_state["status"], "COMPLETED")
+
+    def test_complete_does_not_overwrite_checklist_when_omitted(self):
+        """Absent `checklist_results` leaves the sealed submission's copy alone.
+
+        The PWA deliberately omits the field: the submission already carries
+        the checklist inside the hash chain, and letting a second, unsealed
+        copy replace it would move a value out of the sealed record.
+        """
+        self.inspection_a.checklist_results = [{"item_id": "sealed", "result": "PASS"}]
+        self.inspection_a.save(update_fields=["checklist_results"])
+
+        self.client.post(self.url + "complete/", {
+            "outcome": "PASSED", "summary_notes": "ok"}, format="json")
+
+        self.inspection_a.refresh_from_db()
+        self.assertEqual(self.inspection_a.checklist_results,
+                         [{"item_id": "sealed", "result": "PASS"}])
+
     def test_log_finding_creates_real_row(self):
         response = self.client.post(self.url + "log-finding/", {
             "title": "Honeycombed column",
@@ -1250,3 +1346,340 @@ class IssueNCRCorrectiveActionAPITestCase(InspectionViewTestBase):
 def uuid_hex(length=6):
     import uuid as _uuid
     return _uuid.uuid4().hex[:length].upper()
+
+
+# ==========================================================================
+# Site geofencing (Inspector PWA Module 2)
+#
+# The spec: "⚠️ WARNING: You must be within 50m of the site to check in".
+# Before this, `checkin()` set gps_verified=True after checking only that the
+# coordinates were numeric and in global range — no distance was ever
+# measured, so the flag attested nothing. These tests pin the three states and
+# the reasons that produce them, and in particular pin the two cases where the
+# honest answer is "could not be verified" rather than "pass".
+# ==========================================================================
+
+class GeofenceEvaluationTests(TestCase):
+    """Unit coverage of evaluate_geofence / effective_geofence_radius."""
+
+    def setUp(self):
+        self.project = Project.objects.create(
+            name="Lekki Site", latitude=SITE_LAT, longitude=SITE_LON)
+
+    def test_within_radius_is_verified(self):
+        result = evaluate_geofence(self.project, SITE_LAT, SITE_LON, accuracy_m=5.0)
+        self.assertEqual(result.state, STATE_VERIFIED)
+        self.assertEqual(result.reason, REASON_WITHIN_RADIUS)
+        self.assertTrue(result.verified)
+        self.assertTrue(result.checked)
+        self.assertAlmostEqual(result.distance_m, 0.0, places=3)
+        self.assertEqual(result.radius_m, 50)
+        self.assertEqual(result.radius_source, 'platform_default')
+
+    def test_project_radius_overrides_the_platform_default(self):
+        self.project.geofence_radius_m = 250
+        self.project.save()
+        radius_m, source = effective_geofence_radius(self.project)
+        self.assertEqual((radius_m, source), (250, 'project'))
+        # ~100 m away: outside a 50 m default, inside this project's 250 m.
+        result = evaluate_geofence(
+            self.project, SITE_LAT + 0.0009, SITE_LON, accuracy_m=5.0)
+        self.assertEqual(result.state, STATE_VERIFIED)
+        self.assertEqual(result.radius_source, 'project')
+
+    def test_just_inside_the_radius_is_verified(self):
+        """The boundary itself is inclusive — 50 m away is within 50 m."""
+        result = evaluate_geofence(
+            self.project, SITE_LAT + 0.000449, SITE_LON, accuracy_m=1.0)
+        self.assertLessEqual(result.distance_m, 50)
+        self.assertEqual(result.state, STATE_VERIFIED)
+
+    def test_outside_radius_records_the_measured_distance(self):
+        result = evaluate_geofence(
+            self.project, SITE_LAT + 0.0009, SITE_LON, accuracy_m=5.0)
+        self.assertEqual(result.state, STATE_OUTSIDE)
+        self.assertEqual(result.reason, REASON_OUTSIDE_RADIUS)
+        self.assertFalse(result.verified)
+        self.assertTrue(result.checked)
+        self.assertAlmostEqual(result.distance_m, 100.0, delta=1.0)
+        self.assertEqual(result.as_dict()['distance_m'],
+                         round(result.distance_m, 1))
+
+    def test_project_without_coordinates_is_unverifiable_not_a_pass(self):
+        """An unknown site point is not "inside" anything."""
+        project = Project.objects.create(name="Unsurveyed Site")
+        result = evaluate_geofence(project, SITE_LAT, SITE_LON, accuracy_m=5.0)
+        self.assertEqual(result.state, STATE_UNVERIFIABLE)
+        self.assertEqual(result.reason, REASON_PROJECT_COORDINATES_NOT_RECORDED)
+        self.assertFalse(result.verified)
+        self.assertFalse(result.checked)
+        self.assertIsNone(result.distance_m)
+
+    def test_half_recorded_coordinates_are_unverifiable(self):
+        """Latitude without longitude is not a position."""
+        project = Project.objects.create(name="Half Surveyed", latitude=SITE_LAT)
+        result = evaluate_geofence(project, SITE_LAT, SITE_LON, accuracy_m=5.0)
+        self.assertEqual(result.state, STATE_UNVERIFIABLE)
+        self.assertEqual(result.reason, REASON_PROJECT_COORDINATES_NOT_RECORDED)
+
+    def test_accuracy_wider_than_the_radius_cannot_certify_it(self):
+        """A ±200 m fix cannot witness a 50 m enclosure."""
+        result = evaluate_geofence(self.project, SITE_LAT, SITE_LON, accuracy_m=200.0)
+        self.assertEqual(result.state, STATE_UNVERIFIABLE)
+        self.assertEqual(result.reason, REASON_DEVICE_ACCURACY_EXCEEDS_RADIUS)
+        self.assertFalse(result.verified)
+        # The distance is still reported — it was measurable, just not decisive.
+        self.assertTrue(result.checked)
+
+    def test_missing_accuracy_is_unverifiable_not_a_pass(self):
+        """No reported accuracy means the fence cannot be certified."""
+        for missing in (None, ''):
+            result = evaluate_geofence(self.project, SITE_LAT, SITE_LON,
+                                       accuracy_m=missing)
+            self.assertEqual(result.state, STATE_UNVERIFIABLE)
+            self.assertEqual(result.reason, REASON_ACCURACY_NOT_REPORTED)
+            self.assertFalse(result.verified)
+            self.assertIsNone(result.accuracy_m)
+
+    def test_unparseable_accuracy_is_treated_as_not_reported(self):
+        for bad in ('unknown', 'NaN', float('inf'), -1.0):
+            result = evaluate_geofence(self.project, SITE_LAT, SITE_LON,
+                                       accuracy_m=bad)
+            self.assertEqual(result.reason, REASON_ACCURACY_NOT_REPORTED)
+            self.assertFalse(result.verified)
+
+    def test_accuracy_equal_to_the_radius_is_still_usable(self):
+        result = evaluate_geofence(self.project, SITE_LAT, SITE_LON, accuracy_m=50.0)
+        self.assertEqual(result.state, STATE_VERIFIED)
+
+
+class GeofenceCheckinAPITests(APITestCase):
+    """The check-in endpoint's geofence behaviour, end to end."""
+
+    def setUp(self):
+        self.officer = User.objects.create_superuser(
+            username='geofence_officer@nexucon.com',
+            email='geofence_officer@nexucon.com',
+            password='Password123!',
+        )
+        self.project = Project.objects.create(
+            name='Geofenced Site',
+            latitude=SITE_LAT, longitude=SITE_LON,
+        )
+        self.inspection = Inspection.objects.create(
+            project=self.project, inspection_type='Foundation Inspection')
+        self.client.force_authenticate(self.officer)
+
+    def _url(self, name, inspection=None):
+        return reverse(name, kwargs={
+            'inspection_id': str((inspection or self.inspection).id)})
+
+    def _checkin(self, **body):
+        return self.client.post(
+            self._url('inspection-checkin'), body, format='json')
+
+    # ------------------------------------------------------------ verified
+    def test_on_site_checkin_is_verified(self):
+        response = self._checkin(
+            latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['gps_verified'])
+        self.assertEqual(response.data['geofence']['state'], 'VERIFIED')
+        self.assertEqual(response.data['geofence']['reason'], 'WITHIN_RADIUS')
+        self.assertEqual(response.data['geofence']['radius_m'], 50)
+        self.assertEqual(response.data['geofence']['radius_source'],
+                         'platform_default')
+        self.inspection.refresh_from_db()
+        self.assertTrue(self.inspection.gps_verified)
+        self.assertEqual(self.inspection.geofence_state, 'VERIFIED')
+
+    # ------------------------------------------------------------- outside
+    def test_off_site_checkin_is_recorded_and_reports_the_distance(self):
+        """Under the default 'warn' policy the check-in succeeds but is not
+        verified, and the response states how far away the inspector was."""
+        response = self._checkin(
+            latitude=SITE_LAT + 0.0009, longitude=SITE_LON, gps_accuracy_m=6.0)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gps_verified'])
+        self.assertEqual(response.data['geofence']['state'], 'OUTSIDE')
+        self.assertEqual(response.data['geofence']['reason'], 'OUTSIDE_RADIUS')
+        self.assertAlmostEqual(response.data['geofence']['distance_m'], 100.0,
+                               delta=1.0)
+        self.inspection.refresh_from_db()
+        self.assertFalse(self.inspection.gps_verified)
+        self.assertEqual(self.inspection.geofence_state, 'OUTSIDE')
+        self.assertAlmostEqual(self.inspection.geofence_distance_m, 100.0,
+                               delta=1.0)
+
+    @override_settings(GEOFENCE_ENFORCEMENT='strict')
+    def test_off_site_checkin_is_refused_under_strict_enforcement(self):
+        response = self._checkin(
+            latitude=SITE_LAT + 0.0009, longitude=SITE_LON, gps_accuracy_m=6.0)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # The refusal states the measured distance, not just "no".
+        self.assertIn('100', response.data['detail'])
+        self.assertIn('50', response.data['detail'])
+        self.inspection.refresh_from_db()
+        self.assertIsNone(self.inspection.checkin_time)
+
+    # -------------------------------------------------------- unverifiable
+    def test_checkin_without_reported_accuracy_is_not_verified(self):
+        response = self._checkin(latitude=SITE_LAT, longitude=SITE_LON)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gps_verified'])
+        self.assertEqual(response.data['geofence']['state'], 'UNVERIFIABLE')
+        self.assertEqual(response.data['geofence']['reason'],
+                         'ACCURACY_NOT_REPORTED')
+        self.assertIsNone(response.data['geofence']['accuracy_m'])
+
+    def test_checkin_with_accuracy_wider_than_the_radius_is_not_verified(self):
+        response = self._checkin(
+            latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=200.0)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gps_verified'])
+        self.assertEqual(response.data['geofence']['reason'],
+                         'DEVICE_ACCURACY_EXCEEDS_RADIUS')
+
+    def test_checkin_on_a_site_without_coordinates_is_not_verified(self):
+        unsurveyed = Project.objects.create(name='Unsurveyed Site')
+        inspection = Inspection.objects.create(
+            project=unsurveyed, inspection_type='Safety Audit')
+        response = self.client.post(
+            self._url('inspection-checkin', inspection),
+            {'latitude': SITE_LAT, 'longitude': SITE_LON, 'gps_accuracy_m': 6.0},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gps_verified'])
+        self.assertEqual(response.data['geofence']['state'], 'UNVERIFIABLE')
+        self.assertEqual(response.data['geofence']['reason'],
+                         'PROJECT_COORDINATES_NOT_RECORDED')
+        self.assertIsNone(response.data['geofence']['distance_m'])
+
+    @override_settings(GEOFENCE_ENFORCEMENT='strict')
+    def test_strict_enforcement_refuses_an_unrecorded_site(self):
+        """A project with no coordinates cannot be checked into under strict."""
+        unsurveyed = Project.objects.create(name='Unsurveyed Strict Site')
+        inspection = Inspection.objects.create(
+            project=unsurveyed, inspection_type='Safety Audit')
+        response = self.client.post(
+            self._url('inspection-checkin', inspection),
+            {'latitude': SITE_LAT, 'longitude': SITE_LON, 'gps_accuracy_m': 6.0},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('no recorded site coordinates', response.data['detail'])
+
+    @override_settings(GEOFENCE_ENFORCEMENT='off')
+    def test_enforcement_off_claims_nothing(self):
+        response = self._checkin(
+            latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['gps_verified'])
+        self.assertEqual(response.data['geofence']['state'], '')
+        self.assertEqual(response.data['geofence']['reason'], '')
+
+    # ------------------------------------------------------------- submit
+    def test_submit_before_checkin_is_refused(self):
+        response = self.client.post(self._url('inspection-submit'), {
+            'latitude': SITE_LAT, 'longitude': SITE_LON,
+            'checklist_results': [
+                {'item_id': 'chk_1', 'title': 'Item', 'result': 'PASS'}],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Check in before submitting', response.data['detail'])
+
+    def test_submit_does_not_upgrade_an_unverified_checkin(self):
+        """Submit reports the check-in's verdict; it must not overwrite it."""
+        self._checkin(latitude=SITE_LAT + 0.0009, longitude=SITE_LON,
+                      gps_accuracy_m=6.0)
+        response = self.client.post(self._url('inspection-submit'), {
+            'latitude': SITE_LAT + 0.0009, 'longitude': SITE_LON,
+            'checklist_results': [
+                {'item_id': 'chk_1', 'title': 'Item', 'result': 'PASS'}],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.inspection.refresh_from_db()
+        self.assertFalse(self.inspection.gps_verified)
+        self.assertEqual(self.inspection.geofence_state, 'OUTSIDE')
+
+    def test_strict_enforcement_refuses_submitting_an_unverified_checkin(self):
+        # Check in under warn, then submit under strict. (Deliberately not
+        # decorated: the check-in has to happen under 'warn' for the test to
+        # exercise submit's own gate rather than check-in's.)
+        self._checkin(latitude=SITE_LAT + 0.0009, longitude=SITE_LON,
+                      gps_accuracy_m=6.0)
+        with override_settings(GEOFENCE_ENFORCEMENT='strict'):
+            response = self.client.post(self._url('inspection-submit'), {
+                'latitude': SITE_LAT + 0.0009, 'longitude': SITE_LON,
+                'checklist_results': [
+                    {'item_id': 'chk_1', 'title': 'Item', 'result': 'PASS'}],
+            }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('not geofence-verified', response.data['detail'])
+
+    # ----------------------------------------------------------- check-out
+    def test_checkout_after_checkin_records_time_and_position(self):
+        self._checkin(latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        self.inspection.refresh_from_db()
+        status_before = self.inspection.status
+
+        response = self.client.post(self._url('inspection-checkout'), {
+            'latitude': SITE_LAT, 'longitude': SITE_LON,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.inspection.refresh_from_db()
+        self.assertIsNotNone(self.inspection.check_out_time)
+        self.assertAlmostEqual(self.inspection.checkout_latitude, SITE_LAT)
+        self.assertAlmostEqual(self.inspection.checkout_longitude, SITE_LON)
+        # Check-out records a fact; it does not invent a workflow transition.
+        self.assertEqual(self.inspection.status, status_before)
+
+    def test_checkout_works_without_a_position_fix(self):
+        self._checkin(latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        response = self.client.post(self._url('inspection-checkout'), {},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.inspection.refresh_from_db()
+        self.assertIsNotNone(self.inspection.check_out_time)
+        self.assertIsNone(self.inspection.checkout_latitude)
+
+    def test_checkout_rejects_a_lone_coordinate(self):
+        self._checkin(latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        response = self.client.post(self._url('inspection-checkout'),
+                                    {'latitude': SITE_LAT}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.inspection.refresh_from_db()
+        self.assertIsNone(self.inspection.check_out_time)
+
+    def test_checkout_without_checkin_is_refused(self):
+        response = self.client.post(self._url('inspection-checkout'), {},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('never checked into', response.data['detail'])
+
+    def test_double_checkout_is_refused(self):
+        self._checkin(latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        first = self.client.post(self._url('inspection-checkout'), {},
+                                 format='json')
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        second = self.client.post(self._url('inspection-checkout'), {},
+                                  format='json')
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('already been checked out', second.data['detail'])
+
+    def test_execution_state_reports_the_geofence(self):
+        self._checkin(latitude=SITE_LAT, longitude=SITE_LON, gps_accuracy_m=6.0)
+        response = self.client.get(self._url('inspection-execution'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['gps_verified'])
+        self.assertTrue(response.data['geofence']['evaluated'])
+        self.assertEqual(response.data['geofence']['state'], 'VERIFIED')
+        self.assertEqual(response.data['geofence']['radius_m'], 50)
+        self.assertEqual(response.data['gps_accuracy_m'], 6.0)
+
+    def test_execution_state_before_checkin_reports_not_evaluated(self):
+        response = self.client.get(self._url('inspection-execution'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['geofence']['evaluated'])
+        self.assertEqual(response.data['geofence']['state'], '')
+        self.assertIsNone(response.data['checkin_time'])
+

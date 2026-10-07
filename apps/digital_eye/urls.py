@@ -49,10 +49,27 @@ urlpatterns = [
     path('pundit-analysis-review/<uuid:analysis_id>/',
          views.PunditAnalysisReviewView.as_view(),
          name='pundit-analysis-review'),
+    path('pundit-analysis-review/<uuid:analysis_id>/regenerate/',
+         views.PunditAnalysisJointRegenerateView.as_view(),
+         name='pundit-analysis-joint-regenerate'),
+    path('pundit-analysis-review/<uuid:analysis_id>/comments/',
+         views.PunditAnalysisCommentView.as_view(),
+         name='pundit-analysis-comments'),
+    path('pundit-analysis-review/<uuid:analysis_id>/chat/',
+         views.PunditAnalysisChatView.as_view(),
+         name='pundit-analysis-chat'),
     # Nexucon Link platform system settings (wireframe "System Settings"):
     # the default curve type, standard and display units.
     path('nexucon-link/settings/', views.NexuconLinkSettingsView.as_view(),
          name='nexucon-link-settings'),
+    path('pundit-batches/calibrate/', views.PunditBatchCalibrateView.as_view(),
+         name='pundit-batch-calibrate'),
+    path('pundit-batches/', views.PunditBatchesView.as_view(),
+         name='pundit-batches'),
+    path('visual-observations/', views.VisualObservationsView.as_view(),
+         name='visual-observations'),
+    path('site-attendance/', views.SiteAttendanceView.as_view(),
+         name='site-attendance'),
 
     # Removed: 'stats/', 'trimble/status/', 'trimble/sync/' and
     # 'reports/download/pdf/' returned fabricated counters, a fake CONNECTED
