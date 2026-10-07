@@ -2528,11 +2528,12 @@ class NDTReportService:
             f'ndt_report_{project.id.hex[:12]}_{content_key[:12]}.pdf',
             ContentFile(pdf_bytes), save=False)
         archived.save()
-        try:
-            from .notifications import notify_inspectors_ndt_report_ready
-            notify_inspectors_ndt_report_ready(archived, sender=user, force_resend=True)
-        except Exception:  # noqa: BLE001 — notification failure must not abort report generation
-            logger.exception('Failed to dispatch inspector notifications for archived NDT report')
+        if kwargs.get('notify', False):
+            try:
+                from .notifications import notify_inspectors_ndt_report_ready
+                notify_inspectors_ndt_report_ready(archived, sender=user, force_resend=True)
+            except Exception:  # noqa: BLE001 — notification failure must not abort report generation
+                logger.exception('Failed to dispatch inspector notifications for archived NDT report')
         return archived
 
     @classmethod

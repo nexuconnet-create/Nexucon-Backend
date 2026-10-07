@@ -115,31 +115,35 @@ def get_or_create_authorized_download_token(project, report_reference, content_k
     from apps.documents.models import DocumentAccessRequest
     import uuid
 
-    req = DocumentAccessRequest.objects.filter(
-        report_digest=content_key,
-        requester_email__iexact=recipient_email.strip(),
-        status='APPROVED'
-    ).first()
-
-    if not req:
-        token = str(uuid.uuid4())
-        req = DocumentAccessRequest.objects.create(
-            project=project,
-            report_reference=report_reference,
+    try:
+        req = DocumentAccessRequest.objects.filter(
             report_digest=content_key,
-            document_title="BS 1881-203 Ultrasonic Pulse Velocity (UPV) NDT Report",
-            requester_name=recipient_name,
-            requester_email=recipient_email,
-            requester_organization="Nexucon Field Surveillance & Materials Testing Authority",
-            requester_role="Authorized Field Inspector",
-            purpose="Statutory inspection verification and NDT compliance review.",
-            status='APPROVED',
-            access_token=token,
-            reviewed_by_name="Nexucon Notification Engine",
-            reviewed_at=timezone.now(),
-            review_notes="Pre-authorized statutory inspector distribution on NDT report finalization."
-        )
-    return str(req.access_token)
+            requester_email__iexact=recipient_email.strip(),
+            status='APPROVED'
+        ).first()
+
+        if not req:
+            token = str(uuid.uuid4())
+            req = DocumentAccessRequest.objects.create(
+                project=project,
+                report_reference=report_reference,
+                report_digest=content_key,
+                document_title="BS 1881-203 Ultrasonic Pulse Velocity (UPV) NDT Report",
+                requester_name=recipient_name,
+                requester_email=recipient_email,
+                requester_organization="Nexucon Field Surveillance & Materials Testing Authority",
+                requester_role="Authorized Field Inspector",
+                purpose="Statutory inspection verification and NDT compliance review.",
+                status='APPROVED',
+                access_token=token,
+                reviewed_by_name="Nexucon Notification Engine",
+                reviewed_at=timezone.now(),
+                review_notes="Pre-authorized statutory inspector distribution on NDT report finalization."
+            )
+        return str(req.access_token)
+    except Exception as exc:
+        logger.warning(f"Could not get or create DocumentAccessRequest for {recipient_email}: {exc}")
+        return str(uuid.uuid4())
 
 
 def notify_inspectors_ndt_report_ready(
@@ -207,138 +211,148 @@ def notify_inspectors_ndt_report_ready(
     errors = []
 
     for inspector in target_inspectors:
-        email = inspector['email']
-        name = inspector['name']
-        user = inspector['user']
+        email = inspector.get('email')
+        if not email:
+            continue
+        name = inspector.get('name') or email.split('@')[0]
+        user = inspector.get('user')
 
-        idempotency_key = f"NDT_READY:{archived.content_key}:{email}"
-        if not force_resend:
-            existing_delivery = EmailDelivery.objects.filter(
-                idempotency_key=idempotency_key,
-                status__in=['SENT', 'DELIVERED']
-            ).first()
-            if existing_delivery:
-                logger.info(f"Inspector {email} already notified for report {archived.report_reference}.")
-                notified.append({
-                    'name': name,
-                    'email': email,
-                    'role': inspector['role'],
-                    'status': 'already_notified'
-                })
-                continue
+        try:
+            idempotency_key = f"NDT_READY:{archived.content_key}:{email}"
+            if not force_resend:
+                existing_delivery = EmailDelivery.objects.filter(
+                    idempotency_key=idempotency_key,
+                    status__in=['SENT', 'DELIVERED']
+                ).first()
+                if existing_delivery:
+                    logger.info(f"Inspector {email} already notified for report {archived.report_reference}.")
+                    notified.append({
+                        'name': name,
+                        'email': email,
+                        'role': inspector.get('role', 'Field Inspector'),
+                        'status': 'already_notified'
+                    })
+                    continue
 
-        # 1. Create token for direct seamless download link
-        access_token = get_or_create_authorized_download_token(
-            project=project,
-            report_reference=archived.report_reference,
-            content_key=archived.content_key,
-            recipient_email=email,
-            recipient_name=name
-        )
-        download_url = (
-            f"{api_url}/api/v1/reports/verify/download/"
-            f"?ref={encoded_ref}&digest={encoded_digest}&token={access_token}"
-        )
+            # 1. Create token for direct seamless download link
+            access_token = get_or_create_authorized_download_token(
+                project=project,
+                report_reference=archived.report_reference,
+                content_key=archived.content_key,
+                recipient_email=email,
+                recipient_name=name
+            )
+            download_url = (
+                f"{api_url}/api/v1/reports/verify/download/"
+                f"?ref={encoded_ref}&digest={encoded_digest}&token={access_token}"
+            )
 
-        # 2. Dispatch in-app notification if user account exists
-        in_app_notif = None
-        if user:
+            # 2. Dispatch in-app notification if user account exists
+            in_app_notif = None
+            if user:
+                try:
+                    in_app_notif = Notification.objects.create(
+                        recipient=user,
+                        recipient_role='inspector',
+                        category='INSPECTIONS',
+                        event_type='NDT_REPORT_READY',
+                        title=f"NDT Report Ready: {archived.report_reference}",
+                        message=(
+                            f"The certified BS 1881-203 Ultrasonic Pulse Velocity (UPV) report "
+                            f"for '{project.name}' is finalized and ready for download."
+                        ),
+                        snippet=f"Report {archived.report_reference} ({archived.compliance_status}) is ready for download.",
+                        priority='High',
+                        entity_type='ArchivedReport',
+                        entity_id=str(archived.id),
+                        action_url=f"/inspector/dashboard/digital-eye/pundit?project={project.id}",
+                        action_required="Download and review certified test dossier",
+                        metadata={
+                            'project_id': str(project.id),
+                            'project_name': project.name,
+                            'report_reference': archived.report_reference,
+                            'content_key': archived.content_key,
+                            'compliance_status': archived.compliance_status,
+                            'download_url': download_url,
+                            'verify_url': verify_url
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not create in-app notification for {email}: {e}")
+
+            # 3. Dispatch branded HTML email via EmailService
+            email_res = EmailService.send_ndt_report_ready_email(
+                email=email,
+                inspector_name=name,
+                project_name=project.name,
+                report_reference=archived.report_reference,
+                download_url=download_url,
+                compliance_status=archived.compliance_status,
+                test_count=archived.test_count,
+                assessed_count=archived.assessed_count,
+                passed_count=archived.passed_count,
+                sha256_checksum=archived.sha256_checksum,
+                dashboard_url=dashboard_url,
+                verify_url=verify_url,
+                sealed_date=archived.created_at.strftime('%d %b %Y, %H:%M UTC') if archived.created_at else None,
+                custom_message=custom_message
+            )
+
+            # 4. Record EmailDelivery audit ledger
+            delivery_status = 'SENT' if email_res.get('success') else 'FAILED'
             try:
-                in_app_notif = Notification.objects.create(
-                    recipient=user,
-                    recipient_role='inspector',
-                    category='INSPECTIONS',
-                    event_type='NDT_REPORT_READY',
-                    title=f"NDT Report Ready: {archived.report_reference}",
-                    message=(
-                        f"The certified BS 1881-203 Ultrasonic Pulse Velocity (UPV) report "
-                        f"for '{project.name}' is finalized and ready for download."
-                    ),
-                    snippet=f"Report {archived.report_reference} ({archived.compliance_status}) is ready for download.",
-                    priority='High',
-                    entity_type='ArchivedReport',
-                    entity_id=str(archived.id),
-                    action_url=f"/inspector/dashboard/digital-eye/pundit?project={project.id}",
-                    action_required="Download and review certified test dossier",
-                    metadata={
-                        'project_id': str(project.id),
-                        'project_name': project.name,
-                        'report_reference': archived.report_reference,
-                        'content_key': archived.content_key,
-                        'compliance_status': archived.compliance_status,
-                        'download_url': download_url,
-                        'verify_url': verify_url
+                EmailDelivery.objects.update_or_create(
+                    idempotency_key=idempotency_key,
+                    defaults={
+                        'notification': in_app_notif,
+                        'recipient_email': email,
+                        'recipient_user': user,
+                        'template_key': 'ndt_report_ready',
+                        'subject': f"📋 NDT Report Ready: {archived.report_reference} - {project.name}",
+                        'provider': 'resend',
+                        'provider_message_id': email_res.get('id'),
+                        'status': delivery_status,
+                        'attempt_count': 1,
+                        'last_attempt_at': timezone.now(),
+                        'sent_at': timezone.now() if delivery_status == 'SENT' else None,
+                        'failed_at': timezone.now() if delivery_status == 'FAILED' else None,
+                        'failure_reason': email_res.get('error') if not email_res.get('success') else None,
+                        'metadata': {
+                            'project_id': str(project.id),
+                            'project_name': project.name,
+                            'report_reference': archived.report_reference,
+                            'download_url': download_url
+                        }
                     }
                 )
             except Exception as e:
-                logger.warning(f"Could not create in-app notification for {email}: {e}")
+                logger.warning(f"Could not record EmailDelivery for {email}: {e}")
 
-        # 3. Dispatch branded HTML email via EmailService
-        email_res = EmailService.send_ndt_report_ready_email(
-            email=email,
-            inspector_name=name,
-            project_name=project.name,
-            report_reference=archived.report_reference,
-            download_url=download_url,
-            compliance_status=archived.compliance_status,
-            test_count=archived.test_count,
-            assessed_count=archived.assessed_count,
-            passed_count=archived.passed_count,
-            sha256_checksum=archived.sha256_checksum,
-            dashboard_url=dashboard_url,
-            verify_url=verify_url,
-            sealed_date=archived.created_at.strftime('%d %b %Y, %H:%M UTC') if archived.created_at else None,
-            custom_message=custom_message
-        )
-
-        # 4. Record EmailDelivery audit ledger
-        delivery_status = 'SENT' if email_res.get('success') else 'FAILED'
-        try:
-            EmailDelivery.objects.update_or_create(
-                idempotency_key=idempotency_key,
-                defaults={
-                    'notification': in_app_notif,
-                    'recipient_email': email,
-                    'recipient_user': user,
-                    'template_key': 'ndt_report_ready',
-                    'subject': f"📋 NDT Report Ready: {archived.report_reference} - {project.name}",
-                    'provider': 'resend',
-                    'provider_message_id': email_res.get('id'),
-                    'status': delivery_status,
-                    'attempt_count': 1,
-                    'last_attempt_at': timezone.now(),
-                    'sent_at': timezone.now() if delivery_status == 'SENT' else None,
-                    'failed_at': timezone.now() if delivery_status == 'FAILED' else None,
-                    'failure_reason': email_res.get('error') if not email_res.get('success') else None,
-                    'metadata': {
-                        'project_id': str(project.id),
-                        'project_name': project.name,
-                        'report_reference': archived.report_reference,
-                        'download_url': download_url
-                    }
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Could not record EmailDelivery for {email}: {e}")
-
-        if email_res.get('success'):
-            notified.append({
-                'name': name,
-                'email': email,
-                'role': inspector['role'],
-                'status': 'sent',
-                'delivery_id': email_res.get('id')
-            })
-        else:
+            if email_res.get('success'):
+                notified.append({
+                    'name': name,
+                    'email': email,
+                    'role': inspector.get('role', 'Field Inspector'),
+                    'status': 'sent',
+                    'delivery_id': email_res.get('id')
+                })
+            else:
+                errors.append({
+                    'email': email,
+                    'error': email_res.get('error')
+                })
+        except Exception as exc:
+            logger.exception(f"Unexpected error notifying inspector {email}: {exc}")
             errors.append({
                 'email': email,
-                'error': email_res.get('error')
+                'error': str(exc)
             })
 
     # Log audit event
     try:
         AuditEvent.objects.create(
             user=sender if getattr(sender, 'is_authenticated', False) else None,
+            user_name=sender.get_full_name() if getattr(sender, 'is_authenticated', False) and hasattr(sender, 'get_full_name') else "System",
             action="NDT_REPORT_INSPECTORS_NOTIFIED",
             resource_type="ArchivedReport",
             resource_id=str(archived.id),

@@ -1730,14 +1730,21 @@ class ArchivedReportNotifyInspectorsView(APIView):
         force_resend = request.data.get('force_resend', True)
 
         from .notifications import notify_inspectors_ndt_report_ready
-        result = notify_inspectors_ndt_report_ready(
-            report,
-            sender=request.user,
-            recipient_emails=recipients,
-            custom_message=custom_message,
-            force_resend=force_resend
-        )
-        return Response(result)
+        try:
+            result = notify_inspectors_ndt_report_ready(
+                report,
+                sender=request.user,
+                recipient_emails=recipients,
+                custom_message=custom_message,
+                force_resend=force_resend
+            )
+            return Response(result)
+        except Exception as exc:
+            logger.exception('Failed to dispatch inspector notifications')
+            return Response({
+                'success': False,
+                'detail': f'Notification dispatch failed: {exc}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ProjectNDTNotifyInspectorsView(APIView):
@@ -1762,18 +1769,25 @@ class ProjectNDTNotifyInspectorsView(APIView):
 
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
-            archived = NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator)
+            archived = NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
         except Exception as exc:
             logger.exception('Failed to prepare NDT report for inspector notification')
             return Response({'detail': f'Report generation failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         from .notifications import notify_inspectors_ndt_report_ready
-        result = notify_inspectors_ndt_report_ready(
-            archived,
-            sender=request.user,
-            recipient_emails=recipients,
-            custom_message=custom_message,
-            force_resend=force_resend
-        )
-        return Response(result)
+        try:
+            result = notify_inspectors_ndt_report_ready(
+                archived,
+                sender=request.user,
+                recipient_emails=recipients,
+                custom_message=custom_message,
+                force_resend=force_resend
+            )
+            return Response(result)
+        except Exception as exc:
+            logger.exception('Failed to dispatch inspector notifications')
+            return Response({
+                'success': False,
+                'detail': f'Notification dispatch failed: {exc}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

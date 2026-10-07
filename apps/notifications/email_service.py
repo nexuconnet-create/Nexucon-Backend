@@ -193,6 +193,7 @@ class EmailService:
             html_content=html_content
         )
 
+    @classmethod
     def send_ndt_report_ready_email(
         cls,
         email: str,
