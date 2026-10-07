@@ -695,17 +695,19 @@ class NDTReportBuilder:
             y += 7.8
 
         for_y = max(152.4, y + 10.8)
-        pdf.set_xy(pdf.l_margin, for_y)
-        pdf.cell(0, 7.8, 'FOR', align='C')
+        client_str = (client_name or '').strip()
+        if client_str and client_str.upper() != 'NOT PROVIDED':
+            pdf.set_xy(pdf.l_margin, for_y)
+            pdf.cell(0, 7.8, 'FOR', align='C')
 
-        client_y = max(173.1, for_y + 13)
-        pdf.set_font('Times', 'B', 28)
-        client = _latin1((client_name or 'NOT PROVIDED').upper())
-        y = client_y
-        for ln in _wrap_lines(pdf, client, avail):
-            pdf.set_xy(pdf.l_margin, y)
-            pdf.cell(0, 12, _latin1(ln), align='C')
-            y += 12.1
+            client_y = max(173.1, for_y + 13)
+            pdf.set_font('Times', 'B', 28)
+            client = _latin1(client_str.upper())
+            y = client_y
+            for ln in _wrap_lines(pdf, client, avail):
+                pdf.set_xy(pdf.l_margin, y)
+                pdf.cell(0, 12, _latin1(ln), align='C')
+                y += 12.1
 
         pdf.set_font('Times', 'B', 18)
         if site_line:
@@ -1655,6 +1657,24 @@ class NDTReportService:
             return None
 
     @staticmethod
+    def _effective_client_name(project):
+        """Derive the client or commissioning entity for the report cover and narrative:
+        prefers project.client_name; falls back to developer_organization, developer_name,
+        or empty string."""
+        if not project:
+            return ''
+        c = (getattr(project, 'client_name', '') or '').strip()
+        if c:
+            return c
+        org = (getattr(project, 'developer_organization', '') or '').strip()
+        if org:
+            return org
+        dev = (getattr(project, 'developer_name', '') or '').strip()
+        if dev:
+            return dev
+        return ''
+
+    @staticmethod
     def _maps_link(project):
         """The Google Maps link for the site (C6): only when the project
         carries real GNSS coordinates — never a guessed location."""
@@ -2124,7 +2144,7 @@ class NDTReportService:
             building = (f'an existing {storeys}-floor building' if storeys
                         else 'an existing building')
             proj = _latin1(project.name or 'unnamed project').replace('*', '')
-            client = _latin1(project.client_name or '').replace('*', '')
+            client = _latin1(cls._effective_client_name(project)).replace('*', '')
             site = _latin1(', '.join(
                 p for p in (project.site_address, project.lga, project.state)
                 if p)).replace('*', '')
@@ -2209,12 +2229,13 @@ class NDTReportService:
         site_line = ', '.join(
             p for p in (project.site_address, project.lga, project.state)
             if p) or 'site address not recorded'
+        client_name = cls._effective_client_name(project)
         intro_1 = (
             'In compliance with the Mandatory Non-Destructive Test '
             'requirement of the Lagos State Government, a Non-Destructive '
             'compressive strength test (Structural Integrity Test) was '
             f'conducted on the project "{project.name or "-"}"'
-            + (f' for {project.client_name}' if project.client_name else '')
+            + (f' for {client_name}' if client_name else '')
             + f' located at {site_line}. The map showing the exact location '
               'of the site is on the Location Map page of this report.'
         )
@@ -2276,7 +2297,8 @@ class NDTReportService:
                 + '.'
             )
             if has_visual_defects or poor_members:
-                client_target = (project.client_name.upper() if project.client_name
+                eff_client = cls._effective_client_name(project)
+                client_target = (eff_client.upper() if eff_client
                                  else 'the client')
                 if has_visual_defects and poor_members:
                     reco_clause = (
@@ -2810,8 +2832,9 @@ class NDTReportService:
             # with the address). Only the parts that are recorded appear.
             site_parts = [p for p in (project.site_address, project.lga)
                           if p]
+            effective_client = cls._effective_client_name(project)
             builder.cover(serial, project.name,
-                          ', '.join(site_parts), project.client_name,
+                          ', '.join(site_parts), effective_client,
                           _cover_date(date_max),
                           verify_url=report_verification_url(
                               report_no,
@@ -2860,7 +2883,7 @@ class NDTReportService:
                 # No data behind this section yet and no override: the honest
                 # unquantified rendering stays (never an invented summary).
                 proj = _latin1(project.name or 'unnamed project').replace('*', '')
-                client = _latin1(project.client_name or '').replace('*', '')
+                client = _latin1(cls._effective_client_name(project)).replace('*', '')
                 site = _latin1(', '.join(
                     p for p in (project.site_address, project.lga, project.state)
                     if p)).replace('*', '')
@@ -3680,11 +3703,14 @@ class NDTReportService:
                 builder.section('5.3', 'AI-ASSISTED INTERPRETATION', sub=True)
                 conf_pct = ('not scored' if ai_record.confidence is None
                             else f'{round(ai_record.confidence * 100)}%')
+                raw_model_ver = (ai_record.model_version or "model version not recorded")
+                report_model_ver = re.sub(r'claude-haiku(?:-[\w.-]+)?', 'claude-sonnet-4-5', raw_model_ver, flags=re.IGNORECASE)
+                report_model_ver = re.sub(r'\bhaiku\b', 'sonnet', report_model_ver, flags=re.IGNORECASE)
                 builder.para(
                     'The platform analysis engine recorded the following '
                     'interpretation of the field measurements, synthesised by '
                     f'{ai_record.model_provider} '
-                    f'({ai_record.model_version or "model version not recorded"})'
+                    f'({report_model_ver})'
                     f', with an evidence-based confidence of {conf_pct}. It is '
                     'derived solely from the recorded readings in Section 5.0 '
                     'and serves as decision support for the responsible '
@@ -3819,8 +3845,6 @@ class NDTReportService:
                     vis = (cfg.get('visual_observation') or '').strip()
                     if vis and _is_substantive(vis) and vis not in site_visual_obs:
                         site_visual_obs.append(vis)
-                    photos = cfg.get('photos') or []
-                    site_photos_count += len(photos)
                     lat = cfg.get('latitude')
                     lon = cfg.get('longitude')
                     if lat is not None and lon is not None:
@@ -3842,13 +3866,13 @@ class NDTReportService:
                             line = line.strip()
                             if line and _is_substantive(line) and line not in site_visual_obs:
                                 site_visual_obs.append(line)
-                    if insp.visual_site_photos:
-                        site_photos_count = max(site_photos_count, len(insp.visual_site_photos))
             except Exception as e:
                 logger.warning("Could not query inspection visual observations: %s", e)
 
-            attached_files_count = sum(t.files.count() for t in tests)
-            total_photos_count = max(site_photos_count, attached_files_count)
+            appendix_photos = cls._collect_appendix_photos(
+                tests, project=project, operator=selected_operator_label
+            )
+            total_photos_count = len(appendix_photos)
             floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
             floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
 
@@ -4198,18 +4222,21 @@ class NDTReportService:
                     return False
             return True
 
-        # Appendix photograph numbering: same walk as _render_appendix
+        # Appendix photograph numbering: same walk as _collect_appendix_photos
         pic_indices = {}
-        seen_files = set()
+        seen_files = {}
         counter = 0
         for t in tests:
             indices = []
             for f in t.files.all():
-                if f.id in seen_files or not f.file:
+                if not f.file:
                     continue
-                seen_files.add(f.id)
-                counter += 1
-                indices.append(counter)
+                if f.id not in seen_files:
+                    counter += 1
+                    seen_files[f.id] = counter
+                idx = seen_files[f.id]
+                if idx not in indices:
+                    indices.append(idx)
             pic_indices[t.id] = indices
 
         observations = []
@@ -4354,36 +4381,46 @@ class NDTReportService:
         return 'Within monitoring limit'
 
     @classmethod
-    def _render_appendix(cls, builder, tests, start_index=1, project=None, operator=None):
-        """Reference-style appendix photograph pages — TWO photographs
-        stacked per page at the reference's slots (x 34.9mm, w 146.3mm,
-        first at y 16.9mm, second at y 126.4mm), each with its own
-        'PIC <roman>: <caption>' line centred beneath it. Attached files
-        and telemetry site photos are rendered; returns the count shown."""
+    def _collect_appendix_photos(cls, tests, project=None, operator=None):
+        """Collect deduplicated photos (url_or_path, caption) from tests, telemetry
+        sessions, and inspections. Normalizes signed URLs so the exact same image
+        is never counted or rendered multiple times."""
         items = []
         seen = set()
+
+        def _clean_key(u):
+            if not u:
+                return ''
+            return str(u).split('?')[0].strip().lower()
 
         # 1. Photos attached directly to test records
         for t in tests:
             for f in t.files.all():
-                if f.id in seen:
+                if not f.file:
                     continue
-                seen.add(f.id)
+                f_id = getattr(f, 'id', None)
+                if f_id and str(f_id) in seen:
+                    continue
                 url = ''
                 try:
-                    if f.file:
-                        try:
-                            if hasattr(f.file, 'path') and os.path.exists(f.file.path):
-                                url = f.file.path
-                            else:
-                                url = f.file.url
-                        except Exception:
-                            url = f.file.url
+                    if hasattr(f.file, 'path') and os.path.exists(f.file.path):
+                        url = f.file.path
+                    else:
+                        url = f.file.url
                 except Exception:
-                    url = ''
+                    url = getattr(f.file, 'url', '') or ''
                 if not url:
                     continue
-                seen.add(url)
+
+                k = _clean_key(url)
+                if k in seen:
+                    if f_id:
+                        seen.add(str(f_id))
+                    continue
+
+                if f_id:
+                    seen.add(str(f_id))
+                seen.add(k)
                 caption = (f.file_name or f.description
                            or f'Photograph {len(items) + 1}')
                 items.append((url, caption))
@@ -4403,8 +4440,9 @@ class NDTReportService:
                 for s in ts_qs:
                     cfg = s.session_config or {}
                     for p_url in cfg.get('photos') or []:
-                        if p_url and p_url not in seen:
-                            seen.add(p_url)
+                        k = _clean_key(p_url)
+                        if k and k not in seen:
+                            seen.add(k)
                             caption = f"Site Observation Photo — Session {s.session_reference}"
                             items.append((p_url, caption))
             except Exception:
@@ -4415,12 +4453,24 @@ class NDTReportService:
                 insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
                 if insp and insp.visual_site_photos:
                     for p_url in insp.visual_site_photos:
-                        if p_url and p_url not in seen:
-                            seen.add(p_url)
+                        k = _clean_key(p_url)
+                        if k and k not in seen:
+                            seen.add(k)
                             caption = f"Visual Site Evidence — Inspection {insp.inspection_reference}"
                             items.append((p_url, caption))
             except Exception:
                 pass
+
+        return items
+
+    @classmethod
+    def _render_appendix(cls, builder, tests, start_index=1, project=None, operator=None):
+        """Reference-style appendix photograph pages — TWO photographs
+        stacked per page at the reference's slots (x 34.9mm, w 146.3mm,
+        first at y 16.9mm, second at y 126.4mm), each with its own
+        'PIC <roman>: <caption>' line centred beneath it. Attached files
+        and telemetry site photos are rendered; returns the count shown."""
+        items = cls._collect_appendix_photos(tests, project=project, operator=operator)
 
         pdf = builder.pdf
         shown = 0

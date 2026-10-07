@@ -1110,7 +1110,7 @@ class AnthropicTransportTests(TestCase):
         self.assertEqual(headers["x-api-key"], "an-test")
         self.assertEqual(headers["anthropic-version"], "2023-06-01")
         self.assertEqual(headers["content-type"], "application/json")
-        self.assertEqual(payload["model"], "claude-haiku-4-5")
+        self.assertEqual(payload["model"], "claude-sonnet-4-5")
         # max_tokens is REQUIRED by this API, so it must always be present.
         self.assertIsInstance(payload["max_tokens"], int)
         self.assertGreater(payload["max_tokens"], 0)
@@ -1215,7 +1215,7 @@ class ProviderEnvironmentIsolationTests(TestCase):
             "ANTHROPIC_API_KEY": "ambient-tooling-key",
         }):
             self.assertEqual(AIService._get_anthropic_base_url(), "https://api.anthropic.com")
-            self.assertEqual(AIService._get_anthropic_model(), "claude-haiku-4-5")
+            self.assertEqual(AIService._get_anthropic_model(), "claude-sonnet-4-5")
             self.assertEqual(AIService._get_anthropic_key(), "")
             # And a key found only in the ambient environment must not make
             # the chain believe Anthropic is configured.
@@ -1234,7 +1234,7 @@ class ProviderEnvironmentIsolationTests(TestCase):
     def test_namespaced_variables_are_read(self):
         with mock.patch.dict(os.environ, {
             "NEXUCON_ANTHROPIC_BASE_URL": "https://gateway.internal",
-            "NEXUCON_ANTHROPIC_MODEL": "claude-haiku-4-5",
+            "NEXUCON_ANTHROPIC_MODEL": "claude-sonnet-4-5",
             "NEXUCON_ANTHROPIC_API_KEY": "nx-key",
             "NEXUCON_ANTHROPIC_MAX_TOKENS": "4096",
             "NEXUCON_DEEPSEEK_BASE_URL": "https://ds.internal",
@@ -1242,7 +1242,7 @@ class ProviderEnvironmentIsolationTests(TestCase):
             "NEXUCON_DEEPSEEK_API_KEY": "nx-ds-key",
         }):
             self.assertEqual(AIService._get_anthropic_base_url(), "https://gateway.internal")
-            self.assertEqual(AIService._get_anthropic_model(), "claude-haiku-4-5")
+            self.assertEqual(AIService._get_anthropic_model(), "claude-sonnet-4-5")
             self.assertEqual(AIService._get_anthropic_key(), "nx-key")
             self.assertEqual(AIService._get_anthropic_max_tokens(), 4096)
             self.assertEqual(AIService._get_deepseek_base_url(), "https://ds.internal")
@@ -1302,7 +1302,7 @@ class StructuredResultTests(TestCase):
     """Provenance must ride on attributes, never on keys."""
 
     def test_it_is_still_a_dict_in_every_way_callers_rely_on(self):
-        result = StructuredResult({"root_cause": "x"}, provider="anthropic", model="claude-haiku-4-5")
+        result = StructuredResult({"root_cause": "x"}, provider="anthropic", model="claude-sonnet-4-5")
         self.assertIsInstance(result, dict)
         self.assertEqual(result, {"root_cause": "x"})
         self.assertEqual(result.get("root_cause"), "x")
@@ -1327,7 +1327,7 @@ class StructuredResultTests(TestCase):
         with override_settings(AI_PROVIDER="gemini"):
             result = AIService.generate_structured_json("prompt")
         self.assertEqual(result.provider, "anthropic")
-        self.assertEqual(result.model, "claude-haiku-4-5")
+        self.assertEqual(result.model, "claude-sonnet-4-5")
         self.assertEqual(result, {"a": 1})
 
     @override_settings(**_provider_settings(GEMINI_API_KEY="gm-test"))

@@ -593,13 +593,13 @@ class NDTWordExporter:
                             line = line.strip()
                             if line and _is_substantive(line) and line not in site_visual_obs:
                                 site_visual_obs.append(line)
-                    if insp.visual_site_photos:
-                        site_photos_count = max(site_photos_count, len(insp.visual_site_photos))
             except Exception as e:
                 logger.warning("Could not query inspection visual observations: %s", e)
 
-            attached_files_count = sum(t.files.count() for t in tests)
-            total_photos_count = max(site_photos_count, attached_files_count)
+            appendix_photos = S._collect_appendix_photos(
+                tests, project=project, operator=selected_operator_label
+            )
+            total_photos_count = len(appendix_photos)
             floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
             floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
 
