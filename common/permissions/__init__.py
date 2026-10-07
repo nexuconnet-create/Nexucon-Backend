@@ -106,7 +106,7 @@ def scoped_projects(user):
     district = profile.district if profile else None
     role = user_role_name(user)
 
-    if role == ROLE_INSPECTOR:
+    if role == ROLE_INSPECTOR or (role and 'inspector' in role.lower()):
         from django.db.models import Q
         # The assignment is a foreign key, not a name match. Access follows the
         # user, so it cannot be obtained by typing someone's name into a project

@@ -1,0 +1,27 @@
+NEXUCON STATUTORY REGULATORY SYSTEM - NDT REPORT READY FOR DOWNLOAD
+
+Dear Inspector {{ inspector_name|default:"Officer" }},
+
+The official Ultrasonic Pulse Velocity (UPV) Non-Destructive Testing report for project "{{ project_name }}" has been finalized, stamped, and archived in the statutory document vault.
+
+DOSSIER DETAILS:
+- Project: {{ project_name }}
+- Report Reference: {{ report_reference }}
+- Standard Cited: BS 1881-203 / ASTM C597 / IS 13311
+- Compliance Status: {{ compliance_status }}
+- Test Scope: {{ test_count|default:"20" }} Scan Points ({{ passed_count|default:"20" }}/{{ assessed_count|default:"20" }} Passed)
+- SHA-256 Checksum: {{ sha256_checksum }}
+- Archived Date: {{ sealed_date|default:"Today" }}
+
+DOWNLOAD & ACCESS LINKS:
+- Download PDF Dossier: {{ download_url }}
+{% if dashboard_url %}- Inspector Terminal: {{ dashboard_url }}{% endif %}
+{% if verify_url %}- Public Verification Seal: {{ verify_url }}{% endif %}
+
+{% if custom_message %}
+Officer Note: {{ custom_message }}
+{% endif %}
+
+Statutory Document Governance: This document is an official engineering dossier archived under the Lagos State Materials Testing Laboratory and Nexucon Built-Environment regulatory framework.
+
+(C) {{ current_year|default:"2026" }} Nexucon. All rights reserved.

@@ -193,28 +193,86 @@ class EmailService:
             html_content=html_content
         )
 
-    @classmethod
-    def send_report_ready_email(cls, email: str, name: str, project_name: str, report_reference: str, archived_id=None) -> dict:
+    def send_ndt_report_ready_email(
+        cls,
+        email: str,
+        inspector_name: str,
+        project_name: str,
+        report_reference: str,
+        download_url: str,
+        compliance_status: str = 'COMPLIANT',
+        test_count: int = 0,
+        assessed_count: int = 0,
+        passed_count: int = 0,
+        sha256_checksum: str = None,
+        dashboard_url: str = None,
+        verify_url: str = None,
+        sealed_date: str = None,
+        custom_message: str = None
+    ) -> dict:
         """
-        Tell an inspector their NDT report is ready for download.
+        Dispatch a statutory email notification alerting an inspector that an official
+        Nondestructive Testing (NDT) report is ready for download.
         """
-        link = f"{cls.get_frontend_url()}/inspector/dashboard/reports"
-        subject = f"📄 NDT report {report_reference} is ready for download"
-        who = name or 'Inspector'
-        html_content = (
-            f"<p>Hello {who},</p>"
-            f"<p>The NDT report <strong>{report_reference}</strong> for project "
-            f"<strong>{project_name}</strong> has been generated and is ready for download.</p>"
-            f"<p><a href=\"{link}\">Open your dashboard</a> to download it.</p>"
-            f"<p>— Nexucon</p>"
-        )
-        text_content = (
-            f"Hello {who}, the NDT report {report_reference} for project {project_name} "
-            f"is ready for download: {link}"
-        )
+        subject = f"📋 NDT Report Ready: {report_reference} - {project_name}"
+        context = {
+            'email': email,
+            'inspector_name': inspector_name or 'Field Inspector',
+            'project_name': project_name or 'Monitored Project',
+            'report_reference': report_reference,
+            'download_url': download_url,
+            'compliance_status': compliance_status,
+            'test_count': test_count,
+            'assessed_count': assessed_count,
+            'passed_count': passed_count,
+            'sha256_checksum': sha256_checksum or '',
+            'dashboard_url': dashboard_url or f"{cls.get_frontend_url()}/inspector/dashboard/digital-eye/pundit",
+            'verify_url': verify_url or f"{cls.get_frontend_url()}/verify/report",
+            'sealed_date': sealed_date or timezone.now().strftime('%d %b %Y, %H:%M UTC'),
+            'custom_message': custom_message,
+            'current_year': timezone.now().year,
+        }
+
+        try:
+            html_content = render_to_string('emails/ndt_report_ready.html', context)
+        except Exception as e:
+            logger.warning(f"Could not render emails/ndt_report_ready.html: {e}")
+            html_content = render_to_string('emails/base_notification.html', {
+                'notification_title': f"NDT Report Ready: {report_reference}",
+                'notification_message': f"The official NDT report for {project_name} is now ready for download.",
+                'project_name': project_name,
+                'reference': report_reference,
+                'action_url': download_url,
+                'category': 'INSPECTIONS',
+                'priority': 'High'
+            })
+
+        try:
+            text_content = render_to_string('emails/ndt_report_ready.txt', context)
+        except Exception:
+            text_content = (
+                f"NDT Report Ready: {report_reference}\n"
+                f"Project: {project_name}\n"
+                f"Download: {download_url}\n"
+            )
+
         return cls.send_email(
             to_email=email,
             subject=subject,
             html_content=html_content,
             text_content=text_content,
+        )
+
+    @classmethod
+    def send_report_ready_email(cls, email: str, name: str, project_name: str, report_reference: str, archived_id=None) -> dict:
+        """
+        Convenience wrapper forwarding to send_ndt_report_ready_email.
+        """
+        download_url = f"{cls.get_frontend_url()}/api/v1/reports/archived-reports/{archived_id}/download/" if archived_id else f"{cls.get_frontend_url()}/inspector/dashboard/reports"
+        return cls.send_ndt_report_ready_email(
+            email=email,
+            inspector_name=name,
+            project_name=project_name,
+            report_reference=report_reference,
+            download_url=download_url,
         )

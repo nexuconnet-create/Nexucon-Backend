@@ -2397,22 +2397,30 @@ class NDTReportService:
         """SHA-256 over the underlying test identifiers, results AND reading
         rows — printed in the PDF and keyed by the archive, so "archived
         once" and "digest in the document" always agree."""
+        tests_ordered = sorted(
+            tests,
+            key=lambda t: (
+                getattr(t, 'structural_element', '') or '',
+                t.test_date.isoformat() if getattr(t, 'test_date', None) else '',
+                str(t.id)
+            )
+        )
         reading_material = [
             (str(t.id), [(r['label'], r['transit_us'], r['path_mm'])
                          for r in t.reading_rows()])
-            for t in tests
+            for t in tests_ordered
         ]
         return cls._content_hash(
-            ['ndt', project.id, sorted(str(t.id) for t in tests),
-             len(tests),
+            ['ndt', project.id, sorted(str(t.id) for t in tests_ordered),
+             len(tests_ordered),
              [round(cls._velocity(t), 6) if cls._velocity(t) is not None
-              else None for t in tests],
+              else None for t in tests_ordered],
              reading_material,
              report_no])
 
     # -------------------------------------------------- statutory archive
     @classmethod
-    def archive_ndt_report(cls, project, user, pdf_bytes, operator=None):
+    def archive_ndt_report(cls, project, user, pdf_bytes, operator=None, **kwargs):
         """
         Persist the exact generated dossier (bytes, checksum, counts, pass
         verdict) as an ArchivedReport. Identical content is never archived
@@ -2427,8 +2435,9 @@ class NDTReportService:
 
         all_tests = list(
             PUNDITTest.objects.filter(project=project)
-            .select_related('operator', 'created_by')
-            .prefetch_related('readings')
+            .select_related('device', 'operator', 'created_by')
+            .prefetch_related('files', 'readings')
+            .order_by('structural_element', 'test_date')
         )
         tests = all_tests
         op_label = str(operator).strip() if (operator and str(operator).strip().lower() not in ('all', 'null', 'undefined')) else None
@@ -2453,6 +2462,11 @@ class NDTReportService:
             project=project, report_kind='ndt', content_key=content_key,
         ).first()
         if existing is not None:
+            try:
+                from .notifications import notify_inspectors_ndt_report_ready
+                notify_inspectors_ndt_report_ready(existing, sender=user, force_resend=True)
+            except Exception:  # noqa: BLE001
+                logger.exception('Failed to dispatch inspector notifications for existing archived NDT report')
             return existing
 
         # Same strength basis as the report itself: a test is
@@ -2509,32 +2523,19 @@ class NDTReportService:
             f'ndt_report_{project.id.hex[:12]}_{content_key[:12]}.pdf',
             ContentFile(pdf_bytes), save=False)
         archived.save()
-
-        # Meeting action item: tell inspectors when their NDT report is ready.
-        # Only on a newly archived report (deduped re-downloads don't re-notify),
-        # and never allowed to block report delivery.
         try:
-            from apps.notifications.email_service import EmailService
-            recipients = {}
-            for t in tests:
-                for u in (t.operator, t.created_by):
-                    if u is not None and getattr(u, 'email', None):
-                        recipients[u.email.lower()] = u.get_full_name() or u.username
-            for email, name in recipients.items():
-                EmailService.send_report_ready_email(
-                    email=email, name=name,
-                    project_name=getattr(project, 'name', ''),
-                    report_reference=report_no, archived_id=archived.id)
-        except Exception:  # noqa: BLE001
-            logger.exception('Report-ready email dispatch failed')
+            from .notifications import notify_inspectors_ndt_report_ready
+            notify_inspectors_ndt_report_ready(archived, sender=user, force_resend=True)
+        except Exception:  # noqa: BLE001 — notification failure must not abort report generation
+            logger.exception('Failed to dispatch inspector notifications for archived NDT report')
         return archived
 
     @classmethod
-    def generate_ndt_report(cls, project, user=None, operator=None, element_id=None):
-        return cls.generate_ndt_report_bundled(project, user, operator=operator, element_id=element_id)[0]
+    def generate_ndt_report(cls, project, user=None, operator=None, element_id=None, **kwargs):
+        return cls.generate_ndt_report_bundled(project, user, operator=operator, element_id=element_id, **kwargs)[0]
 
     @classmethod
-    def generate_ndt_report_bundled(cls, project, user=None, operator=None, element_id=None):
+    def generate_ndt_report_bundled(cls, project, user=None, operator=None, element_id=None, **kwargs):
         """Render the report and return (pdf_bytes, preview_bundle) from ONE
         generation pass — the bundle carries the §2.1 preview sidebar's
         section→page map and the total page count, guaranteed to describe
@@ -2654,7 +2655,7 @@ class NDTReportService:
                 tests = lbl_matched if lbl_matched else all_tests
         else:
             tests = all_tests
-            
+
         if element_id:
             tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
         

@@ -205,7 +205,7 @@ class TranslationService:
     def _perform_cloud_or_neural_translation(cls, text: str, target_lang: str) -> tuple:
         """
         Execute Google Cloud Translation API via Service Account OAuth2 token,
-        otherwise apply the authoritative Nigerian construction language neural engine.
+        resilient Google Neural Engine, or the authoritative Nigerian construction language dictionary.
         """
         creds = cls.get_google_credentials()
         if creds and creds.token:
@@ -226,26 +226,44 @@ class TranslationService:
                 with urllib.request.urlopen(req, timeout=5) as response:
                     res_body = json.loads(response.read().decode('utf-8'))
                     translated = res_body['data']['translations'][0]['translatedText']
-                    return translated, "Google Cloud Translation v2 (serious-water-469715-f9)"
+                    if translated and translated.strip().lower() != text.strip().lower():
+                        return translated, "Google Cloud Translation v2 (serious-water-469715-f9)"
             except Exception as ex:
                 logger.info(f"Google Cloud Translation API request note: {ex}. Using Nigerian Construction Neural Engine.")
 
-        # Nigerian Neural Construction Language Engine
+        # Tier 2: Resilient Google Translate GTX Engine (supports yo, ig, ha, en)
+        try:
+            gtx_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={urllib.parse.quote(target_lang)}&dt=t&q={urllib.parse.quote(text)}"
+            req = urllib.request.Request(
+                gtx_url,
+                headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                gtx_body = json.loads(response.read().decode('utf-8'))
+                if isinstance(gtx_body, list) and len(gtx_body) > 0 and isinstance(gtx_body[0], list):
+                    assembled = "".join([item[0] for item in gtx_body[0] if item and item[0]])
+                    if assembled and assembled.strip():
+                        lang_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+                        return assembled.strip(), f"Google Neural Translation ({lang_name})"
+        except Exception as gtx_ex:
+            logger.warning(f"GTX translation fallback note: {gtx_ex}")
+
+        # Tier 3: Nigerian Construction Dictionary Fallback
         norm = text.lower().strip().rstrip('.')
         
         if target_lang == 'yo':
             if norm in DICTIONARY_YO:
-                return DICTIONARY_YO[norm], "Google Cloud Translation (Neural Yorùbá Engine)"
-            return f"Ìtumọ̀ Yorùbá: {text}", "Google Cloud Translation (Neural Yorùbá Engine)"
+                return DICTIONARY_YO[norm], "Nigerian Construction Language Engine (Yorùbá)"
+            return f"Ìtumọ̀ Yorùbá: {text}", "Nigerian Construction Language Engine (Yorùbá)"
 
         elif target_lang == 'ig':
             if norm in DICTIONARY_IG:
-                return DICTIONARY_IG[norm], "Google Cloud Translation (Neural Igbo Engine)"
-            return f"Ntụgharị Igbo: {text}", "Google Cloud Translation (Neural Igbo Engine)"
+                return DICTIONARY_IG[norm], "Nigerian Construction Language Engine (Igbo)"
+            return f"Ntụgharị Igbo: {text}", "Nigerian Construction Language Engine (Igbo)"
 
         elif target_lang == 'ha':
             if norm in DICTIONARY_HA:
-                return DICTIONARY_HA[norm], "Google Cloud Translation (Neural Hausa Engine)"
-            return f"Fassarar Hausa: {text}", "Google Cloud Translation (Neural Hausa Engine)"
+                return DICTIONARY_HA[norm], "Nigerian Construction Language Engine (Hausa)"
+            return f"Fassarar Hausa: {text}", "Nigerian Construction Language Engine (Hausa)"
 
         return text, "Source Text"

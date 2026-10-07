@@ -309,3 +309,48 @@ class DocumentTemplate(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.category})"
+
+
+class DocumentAccessRequest(models.Model):
+    """
+    Public and stakeholder requests to access/download statutory project documents
+    and verified reports (e.g. from QR code verification page or public links).
+    Requires review and approval by the supervising government agency.
+    """
+    STATUS_CHOICES = (
+        ('PENDING', 'Pending Approval'),
+        ('APPROVED', 'Access Granted'),
+        ('REJECTED', 'Access Rejected'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='document_access_requests', null=True, blank=True)
+    document = models.ForeignKey(Document, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_requests')
+    report_reference = models.CharField(max_length=255, blank=True, null=True)
+    report_digest = models.CharField(max_length=255, blank=True, null=True)
+    document_title = models.CharField(max_length=255, default='Statutory Engineering Report')
+
+    # Requester details
+    requester_name = models.CharField(max_length=255)
+    requester_email = models.EmailField()
+    requester_phone = models.CharField(max_length=50, blank=True, null=True)
+    requester_organization = models.CharField(max_length=255, blank=True, null=True)
+    requester_role = models.CharField(max_length=100, default='Stakeholder')
+    purpose = models.TextField(blank=True)
+
+    # Access control & lifecycle
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    access_token = models.CharField(max_length=64, default=uuid.uuid4, unique=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_access_requests')
+    reviewed_by_name = models.CharField(max_length=255, blank=True, null=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.requester_name} ({self.requester_email}) -> {self.document_title} [{self.status}]"
+

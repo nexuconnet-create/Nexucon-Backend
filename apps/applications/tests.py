@@ -471,6 +471,23 @@ class ApplicationTransitionAPITestCase(ApplicationViewTestBase):
         self.assertEqual(permit.status, "ACTIVE")
         self.assertEqual(permit.project, self.project_a)
 
+    def test_direct_approval_from_under_review_issues_permit(self):
+        first = self.client.post(self.url, {"status": "UNDER_REVIEW"}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        response = self.client.post(self.url, {
+            "status": "APPROVED",
+            "reason": "Direct regulatory signoff from review queue"
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.app_a.refresh_from_db()
+        self.assertEqual(self.app_a.status, "APPROVED")
+        self.assertEqual(self.app_a.decision_reason, "Direct regulatory signoff from review queue")
+        permit = Permit.objects.get(application=self.app_a)
+        self.assertEqual(permit.status, "ACTIVE")
+        self.assertEqual(permit.project, self.project_a)
+        self.project_a.refresh_from_db()
+        self.assertEqual(self.project_a.status, "ACTIVE")
+
     def test_conditional_approval_records_conditions_and_permit(self):
         # SUBMITTED -> UNDER_REVIEW -> CONDITIONAL_APPROVAL (state machine).
         first = self.client.post(self.url, {"status": "UNDER_REVIEW"}, format="json")

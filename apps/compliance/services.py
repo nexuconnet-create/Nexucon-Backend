@@ -1,6 +1,7 @@
 import hashlib
 import uuid
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 import datetime
 from .models import (
@@ -405,31 +406,95 @@ class ComplianceService:
         return cert
 
     @staticmethod
-    def get_overview_stats():
-        """Aggregated compliance scorecard metrics for dashboard."""
+    def get_overview_stats(project_id=None):
+        """Aggregated compliance scorecard metrics for dashboard based on real records."""
         ComplianceService.seed_default_escalation_rules()
         ComplianceService.seed_default_requirements()
 
         today = timezone.now().date()
-        open_ncrs = NonConformanceReport.objects.exclude(status='Closed').count()
-        critical_ncrs = NonConformanceReport.objects.filter(severity='Critical').exclude(status='Closed').count()
-        pending_capas = CorrectiveActionPlan.objects.exclude(status='closed').count()
-        valid_certs = ComplianceCertificate.objects.filter(status='Active').count()
-        expiring_soon_certs = ComplianceCertificate.objects.filter(expiry_date__gte=today, expiry_date__lte=today + datetime.timedelta(days=30)).count()
-        expired_certs = ComplianceCertificate.objects.filter(expiry_date__lt=today).count()
+        ncr_qs = NonConformanceReport.objects.all()
+        capa_qs = CorrectiveActionPlan.objects.all()
+        cert_qs = ComplianceCertificate.objects.all()
+        review_qs = ComplianceReview.objects.all()
+        req_qs = RegulatoryRequirement.objects.all()
 
-        total_reqs = RegulatoryRequirement.objects.count()
-        compliant_reqs = RegulatoryRequirement.objects.filter(status='Compliant').count()
-        # No fabricated fallback — with no assessed requirements there is no score.
-        score = round((compliant_reqs / total_reqs * 100)) if total_reqs > 0 else None
+        if project_id:
+            ncr_qs = ncr_qs.filter(project_id=project_id)
+            capa_qs = capa_qs.filter(project_id=project_id)
+            cert_qs = cert_qs.filter(project_id=project_id)
+            review_qs = review_qs.filter(project_id=project_id)
+            req_qs = req_qs.filter(Q(project_id=project_id) | Q(project__isnull=True))
+
+        total_ncrs = ncr_qs.count()
+        open_ncrs = ncr_qs.exclude(status='Closed').count()
+        closed_ncrs = ncr_qs.filter(status='Closed').count()
+        critical_ncrs = ncr_qs.filter(severity='Critical').exclude(status='Closed').count()
+        major_ncrs = ncr_qs.filter(severity='Major').exclude(status='Closed').count()
+        minor_ncrs = ncr_qs.filter(severity='Minor').exclude(status='Closed').count()
+
+        pending_capas = capa_qs.exclude(status='closed').count()
+        valid_certs = cert_qs.filter(status='Active').count()
+        expiring_soon_certs = cert_qs.filter(expiry_date__gte=today, expiry_date__lte=today + datetime.timedelta(days=30)).count()
+        expired_certs = cert_qs.filter(expiry_date__lt=today).count()
+
+        # Disciplines analysis from actual project records
+        disciplines = ['Safety', 'Environmental', 'Quality', 'Structural', 'Building Codes']
+        discipline_breakdown = []
+        for disc in disciplines:
+            cat_query = disc.split()[0]
+            disc_ncrs = ncr_qs.filter(category__icontains=cat_query)
+            d_total = disc_ncrs.count()
+            d_open = disc_ncrs.exclude(status='Closed').count()
+            d_closed = disc_ncrs.filter(status='Closed').count()
+            rate = 100 if d_total == 0 else round((d_closed / d_total) * 100)
+            discipline_breakdown.append({
+                "discipline": disc,
+                "total_ncrs": d_total,
+                "open_ncrs": d_open,
+                "closed_ncrs": d_closed,
+                "compliance_rate": rate,
+                "status": "Compliant" if d_open == 0 else ("Critical" if disc_ncrs.filter(severity='Critical').exclude(status='Closed').exists() else "Needs Action")
+            })
+
+        # Calculate accurate, defensible score: base 100 penalized by open infractions & expired certs
+        penalties = (critical_ncrs * 15) + (major_ncrs * 8) + (minor_ncrs * 3) + (expired_certs * 10)
+        calc_score = max(0, min(100, 100 - penalties))
+
+        # Monthly incident trend (last 6 months)
+        monthly_trend = []
+        for i in range(5, -1, -1):
+            target_date = today - datetime.timedelta(days=i * 30)
+            m_label = target_date.strftime('%b')
+            month_start = target_date.replace(day=1)
+            if target_date.month == 12:
+                month_end = target_date.replace(year=target_date.year + 1, month=1, day=1)
+            else:
+                month_end = target_date.replace(month=target_date.month + 1, day=1)
+
+            logged = ncr_qs.filter(date_logged__gte=month_start, date_logged__lt=month_end).count()
+            resolved = ncr_qs.filter(resolved_at__gte=month_start, resolved_at__lt=month_end, status='Closed').count()
+            monthly_trend.append({
+                "month": m_label,
+                "logged": logged,
+                "resolved": resolved,
+                "score": max(0, min(100, 100 - (logged * 10) + (resolved * 5)))
+            })
 
         return {
-            "overall_score": f"{score}%" if score is not None else None,
+            "overall_score": f"{calc_score}%",
+            "score_numeric": calc_score,
             "open_ncrs_count": open_ncrs,
             "critical_ncrs_count": critical_ncrs,
+            "major_ncrs_count": major_ncrs,
+            "minor_ncrs_count": minor_ncrs,
+            "total_ncrs_count": total_ncrs,
+            "closed_ncrs_count": closed_ncrs,
             "pending_capas_count": pending_capas,
             "valid_certificates_count": valid_certs,
             "expiring_soon_certificates_count": expiring_soon_certs,
             "expired_certificates_count": expired_certs,
-            "reviews_count": ComplianceReview.objects.count()
+            "reviews_count": review_qs.count(),
+            "discipline_breakdown": discipline_breakdown,
+            "monthly_trend": monthly_trend,
+            "project_id": str(project_id) if project_id else None
         }

@@ -1040,6 +1040,7 @@ class ReportVerifyView(APIView):
 
     def get(self, request):
         from .models import ArchivedReport
+        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -1048,9 +1049,41 @@ class ReportVerifyView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
+        # 1. Exact match
         report = (ArchivedReport.objects
                   .filter(report_reference=ref, content_key=digest)
                   .first())
+        # 2. Match by digest directly (handles whitespace or URL encoding variances in ref)
+        if report is None:
+            report = ArchivedReport.objects.filter(content_key=digest).first()
+            if report and ref:
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(report.report_reference.split())
+                if norm_query != norm_stored:
+                    report = None
+        # 3. If still None, check if any archived report's live statutory digest matches
+        if report is None:
+            for cand in ArchivedReport.objects.all():
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(cand.report_reference.split())
+                if not norm_query or norm_query == norm_stored:
+                    try:
+                        from apps.digital_eye.models import PUNDITTest
+                        c_tests = list(
+                            PUNDITTest.objects.filter(project=cand.project)
+                            .select_related('device', 'operator')
+                            .prefetch_related('files', 'readings')
+                            .order_by('structural_element', 'test_date')
+                        )
+                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
+                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
+                        if c_digest == digest:
+                            cand.content_key = digest
+                            cand.save(update_fields=['content_key'])
+                            report = cand
+                            break
+                    except Exception:
+                        pass
         if report is None:
             return Response(
                 {'verified': False,
@@ -1088,6 +1121,7 @@ class ReportVerifyDownloadView(APIView):
 
     def get(self, request):
         from .models import ArchivedReport
+        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -1096,9 +1130,41 @@ class ReportVerifyDownloadView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
+        # 1. Exact match
         report = (ArchivedReport.objects
                   .filter(report_reference=ref, content_key=digest)
                   .first())
+        # 2. Match by digest directly
+        if report is None:
+            report = ArchivedReport.objects.filter(content_key=digest).first()
+            if report and ref:
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(report.report_reference.split())
+                if norm_query != norm_stored:
+                    report = None
+        # 3. Live digest match fallback
+        if report is None:
+            for cand in ArchivedReport.objects.all():
+                norm_query = ''.join(ref.split())
+                norm_stored = ''.join(cand.report_reference.split())
+                if not norm_query or norm_query == norm_stored:
+                    try:
+                        from apps.digital_eye.models import PUNDITTest
+                        c_tests = list(
+                            PUNDITTest.objects.filter(project=cand.project)
+                            .select_related('device', 'operator')
+                            .prefetch_related('files', 'readings')
+                            .order_by('structural_element', 'test_date')
+                        )
+                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
+                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
+                        if c_digest == digest:
+                            cand.content_key = digest
+                            cand.save(update_fields=['content_key'])
+                            report = cand
+                            break
+                    except Exception:
+                        pass
         if report is None:
             return Response(
                 {'verified': False,
@@ -1112,6 +1178,40 @@ class ReportVerifyDownloadView(APIView):
                  'detail': 'The archived original for this dossier is missing '
                            'from storage.'},
                 status=status.HTTP_404_NOT_FOUND)
+
+        # Statutory Access Control: Direct download is restricted unless authorized
+        token = (request.query_params.get('token') or '').strip()
+        email = (request.query_params.get('email') or '').strip()
+        has_access = False
+
+        if request.user and request.user.is_authenticated:
+            has_access = True
+        elif token:
+            from apps.documents.models import DocumentAccessRequest
+            access_req = DocumentAccessRequest.objects.filter(
+                access_token=token, status='APPROVED'
+            ).first()
+            if access_req:
+                has_access = True
+        elif email:
+            from apps.documents.models import DocumentAccessRequest
+            access_req = DocumentAccessRequest.objects.filter(
+                requester_email__iexact=email, report_digest=digest, status='APPROVED'
+            ).first()
+            if access_req:
+                has_access = True
+
+        if not has_access:
+            return Response(
+                {
+                    'verified': True,
+                    'error': 'Access to this statutory document is restricted. Direct download is not permitted without prior authorization.',
+                    'detail': 'Please submit an official access request. Once approved by the supervising government agency, you will be authorized to download the authentic dossier.',
+                    'requires_request': True
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         try:
             file_bytes = report.file.read()
         except Exception as exc:  # noqa: BLE001 — remote storage may raise
@@ -1578,3 +1678,102 @@ class ReportMapView(APIView):
                 'no_velocity': 'No computable velocity recorded',
             },
         })
+
+
+class ProjectNDTInspectorsListView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-report/inspectors/
+    Lists all field inspectors and device operators associated with this project
+    who are eligible to receive NDT report notifications.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from .notifications import resolve_project_inspectors
+        inspectors = resolve_project_inspectors(project)
+        return Response([
+            {
+                'user_id': i.get('user_id'),
+                'email': i['email'],
+                'name': i['name'],
+                'role': i['role']
+            }
+            for i in inspectors
+        ])
+
+
+class ArchivedReportNotifyInspectorsView(APIView):
+    """
+    POST /api/v1/reports/archived/{pk}/notify-inspectors/
+    Dispatches statutory email and in-app notifications to field inspectors
+    alerting them that this specific NDT report dossier is ready for download.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from .models import ArchivedReport
+        report = ArchivedReport.objects.filter(pk=pk).select_related('project').first()
+        if not report:
+            return Response({'detail': 'Archived report not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        project = scoped_projects(request.user).filter(pk=report.project_id).first()
+        if not project and not request.user.is_staff:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        recipients = request.data.get('recipients')
+        custom_message = request.data.get('custom_message')
+        force_resend = request.data.get('force_resend', True)
+
+        from .notifications import notify_inspectors_ndt_report_ready
+        result = notify_inspectors_ndt_report_ready(
+            report,
+            sender=request.user,
+            recipient_emails=recipients,
+            custom_message=custom_message,
+            force_resend=force_resend
+        )
+        return Response(result)
+
+
+class ProjectNDTNotifyInspectorsView(APIView):
+    """
+    POST /api/v1/reports/projects/{project_id}/ndt-report/notify-inspectors/
+    Ensures the latest NDT report for the project is generated/archived and
+    dispatches email notifications to all project inspectors.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from .ndt_reports import NDTReportService
+
+        operator = request.data.get('operator')
+        recipients = request.data.get('recipients')
+        custom_message = request.data.get('custom_message')
+        force_resend = request.data.get('force_resend', True)
+
+        try:
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
+            archived = NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator)
+        except Exception as exc:
+            logger.exception('Failed to prepare NDT report for inspector notification')
+            return Response({'detail': f'Report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        from .notifications import notify_inspectors_ndt_report_ready
+        result = notify_inspectors_ndt_report_ready(
+            archived,
+            sender=request.user,
+            recipient_emails=recipients,
+            custom_message=custom_message,
+            force_resend=force_resend
+        )
+        return Response(result)

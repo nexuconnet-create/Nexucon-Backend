@@ -49,6 +49,8 @@ class EvidenceRecord(models.Model):
     updates the normalised payload instead of duplicating the record.
     """
     SOURCE_TYPES = [
+        ('photo', 'Field Inspection / Defect Photo'),
+        ('voice_note', 'Field Voice Note / Audio Record'),
         ('scan_defect', 'Digital Eye — Visual Defect'),
         ('scan_thermal', 'Digital Eye — Thermal Anomaly'),
         ('scan_alignment', 'Digital Eye — BIM Alignment / Deviation'),

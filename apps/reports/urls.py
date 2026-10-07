@@ -13,6 +13,8 @@ from .views import (
     ReportStructureSectionView, ReportStructureToggleView,
     ReportStructureView,
     ReportTemplateViewSet, ReportVerifyDownloadView, ReportVerifyView,
+    ProjectNDTInspectorsListView, ArchivedReportNotifyInspectorsView,
+    ProjectNDTNotifyInspectorsView,
 )
 from .versions import ReportVersionView
 
@@ -96,4 +98,12 @@ urlpatterns = router.urls + [
     # Report Versions API
     path('reports/archived-reports/<uuid:report_id>/versions/',
          ReportVersionView.as_view(), name='archived-report-versions'),
+
+    # Inspector Email & In-App Notification endpoints
+    path('reports/projects/<uuid:project_id>/ndt-report/inspectors/',
+         ProjectNDTInspectorsListView.as_view(), name='project-ndt-inspectors-list'),
+    path('reports/projects/<uuid:project_id>/ndt-report/notify-inspectors/',
+         ProjectNDTNotifyInspectorsView.as_view(), name='project-ndt-notify-inspectors'),
+    path('reports/archived-reports/<uuid:pk>/notify-inspectors/',
+         ArchivedReportNotifyInspectorsView.as_view(), name='archived-report-notify-inspectors'),
 ]

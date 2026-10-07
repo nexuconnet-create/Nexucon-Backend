@@ -22,8 +22,12 @@ router.register(r'certifications', CertificationViewSet, basename='certification
 router.register(r'trainings', TrainingRecordViewSet, basename='training')
 router.register(r'stats', StakeholderStatsViewSet, basename='stakeholder-stats')
 router.register(r'stage-inspections', BuildingStageInspectionViewSet, basename='stage-inspection')
+router.register(r'inspections', BuildingStageInspectionViewSet, basename='stakeholder-inspection')
 router.register(r'timeline-milestones', ProjectTimelineMilestoneViewSet, basename='timeline-milestone')
+router.register(r'timeline', ProjectTimelineMilestoneViewSet, basename='stakeholder-timeline')
 router.register(r'financial-invoices', StatutoryFinancialTransactionViewSet, basename='financial-invoice')
+router.register(r'financials/invoices', StatutoryFinancialTransactionViewSet, basename='stakeholder-financial-invoices')
+router.register(r'financials', StatutoryFinancialTransactionViewSet, basename='stakeholder-financials')
 
 urlpatterns = [
     path('', include(router.urls)),

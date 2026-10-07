@@ -2089,3 +2089,123 @@ class RemainingViewCoverageTests(BaseStakeholderServiceTestCase):
         self.assertEqual(res.status_code, 404)
         res = self.client.post(f'/api/v1/stakeholders/meetings/{uuid.uuid4()}/send-invites/')
         self.assertEqual(res.status_code, 404)
+
+
+class GovernmentStakeholderClientGovernanceTests(BaseStakeholderServiceTestCase):
+    """
+    Tests for Government Stakeholder & Client Governance Layer:
+    - BuildingStageInspection (stage inspection dispatch, resolve NCR)
+    - ProjectTimelineMilestone (timeline milestones, government signoff)
+    - StatutoryFinancialTransaction (financial invoices, checkout, pay)
+    - Route aliases (/inspections/, /timeline/, /financials/)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.inspector = Inspector.objects.create(
+            inspector_id='INS-TST-01',
+            name='Engr. Adebayo',
+            role_title='Senior Inspector',
+            assigned_zone='Zone 1'
+        )
+
+    def test_stage_inspections_crud_dispatch_and_resolve_ncr(self):
+        self.client.force_authenticate(user=self.agency_head)
+
+        # Create
+        res = self.client.post('/api/v1/stakeholders/stage-inspections/', {
+            'project_name': 'Eko Atlantic Horizon Towers',
+            'stage': 'Foundation Pour & Rebar Cover',
+            'contractor_on_site': 'Julius Berger',
+            'preferred_date': '20 Sep 2026',
+            'has_ncr': False
+        })
+        self.assertEqual(res.status_code, 201)
+        insp_id = res.data['id']
+
+        # Dispatch action
+        res_dispatch = self.client.post(f'/api/v1/stakeholders/stage-inspections/{insp_id}/dispatch/', {
+            'assigned_inspector': str(self.inspector.id),
+            'scheduled_date': '22 Sep 2026'
+        })
+        self.assertEqual(res_dispatch.status_code, 200)
+        self.assertEqual(res_dispatch.data['status'], 'Scheduled')
+
+        # Resolve NCR action
+        res_ncr = self.client.post(f'/api/v1/stakeholders/stage-inspections/{insp_id}/resolve-ncr/', {
+            'remediation_proof': 'Re-tested rebar cover depth with GPR. Passed at 48mm.'
+        })
+        self.assertEqual(res_ncr.status_code, 200)
+        self.assertEqual(res_ncr.data['status'], 'Remediation Under Review')
+
+        # Test alias /api/v1/stakeholders/inspections/
+        res_alias = self.client.get('/api/v1/stakeholders/inspections/')
+        self.assertEqual(res_alias.status_code, 200)
+
+    def test_timeline_milestones_crud_and_signoff(self):
+        self.client.force_authenticate(user=self.agency_head)
+
+        # Create
+        res = self.client.post('/api/v1/stakeholders/timeline-milestones/', {
+            'milestone_id': 'ML-TEST-01',
+            'project_name': 'Eko Atlantic Horizon Towers',
+            'name': 'Foundation & Piling Gate',
+            'category': 'Foundation',
+            'start_date': '01 Jan 2026',
+            'due_date': '28 Feb 2026',
+            'is_hold_point': True,
+            'progress': 50
+        })
+        self.assertEqual(res.status_code, 201)
+        m_id = res.data['id']
+
+        # Government signoff action
+        res_signoff = self.client.post(f'/api/v1/stakeholders/timeline-milestones/{m_id}/signoff/', {
+            'government_signoff': 'Approved & Sealed by Engr. Sanwo (LASBCA Director)'
+        })
+        self.assertEqual(res_signoff.status_code, 200)
+        self.assertEqual(res_signoff.data['status'], 'Completed')
+        self.assertEqual(res_signoff.data['progress'], 100)
+
+        # Test alias /api/v1/stakeholders/timeline/
+        res_alias = self.client.get('/api/v1/stakeholders/timeline/')
+        self.assertEqual(res_alias.status_code, 200)
+
+    def test_financial_invoices_crud_checkout_and_pay(self):
+        self.client.force_authenticate(user=self.agency_head)
+
+        # Create invoice
+        res = self.client.post('/api/v1/stakeholders/financial-invoices/', {
+            'invoice_number': 'INV-2026-TEST-99',
+            'project_name': 'Eko Atlantic Horizon Towers',
+            'fee_category': 'Building Planning Assessment Levy',
+            'amount': '18500000.00',
+            'amount_formatted': '₦18,500,000.00',
+            'issued_date': '01 Sep 2026',
+            'due_date': '30 Sep 2026',
+            'status': 'DUE',
+            'beneficiary': 'LASBCA Revenue Account'
+        })
+        self.assertEqual(res.status_code, 201)
+        inv_id = res.data['id']
+
+        # Checkout action
+        res_checkout = self.client.post(f'/api/v1/stakeholders/financial-invoices/{inv_id}/checkout/', {
+            'gateway': 'Remita'
+        })
+        self.assertEqual(res_checkout.status_code, 200)
+        self.assertEqual(res_checkout.data['status'], 'success')
+        self.assertIn('transaction_reference', res_checkout.data)
+
+        # Pay action
+        res_pay = self.client.post(f'/api/v1/stakeholders/financial-invoices/{inv_id}/pay/')
+        self.assertEqual(res_pay.status_code, 200)
+        self.assertEqual(res_pay.data['status'], 'PAID')
+        self.assertTrue(res_pay.data['receipt_number'].startswith('REC-LAS-'))
+
+        # Test aliases /api/v1/stakeholders/financials/invoices/ and /financials/
+        res_alias1 = self.client.get('/api/v1/stakeholders/financials/invoices/')
+        self.assertEqual(res_alias1.status_code, 200)
+        res_alias2 = self.client.get('/api/v1/stakeholders/financials/')
+        self.assertEqual(res_alias2.status_code, 200)
+
