@@ -36,9 +36,9 @@ class SensorDataFileAdmin(admin.ModelAdmin):
 
 @admin.register(FieldDevice)
 class FieldDeviceAdmin(admin.ModelAdmin):
-    list_display = ('serial_number', 'model_name', 'device_type', 'is_active', 'project')
-    list_filter = ('device_type', 'is_active')
-    search_fields = ('serial_number', 'model_name', 'project__name')
+    list_display = ('device_reference', 'device_id', 'name', 'device_type', 'model', 'status', 'is_active', 'assigned_project')
+    list_filter = ('device_type', 'status', 'is_active')
+    search_fields = ('device_reference', 'device_id', 'name', 'model', 'assigned_project__name')
 
 
 @admin.register(PUNDITTest)
