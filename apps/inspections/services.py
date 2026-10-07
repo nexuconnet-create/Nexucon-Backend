@@ -101,10 +101,12 @@ class InspectionService:
                 "A real inspector (inspector_user or inspector_name) is required — "
                 "an inspection cannot be assigned to a fabricated officer.")
 
+        if not scheduled_date and not inspection.scheduled_date:
+            raise APIValidationError(
+                "An inspection must be scheduled for a specific date before it "
+                "can be assigned.")
         if scheduled_date:
             inspection.scheduled_date = scheduled_date
-        elif not inspection.scheduled_date:
-            inspection.scheduled_date = timezone.now() + datetime.timedelta(days=1)
 
         inspection.status = 'SCHEDULED'
         inspection.save()

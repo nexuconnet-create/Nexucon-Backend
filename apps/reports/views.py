@@ -362,17 +362,23 @@ class ArchivedReportListView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, project_id):
+    def get(self, request, project_id=None):
         from apps.projects.models import Project
         from .models import ArchivedReport
         from .serializers import ArchivedReportSerializer
-        project = scoped_projects(request.user).filter(pk=project_id).first()
-        if not project:
-            return Response({'detail': 'Project not found in your scope.'},
-                            status=status.HTTP_404_NOT_FOUND)
+        scoped = scoped_projects(request.user)
+        if project_id:
+            project = scoped.filter(pk=project_id).first()
+            if not project:
+                return Response({'detail': 'Project not found in your scope.'},
+                                status=status.HTTP_404_NOT_FOUND)
+            projects_filter = [project]
+        else:
+            projects_filter = scoped
+
         kind = request.query_params.get('kind') or 'ndt'
         reports = (ArchivedReport.objects
-                   .filter(project=project, report_kind=kind)
+                   .filter(project__in=projects_filter, report_kind=kind)
                    .select_related('project', 'generated_by'))
         return Response(ArchivedReportSerializer(reports, many=True).data)
 

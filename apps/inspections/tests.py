@@ -892,10 +892,21 @@ class InspectionWorkflowActionsAPITestCase(InspectionViewTestBase):
     def test_assign_inspector_by_email_lookup(self):
         response = self.client.post(self.url + "assign/", {
             "inspector_id": "actions.inspector@nexucon.com",
+            "scheduled_date": "2026-10-01T09:00:00Z",
         }, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.inspection_a.refresh_from_db()
         self.assertEqual(self.inspection_a.inspector, self.inspector)
+
+    def test_assign_without_schedule_date_returns_400(self):
+        self.inspection_a.scheduled_date = None
+        self.inspection_a.save()
+        response = self.client.post(self.url + "assign/", {
+            "inspector_id": str(self.inspector.id),
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.inspection_a.refresh_from_db()
+        self.assertEqual(self.inspection_a.status, "REQUESTED")
 
     def test_assign_without_inspector_returns_400(self):
         response = self.client.post(self.url + "assign/", {}, format="json")

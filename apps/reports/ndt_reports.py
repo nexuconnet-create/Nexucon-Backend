@@ -2509,6 +2509,24 @@ class NDTReportService:
             f'ndt_report_{project.id.hex[:12]}_{content_key[:12]}.pdf',
             ContentFile(pdf_bytes), save=False)
         archived.save()
+
+        # Meeting action item: tell inspectors when their NDT report is ready.
+        # Only on a newly archived report (deduped re-downloads don't re-notify),
+        # and never allowed to block report delivery.
+        try:
+            from apps.notifications.email_service import EmailService
+            recipients = {}
+            for t in tests:
+                for u in (t.operator, t.created_by):
+                    if u is not None and getattr(u, 'email', None):
+                        recipients[u.email.lower()] = u.get_full_name() or u.username
+            for email, name in recipients.items():
+                EmailService.send_report_ready_email(
+                    email=email, name=name,
+                    project_name=getattr(project, 'name', ''),
+                    report_reference=report_no, archived_id=archived.id)
+        except Exception:  # noqa: BLE001
+            logger.exception('Report-ready email dispatch failed')
         return archived
 
     @classmethod
@@ -3802,6 +3820,13 @@ class NDTReportService:
             body = get_cms_text(project, 'discussion_of_results')[0]
             for para in cms_paragraphs(body):
                 builder.para(para)
+            builder.para(
+                'Note on point spread: each element is tested at several '
+                'points. The point spread is how far apart those readings '
+                'are. A small spread means the concrete was compacted and '
+                'cured evenly across the element; a large spread points to '
+                'local variation (for example voids, poor compaction or '
+                'uneven curing) that deserves a closer look.')
 
         def emit_remarks():
             # ----------------------------- 5.5 REMARKS

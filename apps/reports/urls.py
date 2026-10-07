@@ -33,6 +33,8 @@ urlpatterns = router.urls + [
          NDTOperatorsListView.as_view(), name='project-ndt-operators'),
     path('reports/projects/<uuid:project_id>/ndt-report-word/',
          NDTWordExportView.as_view(), name='project-ndt-report-word'),
+    path('reports/archived-reports/',
+         ArchivedReportListView.as_view(), name='all-archived-reports'),
     path('reports/projects/<uuid:project_id>/archived-reports/',
          ArchivedReportListView.as_view(), name='project-archived-reports'),
     path('reports/archived-reports/<uuid:report_id>/download/',

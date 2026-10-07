@@ -192,3 +192,29 @@ class EmailService:
             subject=subject,
             html_content=html_content
         )
+
+    @classmethod
+    def send_report_ready_email(cls, email: str, name: str, project_name: str, report_reference: str, archived_id=None) -> dict:
+        """
+        Tell an inspector their NDT report is ready for download.
+        """
+        link = f"{cls.get_frontend_url()}/inspector/dashboard/reports"
+        subject = f"📄 NDT report {report_reference} is ready for download"
+        who = name or 'Inspector'
+        html_content = (
+            f"<p>Hello {who},</p>"
+            f"<p>The NDT report <strong>{report_reference}</strong> for project "
+            f"<strong>{project_name}</strong> has been generated and is ready for download.</p>"
+            f"<p><a href=\"{link}\">Open your dashboard</a> to download it.</p>"
+            f"<p>— Nexucon</p>"
+        )
+        text_content = (
+            f"Hello {who}, the NDT report {report_reference} for project {project_name} "
+            f"is ready for download: {link}"
+        )
+        return cls.send_email(
+            to_email=email,
+            subject=subject,
+            html_content=html_content,
+            text_content=text_content,
+        )

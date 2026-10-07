@@ -2576,10 +2576,16 @@ class PunditAnalysisReviewView(APIView):
             subject = f"NDT Report {analysis.analysis_reference} has been {decision}"
             message = f"Hello Inspector,\n\nThe AI Analysis {analysis.analysis_reference} for project '{getattr(analysis.project, 'name', '')}' has been {decision} by {rev_by}.\n\nNotes:\n{review.notes}\n\nPlease review the dashboard for more details."
             try:
-                # We should ideally fetch all inspectors for the project. For now, simulate sending to inspector email.
-                send_mail(subject, message, 'notifications@nexucon.com', ['inspector@nexucon.com'], fail_silently=True)
+                from apps.inspections.models import Inspection
+                recipients = sorted({
+                    e.lower() for e in Inspection.objects
+                    .filter(project=analysis.project, inspector__isnull=False)
+                    .values_list('inspector__email', flat=True) if e
+                })
+                if recipients:
+                    send_mail(subject, message, 'notifications@nexucon.com', recipients, fail_silently=True)
             except Exception as e:
-                pass
+                logger.warning("Inspector review-decision email failed: %s", e)
 
         _record_audit(request.user, 'digital_eye.pundit_analysis.review',
                       'AIAnalysisRecord', analysis.id,
