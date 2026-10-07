@@ -271,11 +271,35 @@ class TelemetrySessionFromFileView(APIView):
         }
         if data.get('transducer_frequency_khz'):
             config['transducer_frequency_khz'] = data['transducer_frequency_khz']
-        # GPS coordinates — only stored if the inspector supplied them.
+        # GPS coordinates & 4-corner boundary survey
         if data.get('latitude') is not None:
             config['latitude'] = data['latitude']
         if data.get('longitude') is not None:
             config['longitude'] = data['longitude']
+        if data.get('coordinate_system'):
+            config['coordinate_system'] = data['coordinate_system']
+        corner_coords = data.get('corner_coordinates')
+        if isinstance(corner_coords, str):
+            try:
+                import json
+                corner_coords = json.loads(corner_coords)
+            except Exception:
+                pass
+        if corner_coords:
+            config['corner_coordinates'] = corner_coords
+            if project and (not project.corner_coordinates or not getattr(project.corner_coordinates, 'get', lambda k: None)('corners')):
+                project.corner_coordinates = corner_coords
+                fields_to_update = ['corner_coordinates']
+                if data.get('coordinate_system'):
+                    project.coordinate_system = data['coordinate_system']
+                    fields_to_update.append('coordinate_system')
+                if data.get('latitude') is not None and not project.latitude:
+                    project.latitude = data['latitude']
+                    fields_to_update.append('latitude')
+                if data.get('longitude') is not None and not project.longitude:
+                    project.longitude = data['longitude']
+                    fields_to_update.append('longitude')
+                project.save(update_fields=fields_to_update)
 
         # Handle attached visual observation photos
         uploaded_photos = request.FILES.getlist('photos')

@@ -239,7 +239,7 @@ CMS_SECTIONS = {
         'help': 'Editable text for the discussion of the test results.',
     },
     'remarks_preamble': {
-        'label': 'Remarks — opening lead-in (Section 5.5)',
+        'label': 'Field Remarks & Observations — opening lead-in (Section 5.4)',
         'kind': 'paragraphs',
         'default': REMARKS_PREAMBLE_DEFAULT,
         'help': 'Precedes the remarks and observations table or fallback notice.',

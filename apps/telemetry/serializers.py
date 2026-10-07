@@ -241,6 +241,12 @@ class ImportExportRequestSerializer(serializers.Serializer):
     longitude = serializers.FloatField(
         required=False, allow_null=True,
         help_text='GPS longitude of the test location, decimal degrees.')
+    coordinate_system = serializers.CharField(
+        required=False, allow_blank=True, default='WGS84_DD',
+        help_text='Coordinate system for the survey boundaries (e.g. WGS84_DD, UTM_31N_MINNA).')
+    corner_coordinates = serializers.JSONField(
+        required=False, allow_null=True, default=dict,
+        help_text='4-corner boundary survey mapping payload.')
     photos = serializers.ListField(
         child=serializers.FileField(),
         required=False,

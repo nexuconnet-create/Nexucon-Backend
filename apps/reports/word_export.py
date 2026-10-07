@@ -555,8 +555,8 @@ class NDTWordExporter:
                 _add_para(doc, para)
 
         def emit_remarks():
-            # ------------------------------------------------------------ 5.5
-            _add_heading(doc, '5.5 REMARKS', level=2)
+            # ------------------------------------------------------------ 5.4
+            _add_heading(doc, '5.4 FIELD REMARKS & OBSERVATIONS', level=2)
 
             lead_in = get_cms_text(project, 'remarks_preamble')[0]
             for para in cms_paragraphs(lead_in):
@@ -756,8 +756,9 @@ class NDTWordExporter:
             '4.1': emit_visual,
             '4.2': emit_methodology,   # 4.2 + 4.3 + 4.4, as one unit
             '5.0': emit_analysis,
-            '5.4': emit_discussion_of_results,
-            '5.5': emit_remarks,
+            '5.4': emit_remarks,
+            '5.5': emit_discussion_of_results,
+            'remarks': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
         }
