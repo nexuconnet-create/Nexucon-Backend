@@ -187,6 +187,8 @@ class Project(models.Model):
             "nobody entered."
         ),
     )
+    coordinate_system = models.CharField(max_length=50, blank=True, default='WGS84_DD', help_text="Coordinate format/system (e.g. WGS84_DD, UTM_31N_WGS84, etc.)")
+    corner_coordinates = models.JSONField(null=True, blank=True, default=dict, help_text="Four-corner boundary coordinates (e.g. 4 corner points with lat/lng/easting/northing/dms)")
 
     # 9. Monitoring Configuration
     enable_site_monitoring = models.BooleanField(default=False)

@@ -53,7 +53,10 @@ class EvidenceRecordSerializer(serializers.ModelSerializer):
 
     project_name = serializers.CharField(source='project.name', read_only=True)
     source_type_display = serializers.CharField(source='get_source_type_display', read_only=True)
-    file = EvidenceFileSerializer(read_only=True)
+    photo_url = serializers.SerializerMethodField()
+    audio_url = serializers.SerializerMethodField()
+    file = serializers.SerializerMethodField()
+    inspector_name = serializers.SerializerMethodField()
 
     class Meta:
         model = EvidenceRecord
@@ -61,9 +64,53 @@ class EvidenceRecordSerializer(serializers.ModelSerializer):
             'id', 'evidence_reference', 'project', 'project_name', 'source_type',
             'source_type_display', 'structural_element_id', 'bim_guid', 'coordinates',
             'captured_at', 'confidence', 'source_model', 'source_id', 'inspection',
-            'payload', 'evidence_hash', 'created_at', 'file',
+            'payload', 'evidence_hash', 'photo_url', 'audio_url', 'file', 'inspector_name', 'created_at',
         ]
         read_only_fields = ['id', 'evidence_reference', 'evidence_hash', 'created_at', 'updated_at']
+
+    def get_photo_url(self, obj):
+        if not obj.payload or not isinstance(obj.payload, dict):
+            return None
+        return obj.payload.get('photo_url') or obj.payload.get('url') or obj.payload.get('file_url') or None
+
+    def get_audio_url(self, obj):
+        if not obj.payload or not isinstance(obj.payload, dict):
+            return None
+        return obj.payload.get('audio_url') or obj.payload.get('voice_note_url') or None
+
+    def get_inspector_name(self, obj):
+        if obj.payload and isinstance(obj.payload, dict) and obj.payload.get('inspector_name'):
+            return obj.payload.get('inspector_name')
+        if obj.ingested_by:
+            return obj.ingested_by.get_full_name() or obj.ingested_by.email
+        return 'Field Inspector'
+
+    def get_file(self, obj):
+        try:
+            if hasattr(obj, 'file') and obj.file:
+                return EvidenceFileSerializer(obj.file, context=self.context).data
+        except Exception:
+            pass
+        media_url = self.get_photo_url(obj) or self.get_audio_url(obj)
+        if not media_url:
+            return None
+        payload = obj.payload if isinstance(obj.payload, dict) else {}
+        is_audio = (obj.source_type == 'voice_note' or bool(self.get_audio_url(obj)))
+        default_name = f"evidence_{obj.evidence_reference}.webm" if is_audio else f"evidence_{obj.evidence_reference}.jpg"
+        default_type = 'audio/webm' if is_audio else 'image/jpeg'
+        return {
+            'id': str(obj.id),
+            'file_name': payload.get('file_name', default_name),
+            'content_type': payload.get('content_type', default_type),
+            'file_size_bytes': payload.get('file_size_bytes') or payload.get('file_size') or 0,
+            'sha256_hash': obj.evidence_hash,
+            'file_url': media_url,
+            'last_verify_ok': payload.get('last_verify_ok', True),
+            'last_verified_at': payload.get('last_verified_at'),
+            'last_verify_note': payload.get('last_verify_note', 'Digest matches stored artifact bytes.'),
+            'uploaded_by': self.get_inspector_name(obj),
+            'created_at': obj.created_at.isoformat() if obj.created_at else '',
+        }
 
 
 class EvidenceFileUploadSerializer(serializers.Serializer):

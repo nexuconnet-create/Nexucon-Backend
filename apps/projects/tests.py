@@ -1,4 +1,5 @@
 from django.urls import reverse
+from django.test import override_settings
 from rest_framework.test import APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
@@ -8,15 +9,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
 
+
+@override_settings(SECURE_SSL_REDIRECT=False)
 class ProjectAPITests(APITestCase):
     def setUp(self):
-        # A superuser, because `ProjectViewSet.get_queryset` narrows an
-        # ordinary authenticated user to projects carrying their own email and
-        # hides the seeded mock projects from them. That narrowing is not what
-        # this test is about — it is about creating a project and reading it
-        # back — so it runs as the kind of caller the endpoint admits without
-        # qualification. The narrowing itself is covered by
-        # `ProjectVisibilityTestCase` below.
+        cache.clear()
         self.user = User.objects.create_superuser(
             username='projuser', email='projuser@test.com', password='testpass')
         refresh = RefreshToken.for_user(self.user)
@@ -34,6 +31,57 @@ class ProjectAPITests(APITestCase):
         response = self.client.get(create_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(any(p['id'] == proj_id for p in response.data))
+
+    def test_assignable_projects_security_and_filtering(self):
+        from apps.government.models import District, Role, Profile
+        # 1. Unauthenticated request must be rejected with 401
+        self.client.credentials()  # clear auth
+        res_anon = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(res_anon.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 2. Authenticated non-government user with no projects receives empty list
+        other_user = User.objects.create_user(username='other_contractor', email='other@test.com', password='testpass')
+        tok = str(RefreshToken.for_user(other_user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {tok}')
+
+        # Create diverse projects across districts and statuses
+        district_a = District.objects.create(name='Lekki Zonal District', code='LEK-ZONAL')
+        district_b = District.objects.create(name='Ikeja Zonal District', code='IKJ-ZONAL')
+
+        Project.objects.create(name='Lekki Active Project', status='ACTIVE', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Approved Project', status='APPROVED', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Draft Project', status='DRAFT', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Suspended Project', status='SUSPENDED', district=district_a, cold_storage=False)
+        Project.objects.create(name='Lekki Cold Project', status='ACTIVE', district=district_a, cold_storage=True)
+        Project.objects.create(name='Ikeja Active Project', status='ACTIVE', district=district_b, cold_storage=False)
+
+        # Unrelated user has no assigned projects -> receives []
+        res_other = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(res_other.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_other.data), 0)
+
+        # 3. Inspector in District A only receives ACTIVE/APPROVED projects in District A
+        inspector_role, _ = Role.objects.get_or_create(name='Inspector')
+        inspector_user = User.objects.create_user(username='inspector_lekki', email='insp_lekki@test.com', password='testpass')
+        Profile.objects.create(user=inspector_user, district=district_a, role=inspector_role)
+        tok_insp = str(RefreshToken.for_user(inspector_user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {tok_insp}')
+
+        res_insp = self.client.get('/api/v1/projects/assignable/')
+        self.assertEqual(res_insp.status_code, status.HTTP_200_OK)
+        names = [p['name'] for p in res_insp.data]
+
+        # Must include active and approved projects in District A
+        self.assertIn('Lekki Active Project', names)
+        self.assertIn('Lekki Approved Project', names)
+
+        # Must EXCLUDE inactive, draft, suspended, and cold-stored projects
+        self.assertNotIn('Lekki Draft Project', names)
+        self.assertNotIn('Lekki Suspended Project', names)
+        self.assertNotIn('Lekki Cold Project', names)
+
+        # Must EXCLUDE projects from District B
+        self.assertNotIn('Ikeja Active Project', names)
 
 
 # ======================================================================
@@ -119,6 +167,7 @@ from apps.digital_eye.models import PUNDITTest
 from apps.projects.tasks import cold_store_inactive_projects
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
 class ColdStoragePolicyTestCase(APITestCase):
     def setUp(self):
         # The ProjectViewSet list/retrieve actions are cache_page(15 min)
@@ -308,6 +357,83 @@ class AgencyHeadScopeTestCase(TestCase):
 
         self.assertFalse(user_is_agency_head(staff))
         self.assertEqual(scoped_projects(staff).count(), 0)
+
+
+class CoordinateConversionTestCase(APITestCase):
+    """Tests for 4-corner coordinate transformation, center point, and footprint area calculation."""
+
+    def test_convert_four_corners_dd(self):
+        url = '/api/v1/projects/convert-coordinates/'
+        data = {
+            'system': 'WGS84_DD',
+            'corners': [
+                {'id': 1, 'label': 'Corner 1 (NW)', 'lat': 6.5244, 'lng': 3.3792},
+                {'id': 2, 'label': 'Corner 2 (NE)', 'lat': 6.5244, 'lng': 3.3798},
+                {'id': 3, 'label': 'Corner 3 (SE)', 'lat': 6.5238, 'lng': 3.3798},
+                {'id': 4, 'label': 'Corner 4 (SW)', 'lat': 6.5238, 'lng': 3.3792},
+            ]
+        }
+        res = self.client.post(url, data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('center', res.data)
+        self.assertAlmostEqual(res.data['center']['lat'], 6.5241, places=3)
+        self.assertAlmostEqual(res.data['center']['lng'], 3.3795, places=3)
+        self.assertIn('footprintAreaSqm', res.data)
+        self.assertGreater(res.data['footprintAreaSqm'], 0)
+        self.assertIn('googleMapsUrl', res.data)
+        self.assertEqual(len(res.data['corners']), 4)
+        self.assertIn('formattedLatDms', res.data['corners'][0])
+
+    def test_convert_four_corners_utm_minna(self):
+        url = '/api/v1/projects/convert-coordinates/'
+        data = {
+            'system': 'UTM_31N_MINNA',
+            'corners': [
+                {'id': 1, 'label': 'Corner 1', 'easting': 542000, 'northing': 721000},
+                {'id': 2, 'label': 'Corner 2', 'easting': 542050, 'northing': 721000},
+                {'id': 3, 'label': 'Corner 3', 'easting': 542050, 'northing': 720950},
+                {'id': 4, 'label': 'Corner 4', 'easting': 542000, 'northing': 720950},
+            ]
+        }
+        res = self.client.post(url, data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('center', res.data)
+        self.assertIn('footprintAreaSqm', res.data)
+        self.assertAlmostEqual(res.data['footprintAreaSqm'], 2500.0, places=0)
+
+    def test_create_project_with_corner_coordinates(self):
+        user = User.objects.create_superuser(username='coordadmin', email='coordadmin@test.com', password='password123')
+        token = str(RefreshToken.for_user(user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        payload = {
+            'name': 'Marina Harbour Tower',
+            'coordinate_system': 'UTM_31N_WGS84',
+            'latitude': 6.4532,
+            'longitude': 3.3958,
+            'corner_coordinates': {
+                'corners': [
+                    {'id': 1, 'lat': 6.4535, 'lng': 3.3955},
+                    {'id': 2, 'lat': 6.4535, 'lng': 3.3961},
+                    {'id': 3, 'lat': 6.4529, 'lng': 3.3961},
+                    {'id': 4, 'lat': 6.4529, 'lng': 3.3955},
+                ],
+                'footprintAreaSqm': 4420.5
+            },
+            'professionals': [
+                {
+                    'name': 'Engr. Babatunde Adeleke',
+                    'role': 'Others',
+                    'organization': 'Apex GeoTech Consultants',
+                    'email': 'adeleke@apexgeotech.ng'
+                }
+            ]
+        }
+        res = self.client.post('/api/v1/projects/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['coordinate_system'], 'UTM_31N_WGS84')
+        self.assertEqual(res.data['corner_coordinates']['footprintAreaSqm'], 4420.5)
+        self.assertEqual(res.data['professionals'][0]['role'], 'Others')
 
 
 # ======================================================================

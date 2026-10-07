@@ -181,7 +181,12 @@ class ApplicationViewSet(viewsets.ModelViewSet):
                 'data': ApplicationSerializer(updated).data
             })
         except ValidationError as e:
-            return Response({'success': False, 'message': str(e.message if hasattr(e, 'message') else e)}, status=status.HTTP_400_BAD_REQUEST)
+            err_msg = e.message if hasattr(e, 'message') else str(e)
+            if isinstance(err_msg, (list, tuple)) and err_msg:
+                err_msg = str(err_msg[0])
+            elif isinstance(err_msg, str):
+                err_msg = err_msg.strip("[]'\"")
+            return Response({'success': False, 'message': str(err_msg)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

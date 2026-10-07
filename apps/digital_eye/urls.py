@@ -11,6 +11,10 @@ router.register(r'files', views.SensorDataFileViewSet, basename='sensor-file')
 router.register(r'gpr-surveys', views.GPRSurveyViewSet, basename='gpr-survey')
 router.register(r'gpr-anomalies', views.GPRAnomalyViewSet, basename='gpr-anomaly')
 router.register(r'pundit-tests', views.PUNDITTestViewSet, basename='pundit-test')
+router.register(r'pundit-batches', views.PunditScanBatchViewSet, basename='pundit-batch')
+router.register(r'calibration-profiles', views.CalibrationProfileViewSet, basename='calibration-profile')
+router.register(r'visual-observations', views.VisualObservationViewSet, basename='visual-observation')
+router.register(r'site-attendance', views.SiteAttendanceRecordViewSet, basename='site-attendance')
 router.register(r'nexucon-link/curves', views.StrengthCurveViewSet, basename='strength-curve')
 # Ground-truth core results (path-to-95% Layer 3): lab-crushed cores whose
 # strength pairs with the in-situ UPV test at the same location.

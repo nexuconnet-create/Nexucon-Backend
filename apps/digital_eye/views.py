@@ -16,7 +16,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError as InvalidQueryParam
 from rest_framework.filters import SearchFilter
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -29,21 +29,23 @@ from .adapters import GNSSProjection, GPRAdapter, PUNDITAdapter
 from .bim_preview import build_preview_geometry
 from .models import (
     AIAnalysisRecord, BIMElementMapping, BIMModelGeometry, BIMStructuralElement,
-    CoreSample, DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding, EvidenceSpatialPoint,
-    FieldDevice, GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark,
-    GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
-    PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
-    StrengthCurve, TrimbleConnection, TrimbleProject,
+    CalibrationProfile, CoreSample, DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding,
+    EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan, GPRSurvey,
+    GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
+    PunditScanBatch, PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
+    SiteAttendanceRecord, StrengthCurve, TrimbleConnection, TrimbleProject,
+    VisualObservation, VisualObservationPhoto,
 )
 from .serializers import (
     AIAnalysisRecordSerializer, BIMElementMappingSerializer, BIMStructuralElementSerializer,
-    CoreSampleSerializer, DeviceConnectionLogSerializer, DeviceReportRecordSerializer, DigitalEyeFindingSerializer,
-    EvidenceSpatialPointSerializer, FieldDeviceSerializer, GPRAnomalySerializer,
-    GPRScanSerializer, GPRSurveySerializer, GnssBenchmarkSerializer,
-    GnssBoundaryPointSerializer, GnssSurveySerializer,
-    LiveStreamSerializer, PUNDITTestSerializer, PunditTestSerializer,
-    ProcessingQueueJobSerializer, SensorDataFileSerializer,
+    CalibrationProfileSerializer, CoreSampleSerializer, DeviceConnectionLogSerializer, DeviceReportRecordSerializer,
+    DigitalEyeFindingSerializer, EvidenceSpatialPointSerializer, FieldDeviceSerializer,
+    GPRAnomalySerializer, GPRScanSerializer, GPRSurveySerializer, GnssBenchmarkSerializer,
+    GnssBoundaryPointSerializer, GnssSurveySerializer, LiveStreamSerializer,
+    PunditScanBatchSerializer, PUNDITTestSerializer, PunditTestSerializer,
+    ProcessingQueueJobSerializer, SensorDataFileSerializer, SiteAttendanceRecordSerializer,
     StrengthCurveSerializer, TrimbleConnectionSerializer, TrimbleProjectSerializer,
+    VisualObservationPhotoSerializer, VisualObservationSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -579,9 +581,23 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                             'date_to', 'operator', 'curve', 'search')
 
     def perform_create(self, serializer):
-        test = serializer.save(created_by=self.request.user, operator=self.request.user)
+        # Store test in RAW state under assigned scan batch. DO NOT auto-trigger analysis.
+        batch_id = self.request.data.get('batch') or self.request.data.get('batch_id')
+        batch = None
+        if batch_id:
+            batch = PunditScanBatch.objects.filter(pk=batch_id).first()
+        test = serializer.save(
+            created_by=self.request.user,
+            operator=self.request.user,
+            batch=batch or serializer.validated_data.get('batch'),
+        )
+        if test.batch:
+            test.batch.element_count = test.batch.tests.count()
+            test.batch.save(update_fields=['element_count', 'updated_at'])
         _record_audit(self.request.user, 'digital_eye.pundit_test.create',
-                      'PUNDITTest', test.id, {'test_reference': test.test_reference})
+                      'PUNDITTest', test.id,
+                      {'test_reference': test.test_reference,
+                       'batch_id': str(test.batch.id) if test.batch else None})
 
     MEASUREMENT_FIELDS = (
         'test_type', 'path_length_mm', 'pulse_time_us',
@@ -597,8 +613,8 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                       'PUNDITTest', test.id,
                       {'test_reference': test.test_reference,
                        'corrected_fields': corrected})
-        if corrected:
-            PUNDITAdapter.analyze(test)
+        # Note: Do NOT auto-trigger PUNDITAdapter.analyze(test) on save/update.
+        # Analysis must only be initiated intentionally on an isolated batch.
 
     @action(detail=True, methods=['post'])
     def analyze(self, request, pk=None):
@@ -642,12 +658,16 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='analyze_project')
     def analyze_project(self, request):
         """
-        Run the PUNDIT analysis across a whole project (review meeting D1 —
-        the AI Analysis page's "Run AI Analysis"):
-        per-test deterministic passes, then ONE project-level LLM narrative
-        over the aggregate fact pack. Measured inputs only; on provider
-        failure the deterministic record is still stored.
-        Body: {"project": "<project_id>"} (or ?project= query param).
+        Run PUNDIT analysis across an isolated scan batch or whole project.
+        Body:
+          {
+            "project": "<project_id>",
+            "batch_id": "<batch_id>",
+            "calibration_id": "<calibration_profile_id>",
+            "curve_type": "exponential",
+            "params": {"a": 1.20, "b": 0.85, "c": 0.0},
+            "design_strength_mpa": 25.0
+          }
         """
         project_id = request.data.get('project') or request.query_params.get('project')
         if not project_id:
@@ -657,25 +677,64 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+
+        batch_id = request.data.get('batch_id') or request.data.get('batch') or request.query_params.get('batch_id')
+        batch = None
+        if batch_id:
+            batch = PunditScanBatch.objects.filter(pk=batch_id, project=project).first()
+            if not batch:
+                return Response({'detail': f'Scan batch {batch_id} not found for this project.'},
+                                status=status.HTTP_404_NOT_FOUND)
+
         tests = self.get_queryset().filter(project=project)
+        if batch:
+            tests = tests.filter(batch=batch)
+
         if not tests.exists():
-            return Response({'detail': 'No PUNDIT tests recorded for this project.'},
+            batch_msg = f" for batch '{batch.folder_name}'" if batch else ""
+            return Response({'detail': f'No PUNDIT tests recorded{batch_msg}.'},
                             status=status.HTTP_400_BAD_REQUEST)
+
+        # Calibration parameters (default strictly to Exponential)
+        calibration_id = request.data.get('calibration_id')
+        calibration = None
+        if calibration_id:
+            calibration = CalibrationProfile.objects.filter(pk=calibration_id, project=project).first()
+
+        curve_type = request.data.get('curve_type') or (calibration.curve_type if calibration else 'exponential')
+        params = request.data.get('params') or (calibration.params if calibration else {'a': 1.20, 'b': 0.85, 'c': 0.0})
+        design_strength_mpa = request.data.get('design_strength_mpa') or (calibration.design_strength_mpa if calibration else 25.0)
+
+        curve_profile = {
+            'curve_type': curve_type,
+            'params': params,
+            'design_strength_mpa': float(design_strength_mpa),
+            'calibration_id': str(calibration.id) if calibration else None,
+        }
 
         records = []
         for test in tests:
-            # Deterministic pass only — the ONE project-level narrative below
-            # is the single LLM call (N tests must not fire N LLM requests;
-            # provider rate limits 504'd the endpoint when they did).
             record = PUNDITAdapter.analyze(test, use_llm=False)
             records.append(record)
-        project_record = PUNDITAdapter.analyze_project(project, request.user)
+
+        project_record = PUNDITAdapter.analyze_project(
+            project, request.user, batch=batch, curve_profile=curve_profile
+        )
+
+        if batch:
+            batch.status = 'ANALYSIS_COMPLETE'
+            batch.save(update_fields=['status', 'updated_at'])
+
         _record_audit(request.user, 'digital_eye.pundit_test.analyze_project',
                       'Project', project.id,
                       {'tests_analysed': len(records),
+                       'batch_id': str(batch.id) if batch else None,
                        'analysis_id': str(project_record.id)})
+
         return Response({
             'project': str(project.id),
+            'batch_id': str(batch.id) if batch else None,
+            'batch_folder': batch.folder_name if batch else None,
             'tests_analysed': len(records),
             'analysis_id': str(project_record.id),
             'risk_level': project_record.risk_level,
@@ -685,6 +744,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'reasoning_log': project_record.reasoning_log,
             'model_provider': project_record.model_provider,
             'model_version': project_record.model_version,
+            'curve_profile': curve_profile,
         })
 
     @action(detail=False, methods=['get'], url_path='export_results')
@@ -2784,6 +2844,233 @@ class PunditAnalysisCommentView(APIView):
 #
 # Dashboard counters must be derived from real rows at the call site, and an
 # empty project must read as empty.
+
+
+# ======================================================================
+# Pundit Scan Batches, Calibration, Visual Observations & Site Attendance
+# ======================================================================
+
+class PunditScanBatchViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PunditScanBatchSerializer
+    filter_backends = [SearchFilter]
+    search_fields = ['folder_name', 'batch_reference', 'inspector_name', 'floor', 'notes']
+
+    def get_queryset(self):
+        qs = PunditScanBatch.objects.filter(project__in=scoped_projects(self.request.user))
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if not project:
+            project_id = self.request.data.get('project')
+            if project_id:
+                project = scoped_projects(self.request.user).filter(pk=project_id).first()
+        batch = serializer.save(
+            project=project,
+            inspector=self.request.user if not serializer.validated_data.get('inspector') else serializer.validated_data['inspector'],
+            inspector_name=serializer.validated_data.get('inspector_name') or self.request.user.get_full_name() or self.request.user.email
+        )
+        _record_audit(self.request.user, 'digital_eye.pundit_batch.create',
+                      'PunditScanBatch', batch.id, {'batch_reference': batch.batch_reference})
+
+    @action(detail=True, methods=['post'])
+    def calibrate(self, request, pk=None):
+        """
+        Pre-analysis calibration endpoint: sets up the project/batch-specific
+        UPV-to-fcu correlation model (exponential default).
+        """
+        batch = self.get_object()
+        curve_type = request.data.get('curve_type', 'exponential')
+        params = request.data.get('params', {'a': 1.20, 'b': 0.85, 'c': 0.0})
+        design_strength_mpa = float(request.data.get('design_strength_mpa', 25.0))
+        cube_points = request.data.get('cube_correlation_points') or request.data.get('cube_correlation_data', [])
+        notes = request.data.get('notes', '')
+
+        # Deactivate previous profiles for this batch
+        CalibrationProfile.objects.filter(batch=batch).update(is_active=False)
+
+        profile = CalibrationProfile.objects.create(
+            project=batch.project,
+            batch=batch,
+            curve_type=curve_type,
+            params=params,
+            design_strength_mpa=design_strength_mpa,
+            calibrated_by=request.user,
+            cube_correlation_data=cube_points,
+            notes=notes,
+            is_active=True,
+        )
+
+        batch.status = 'CALIBRATED'
+        batch.save(update_fields=['status', 'updated_at'])
+
+        _record_audit(request.user, 'digital_eye.pundit_batch.calibrate',
+                      'PunditScanBatch', batch.id,
+                      {'curve_type': curve_type, 'calibration_id': str(profile.id)})
+
+        serializer = CalibrationProfileSerializer(profile, context={'request': request})
+        return Response({
+            'message': f"Scan batch '{batch.folder_name}' successfully calibrated with {profile.get_curve_type_display()}.",
+            'batch_id': str(batch.id),
+            'batch_status': batch.status,
+            'calibration': serializer.data,
+        })
+
+
+class CalibrationProfileViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = CalibrationProfileSerializer
+
+    def get_queryset(self):
+        qs = CalibrationProfile.objects.filter(project__in=scoped_projects(self.request.user))
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        batch_id = self.request.query_params.get('batch')
+        if batch_id:
+            qs = qs.filter(batch_id=batch_id)
+        return qs
+
+    def perform_create(self, serializer):
+        profile = serializer.save(calibrated_by=self.request.user)
+        if profile.batch:
+            profile.batch.status = 'CALIBRATED'
+            profile.batch.save(update_fields=['status', 'updated_at'])
+        _record_audit(self.request.user, 'digital_eye.calibration.create',
+                      'CalibrationProfile', profile.id, {'curve_type': profile.curve_type})
+
+
+class VisualObservationViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    serializer_class = VisualObservationSerializer
+    filter_backends = [SearchFilter]
+    search_fields = ['structural_element', 'description', 'grid_location', 'category']
+
+    def get_queryset(self):
+        qs = VisualObservation.objects.filter(project__in=scoped_projects(self.request.user)).prefetch_related('photos')
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        batch_id = self.request.query_params.get('batch')
+        if batch_id:
+            qs = qs.filter(batch_id=batch_id)
+        inspection_id = self.request.query_params.get('inspection')
+        if inspection_id:
+            qs = qs.filter(inspection_id=inspection_id)
+        severity = self.request.query_params.get('severity')
+        if severity:
+            qs = qs.filter(severity=severity)
+        return qs
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if not project:
+            project_id = self.request.data.get('project')
+            if project_id:
+                project = scoped_projects(self.request.user).filter(pk=project_id).first()
+        batch_id = self.request.data.get('batch')
+        batch = PunditScanBatch.objects.filter(pk=batch_id).first() if batch_id else None
+        obs = serializer.save(
+            project=project,
+            batch=batch or serializer.validated_data.get('batch'),
+            created_by=self.request.user,
+            inspector_name=serializer.validated_data.get('inspector_name') or self.request.user.get_full_name() or self.request.user.email
+        )
+        uploaded_photos = self.request.FILES.getlist('photos')
+        if not uploaded_photos:
+            single = self.request.FILES.get('photo') or self.request.FILES.get('file')
+            if single:
+                uploaded_photos = [single]
+
+        for photo_file in uploaded_photos:
+            sha = hashlib.sha256()
+            for chunk in photo_file.chunks():
+                sha.update(chunk)
+            checksum = sha.hexdigest()
+            photo_obj = VisualObservationPhoto.objects.create(
+                observation=obs,
+                photo=photo_file,
+                caption=self.request.data.get('caption', ''),
+                sha256_checksum=checksum,
+                file_size_bytes=photo_file.size,
+            )
+            # Synchronize to Unified Evidence Registry
+            try:
+                from apps.evidence.models import EvidenceRecord
+                if obs.project:
+                    EvidenceRecord.objects.create(
+                        project=obs.project,
+                        source_type='photo',
+                        structural_element_id=obs.structural_element or '',
+                        coordinates={'grid': obs.grid_location, 'floor': obs.floor} if (obs.grid_location or obs.floor) else None,
+                        captured_at=obs.created_at or timezone.now(),
+                        confidence=1.0,
+                        source_model='VisualObservationPhoto',
+                        source_id=str(photo_obj.id),
+                        evidence_hash=checksum,
+                        payload={
+                            'photo_url': photo_obj.photo.url if photo_obj.photo else '',
+                            'caption': photo_obj.caption,
+                            'description': obs.description,
+                            'category': obs.category,
+                            'severity': obs.severity,
+                            'structural_element': obs.structural_element,
+                            'grid_location': obs.grid_location,
+                            'floor': obs.floor,
+                            'inspector_name': obs.inspector_name,
+                            'batch_id': str(obs.batch_id) if obs.batch_id else None,
+                            'batch_name': obs.batch.batch_name if obs.batch else None,
+                        },
+                        ingested_by=self.request.user,
+                    )
+            except Exception as e:
+                logger.warning("Failed to mirror VisualObservationPhoto to EvidenceRecord: %s", e)
+
+        _record_audit(self.request.user, 'digital_eye.visual_observation.create',
+                      'VisualObservation', obs.id, {'structural_element': obs.structural_element})
+
+
+class SiteAttendanceRecordViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SiteAttendanceRecordSerializer
+    filter_backends = [SearchFilter]
+    search_fields = ['attendee_name', 'organization', 'role']
+
+    def get_queryset(self):
+        qs = SiteAttendanceRecord.objects.filter(project__in=scoped_projects(self.request.user))
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        batch_id = self.request.query_params.get('batch')
+        if batch_id:
+            qs = qs.filter(batch_id=batch_id)
+        inspection_id = self.request.query_params.get('inspection')
+        if inspection_id:
+            qs = qs.filter(inspection_id=inspection_id)
+        return qs
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if not project:
+            project_id = self.request.data.get('project')
+            if project_id:
+                project = scoped_projects(self.request.user).filter(pk=project_id).first()
+        batch_id = self.request.data.get('batch')
+        batch = PunditScanBatch.objects.filter(pk=batch_id).first() if batch_id else None
+        rec = serializer.save(
+            project=project,
+            batch=batch or serializer.validated_data.get('batch'),
+        )
+        _record_audit(self.request.user, 'digital_eye.site_attendance.create',
+                      'SiteAttendanceRecord', rec.id, {'attendee_name': rec.attendee_name})
 
 
 class PunditBatchesView(APIView):

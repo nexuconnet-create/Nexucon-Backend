@@ -23,6 +23,7 @@ import math
 import re
 from datetime import datetime
 
+from django.db.models import Q
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -470,22 +471,53 @@ class PUNDITAdapter:
         return None
 
     # ------------------------------------------------ project-level narrative
-    @classmethod
-    def analyze_project(cls, project, requested_by=None, peer_review=None):
+    @staticmethod
+    def compute_profile_ecs(velocity_km_s, curve_profile):
         """
-        One project-level PUNDIT analysis (review meeting D1): aggregates the
-        per-element verdicts of every PUNDITTest on the project, writes the
-        deterministic project summary, and asks the configured LLM for a
-        project narrative from the same real numbers. Provider failure keeps
-        the deterministic record. Returns the AIAnalysisRecord.
+        Compute estimated compressive strength (MPa) using project-calibrated
+        correlation parameters. Defaults strictly to exponential model:
+            f_cu = a * exp(b * V) + c
+        """
+        if velocity_km_s is None or velocity_km_s <= 0:
+            return None
+        ctype = (curve_profile or {}).get('curve_type', 'exponential')
+        params = (curve_profile or {}).get('params') or {'a': 1.20, 'b': 0.85, 'c': 0.0}
+        try:
+            if ctype == 'exponential':
+                a = float(params.get('a', 1.20))
+                b = float(params.get('b', 0.85))
+                c = float(params.get('c', 0.0))
+                # Domain normalization:
+                # If b < 0.01 (e.g. 0.00085), it represents per m/s -> b * (V_km/s * 1000)
+                # If b >= 0.01 (e.g. 0.85), it represents per km/s -> b * V_km/s
+                exp_arg = b * (velocity_km_s * 1000.0) if b < 0.01 else b * velocity_km_s
+                val = a * math.exp(exp_arg) + c
+                return round(val, 2) if math.isfinite(val) else None
+            elif ctype == 'linear':
+                m_raw = float(params.get('m', 8.961))
+                m = m_raw if m_raw > 1.0 else (m_raw * 1000.0)
+                c = float(params.get('c', -7.97))
+                val = m * velocity_km_s + c
+                return round(val, 2) if math.isfinite(val) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+        return None
 
-        7 Sep 2026 meeting: crack-depth findings lead the narrative (before
-        the velocity parameter tests), the story is structured floor-by-floor
-        and element-by-element with grid locations, and the stored confidence
-        is an evidence-based score (never a fixed marketing number).
+    # ------------------------------------------------ project-level narrative
+    @classmethod
+    def analyze_project(cls, project, requested_by=None, peer_review=None, batch=None, curve_profile=None):
+        """
+        One project-level PUNDIT analysis (review meeting D1 / 30 Sep overhaul):
+        CRITICAL OVERHAUL:
+          1. Scopes tests strictly to `batch` if specified, preventing 59 vs 48 data clashes.
+          2. Calculates compressive strength using the calibrated non-linear exponential model.
+          3. Synthesises visual observations (honeycombing, cracking, etc.) and photos.
+          4. Integrates site attendance log into the AI narrative fact pack.
         """
         from apps.evidence.models import AIAnalysisRecord
-        from apps.digital_eye.models import PUNDITTest  # noqa: F401 — imported late to avoid cycles
+        from apps.digital_eye.models import (  # noqa: F401
+            PUNDITTest, SiteAttendanceRecord, VisualObservation,
+        )
 
         if peer_review is None:
             prev_record = (AIAnalysisRecord.objects
@@ -494,9 +526,26 @@ class PUNDITAdapter:
             if prev_record and hasattr(prev_record, 'pundit_review'):
                 peer_review = prev_record.pundit_review
 
-        tests = list(PUNDITTest.objects.filter(project=project))
+        queryset = PUNDITTest.objects.filter(project=project)
+        if batch is not None:
+            queryset = queryset.filter(batch=batch)
 
-        steps = [f"Project PUNDIT roll-up over {len(tests)} recorded element(s)."]
+        tests = list(queryset)
+
+        batch_name = getattr(batch, 'folder_name', 'General Project Scan') if batch else None
+        if batch_name:
+            steps = [
+                f"PUNDIT roll-up over {len(tests)} verified element(s) "
+                f"in folder '{batch_name}'."
+            ]
+        else:
+            steps = [f"Project PUNDIT roll-up over {len(tests)} recorded element(s)."]
+
+        if curve_profile:
+            steps.append(
+                f"Calibrated correlation model applied: {curve_profile.get('curve_type', 'exponential')} "
+                f"(params: {curve_profile.get('params')}, target: {curve_profile.get('design_strength_mpa', 25.0)} MPa)."
+            )
         if peer_review and getattr(peer_review, 'decision', None):
             rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
                         if peer_review.reviewed_by else 'Principal Engineer')
@@ -511,9 +560,6 @@ class PUNDITAdapter:
         for test in tests:
             rows = test.reading_rows()
             velocity = test.element_mean_velocity_km_s()
-            # Grade from the real measurements, not the stored value — the
-            # stored grade may be stale if analyze() has not run since the
-            # last reading edit.
             grade = cls.grade_quality(velocity) if velocity is not None \
                 else (test.quality_grade or 'pending')
             risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
@@ -537,13 +583,24 @@ class PUNDITAdapter:
                                if test.readings.exists() else test.crack_depth_mm)
             else:
                 crack_depth = None
-            mean_ecs, ecs_snapshot = (
-                _ecs_with_provenance(
-                    velocity, project=project,
-                    rebound_number=test.rebound_number,
-                    temperature_c=test.surface_temperature_c,
-                    n_points=max(1, len(point_velocities)))
-                if velocity is not None else (None, None))
+
+            # Compressive strength from calibrated model if provided, else active curve
+            mean_ecs = None
+            ecs_snapshot = None
+            if velocity is not None:
+                if curve_profile:
+                    mean_ecs = cls.compute_profile_ecs(velocity, curve_profile)
+                    ecs_snapshot = {
+                        'curve_type': curve_profile.get('curve_type', 'exponential'),
+                        'formula_params': curve_profile.get('params', {}),
+                        'provenance_source': f"Calibrated {curve_profile.get('curve_type', 'exponential')} model",
+                    }
+                else:
+                    mean_ecs, ecs_snapshot = _ecs_with_provenance(
+                        velocity, project=project,
+                        rebound_number=test.rebound_number,
+                        temperature_c=test.surface_temperature_c,
+                        n_points=max(1, len(point_velocities)))
             element_summaries.append({
                 'element': test.structural_element or None,
                 'floor': test.floor or None,
@@ -557,15 +614,10 @@ class PUNDITAdapter:
                 else round(velocity * 1000, 2),
                 'point_spread_pct': spread_pct,
                 'mean_ecs_n_mm2': None if mean_ecs is None else round(mean_ecs, 1),
-                # Provenance of the figure above: the standard-error policy
-                # that moved it, so the reasoning trace can state it.
                 'se_adjustment': (ecs_snapshot or {}).get('se_adjustment'),
                 'grade': grade,
                 'crack_depth_mm': None if crack_depth is None
                 else round(crack_depth, 1),
-                # 8 Sep meeting: the AI must weigh the field context —
-                # operator notes, weather at test time and attached photos —
-                # not just the figures.
                 'field_notes': test.notes or None,
                 'weather_condition': test.weather_condition or None,
                 'attachments': [
@@ -583,13 +635,14 @@ class PUNDITAdapter:
         good = sum(1 for g in graded if g in ('excellent', 'good'))
         poor = len(graded) - good
         deterministic_observations = []
+        scope_desc = f"in folder '{batch_name}'" if batch_name else "for this project"
         if graded:
             deterministic_observations.append(
-                f"{len(tests)} element(s) tested: {good} graded good or better, "
+                f"{len(tests)} element(s) tested {scope_desc}: {good} graded good or better, "
                 f"{poor} below the good band (BS 1881-203)."
             )
         else:
-            deterministic_observations.append("No graded PUNDIT results for this project yet.")
+            deterministic_observations.append(f"No graded PUNDIT results {scope_desc} yet.")
         for s in unverified:
             deterministic_observations.append(
                 f"Element {s['element'] or 'unspecified'}"
@@ -598,7 +651,18 @@ class PUNDITAdapter:
                 + cls.implausibility_note((s['mean_velocity_m_s'] or 0) / 1000.0)
             )
 
-        # ---- Fact pack: crack findings FIRST (only if present), then floors -> elements
+        # ---- Gather Visual Observations & Site Attendance Logs
+        visual_obs_qs = VisualObservation.objects.filter(project=project)
+        if batch is not None:
+            visual_obs_qs = visual_obs_qs.filter(Q(batch=batch) | Q(batch__isnull=True))
+        visual_observations = list(visual_obs_qs[:25])
+
+        attendance_qs = SiteAttendanceRecord.objects.filter(project=project)
+        if batch is not None:
+            attendance_qs = attendance_qs.filter(Q(batch=batch) | Q(batch__isnull=True))
+        site_witnesses = list(attendance_qs[:25])
+
+        # ---- Fact pack: crack findings FIRST, then visual defects, attendance, floors -> elements
         crack_elements = [
             {k: v for k, v in s.items() if v is not None}
             for s in element_summaries
@@ -608,11 +672,58 @@ class PUNDITAdapter:
         floors = {}
         for s in element_summaries:
             if s['test_type'] == 'crack_depth' and not s['point_velocities_m_s']:
-                continue  # crack-only stations are summarised above
+                continue
             floors.setdefault(s['floor'] or 'Unspecified level', []).append(
                 {k: v for k, v in s.items() if v is not None})
+
         fact_pack = {
             'project': project.name,
+            'scan_batch': {
+                'folder_name': batch_name or 'General Project Scan',
+                'batch_reference': getattr(batch, 'batch_reference', 'N/A') if batch else 'N/A',
+                'verified_element_count': len(tests),
+                'floor': getattr(batch, 'floor', 'Unspecified level') if batch else 'Unspecified level',
+            },
+            'correlation_model': {
+                'curve_type': curve_profile.get('curve_type', 'exponential') if curve_profile else 'Exponential (BS 1881-203)',
+                'formula': (
+                    f"f_cu = {curve_profile.get('params', {}).get('a', 1.20)} * exp({curve_profile.get('params', {}).get('b', 0.85)} * V_km/s) + {curve_profile.get('params', {}).get('c', 0.0)}"
+                    if curve_profile else "f_cu = 1.20 * exp(0.85 * V_km/s)"
+                ),
+                'target_strength_mpa': curve_profile.get('design_strength_mpa', 25.0) if curve_profile else 25.0,
+            },
+            'ndt_results_summary': {
+                'total_elements': len(tests),
+                'good_strength_count': good,
+                'below_good_count': poor,
+                'mean_velocity_ms': round(
+                    (sum(v for v in [t.element_mean_velocity_km_s() for t in tests] if v is not None)
+                     / max(1, len([v for v in [t.element_mean_velocity_km_s() for t in tests] if v is not None])))
+                    * 1000.0, 1
+                ) if any(t.element_mean_velocity_km_s() for t in tests) else None,
+            },
+            'crack_depth_findings': crack_elements,
+            'visual_observations': [
+                {
+                    'element': obs.structural_element,
+                    'grid_location': obs.grid_location,
+                    'floor': obs.floor,
+                    'category': obs.get_category_display(),
+                    'severity': obs.severity,
+                    'description': obs.description,
+                    'photo_count': obs.photos.count(),
+                }
+                for obs in visual_observations
+            ],
+            'site_witnesses': [
+                {
+                    'name': att.attendee_name,
+                    'organization': att.organization,
+                    'role': att.get_role_display(),
+                    'signed_off': att.signed_off,
+                }
+                for att in site_witnesses
+            ],
             'floors': [
                 {'floor': name,
                  'elements': [{k: v for k, v in e.items()
@@ -623,6 +734,7 @@ class PUNDITAdapter:
             'velocity_units': 'm/s',
             'counts': {'graded': len(graded), 'good_or_better': good, 'below_good': poor},
         }
+
         if has_crack_findings:
             fact_pack['crack_depth_findings'] = crack_elements
         if unverified:
@@ -699,26 +811,21 @@ class PUNDITAdapter:
                 )
             prompt_text = (
                 "You are the Nexucon PUNDIT ultrasonic NDT analysis layer, "
-                "writing for a structural engineering audience. Based ONLY on "
-                "the following real field measurements (velocities in m/s): "
+                "writing an authoritative executive summary for structural engineers, project directors, and regulatory authorities (such as LASBCA). "
+                "Based ONLY on the following real field measurements (velocities in m/s), visual defect observations, and site attendance log: "
                 f"{crack_instruction}"
-                "(2) then analyse the pulse velocity results floor-by-floor and element-by-element, "
-                "referencing each element's grid location where given; "
-                "(3) analyse the dataset COLLECTIVELY: group elements that "
+                "(2) State the exact scope and verified element count tested in this isolated scan folder/batch (e.g. 48 elements); "
+                "(3) then analyse the pulse velocity results floor-by-floor and element-by-element, "
+                "referencing each element's grid location where given; directly correlate visual defects (such as honeycombing, voiding, spalling, exposed rebar) with low ultrasonic velocity zones (V < 3,000 m/s); "
+                "(4) analyse the dataset COLLECTIVELY: group elements that "
                 "show similar behaviour (same floor, same member type, or "
                 "similar velocities/grades) and give ONE collective judgment "
                 "per group rather than repeating near-identical verdicts "
-                "element by element; (4) where field_notes, weather_condition "
-                "or attachment descriptions are present, weigh them as "
-                "contributing evidence — e.g. surface moisture or hot weather "
-                "can depress or inflate pulse velocities, and operator notes "
-                "may explain an outlier; (5) for each weak or variable "
-                "element or group state the technical impact, a solution, and "
-                "a recommendation; (6) cite the relevant codes where "
-                "applicable (BS 1881-203, BS EN 12504-4, ASTM C597, "
-                "ACI 228.2R). Do not invent facts, numbers, or events that "
-                "are not present in the data. Do NOT mention or infer unmeasured test types or excesses. "
-                "(7) Every entry under unverified_measurements is a reading "
+                "element by element; evaluate compressive strength against the calibrated non-linear exponential model (f_cu = a * exp(b * V) + c) relative to statutory design target strength (25 MPa); "
+                "(5) where field_notes, weather_condition or attachment descriptions are present, weigh them as contributing evidence; "
+                "(6) explicitly list the site and client representatives who witnessed and signed off on the test; "
+                "(7) for each weak or variable element or group state the technical impact, a remedial solution (e.g. pressure grouting, structural jacketing), and a recommendation citing relevant codes (BS 1881-203, BS EN 12504-4, BS EN 13791, ASTM C597, ACI 228.2R); "
+                "(8) Every entry under unverified_measurements is a reading "
                 "that falls outside the range physically possible for "
                 "concrete and has deliberately NOT been graded. Treat it as "
                 "a probable instrumentation, path-length or unit error: say "
@@ -726,8 +833,8 @@ class PUNDITAdapter:
                 "unit to be re-checked. Do NOT describe an unverified "
                 "element as poor-quality or defective concrete, do not give "
                 "it a severity, and do not include it in any strength or "
-                f"quality verdict. {peer_review_instruction}Return JSON: "
-                '{"observations": ["..."]}\n\n'
+                f"quality verdict. {peer_review_instruction}Do not invent facts, numbers, or events that "
+                'are not present in the data. Return JSON: {"observations": ["..."]}\n\n'
                 f"Measured data: {fact_pack}"
             )
             # Run all available models simultaneously with complete fault isolation
@@ -796,7 +903,7 @@ class PUNDITAdapter:
                 steps.append(f"[ISOLATION] Engine '{prov}' quota limit reached ({err}) - isolated safely without halting analysis.")
             steps.append(
                 f"Project narrative synthesized by {provider} ({model_version}) "
-                "from the per-element measurements above.")
+                "from the per-element measurements, visual observations, and attendance records above.")
         except Exception as e:  # noqa: BLE001 — provider down must never break the roll-up
             logger.info("PUNDIT project LLM narrative unavailable (%s) — "
                         "deterministic record stands.", e)

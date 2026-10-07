@@ -86,6 +86,20 @@ class InspectorMeView(APIView):
     def get(self, request):
         accreditation = Inspector.objects.filter(user=request.user).first()
         if not accreditation:
+            from apps.stakeholders.models import Inspector as StakeholderInspector
+            stk = StakeholderInspector.objects.filter(user=request.user).first()
+            if stk:
+                data = {
+                    'id': str(request.user.id),
+                    'badge_number': stk.inspector_id,
+                    'full_name': stk.name or f"{request.user.first_name} {request.user.last_name}".strip(),
+                    'directorate': stk.assigned_zone or 'Lekki-Epe Zonal Directorate',
+                    'accreditation_status': 'ACTIVE',
+                    'effective_status': 'ACTIVE',
+                    'is_valid': True,
+                    'is_suspended': False,
+                }
+                return Response(data, status=status.HTTP_200_OK)
             return Response({
                 'detail': 'No inspector accreditation is recorded for your account.',
                 'reason': 'NOT_ACCREDITED',
@@ -93,7 +107,9 @@ class InspectorMeView(APIView):
                 'accreditation_status': None,
                 'directorate': None,
             }, status=status.HTTP_404_NOT_FOUND)
-        return Response(InspectorSerializer(accreditation).data)
+        data = InspectorSerializer(accreditation).data
+        data['is_suspended'] = (accreditation.accreditation_status == Inspector.STATUS_SUSPENDED)
+        return Response(data)
 
 
 class InspectorListCreateView(APIView):

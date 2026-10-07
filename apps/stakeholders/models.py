@@ -229,6 +229,10 @@ class StakeholderMessage(models.Model):
     voice_note_url = models.TextField(blank=True, null=True)
     voice_note_duration = models.IntegerField(default=0, help_text="Duration in seconds")
     
+    # Direct Recipient (for direct peer inspector messaging)
+    recipient_name = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    recipient_id = models.CharField(max_length=100, blank=True, null=True)
+
     is_urgent = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 

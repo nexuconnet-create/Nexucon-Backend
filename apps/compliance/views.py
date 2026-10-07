@@ -241,14 +241,19 @@ class ComplianceStatsViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'], url_path='overview')
     def overview(self, request):
-        stats_data = ComplianceService.get_overview_stats()
+        project_id = request.query_params.get('project')
+        stats_data = ComplianceService.get_overview_stats(project_id=project_id)
         return Response(stats_data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='generate-report')
     def generate_report(self, request):
-        stats_data = ComplianceService.get_overview_stats()
+        project_id = request.query_params.get('project')
+        stats_data = ComplianceService.get_overview_stats(project_id=project_id)
         open_ncrs = NonConformanceReport.objects.filter(status__in=['Open', 'In Progress']).select_related('project')
         certs = ComplianceCertificate.objects.filter(status='Active').select_related('project')
+        if project_id:
+            open_ncrs = open_ncrs.filter(project_id=project_id)
+            certs = certs.filter(project_id=project_id)
         
         return Response({
             "generated_at": timezone.now().isoformat(),

@@ -91,13 +91,13 @@ class ApplicationService:
         valid_transitions = {
             'DRAFT': ['SUBMITTED'],
             'SUBMITTED': ['UNDER_REVIEW', 'REJECTED'],
-            'UNDER_REVIEW': ['REVIEW_COMPLETED', 'CONDITIONAL_APPROVAL', 'REJECTED'],
-            'REVIEW_COMPLETED': ['APPROVAL_REQUESTED', 'CONDITIONAL_APPROVAL', 'APPROVED', 'REJECTED'],
-            'APPROVAL_REQUESTED': ['APPROVED', 'CONDITIONAL_APPROVAL', 'REJECTED'],
-            'CONDITIONAL_APPROVAL': ['APPROVED', 'REJECTED'],
+            'UNDER_REVIEW': ['REVIEW_COMPLETED', 'APPROVAL_REQUESTED', 'CONDITIONAL_APPROVAL', 'APPROVED', 'REJECTED'],
+            'REVIEW_COMPLETED': ['APPROVAL_REQUESTED', 'CONDITIONAL_APPROVAL', 'APPROVED', 'REJECTED', 'UNDER_REVIEW'],
+            'APPROVAL_REQUESTED': ['APPROVED', 'CONDITIONAL_APPROVAL', 'REJECTED', 'UNDER_REVIEW'],
+            'CONDITIONAL_APPROVAL': ['APPROVED', 'REJECTED', 'UNDER_REVIEW'],
             'APPROVED': ['EXPIRED'],
-            'REJECTED': ['SUBMITTED'], # Resubmission flow
-            'EXPIRED': ['RENEWED'],
+            'REJECTED': ['SUBMITTED', 'UNDER_REVIEW'], # Resubmission or Appeal flow
+            'EXPIRED': ['RENEWED', 'SUBMITTED'],
             'RENEWED': ['EXPIRED']
         }
 
@@ -137,39 +137,42 @@ class ApplicationService:
         if new_status == 'APPROVED':
             # 1. Activate or update linked Project
             project = application.project
-            project.status = 'ACTIVE'
-            project.save()
+            if project:
+                project.status = 'ACTIVE'
+                project.save()
 
             # 2. Provision or activate Permit
-            permit, created = Permit.objects.get_or_create(
-                application=application,
-                defaults={
-                    'project': project,
-                    'issued_by': getattr(user, 'government_profile', None),
-                    'issue_date': datetime.date.today(),
-                    'expiry_date': datetime.date.today() + datetime.timedelta(days=365),
-                    'status': 'ACTIVE',
-                    'conditions': application.conditions or ''
-                }
-            )
-            if not created and permit.status != 'ACTIVE':
-                permit.status = 'ACTIVE'
-                permit.save()
+            if project:
+                permit, created = Permit.objects.get_or_create(
+                    application=application,
+                    defaults={
+                        'project': project,
+                        'issued_by': getattr(user, 'government_profile', None),
+                        'issue_date': datetime.date.today(),
+                        'expiry_date': datetime.date.today() + datetime.timedelta(days=365),
+                        'status': 'ACTIVE',
+                        'conditions': application.conditions or ''
+                    }
+                )
+                if not created and permit.status != 'ACTIVE':
+                    permit.status = 'ACTIVE'
+                    permit.save()
 
         # Side Effects upon Conditional Approval
         elif new_status == 'CONDITIONAL_APPROVAL':
             # Create a pending permit record with conditions
-            Permit.objects.get_or_create(
-                application=application,
-                defaults={
-                    'project': application.project,
-                    'issued_by': getattr(user, 'government_profile', None),
-                    'issue_date': datetime.date.today(),
-                    'expiry_date': datetime.date.today() + datetime.timedelta(days=365),
-                    'status': 'ACTIVE',
-                    'conditions': conditions or 'Approved subject to satisfaction of outstanding items.'
-                }
-            )
+            if application.project:
+                Permit.objects.get_or_create(
+                    application=application,
+                    defaults={
+                        'project': application.project,
+                        'issued_by': getattr(user, 'government_profile', None),
+                        'issue_date': datetime.date.today(),
+                        'expiry_date': datetime.date.today() + datetime.timedelta(days=365),
+                        'status': 'ACTIVE',
+                        'conditions': conditions or 'Approved subject to satisfaction of outstanding items.'
+                    }
+                )
 
         ApplicationService.log_audit(
             user=user,

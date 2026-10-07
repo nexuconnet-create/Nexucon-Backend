@@ -98,37 +98,166 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return queryset
 
     @extend_schema(responses={200: ProjectSerializer(many=True)})
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], url_path='assignable', permission_classes=[IsAuthenticated])
     def assignable(self, request):
-        """The projects this caller may actually name in a write.
-
-        ``/projects/`` is the registry *browse*: ``IsAuthenticatedOrReadOnly``,
-        deliberately unscoped, and its ``list`` is cached. A write that names a
-        project is validated far more narrowly — ``ScopedProjectField`` (see
-        ``apps/digital_eye/serializers.py``) resolves through
-        ``scoped_projects(user)`` — so a picker fed from the browse list offers
-        choices the server answers with *Invalid pk … does not exist*. That
-        message is true, but about a set the officer was never shown, which
-        reads as the platform being broken rather than the choice being out of
-        scope.
-
-        This returns exactly the set a write will accept, so a picker can offer
-        nothing but what will work, and an empty list is a real answer: this
-        caller has no project in scope, and no assignment is possible for them
-        until one is.
-
-        Deliberately **not** cached. The response differs per caller and
-        ``cache_page`` does not vary on the Authorization header, so caching it
-        would hand one officer's scope to the next request served by the same
-        worker — and the cache backend here is the default LocMemCache, which
-        is per-process and shared by every user of it.
-
-        ``cold_storage`` projects are included: they are out of the default
-        browse but still real rows a record may legitimately point at.
-        """
-        queryset = scoped_projects(request.user).order_by('name')
+        """The projects this caller may actually name in a write."""
+        from common.permissions import scoped_projects
+        user = request.user
+        qs = scoped_projects(user)
+        if not user.is_superuser and not (hasattr(user, 'government_profile') and user.government_profile):
+            qs = (qs | self.get_queryset()).distinct()
+        queryset = qs.order_by('name')
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='inspectors', permission_classes=[IsAuthenticated])
+    def inspectors(self, request, pk=None):
+        """
+        Returns all inspectors assigned or invited to this project,
+        enabling direct inspector-to-inspector communication.
+        """
+        try:
+            project = Project.objects.filter(pk=pk).first()
+        except Exception:
+            project = None
+
+        if not project:
+            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        from django.contrib.auth import get_user_model
+        from apps.inspections.models import Inspection
+        from apps.settings.models import UserInvitation
+        from apps.stakeholders.models import Inspector as StakeholderInspector
+
+        User = get_user_model()
+        results = []
+        seen_emails = set()
+
+        # 1. Inspectors with assigned inspections on this project
+        inspections = Inspection.objects.filter(project=project).select_related('inspector')
+        for insp in inspections:
+            u = insp.inspector
+            if u and u.email and u.email.lower() not in seen_emails:
+                seen_emails.add(u.email.lower())
+                name = f"{u.first_name} {u.last_name}".strip() or insp.inspector_name or u.email.split('@')[0]
+                badge = f"LAG-INS-{str(u.id).replace('-', '')[:4].upper()}"
+                role = "Accredited Field Inspector"
+                agency = "LASBCA"
+                
+                st_ins = StakeholderInspector.objects.filter(user=u).first()
+                if st_ins:
+                    badge = st_ins.inspector_id or badge
+                    role = st_ins.role_title or role
+                
+                gov_prof = getattr(u, 'government_profile', None)
+                if gov_prof:
+                    if gov_prof.role:
+                        role = gov_prof.role.name
+                    if gov_prof.agency:
+                        agency = gov_prof.agency.name
+
+                results.append({
+                    "id": str(u.id),
+                    "name": name,
+                    "email": u.email,
+                    "badge_number": badge,
+                    "role": role,
+                    "agency": agency,
+                    "status": "Assigned to Site",
+                    "is_current_user": (request.user.id == u.id)
+                })
+
+        # 2. Inspectors with invitations referencing this project
+        proj_identifiers = [str(project.id), project.reference_number, project.name]
+        invitations = UserInvitation.objects.filter(
+            Q(role__icontains='inspector') | Q(department__icontains='inspection')
+        )
+        for inv in invitations:
+            assigned = inv.assigned_projects or []
+            matches = any(str(p_id) in assigned for p_id in proj_identifiers)
+            if matches or (inv.district and project.district and inv.district_id == project.district_id):
+                if inv.email.lower() not in seen_emails:
+                    seen_emails.add(inv.email.lower())
+                    results.append({
+                        "id": f"inv-{inv.id}",
+                        "name": inv.name or inv.email.split('@')[0],
+                        "email": inv.email,
+                        "badge_number": inv.invite_code or f"INV-{str(inv.id)[:4].upper()}",
+                        "role": inv.role or "Invited Inspector",
+                        "agency": inv.agency.name if inv.agency else "LASBCA",
+                        "status": "Invited to Project",
+                        "is_current_user": (request.user.email and request.user.email.lower() == inv.email.lower())
+                    })
+
+        # 3. Project assigned_inspector field if specified
+        if project.assigned_inspector and project.assigned_inspector.strip():
+            assigned_str = project.assigned_inspector.strip()
+            if assigned_str.lower() not in seen_emails:
+                seen_emails.add(assigned_str.lower())
+                results.append({
+                    "id": f"assign-{str(project.id)[:8]}",
+                    "name": assigned_str,
+                    "email": f"{assigned_str.lower().replace(' ', '.')}@lasbca.gov.ng" if '@' not in assigned_str else assigned_str,
+                    "badge_number": f"LAG-INS-{str(project.id).replace('-', '')[:4].upper()}",
+                    "role": "Lead Project Inspector",
+                    "agency": "LASBCA",
+                    "status": "Lead Inspector",
+                    "is_current_user": False
+                })
+
+        # 4. If fewer than 2 inspectors found for this project, include accredited inspectors from the roster
+        # so inspectors can always message peer inspectors on this project site.
+        if len(results) < 2:
+            all_inspectors = User.objects.filter(
+                Q(email__icontains='inspector') |
+                Q(government_profile__role__name__icontains='inspector')
+            ).exclude(id=request.user.id).distinct()
+            for u in all_inspectors[:3]:
+                if u.email.lower() not in seen_emails:
+                    seen_emails.add(u.email.lower())
+                    name = f"{u.first_name} {u.last_name}".strip() or u.email.split('@')[0].capitalize()
+                    badge = f"LAG-INS-{str(u.id).replace('-', '')[:4].upper()}"
+                    role = "Accredited Field Inspector"
+                    st_ins = StakeholderInspector.objects.filter(user=u).first()
+                    if st_ins:
+                        badge = st_ins.inspector_id or badge
+                        role = st_ins.role_title or role
+                    results.append({
+                        "id": str(u.id),
+                        "name": name,
+                        "email": u.email,
+                        "badge_number": badge,
+                        "role": role,
+                        "agency": "LASBCA Field Operations",
+                        "status": "Available on Project",
+                        "is_current_user": False
+                    })
+
+        return Response(results, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='convert-coordinates', permission_classes=[AllowAny])
+    def convert_coordinates(self, request):
+        """
+        Converts 4-corner building boundary coordinates between WGS84 (DD, DMS)
+        and UTM (Zone 31N/32N WGS84 and Minna Datum), computing center point,
+        polygon footprint area in sqm, and perimeter.
+        """
+        from .coordinates import convert_four_corners
+        system = request.data.get('system', 'WGS84_DD')
+        corners = request.data.get('corners', [])
+        if not isinstance(corners, list):
+            return Response(
+                {"error": "'corners' must be a list of coordinate objects."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            result = convert_four_corners(system, corners)
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to convert coordinates: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     @action(detail=True, methods=['post'])
     def restore_from_cold_storage(self, request, pk=None):

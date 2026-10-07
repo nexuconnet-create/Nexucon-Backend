@@ -3,7 +3,8 @@ from django.utils import timezone
 import datetime
 from .models import (
     Document, Version, Approval, DocumentReview, 
-    DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder
+    DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder,
+    DocumentAccessRequest
 )
 
 class VersionSerializer(serializers.ModelSerializer):
@@ -107,3 +108,13 @@ class DocumentSerializer(serializers.ModelSerializer):
         elif obj.expiry_date <= today + datetime.timedelta(days=30):
             return 'expiring_soon'
         return 'valid'
+
+
+class DocumentAccessRequestSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True, default=None)
+
+    class Meta:
+        model = DocumentAccessRequest
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at', 'updated_at', 'access_token')
+
