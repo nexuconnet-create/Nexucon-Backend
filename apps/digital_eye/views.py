@@ -1561,6 +1561,52 @@ class BIMElementImportView(APIView):
             if os.path.exists(src_tmp):
                 os.unlink(src_tmp)
 
+    def delete(self, request):
+        """Remove the imported BIM model geometry and element mappings for a project."""
+        project_id = request.query_params.get('project') or request.data.get('project')
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Remove BIMModelGeometry
+        deleted_geom_count, _ = BIMModelGeometry.objects.filter(project=project).delete()
+
+        # 2. Remove BIMElementMapping elements imported from IFC
+        delete_elements = request.query_params.get('delete_elements', 'true').lower() in ('true', '1')
+        deleted_elem_count = 0
+        if delete_elements:
+            deleted_elem_count, _ = BIMElementMapping.objects.filter(
+                project=project, source='ifc_upload'
+            ).delete()
+
+        # 3. Optionally remove stored files if requested
+        delete_stored = request.query_params.get('delete_stored', 'false').lower() in ('true', '1')
+        deleted_files_count = 0
+        if delete_stored:
+            stored_qs = SensorDataFile.objects.filter(project=project, file_type='bim_model')
+            for f in stored_qs:
+                if f.file:
+                    try:
+                        f.file.delete(save=False)
+                    except Exception:
+                        pass
+            deleted_files_count, _ = stored_qs.delete()
+
+        _record_audit(request.user, 'digital_eye.bim_model.deleted',
+                      'Project', project.id,
+                      {'deleted_geometry': deleted_geom_count,
+                       'deleted_elements': deleted_elem_count,
+                       'deleted_files': deleted_files_count})
+
+        return Response({
+            'success': True,
+            'message': 'BIM model removed successfully.',
+            'deleted_geometry': deleted_geom_count,
+            'deleted_elements': deleted_elem_count,
+            'deleted_files': deleted_files_count,
+        })
+
 
 class BIMModelGeometryView(APIView):
     """Serves the stored tessellated preview meshes for a project's imported
