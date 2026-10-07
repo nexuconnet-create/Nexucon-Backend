@@ -1674,16 +1674,21 @@ class NDTReportService:
         if not source:
             return False
         try:
-            if isinstance(source, str) and source.startswith('/media/'):
+            if isinstance(source, str):
                 from django.conf import settings
-                source = os.path.join(settings.MEDIA_ROOT,
-                                      source[len('/media/'):])
-            elif isinstance(source, str) and source.startswith('http'):
-                import urllib.request
-                req = urllib.request.Request(
-                    source, headers={'User-Agent': 'Mozilla/5.0'})
-                source = io.BytesIO(
-                    urllib.request.urlopen(req, timeout=15).read())
+                if '/media/' in source:
+                    rel_path = source.split('/media/', 1)[1]
+                    local_candidate = os.path.join(settings.MEDIA_ROOT, rel_path)
+                    if os.path.exists(local_candidate):
+                        source = local_candidate
+                elif os.path.exists(source):
+                    pass
+                elif source.startswith('http'):
+                    import urllib.request
+                    req = urllib.request.Request(
+                        source, headers={'User-Agent': 'Mozilla/5.0'})
+                    source = io.BytesIO(
+                        urllib.request.urlopen(req, timeout=15).read())
             pdf.image(source, x=x, y=y, w=w, h=h, keep_aspect_ratio=True)
             return True
         except Exception as exc:            # noqa: BLE001 — a missing image
@@ -3458,22 +3463,16 @@ class NDTReportService:
             if not element_data:
                 builder.para('No pulse velocity tests recorded for this project.')
             else:
-                # ---- Summary of Test Analysis: counts from the real rows
+                # ---- Summary of Test Analysis: each structural member listed
                 builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
-                analysis_groups = {}
-                for e in element_data:
-                    key = (e['floor_label'], e['member_type'])
-                    g = analysis_groups.setdefault(
-                        key, {'count': 0, 'points': 0})
-                    g['count'] += 1
-                    g['points'] += e['n_points']
+                analysis_rows = [
+                    [_element_display(e['element']), '1', e['floor_label'].title(), str(e['n_points'])]
+                    for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element']))
+                ]
                 builder.ruled_table(
                     ['STRUCTURAL MEMBER', 'NUMBER TESTED', 'LOCATION',
                      'NO OF POINT TAKEN'],
-                    [[member.title(), str(g['count']), floor.title(),
-                      str(g['points'])]
-                     for (floor, member), g in sorted(
-                         analysis_groups.items(), key=_natural_sort_key)],
+                    analysis_rows,
                     [50, 32, 60, 40],
                     ['C', 'C', 'C', 'C'],
                 )
@@ -3485,7 +3484,7 @@ class NDTReportService:
                 for floor in floors_present:
                     floor_elements = sorted(
                         [e for e in element_data if e['floor_label'] == floor],
-                        key=lambda e: e['test'].created_at
+                        key=lambda e: _natural_sort_key(e['element'])
                     )
                     member_order = []
                     for e in floor_elements:
@@ -3498,24 +3497,15 @@ class NDTReportService:
                     for member in member_order:
                         group = sorted(
                             [e for e in floor_elements if e['member_type'] == member],
-                            key=lambda e: e['test'].created_at
+                            key=lambda e: _natural_sort_key(e['element'])
                         )
 
                         for e in group:
                             rows = e['rows']
                             mid = len(rows) // 2 if len(rows) > 1 else 0
-                            # The element's own name (its BIM identity), one
-                            # Revit 'Family:Type:Tag' segment per line — the
-                            # test serial is provenance and stays in the
-                            # registry / integrity digest, not the results
-                            # table.
+                            # The element's own name (its BIM identity)
                             element_cell = _element_display(e['element'])
                             remark = e['remark']
-                            # The point spread is a quality signal about a
-                            # reading that was graded. On an unverified element
-                            # the spread is arithmetic over readings nothing
-                            # else is asserted from, so printing it invites the
-                            # reader to treat it as evidence.
                             if (remark != 'UNVERIFIED'
                                     and e['spread_pct'] is not None
                                     and e['spread_pct'] > 2.0):
@@ -3524,13 +3514,13 @@ class NDTReportService:
                                            f"(±{e['spread_pct'] / 2:.1f}%)")
                             for i, r in enumerate(rows):
                                 all_floor_rows.append([
-                                    element_cell if i == 0 else '',
+                                    element_cell if i == 0 else '-',
                                     cls._fp(r['path_mm']),
                                     cls._f1(r['transit_us']),
                                     cls._fms(r['velocity_km_s']),
                                     cls._f1(r['ecs_mpa']),
-                                    cls._f1(e['mean_ecs']) if i == mid else '',
-                                    remark if i == mid else '',
+                                    cls._f1(e['mean_ecs']) if i == mid else '-',
+                                    remark if i == mid else '-',
                                 ])
 
                     # Render heading and table once per floor with all members
@@ -3574,36 +3564,17 @@ class NDTReportService:
                     )
                     builder.ln_gap(2)
 
-                # ---- Summary of Test Results: GOOD / POOR per member & floor
+                # ---- Summary of Test Results: GOOD / POOR per member
                 builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
-                result_groups = {}
-                for e in element_data:
-                    key = (e['floor_label'], e['member_type'])
-                    g = result_groups.setdefault(
-                        key, {'good': 0, 'poor': 0, 'unverified': 0, 'total': 0})
-                    g['total'] += 1
-                    if e['remark'] == 'GOOD':
-                        g['good'] += 1
-                    elif e['remark'] == 'POOR':
-                        g['poor'] += 1
-                    elif e['remark'] == 'UNVERIFIED':
-                        g['unverified'] += 1
                 result_rows = []
-                for (floor, member), g in sorted(result_groups.items(), key=_natural_sort_key):
-                    # The percentages are of the elements that could actually be
-                    # assessed. Counting an unverifiable reading in the
-                    # denominator would state a GOOD/POOR split over a set that
-                    # includes an element nothing is known about — and the two
-                    # columns would then not add up to 100%, which reads as an
-                    # arithmetic error in a statutory report.
-                    graded = g['good'] + g['poor']
-                    good_pct = round(g['good'] * 100 / graded, 1) if graded else None
-                    poor_pct = round(g['poor'] * 100 / graded, 1) if graded else None
+                for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element'])):
+                    good_str = '1 (100.0%)' if e['remark'] == 'GOOD' else '0 (0.0%)'
+                    poor_str = '1 (100.0%)' if e['remark'] == 'POOR' else '0 (0.0%)'
                     result_rows.append([
-                        member.title(),
-                        floor.title(),
-                        f"{g['good']} ({good_pct}%)" if graded else '-',
-                        f"{g['poor']} ({poor_pct}%)" if graded else '-',
+                        _element_display(e['element']),
+                        e['floor_label'].title(),
+                        good_str,
+                        poor_str,
                     ])
                 builder.ruled_table(
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
@@ -4400,7 +4371,13 @@ class NDTReportService:
                 url = ''
                 try:
                     if f.file:
-                        url = f.file.url
+                        try:
+                            if hasattr(f.file, 'path') and os.path.exists(f.file.path):
+                                url = f.file.path
+                            else:
+                                url = f.file.url
+                        except Exception:
+                            url = f.file.url
                 except Exception:
                     url = ''
                 if not url:

@@ -936,10 +936,13 @@ def run_regression(data_points):
     best_fit_type = None
     fitted = {t: res for t, res in results.items() if res and res['r2_score'] is not None}
     if fitted:
-        # Highest R² wins; AIC breaks ties (fewer parameters preferred).
-        best_fit_type = min(
-            fitted, key=lambda t: (-fitted[t]['r2_score'], fitted[t]['aic']
-                                   if fitted[t]['aic'] is not None else float('inf')))
+        # Exponential is the default model for concrete acoustic-strength relations.
+        if 'exponential' in fitted and fitted['exponential']['r2_score'] is not None:
+            best_fit_type = 'exponential'
+        else:
+            best_fit_type = min(
+                fitted, key=lambda t: (-fitted[t]['r2_score'], fitted[t]['aic']
+                                       if fitted[t]['aic'] is not None else float('inf')))
 
     return {
         'n_points': n,

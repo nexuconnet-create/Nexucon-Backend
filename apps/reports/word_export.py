@@ -434,20 +434,15 @@ class NDTWordExporter:
                                'project.')
             else:
                 _add_heading(doc, 'SUMMARY OF TEST ANALYSIS', level=2)
-                analysis_groups = {}
-                for e in element_data:
-                    key = (e['floor_label'], e['member_type'])
-                    g = analysis_groups.setdefault(key, {'count': 0, 'points': 0})
-                    g['count'] += 1
-                    g['points'] += e['n_points']
+                analysis_rows = [
+                    [_element_display(e['element']), '1', e['floor_label'].title(), str(e['n_points'])]
+                    for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element']))
+                ]
                 _add_table(
                     doc,
                     ['STRUCTURAL MEMBER', 'NUMBER TESTED', 'LOCATION',
                      'NO OF POINT TAKEN'],
-                    [[member.title(), str(g['count']), floor.title(),
-                      str(g['points'])]
-                     for (floor, member), g in sorted(
-                         analysis_groups.items(), key=_natural_sort_key)])
+                    analysis_rows)
 
                 _add_heading(doc, 'SUMMARY OF TEST RESULTS', level=2)
                 for floor in floors_present:
@@ -495,33 +490,21 @@ class NDTWordExporter:
                              'PULSE VELOCITY (M/S)', 'E.C.S',
                              'AVERAGE COMPRESSIVE STRENGTH (N/mm2)', 'REMARK'],
                             table_rows)
-                result_groups = {}
-                for e in element_data:
-                    key = (e['floor_label'], e['member_type'])
-                    g = result_groups.setdefault(
-                        key, {'good': 0, 'poor': 0, 'unverified': 0, 'total': 0})
-                    g['total'] += 1
-                    if e['remark'] == 'GOOD':
-                        g['good'] += 1
-                    elif e['remark'] == 'POOR':
-                        g['poor'] += 1
-                    elif e['remark'] == 'UNVERIFIED':
-                        g['unverified'] += 1
-
-                def _pct(count, g):
-                    # Percentage of the elements that could be assessed — see
-                    # ndt_reports for why an unverifiable element is not in the
-                    # denominator.
-                    graded = g['good'] + g['poor']
-                    return f"{count} ({round(count * 100 / graded, 1)}%)" if graded else '-'
-
+                result_rows = []
+                for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element'])):
+                    good_str = '1 (100.0%)' if e['remark'] == 'GOOD' else '0 (0.0%)'
+                    poor_str = '1 (100.0%)' if e['remark'] == 'POOR' else '0 (0.0%)'
+                    result_rows.append([
+                        _element_display(e['element']),
+                        e['floor_label'].title(),
+                        good_str,
+                        poor_str,
+                    ])
                 _add_table(
                     doc,
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
                      'POOR (NO, %)'],
-                    [[member.title(), floor.title(),
-                      _pct(g['good'], g), _pct(g['poor'], g)]
-                     for (floor, member), g in sorted(result_groups.items(), key=_natural_sort_key)])
+                    result_rows)
                 unverified_members = [e for e in element_data
                                       if e['remark'] == 'UNVERIFIED']
                 if unverified_members:
