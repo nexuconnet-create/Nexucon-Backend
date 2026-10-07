@@ -10,7 +10,7 @@ import uuid
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('projects', '0011_remove_project_coordinate_system_and_more'),
+        ('projects', '0010_project_coordinate_system_project_corner_coordinates'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ('documents', '0007_alter_document_file_format_alter_document_status_and_more'),
     ]
