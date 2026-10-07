@@ -2286,7 +2286,7 @@ class NDTReportService:
 
     # -------------------------------------------------- statutory archive
     @classmethod
-    def archive_ndt_report(cls, project, user, pdf_bytes):
+    def archive_ndt_report(cls, project, user, pdf_bytes, operator=None, **kwargs):
         """
         Persist the exact generated dossier (bytes, checksum, counts, pass
         verdict) as an ArchivedReport. Identical content is never archived
@@ -2306,6 +2306,17 @@ class NDTReportService:
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'test_date')
         )
+        if operator and str(operator).strip():
+            op_str = str(operator).strip().lower()
+            op_tests = [
+                t for t in tests
+                if (t.operator_name and op_str in t.operator_name.lower())
+                or (t.operator and (op_str in (t.operator.get_full_name() or '').lower() or op_str in t.operator.email.lower()))
+                or (t.created_by and (op_str in (t.created_by.get_full_name() or '').lower() or op_str in t.created_by.email.lower()))
+            ]
+            if op_tests:
+                tests = op_tests
+
         # The effective reference (CMS override honoured) — the archived
         # reference and content_key must match what the report printed and
         # what the cover QR digests, never the un-overridden serial.
@@ -2317,6 +2328,11 @@ class NDTReportService:
             project=project, report_kind='ndt', content_key=content_key,
         ).first()
         if existing is not None:
+            try:
+                from .notifications import notify_inspectors_ndt_report_ready
+                notify_inspectors_ndt_report_ready(existing, sender=user, force_resend=True)
+            except Exception:  # noqa: BLE001
+                logger.exception('Failed to dispatch inspector notifications for existing archived NDT report')
             return existing
 
         # Same strength basis as the report itself: a test is
@@ -2369,15 +2385,20 @@ class NDTReportService:
             f'ndt_report_{project.id.hex[:12]}_{content_key[:12]}.pdf',
             ContentFile(pdf_bytes), save=False)
         archived.save()
+        try:
+            from .notifications import notify_inspectors_ndt_report_ready
+            notify_inspectors_ndt_report_ready(archived, sender=user, force_resend=True)
+        except Exception:  # noqa: BLE001 — notification failure must not abort report generation
+            logger.exception('Failed to dispatch inspector notifications for archived NDT report')
         return archived
 
     # -------------------------------------------------------- main entry
     @classmethod
-    def generate_ndt_report(cls, project, user=None):
-        return cls.generate_ndt_report_bundled(project, user)[0]
+    def generate_ndt_report(cls, project, user=None, operator=None, **kwargs):
+        return cls.generate_ndt_report_bundled(project, user, operator=operator, **kwargs)[0]
 
     @classmethod
-    def generate_ndt_report_bundled(cls, project, user=None):
+    def generate_ndt_report_bundled(cls, project, user=None, operator=None, **kwargs):
         """Render the report and return (pdf_bytes, preview_bundle) from ONE
         generation pass — the bundle carries the §2.1 preview sidebar's
         section→page map and the total page count, guaranteed to describe
@@ -2392,6 +2413,16 @@ class NDTReportService:
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'test_date')
         )
+        if operator and str(operator).strip():
+            op_str = str(operator).strip().lower()
+            op_tests = [
+                t for t in tests
+                if (t.operator_name and op_str in t.operator_name.lower())
+                or (t.operator and (op_str in (t.operator.get_full_name() or '').lower() or op_str in t.operator.email.lower()))
+                or (t.created_by and (op_str in (t.created_by.get_full_name() or '').lower() or op_str in t.created_by.email.lower()))
+            ]
+            if op_tests:
+                tests = op_tests
         
         rebar_tests = list(
             RebarTest.objects

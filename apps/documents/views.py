@@ -10,12 +10,14 @@ import datetime
 import uuid
 from .models import (
     Document, Version, Approval, DocumentReview, 
-    DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder
+    DocumentAccess, DocumentAudit, DocumentTemplate, DocumentFolder,
+    DocumentAccessRequest
 )
 from .serializers import (
     DocumentSerializer, VersionSerializer, ApprovalSerializer,
     DocumentReviewSerializer, DocumentAccessSerializer, DocumentAuditSerializer,
-    DocumentTemplateSerializer, DocumentFolderSerializer
+    DocumentTemplateSerializer, DocumentFolderSerializer,
+    DocumentAccessRequestSerializer
 )
 from .services import DocumentService
 from apps.projects.models import Project
@@ -394,3 +396,103 @@ class DocumentStatsViewSet(viewsets.ViewSet):
             "storage_bucket": "nexucondocument",
             "storage_provider": "Cloudflare R2"
         }, status=status.HTTP_200_OK)
+
+
+class DocumentAccessRequestViewSet(viewsets.ModelViewSet):
+    """
+    Endpoints for public access requests (QR code / verify report page)
+    and government agency dashboard approvals.
+    """
+    queryset = DocumentAccessRequest.objects.all().select_related('project', 'document', 'reviewed_by')
+    serializer_class = DocumentAccessRequestSerializer
+
+    def get_permissions(self):
+        if self.action in ['create', 'check_status']:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        project_id = self.request.query_params.get('project')
+        status_val = self.request.query_params.get('status')
+        digest = self.request.query_params.get('digest')
+        email = self.request.query_params.get('email')
+
+        if is_valid_uuid(project_id):
+            qs = qs.filter(project_id=project_id)
+        if status_val and str(status_val).lower() not in ('undefined', 'null', 'none', '', 'all'):
+            qs = qs.filter(status__iexact=status_val)
+        if digest:
+            qs = qs.filter(report_digest=digest)
+        if email:
+            qs = qs.filter(requester_email__iexact=email.strip())
+        return qs
+
+    def perform_create(self, serializer):
+        digest = serializer.validated_data.get('report_digest')
+        ref = serializer.validated_data.get('report_reference')
+        project = serializer.validated_data.get('project')
+        if not project and (digest or ref):
+            from apps.reports.models import ArchivedReport
+            archived = None
+            if digest:
+                archived = ArchivedReport.objects.filter(content_key=digest).first()
+            if not archived and ref:
+                archived = ArchivedReport.objects.filter(report_reference=ref).first()
+            if archived and archived.project:
+                serializer.save(project=archived.project)
+                return
+        serializer.save()
+
+    @action(detail=False, methods=['get', 'post'], url_path='check-status', permission_classes=[permissions.AllowAny])
+    def check_status(self, request):
+        email = request.data.get('email') or request.query_params.get('email')
+        token = request.data.get('token') or request.query_params.get('token')
+        digest = request.data.get('digest') or request.query_params.get('digest')
+
+        qs = DocumentAccessRequest.objects.all()
+        if token:
+            qs = qs.filter(access_token=token)
+        elif email and digest:
+            qs = qs.filter(requester_email__iexact=email.strip(), report_digest=digest)
+        else:
+            return Response({'detail': 'Token or email + digest required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        item = qs.first()
+        if not item:
+            return Response({'found': False, 'detail': 'No access request found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'found': True,
+            'id': str(item.id),
+            'status': item.status,
+            'requester_name': item.requester_name,
+            'requester_email': item.requester_email,
+            'document_title': item.document_title,
+            'access_token': item.access_token,
+            'reviewed_at': item.reviewed_at,
+            'review_notes': item.review_notes,
+            'is_approved': item.status == 'APPROVED',
+        })
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        item = self.get_object()
+        item.status = 'APPROVED'
+        item.reviewed_by = request.user
+        item.reviewed_by_name = request.user.get_full_name() or request.user.username or request.user.email
+        item.reviewed_at = timezone.now()
+        item.review_notes = request.data.get('notes', 'Approved by supervising government authority.')
+        item.save()
+        return Response(self.get_serializer(item).data)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        item = self.get_object()
+        item.status = 'REJECTED'
+        item.reviewed_by = request.user
+        item.reviewed_by_name = request.user.get_full_name() or request.user.username or request.user.email
+        item.reviewed_at = timezone.now()
+        item.review_notes = request.data.get('notes', 'Access denied under statutory records governance.')
+        item.save()
+        return Response(self.get_serializer(item).data)
+

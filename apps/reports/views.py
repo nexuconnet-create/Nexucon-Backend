@@ -302,17 +302,56 @@ class NDTReportView(APIView):
         if not project:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        operator = request.query_params.get('operator')
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
         try:
-            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user)
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report generation failed')
             return Response({'detail': f'Report generation failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         try:
-            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes)
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator)
         except Exception:  # noqa: BLE001 — archive failure must not block the stream
             logger.exception('NDT report archiving failed')
-        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}.pdf')
+        safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
+        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}{safe_op}.pdf')
+
+
+class NDTOperatorsListView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-operators/
+    Returns the distinct field inspectors/operators who conducted scans on this project,
+    with their scan counts and latest activity date, so separate reports can be
+    viewed/generated per inspector.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from apps.digital_eye.models import PUNDITTest
+        tests = PUNDITTest.objects.filter(project=project).select_related('operator', 'created_by')
+
+        ops_map = {}
+        for t in tests:
+            lbl = (t.operator_name or '').strip()
+            if not lbl and t.operator:
+                lbl = (t.operator.get_full_name() or t.operator.username or t.operator.email).strip()
+            if not lbl and t.created_by:
+                lbl = (t.created_by.get_full_name() or t.created_by.username or t.created_by.email).strip()
+            if not lbl:
+                continue
+            if lbl not in ops_map:
+                ops_map[lbl] = {'operator': lbl, 'scan_count': 0, 'last_tested': None}
+            ops_map[lbl]['scan_count'] += 1
+            t_date = t.test_date or (t.tested_at.date() if t.tested_at else None)
+            if t_date and (not ops_map[lbl]['last_tested'] or str(t_date) > str(ops_map[lbl]['last_tested'])):
+                ops_map[lbl]['last_tested'] = str(t_date)
+        return Response(sorted(list(ops_map.values()), key=lambda x: x['scan_count'], reverse=True))
 
 
 class ArchivedReportListView(APIView):
@@ -1127,6 +1166,40 @@ class ReportVerifyDownloadView(APIView):
                  'detail': 'The archived original for this dossier is missing '
                            'from storage.'},
                 status=status.HTTP_404_NOT_FOUND)
+
+        # Statutory Access Control: Direct download is restricted unless authorized
+        token = (request.query_params.get('token') or '').strip()
+        email = (request.query_params.get('email') or '').strip()
+        has_access = False
+
+        if request.user and request.user.is_authenticated:
+            has_access = True
+        elif token:
+            from apps.documents.models import DocumentAccessRequest
+            access_req = DocumentAccessRequest.objects.filter(
+                access_token=token, status='APPROVED'
+            ).first()
+            if access_req:
+                has_access = True
+        elif email:
+            from apps.documents.models import DocumentAccessRequest
+            access_req = DocumentAccessRequest.objects.filter(
+                requester_email__iexact=email, report_digest=digest, status='APPROVED'
+            ).first()
+            if access_req:
+                has_access = True
+
+        if not has_access:
+            return Response(
+                {
+                    'verified': True,
+                    'error': 'Access to this statutory document is restricted. Direct download is not permitted without prior authorization.',
+                    'detail': 'Please submit an official access request. Once approved by the supervising government agency, you will be authorized to download the authentic dossier.',
+                    'requires_request': True
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         try:
             file_bytes = report.file.read()
         except Exception as exc:  # noqa: BLE001 — remote storage may raise
@@ -1581,3 +1654,102 @@ class ReportMapView(APIView):
                 'no_velocity': 'No computable velocity recorded',
             },
         })
+
+
+class ProjectNDTInspectorsListView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-report/inspectors/
+    Lists all field inspectors and device operators associated with this project
+    who are eligible to receive NDT report notifications.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from .notifications import resolve_project_inspectors
+        inspectors = resolve_project_inspectors(project)
+        return Response([
+            {
+                'user_id': i.get('user_id'),
+                'email': i['email'],
+                'name': i['name'],
+                'role': i['role']
+            }
+            for i in inspectors
+        ])
+
+
+class ArchivedReportNotifyInspectorsView(APIView):
+    """
+    POST /api/v1/reports/archived/{pk}/notify-inspectors/
+    Dispatches statutory email and in-app notifications to field inspectors
+    alerting them that this specific NDT report dossier is ready for download.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from .models import ArchivedReport
+        report = ArchivedReport.objects.filter(pk=pk).select_related('project').first()
+        if not report:
+            return Response({'detail': 'Archived report not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        project = scoped_projects(request.user).filter(pk=report.project_id).first()
+        if not project and not request.user.is_staff:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        recipients = request.data.get('recipients')
+        custom_message = request.data.get('custom_message')
+        force_resend = request.data.get('force_resend', True)
+
+        from .notifications import notify_inspectors_ndt_report_ready
+        result = notify_inspectors_ndt_report_ready(
+            report,
+            sender=request.user,
+            recipient_emails=recipients,
+            custom_message=custom_message,
+            force_resend=force_resend
+        )
+        return Response(result)
+
+
+class ProjectNDTNotifyInspectorsView(APIView):
+    """
+    POST /api/v1/reports/projects/{project_id}/ndt-report/notify-inspectors/
+    Ensures the latest NDT report for the project is generated/archived and
+    dispatches email notifications to all project inspectors.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        from .ndt_reports import NDTReportService
+
+        operator = request.data.get('operator')
+        recipients = request.data.get('recipients')
+        custom_message = request.data.get('custom_message')
+        force_resend = request.data.get('force_resend', True)
+
+        try:
+            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator)
+            archived = NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator)
+        except Exception as exc:
+            logger.exception('Failed to prepare NDT report for inspector notification')
+            return Response({'detail': f'Report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        from .notifications import notify_inspectors_ndt_report_ready
+        result = notify_inspectors_ndt_report_ready(
+            archived,
+            sender=request.user,
+            recipient_emails=recipients,
+            custom_message=custom_message,
+            force_resend=force_resend
+        )
+        return Response(result)
