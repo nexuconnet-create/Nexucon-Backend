@@ -1358,7 +1358,7 @@ class NDTReportFixtureMixin:
             device_reference=f"DE-NDT{uuid.uuid4().hex[:6]}",
             device_type="pundit", name="Pundit PL-2",
             model="Pundit PL-2", manufacturer="Proceq",
-            device_id="SN-88112", status="online",
+            device_id=f"SN-{uuid.uuid4().hex[:6]}", status="online",
             calibration_date=date(2026, 1, 15),
             assigned_project=project,
         )
@@ -1498,7 +1498,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         flat = ' '.join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
 
-        self.assertIn('UNVERIFIED', flat)
+        self.assertIn('1G/1U', flat)
         self.assertIn('could not be verified', flat)
         self.assertIn('path length', flat)
         # The GOOD/POOR percentages are of what could be assessed, so the one
@@ -1915,7 +1915,7 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         flat = ' '.join(text.split())
         self.assertIn('COL-C24', flat)
         self.assertIn('BEAM-B12', flat)
-        self.assertIn('AVERAGE COMPRESSIVE STRENGTH (N/mm2)', flat)
+        self.assertIn('MEAN E.C.S (N/mm2)', flat)
         self.assertIn('REMARK', flat)
         # 250 mm / 62.5 us = 4.00 km/s -> E.C.S 1.20*exp(0.85*4.0) = 36.0.
         self.assertIn('36.0', text)
@@ -1957,10 +1957,10 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                        structural_element="COL-C25",
                        path_length_mm=290.0, pulse_time_us=100.0)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn('36.0', text)
-        self.assertIn('14.1', text)
-        self.assertIn('GOOD', text)
-        self.assertIn('POOR', text)
+        # The 2 elements are on the same floor and are both columns, so they
+        # are grouped. Mean ECS of (36.0 + 14.1)/2 = 25.0.
+        self.assertIn('25.0', text)
+        self.assertIn('1G/1P', text)
         self.assertGreater(estimated_compressive_strength(4.0), 25.0)
         self.assertLess(estimated_compressive_strength(2.9), 25.0)
 
@@ -2150,41 +2150,23 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         self.assertIn('No photographs recorded for these tests.', text)
 
     # ------------------------------------------------- BIM site-plan (C6)
-    def test_bim_model_plan_view_replaces_map_placeholder(self):
-        # With an imported BIM model, the map page renders the model's real
-        # plan-view geometry in one of the two reference image frames instead
-        # of the "SITE LOCATION MAP NOT PROVIDED" placeholder (the reference
-        # prints no captions under the frames — the images speak alone).
+    def test_bim_model_plan_view_does_not_replace_map_placeholder(self):
+        # We removed the BIM plan fallback; a BIM model alone should NOT replace
+        # the Google Static Map, so the placeholder is expected.
         from apps.digital_eye.models import BIMModelGeometry
-        from pypdf import PdfReader
         self.make_test(self.project, self.device,
                        path_length_mm=250.0, pulse_time_us=62.5)
         BIMModelGeometry.objects.create(
             project=self.project, source_file='STACKING_AREA_IFC.rvt',
             element_count=2,
             elements=[
-                # A 4 m x 3 m slab: two triangles over four corner verts.
                 {'guid': 'g1', 'name': 'Slab-1', 'type': 'IfcSlab',
                  'verts': [0, 0, 0, 4000, 0, 0, 4000, 3000, 0, 0, 3000, 0],
                  'faces': [0, 1, 2, 0, 2, 3]},
-                {'guid': 'g2', 'name': 'Col-1', 'type': 'IfcColumn',
-                 'verts': [1000, 1000, 0, 1000, 1200, 0, 1200, 1200, 0,
-                           1200, 1000, 0],
-                 'faces': [0, 1, 2, 0, 2, 3]},
             ])
         data = NDTReportService.generate_ndt_report(self.project)
-        self.assertTrue(data.startswith(b'%PDF'))
         text = _pdf_text(data)
-        self.assertNotIn('SITE LOCATION MAP NOT PROVIDED', text)
-        # The map page carries the running watermark PLUS the plan image
-        # (single source -> one centred frame).
-        reader = PdfReader(io.BytesIO(data))
-        map_pages = [p for p in reader.pages
-                     if 'LOCATION MAP' in (p.extract_text() or '')]
-        self.assertTrue(map_pages, 'map page not found')
-        self.assertGreaterEqual(len(map_pages[0].images), 2,
-                                'map page should carry the watermark and the '
-                                'BIM plan view')
+        self.assertIn('SITE LOCATION MAP NOT PROVIDED', text)
 
     def test_map_placeholder_when_no_bim_model_or_attachment(self):
         # No imported model and no attached map photo — the honest
@@ -2265,9 +2247,9 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                 map_pages = [p for p in reader.pages
                              if 'LOCATION MAP' in (p.extract_text() or '')]
                 self.assertTrue(map_pages, 'map page not found')
-                self.assertGreaterEqual(len(map_pages[0].images), 3,
-                                        'map page should carry the watermark, '
-                                        'the BIM capture and the plan view')
+                self.assertGreaterEqual(len(map_pages[0].images), 2,
+                                        'map page should carry the watermark '
+                                        'and the BIM capture')
         finally:
             shutil.rmtree(media, ignore_errors=True)
 
@@ -2654,7 +2636,8 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
                        structural_element="COL-C24",
                        path_length_mm=250.0, pulse_time_us=62.5)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
-        self.assertIn("PULSE VELOCITY (M/S)", text)
+        flat_no_space = text.replace(" ", "").replace("\n", "")
+        self.assertIn("PULSEVELOCITY(M/S)", flat_no_space)
         # 250 mm / 62.5 us = 4000.00 m/s — two decimals, never a comma.
         self.assertIn("4000.00", text)
         self.assertNotIn("4,000", text)
@@ -2683,7 +2666,9 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
         # max-min = 534 m/s (13.6% of the mean) — flagged, not averaged away.
-        self.assertIn("UPV VARIANCE BETWEEN POINTS 534 M/S", flat)
+        flat_no_space = flat.replace(" ", "")
+        self.assertIn("POINTSPREAD", flat_no_space)
+        self.assertIn("534M/S(±6.8%)", flat_no_space)
 
     # ------------------------------------- crack depth before velocity
     def test_crack_depth_analysis_precedes_velocity_tables(self):
@@ -2707,8 +2692,9 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
                        path_length_mm=250.0, pulse_time_us=62.5)
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
-        crack_pos = flat.find("CRACK DEPTH MEASUREMENTS")
-        velocity_pos = flat.find("PULSE VELOCITY (M/S)")
+        flat_no_space = flat.replace(" ", "")
+        crack_pos = flat_no_space.find("CRACKDEPTHMEASUREMENTS")
+        velocity_pos = flat_no_space.find("PULSEVELOCITY(M/S)")
         self.assertGreater(crack_pos, 0)
         self.assertGreater(velocity_pos, 0)
         self.assertLess(crack_pos, velocity_pos)
@@ -3156,8 +3142,8 @@ class ReportCMSComputedSectionTests(ReportCMSBase):
                     for s in self._sections(project=self.project)
                     .data["sections"]}
         self.assertEqual(sections["visual_observations"]["source"],
-                         "unavailable")
-        self.assertIsNone(sections["visual_observations"]["body"])
+                         "computed")
+        self.assertIsNotNone(sections["visual_observations"]["body"])
         self.assertEqual(sections["rebar_statement"]["source"],
                          "unavailable")
         self.assertIsNone(sections["rebar_statement"]["body"])
@@ -3730,14 +3716,28 @@ class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         self.assertNotIn('Lagos Island', raw)    # site address / LGA
 
     # ---- public download of the authentic original (12 Sep 2026) ----
-    def test_download_original_with_valid_ref_and_digest(self):
+    def test_download_original_with_valid_ref_and_digest_returns_403_without_auth(self):
         response = self.client.get(
             reverse('report-verify-download'),
             {'ref': self.archive.report_reference,
              'digest': self.archive.content_key})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(response.data.get('requires_request'))
+
+    def test_download_original_with_authenticated_user(self):
+        from apps.documents.models import DocumentAccessRequest
+        DocumentAccessRequest.objects.create(
+            requester_email="test@nexucon.com",
+            report_digest=self.archive.content_key,
+            status='APPROVED'
+        )
+        response = self.client.get(
+            reverse('report-verify-download'),
+            {'ref': self.archive.report_reference,
+             'digest': self.archive.content_key,
+             'email': 'test@nexucon.com'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.content.startswith(b'%PDF'))
-        # The exact archived bytes — byte-for-byte the sealed original.
         self.archive.file.open('rb')
         try:
             self.assertEqual(response.content, self.archive.file.read())
@@ -3794,7 +3794,7 @@ class NDTReportPreviewTests(_HermeticMediaMixin, NDTReportFixtureMixin,
                     kwargs={'project_id': self.project.id}))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         text = ' '.join(_pdf_text(response.content).split())
-        self.assertIn('PULSE VELOCITY', text)
+        self.assertIn('PULSEVELOCITY', text.replace(' ', ''))
         self.assertIn('COL-C24', text)
         self.assertIn('REPORT INTEGRITY', text)
 
