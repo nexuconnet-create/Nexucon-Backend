@@ -822,7 +822,7 @@ class NDTReportBuilder:
                 # a valid (never inverted) single-page range.
                 end = _to_roman(max(start_n,
                                     end_page - pdf.roman_from_page + 1))
-                disp = APPENDIX_ITEM_TITLES.get(name, name.title())
+                disp = APPENDIX_ITEM_TITLES.get(name, name).upper()
                 pdf.set_font('Cambria', 'B', 12)
                 pdf.set_xy(pdf.l_margin, y)
                 pdf.cell(0, 7.5, f'{disp} ({_to_roman(start_n)}-{end})')
@@ -834,7 +834,7 @@ class NDTReportBuilder:
                 # full title prints in the title column, no number cell.
                 title_x = pdf.l_margin + 25.4
                 avail = (pdf.w - pdf.r_margin - 26) - title_x
-                toc_title = name
+                toc_title = name.upper()
                 pdf.set_font('Cambria', 'B', 12)
                 pdf.set_xy(pdf.l_margin, y)
                 lines = _wrap_lines(pdf, toc_title, avail)
@@ -848,7 +848,7 @@ class NDTReportBuilder:
             indent = 12.7 if level else 0
             title_x = pdf.l_margin + 25.4
             avail = (pdf.w - pdf.r_margin - 26) - title_x
-            toc_title = TOC_TITLES.get(num) or (title or name).title()
+            toc_title = (TOC_TITLES.get(num) or (title or name)).upper()
             pdf.set_font('Cambria', 'B', 12)
             pdf.set_xy(pdf.l_margin + indent, y)
             pdf.cell(25.4 - indent, 7.5, f'{num}.' if not level else num)
@@ -2262,6 +2262,8 @@ class NDTReportService:
                     'of the structure.**'
                 )
                 exec_paras.append(para4)
+            else:
+                exec_paras.append('**No visual or structural defects were observed during the investigation.**')
             bodies['executive_summary'] = '\n\n'.join(exec_paras)
 
         # -- introduction, computed project paragraphs (always available)
@@ -2365,7 +2367,7 @@ class NDTReportService:
                 bodies['findings_statement'] = (strength_sentence + ' '
                                                 + advice_sentence)
             else:
-                bodies['findings_statement'] = strength_sentence
+                bodies['findings_statement'] = strength_sentence + ' **No visual or structural defects were observed during the investigation.**'
 
         # -- conclusion items (needs results: they state percentages)
         if element_data:
@@ -3159,8 +3161,12 @@ class NDTReportService:
             map_link = cls._maps_link(project) if static_map is not None else None
             
             if not map_sources:
-                builder.placeholder_box('SITE LOCATION MAP NOT PROVIDED',
-                                        height=100)
+                location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
+                if project.lga:
+                    location_text += f', {project.lga.upper()}'
+                if project.state:
+                    location_text += f', {project.state.upper()}'
+                builder.placeholder_box(location_text, height=100)
             elif len(map_sources) == 1:
                 cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
                                  48.3, 120, 138.9, link=map_link)
