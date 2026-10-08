@@ -2689,16 +2689,16 @@ class NDTReportService:
                     reco_clause = ' '.join(reco_parts)
                     
                 advice_sentence = (
-                    f'**It is advised that {client_target} engage a qualified '
+                    f'It is advised that {client_target} engage a qualified '
                     f'structural engineer and other relevant professionals in the '
                     f'built environment to {reco_clause} to guarantee the '
                     'stability, integrity and the serviceability of the '
-                    'building.**'
+                    'building.'
                 )
                 bodies['findings_statement'] = (strength_sentence + ' '
                                                 + advice_sentence)
             else:
-                bodies['findings_statement'] = strength_sentence + ' **No visual or structural defects were observed during the investigation.**'
+                bodies['findings_statement'] = strength_sentence + ' No visual or structural defects were observed during the investigation.'
 
         # -- conclusion items (needs results: they state percentages)
         if element_data:
