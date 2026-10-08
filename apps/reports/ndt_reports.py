@@ -3946,7 +3946,7 @@ class NDTReportService:
                                 total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
                                 spread_str = f"{total_spread:.1f}%"
                             
-                            if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None and e['spread_pct'] > 2.0):
+                            if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
                                 remark += (f"\nUPV VARIANCE BETWEEN POINTS {e['spread_km_s'] * 1000:.0f} M/S (±{e['spread_pct'] / 2:.1f}%)")
                             remark += flag_text
                             
