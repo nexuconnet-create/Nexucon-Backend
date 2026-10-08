@@ -1655,7 +1655,14 @@ class NDTReportService:
         from django.conf import settings as dj_settings
         api_key = getattr(dj_settings, 'GOOGLE_MAPS_API_KEY', '') or ''
         if not api_key:
-            return None
+            try:
+                # Fallback to free Yandex Static Maps if no Google Maps API key is configured
+                yandex_url = f'https://static-maps.yandex.ru/1.x/?ll={lon},{lat}&size=600,400&z=15&l=sat,skl&pt={lon},{lat},pm2rdm'
+                req = urllib.request.Request(yandex_url, headers={'User-Agent': 'Mozilla/5.0'})
+                return io.BytesIO(urllib.request.urlopen(req, timeout=15).read())
+            except Exception as exc:
+                logger.error('Yandex static map fetch failed: %s', exc)
+                return None
         # ~500 m radius at Lagos latitudes: 0.0045° latitude span.
         params = urllib.parse.urlencode({
             'center': f'{lat},{lon}',
@@ -1673,7 +1680,14 @@ class NDTReportService:
             return io.BytesIO(urllib.request.urlopen(req, timeout=15).read())
         except Exception as exc:            # noqa: BLE001 — no map, honestly
             logger.error('Google static map fetch failed: %s', exc)
-            return None
+            # Try Yandex fallback if Google fetch fails (e.g., quota exceeded)
+            try:
+                yandex_url = f'https://static-maps.yandex.ru/1.x/?ll={lon},{lat}&size=600,400&z=15&l=sat,skl&pt={lon},{lat},pm2rdm'
+                req = urllib.request.Request(yandex_url, headers={'User-Agent': 'Mozilla/5.0'})
+                return io.BytesIO(urllib.request.urlopen(req, timeout=15).read())
+            except Exception as fallback_exc:
+                logger.error('Yandex fallback map fetch failed: %s', fallback_exc)
+                return None
 
     @staticmethod
     def _effective_client_name(project):
@@ -3150,6 +3164,12 @@ class NDTReportService:
             capture_url = cls._bim_capture_url(project)
             if capture_url:
                 map_sources.append(capture_url)
+            try:
+                bim_plan, _cap = cls._generate_bim_plan_view(project)
+                if bim_plan:
+                    map_sources.append(bim_plan)
+            except Exception:  # noqa: BLE001
+                pass
             # Google static map around the project's recorded GNSS coordinates
             # (C6) — a real 500 m radius map image when coordinates + API key
             # exist; absent otherwise, never fabricated.
@@ -3785,7 +3805,11 @@ class NDTReportService:
                     builder.ln_gap(2)
 
                 for obs in ai_record.observations:
-                    builder.bullet(str(obs))
+                    obs_text = str(obs)
+                    if ':' in obs_text:
+                        prefix, rest = obs_text.split(':', 1)
+                        obs_text = f'**{prefix}:**{rest}'
+                    builder.bullet(obs_text)
                 # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
                 # intervals, probability below design strength, cross-element
                 # outlier checks, data quality and the reasoning trace — computed
