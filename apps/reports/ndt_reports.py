@@ -186,7 +186,7 @@ ECS_CALIBRATION_SOURCE = (
     "estimate rather than extrapolated."
 )
 
-ECS_FORMULA_LINE = "E.C.S: f_cu = 1.20 x exp(0.85 x V)  (f_cu in N/mm2, V in km/s; valid 2.0 - 5.0 km/s)"
+ECS_FORMULA_LINE = "E.C.S: **f_cu = 1.20 x exp(0.85 x V)**  (f_cu in N/mm2, V in km/s; valid 2.0 - 5.0 km/s)"
 
 
 def estimated_compressive_strength(velocity_km_s):
@@ -213,8 +213,8 @@ def ecs_report_disclosure(project):
         curve_snapshot, formula_display, resolve_active_curve)
 
     default_derivation = (
-        'f_cu = 1.20 x exp(0.85 x V), with V expressed in km/s '
-        '(f_cu = 1.20 x exp(0.00085 x V) in m/s)')
+        '**f_cu = 1.20 x exp(0.85 x V)**, with V expressed in km/s '
+        '(**f_cu = 1.20 x exp(0.00085 x V)** in m/s)')
     try:
         curve = resolve_active_curve(project)
     except Exception:
@@ -230,7 +230,7 @@ def ecs_report_disclosure(project):
         "Estimated compressive strength (E.C.S) values in this report are "
         "derived from the project-specific calibration curve "
         f"established for this project under the Nexucon Link procedure: "
-        f"{formula} (f_cu in N/mm2, V the pulse velocity in m/s"
+        f"**{formula}** (f_cu in N/mm2, V the pulse velocity in m/s"
         + (", R the rebound number)" if curve.curve_type == 'sonreb' else ")")
         + ".",
     ]
@@ -3743,8 +3743,8 @@ class NDTReportService:
             if active_curve is not None and active_curve.project_id:
                 from apps.digital_eye.strength_curves import formula_display
                 ecs_conversion_line = (
-                    formula_display(active_curve.curve_type,
-                                    active_curve.formula_params or {})
+                    '**' + formula_display(active_curve.curve_type,
+                                    active_curve.formula_params or {}) + '**'
                     + ' (f_cu in N/mm2, V in m/s'
                     + (', R the rebound number)'
                        if active_curve.curve_type == 'sonreb' else ')'))
