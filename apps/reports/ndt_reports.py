@@ -375,6 +375,21 @@ def _se_adjustment_disclosure(curve):
     return parts
 
 
+def _bold(text):
+    """``text`` wrapped in the **bold** run both renderers understand.
+
+    The client asked (Oct 2026) that recommendations and every other
+    statement the client has to act on print in bold in every section. The
+    text is wrapped only when it does not already carry markup, so a body
+    pulled from the report CMS that the operator has already emphasised is
+    left exactly as they wrote it.
+    """
+    stripped = str(text or '').strip()
+    if not stripped or '**' in stripped:
+        return stripped
+    return f'**{stripped}**'
+
+
 def _wrap_lines(pdf, text, width):
     """
     Word-wrap ``text`` into lines no wider than ``width`` mm using the PDF's
@@ -411,6 +426,50 @@ def _wrap_lines(pdf, text, width):
             line = line[cut:]
         out.append(line)
     return out or ['-']
+
+
+def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
+                      base_bold=False):
+    """Draw one table-cell line, honouring the ``**bold**`` markup.
+
+    Table cells are written by the same code that writes the body
+    paragraphs, so they carry the same markup; drawn literally they printed
+    the asterisks to the client. The markers are measured as nothing and
+    rendered as Cambria-Bold runs, and the alignment is computed on the
+    visible width so a bolded cell stays centred. ``base_bold`` keeps the
+    header row's own weight, and any marker a hard character-break left
+    unbalanced is dropped rather than printed: the client never receives an
+    asterisk.
+    """
+    base = 'B' if base_bold else ''
+    runs = []
+    for part in re.split(r'(\*\*[^*]+\*\*)', _latin1(line)):
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**') and len(part) > 4:
+            runs.append((part[2:-2], True))
+        else:
+            runs.append((part.replace('**', ''), False))
+    runs = [(text, bold) for text, bold in runs if text]
+    if not runs:
+        return
+    pdf.set_font('Cambria', base, size)
+    visible = ''.join(text for text, _bold in runs)
+    if not any(bold for _text, bold in runs):
+        # No emphasis in this line: one plain cell, aligned as before.
+        pdf.cell(width, line_h, visible, align=align)
+        return
+    cursor = x + pdf.c_margin
+    if align == 'C':
+        cursor = x + (width - pdf.get_string_width(visible)) / 2.0
+    elif align == 'R':
+        cursor = x + width - pdf.c_margin - pdf.get_string_width(visible)
+    for text, bold in runs:
+        pdf.set_font('Cambria', 'B' if (bold or base_bold) else '', size)
+        pdf.set_xy(cursor, y)
+        pdf.cell(pdf.get_string_width(text), line_h, text)
+        cursor += pdf.get_string_width(text)
+    pdf.set_font('Cambria', base, size)
 
 
 def _element_display(name):
@@ -903,12 +962,14 @@ class NDTReportBuilder:
         """Body prose, Cambria 12. The reference's dominant leading is
         double-spaced (28pt = 9.9mm); §3.0 literature runs single-spaced
         (16.2pt = 5.7mm) and the §4 field-work pages 21pt = 7.5mm. With
-        ``markdown=True`` the text may carry **bold** runs, rendered in
-        Cambria-Bold like the reference's emphasised names/dates."""
+        ``**bold**`` runs are rendered in Cambria-Bold like the
+        reference's emphasised names/dates whenever they are present — the
+        body text comes from the report CMS, so a body the operator has
+        emphasised must not reach the client as asterisks."""
         pdf = self.pdf
         pdf.set_font('Cambria', '', 12)
         pdf.set_text_color(*INK)
-        if not markdown:
+        if not markdown and '**' not in str(text or ''):
             pdf.multi_cell(0, leading, _latin1(text))
         else:
             import re
@@ -989,30 +1050,66 @@ class NDTReportBuilder:
                        new_x='LMARGIN', new_y='NEXT')
         pdf.set_font('Cambria', '', 12)
 
-    def numbered(self, items, num_indent=0.0, text_indent=6.35, leading=9.9):
+    def numbered(self, items, num_indent=0.0, text_indent=6.35, leading=9.9,
+                 markdown=False):
         """Numbered clause list. Reference §2.0: number at the margin, text
         6.35mm across, 9.9mm leading; §4.0 scope: number 1.6mm in, text
         12.7mm across, 7.5mm leading; §7.0 conclusion: text 12.7mm across,
-        7.5mm leading."""
+        7.5mm leading. ``**bold**`` runs render in Cambria-Bold whenever
+        they are present — the §7.0 conclusion items are the report's
+        conclusions, so they are set bold like the rest of the advice."""
+        import re as _re
         for i, item in enumerate(items, 1):
             self.pdf.set_font('Cambria', '', 12)
             self.pdf.set_text_color(*INK)
             self.pdf.set_x(self.pdf.l_margin + num_indent)
             self.pdf.cell(max(6.0, text_indent - num_indent), leading,
                           f'{i}.')
-            self.pdf.multi_cell(0, leading, _latin1(item),
-                                new_x='LMARGIN', new_y='NEXT')
+            if '**' not in item:
+                self.pdf.multi_cell(0, leading, _latin1(item),
+                                    new_x='LMARGIN', new_y='NEXT')
+                continue
+            for part in _re.split(r'(\*\*[^*]+\*\*)', _latin1(item)):
+                if not part:
+                    continue
+                if part.startswith('**') and part.endswith('**'):
+                    self.pdf.set_font('Cambria', 'B', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(leading, part[2:-2])
+                    self.pdf.set_font('Cambria', '', 12)
+                else:
+                    self.pdf.set_font('Cambria', '', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(leading, part)
+            self.pdf.ln(leading)
 
     def lettered(self, items):
         """Lettered observation list (reference §4.1 visual test a., b., c.):
-        letter 6.35mm in, text 12.7mm in, 7.5mm leading."""
+        letter 6.35mm in, text 12.7mm in, 7.5mm leading. ``**bold**`` runs
+        render as Cambria-Bold, as everywhere else body text is set."""
+        import re as _re
         for i, item in enumerate(items):
             self.pdf.set_font('Cambria', '', 12)
             self.pdf.set_text_color(*INK)
             self.pdf.set_x(self.pdf.l_margin + 6.35)
             self.pdf.cell(6.35, 7.5, f'{chr(ord("a") + i)}.')
-            self.pdf.multi_cell(0, 7.5, _latin1(item),
-                                new_x='LMARGIN', new_y='NEXT')
+            if '**' not in item:
+                self.pdf.multi_cell(0, 7.5, _latin1(item),
+                                    new_x='LMARGIN', new_y='NEXT')
+                continue
+            for part in _re.split(r'(\*\*[^*]+\*\*)', _latin1(item)):
+                if not part:
+                    continue
+                if part.startswith('**') and part.endswith('**'):
+                    self.pdf.set_font('Cambria', 'B', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(7.5, part[2:-2])
+                    self.pdf.set_font('Cambria', '', 12)
+                else:
+                    self.pdf.set_font('Cambria', '', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(7.5, part)
+            self.pdf.ln(7.5)
 
     def centered_formula(self, formula):
         """Centered symbolic formula line (reference §3.0 'UPV = L / t')."""
@@ -1185,15 +1282,15 @@ class NDTReportBuilder:
     def bullet(self, text, leading=5.7, markdown=False):
         """Bulleted line — reference: a ~3mm black filled circle at the
         margin, text 7.4mm across, leading matches the surrounding section
-        (5.7mm in §3.0, 7.5mm in §4.0). With markdown=True the text may
-        carry **bold** runs, rendered in Cambria-Bold."""
+        (5.7mm in §3.0, 7.5mm in §4.0). ``**bold**`` runs render in
+        Cambria-Bold whenever they are present."""
         import re as _re
         pdf = self.pdf
         pdf.set_fill_color(*INK)
         y = pdf.get_y()
         pdf.ellipse(pdf.l_margin + 0.2, y + 1.2, 3.0, 3.0, 'F')
         pdf.set_xy(pdf.l_margin + 7.4, y)
-        if not markdown or '**' not in text:
+        if '**' not in text:
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
             pdf.multi_cell(0, leading, _latin1(text),
@@ -1292,7 +1389,8 @@ class NDTReportBuilder:
                 ty = y0 + (row_h - len(lines) * line_h) / 2
                 for ln in lines:
                     pdf.set_xy(x, ty)
-                    pdf.cell(w, line_h, _latin1(ln), align=a)
+                    _draw_markup_line(pdf, x, ty, w, ln, a, line_h,
+                                      base_bold=is_header)
                     ty += line_h
                 x += w
             pdf.set_xy(pdf.l_margin, y0 + row_h)
@@ -1637,33 +1735,192 @@ class NDTReportService:
             plans.append((floor_label, buf, caption))
         return plans
 
+    # ---- Static map sources -------------------------------------------
+    # The location page has to show the site, not an abstraction of it. The
+    # old fallback was a single 600x400 satellite frame at zoom 15, which
+    # over these project locations resolves to unlabelled blobs — the
+    # "generic shapes" the client rejected. Google's Static Maps API is used
+    # when the server holds a key entitled to it; the street tiles below are
+    # the free fallback, so a key that is missing, restricted or out of
+    # quota degrades to a real labelled map rather than to a blur.
+    _MAP_TILE_SERVERS = (
+        ('OpenStreetMap', 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
+        ('CARTO', 'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'),
+    )
+    _TILE_SIZE = 256
+    # Tile servers identify callers by User-Agent and refuse the python
+    # default, so the report carries its own.
+    _TILE_USER_AGENT = 'NexuconReport/1.0 (+https://nexucon.net; reports@nexucon.net)'
+
+    @staticmethod
+    def _site_coordinates(project, tests=None):
+        """The point the report may map.
+
+        The project's own recorded fix wins. Failing that, the median of the
+        fixes recorded on its tests — positions actually taken at this site
+        by the instruments, not a guess at where it might be. `(None, None)`
+        when nothing was recorded anywhere, which is what keeps the location
+        page honest.
+        """
+        import statistics
+
+        lat = getattr(project, 'latitude', None)
+        lon = getattr(project, 'longitude', None)
+        if lat is not None and lon is not None:
+            return float(lat), float(lon)
+
+        lats, lons = [], []
+        for test in (tests or []):
+            t_lat = getattr(test, 'latitude', None)
+            t_lon = getattr(test, 'longitude', None)
+            if t_lat is None or t_lon is None:
+                continue
+            lats.append(float(t_lat))
+            lons.append(float(t_lon))
+        if not lats:
+            return None, None
+        return statistics.median(lats), statistics.median(lons)
+
     @classmethod
-    def _google_static_map(cls, project):
-        """A 500 m radius Google Maps static-image around the project's
-        recorded GNSS coordinates (review meeting C6), fetched with the
-        server's GOOGLE_MAPS_API_KEY when one is configured. Returns a
-        BytesIO (PNG) or None — no coordinates or no key means no map, and
-        the caller falls through to the honest fallbacks. A failed fetch
-        also returns None (never a fabricated map)."""
+    def _tiled_street_map(cls, lat, lon, zoom=17, width=640, height=640):
+        """A labelled street map of (lat, lon), stitched from raster tiles
+        and marked at the exact point. Returns ``(buffer, source_name)`` or
+        ``(None, '')`` when no tile server answers.
+
+        Ordinary slippy-map tiles at building zoom: streets, names and
+        landmarks are legible at the size the report prints, which a
+        low-zoom satellite frame is not. Every tile is a real map of the
+        coordinate; nothing here is drawn from imagination.
+        """
+        import io
+        import math
+        import urllib.request
+        from PIL import Image, ImageDraw
+
+        n = 2 ** zoom
+        x = (lon + 180.0) / 360.0 * n
+        y = ((1.0 - math.log(math.tan(math.radians(lat))
+                             + 1.0 / math.cos(math.radians(lat))) / math.pi)
+             / 2.0 * n)
+        centre_x, centre_y = x * cls._TILE_SIZE, y * cls._TILE_SIZE
+        left, top = centre_x - width / 2.0, centre_y - height / 2.0
+        tile_x0, tile_y0 = int(left // cls._TILE_SIZE), int(top // cls._TILE_SIZE)
+        offset_x, offset_y = left - tile_x0 * cls._TILE_SIZE, top - tile_y0 * cls._TILE_SIZE
+        cols = int(width // cls._TILE_SIZE) + 2
+        rows = int(height // cls._TILE_SIZE) + 2
+
+        for source_name, template in cls._MAP_TILE_SERVERS:
+            canvas = Image.new('RGB', (cols * cls._TILE_SIZE, rows * cls._TILE_SIZE),
+                               (232, 234, 237))
+            drawn = 0
+            attempted = 0
+            for col in range(cols):
+                for row in range(rows):
+                    tile_y = tile_y0 + row
+                    if tile_y < 0 or tile_y >= n:
+                        continue
+                    url = template.format(z=zoom, x=(tile_x0 + col) % n, y=tile_y)
+                    attempted += 1
+                    try:
+                        request = urllib.request.Request(
+                            url, headers={'User-Agent': cls._TILE_USER_AGENT})
+                        payload = urllib.request.urlopen(request, timeout=8).read()
+                        tile = Image.open(io.BytesIO(payload)).convert('RGB')
+                    except Exception as exc:      # noqa: BLE001 — a missing tile
+                        # The very first tile failing means the server is
+                        # unreachable; one timeout is enough to know that,
+                        # and paying it sixteen times would stall the render.
+                        if attempted == 1:
+                            logger.warning('map tile server %s unreachable: %s',
+                                           source_name, exc)
+                            break
+                        logger.warning('map tile %s failed (%s): %s',
+                                       source_name, url, exc)
+                        continue
+                    canvas.paste(tile, (col * cls._TILE_SIZE, row * cls._TILE_SIZE))
+                    drawn += 1
+                if attempted == 1 and drawn == 0:
+                    break
+            # A mostly-holed canvas is a broken map, so try the next server
+            # rather than print the gaps.
+            if drawn < (cols * rows) * 0.75:
+                continue
+
+            canvas = canvas.crop((int(offset_x), int(offset_y),
+                                  int(offset_x) + width, int(offset_y) + height))
+            draw = ImageDraw.Draw(canvas)
+            mark_x, mark_y = width / 2.0, height / 2.0
+            radius = 10
+            draw.ellipse([mark_x - radius, mark_y - radius,
+                          mark_x + radius, mark_y + radius],
+                         fill=(214, 40, 40), outline=(255, 255, 255), width=3)
+            draw.ellipse([mark_x - 3, mark_y - 3, mark_x + 3, mark_y + 3],
+                         fill=(255, 255, 255))
+            buffer = io.BytesIO()
+            canvas.save(buffer, format='PNG')
+            buffer.seek(0)
+            return buffer, source_name
+        return None, ''
+
+    @staticmethod
+    def _map_attribution(source_name):
+        """The credit line that belongs under the location map.
+
+        Tile servers licence their imagery on condition that the consumer
+        names the source, and the credit also tells the client whether the
+        map is satellite imagery or a street map. An unknown source gets no
+        line rather than an invented credit.
+        """
+        return {
+            'Google Maps': 'Map imagery © Google Maps.',
+            'OpenStreetMap': 'Map data © OpenStreetMap contributors.',
+            'CARTO': 'Map tiles © CARTO — map data © OpenStreetMap '
+                     'contributors.',
+        }.get(str(source_name or '').strip(), '')
+
+    @classmethod
+    def _site_map_image(cls, project, tests=None):
+        """The best available real map of the site, with its source name.
+
+        Google's static map first (satellite imagery with labels, when the
+        key is entitled), then stitched street tiles. Returns ``(None, '')``
+        when the project holds no coordinates at all, so the caller falls
+        through to the placeholder rather than to a drawn guess.
+        """
+        lat, lon = cls._site_coordinates(project, tests)
+        if lat is None or lon is None:
+            return None, ''
+
+        google_map = cls._google_static_map(project, latitude=lat, longitude=lon)
+        if google_map is not None:
+            return google_map, 'Google Maps'
+
+        return cls._tiled_street_map(lat, lon)
+
+    @staticmethod
+    def _google_static_map(project, latitude=None, longitude=None):
+        """A Google Maps static image centred on the site coordinates,
+        fetched with the server's GOOGLE_MAPS_API_KEY. Returns a BytesIO
+        (image) or None.
+
+        No key — or a key the project is not entitled to (the API returns
+        403 for a disabled or unbilled Static Maps API, which is what this
+        deployment sees) — returns None so the caller can use the tile
+        fallback. No map is ever fabricated.
+        """
         import io
         import urllib.parse
         import urllib.request
-        lat = getattr(project, 'latitude', None)
-        lon = getattr(project, 'longitude', None)
+        lat = latitude if latitude is not None else getattr(project, 'latitude', None)
+        lon = longitude if longitude is not None else getattr(project, 'longitude', None)
         if lat is None or lon is None:
             return None
         from django.conf import settings as dj_settings
         api_key = getattr(dj_settings, 'GOOGLE_MAPS_API_KEY', '') or ''
         if not api_key:
-            try:
-                # Fallback to free Yandex Static Maps if no Google Maps API key is configured
-                yandex_url = f'https://static-maps.yandex.ru/1.x/?ll={lon},{lat}&size=600,400&z=15&l=sat,skl&pt={lon},{lat},pm2rdm'
-                req = urllib.request.Request(yandex_url, headers={'User-Agent': 'Mozilla/5.0'})
-                return io.BytesIO(urllib.request.urlopen(req, timeout=15).read())
-            except Exception as exc:
-                logger.error('Yandex static map fetch failed: %s', exc)
-                return None
-        # ~500 m radius at Lagos latitudes: 0.0045° latitude span.
+            return None
+        # Zoom 18 is building scale at these latitudes — the detail the
+        # client asked for; hybrid keeps the place names over the imagery.
         params = urllib.parse.urlencode({
             'center': f'{lat},{lon}',
             'zoom': '18',
@@ -1680,14 +1937,7 @@ class NDTReportService:
             return io.BytesIO(urllib.request.urlopen(req, timeout=15).read())
         except Exception as exc:            # noqa: BLE001 — no map, honestly
             logger.error('Google static map fetch failed: %s', exc)
-            # Try Yandex fallback if Google fetch fails (e.g., quota exceeded)
-            try:
-                yandex_url = f'https://static-maps.yandex.ru/1.x/?ll={lon},{lat}&size=600,400&z=15&l=sat,skl&pt={lon},{lat},pm2rdm'
-                req = urllib.request.Request(yandex_url, headers={'User-Agent': 'Mozilla/5.0'})
-                return io.BytesIO(urllib.request.urlopen(req, timeout=15).read())
-            except Exception as fallback_exc:
-                logger.error('Yandex fallback map fetch failed: %s', fallback_exc)
-                return None
+            return None
 
     @staticmethod
     def _effective_client_name(project):
@@ -1714,11 +1964,13 @@ class NDTReportService:
         return 'NOT PROVIDED'
 
     @staticmethod
-    def _maps_link(project):
-        """The Google Maps link for the site (C6): only when the project
-        carries real GNSS coordinates — never a guessed location."""
-        lat = getattr(project, 'latitude', None)
-        lon = getattr(project, 'longitude', None)
+    def _maps_link(project, latitude=None, longitude=None):
+        """The Google Maps link for the site (C6): only when the platform
+        holds real GNSS coordinates — never a guessed location. The caller
+        may pass the coordinates it resolved (which can come from the test
+        fixes when the project records none)."""
+        lat = latitude if latitude is not None else getattr(project, 'latitude', None)
+        lon = longitude if longitude is not None else getattr(project, 'longitude', None)
         if lat is None or lon is None:
             return None
         return (f'https://www.google.com/maps/search/?api=1&query={lat},{lon}')
@@ -2145,9 +2397,19 @@ class NDTReportService:
         Benign descriptions (e.g. 'uniform surface integrity without evidence of...',
         'smooth finished', 'good', 'sound') are not structural defects.
         """
+        return bool(cls._defect_notes(visual_notes))
+
+    @classmethod
+    def _defect_notes(cls, visual_notes):
+        """The operator's own defect observations, cleaned and de-duplicated.
+
+        One list feeds both the yes/no defect test and the bracketed list the
+        advice paragraph prints, so a note can never be substantive enough to
+        trigger the advice and then be missing from the bracket it points at.
+        """
         if not visual_notes:
-            return False
-        
+            return []
+
         defect_keywords = (
             'crack', 'spall', 'honeycomb', 'void', 'delaminat', 'defect',
             'damage', 'corros', 'rust', 'rot', 'deteriorat', 'exposed rebar',
@@ -2159,15 +2421,68 @@ class NDTReportService:
             'without evidence of', 'no visible', 'no evidence of', 'free of',
             'without sign of', 'not observed', 'no structural defect'
         )
-        
+
+        notes = []
+        seen = set()
         for note in visual_notes:
-            note_lower = note.lower()
-            is_negated = any(neg in note_lower for neg in non_defect_negations)
-            if is_negated:
+            # Collapse the operator's line breaks: these strings are pasted
+            # into a single sentence, and a newline inside it would break the
+            # paragraph across the bracket.
+            text = ' '.join(str(note or '').split()).strip(' \t.;,')
+            if not text:
                 continue
-            if any(k in note_lower for k in defect_keywords):
-                return True
-        return False
+            # The §4.1 sentences wrap the operator's own words in narration
+            # and append an appendix cross-reference; the bracket wants the
+            # observation itself, not the scaffolding around it.
+            quoted = re.match(
+                r'^On-site visual observation logged during survey:\s*[“"](.*?)[”"]\.?$',
+                text)
+            if quoted:
+                text = quoted.group(1).strip(' \t.;,')
+            text = re.sub(r'\s*\(see pic [^)]*\)', '', text).strip(' \t.;,')
+            if not text:
+                continue
+            # §4.1 always appends 'observed on <element>.' — but when the
+            # operator's own words already said 'observed', the repeat reads
+            # as a stutter inside the bracket.
+            tail = re.search(r'\s+observed on (.+?)\.?$', text)
+            if tail and 'observ' in text[:tail.start()].lower():
+                text = f'{text[:tail.start()]} on {tail.group(1).rstrip(".")}'
+            # One very long note would swallow the sentence it sits inside.
+            if len(text) > 160:
+                text = text[:160].rsplit(' ', 1)[0].rstrip(' ,;') + '…'
+            low = text.lower()
+            if any(neg in low for neg in non_defect_negations):
+                continue
+            if not any(k in low for k in defect_keywords):
+                continue
+            key = low.rstrip('.')
+            if key in seen:
+                continue
+            seen.add(key)
+            notes.append(text)
+        return notes
+
+    @classmethod
+    def _defect_bracket(cls, visual_notes, limit=3):
+        """The observed defects as a bracketed aside — '(cracks; spalling)'.
+
+        The advice paragraph tells the client to engage an engineer "to
+        proffer solution to the defects observed" without ever naming them.
+        The names here are the operator's recorded words, not a summary this
+        platform wrote: nobody here has seen the building. Empty string when
+        nothing substantive was recorded, so the sentence never carries an
+        empty pair of brackets.
+        """
+        notes = cls._defect_notes(visual_notes)
+        if not notes:
+            return ''
+        shown = notes[:limit]
+        extra = len(notes) - len(shown)
+        if extra > 0:
+            shown.append(f'and {extra} further observation'
+                         f'{"s" if extra != 1 else ""} recorded in Section 4.1')
+        return ' (' + '; '.join(shown) + ')'
 
     # ---------------------------------------------------------------
     # Generated-content CMS bodies (11 Sep 2026 client request): the
@@ -2256,7 +2571,8 @@ class NDTReportService:
             if has_visual_defects or poor_members or has_flagged_members:
                 reco_parts = []
                 if has_visual_defects:
-                    reco_parts.append('proffer solution to the defects observed')
+                    reco_parts.append('proffer solution to the defects observed'
+                                      + cls._defect_bracket(visual_notes))
                 if poor_members:
                     reco_parts.append('give technical advice on the poor structural members tested')
                 if has_flagged_members and not poor_members:
@@ -2359,7 +2675,8 @@ class NDTReportService:
                 
                 reco_parts = []
                 if has_visual_defects:
-                    reco_parts.append('proffer solution to the defects observed')
+                    reco_parts.append('proffer solution to the defects observed'
+                                      + cls._defect_bracket(visual_notes))
                 if poor_members:
                     reco_parts.append('technical advice on the poor structural members tested')
                 if has_flagged_members and not poor_members:
@@ -3006,15 +3323,18 @@ class NDTReportService:
                 builder.para(' '.join(
                     [visual_sentence, analysis_sentence, arrangement_sentence]))
                 if has_visual_defects or poor_members:
+                    defect_bracket = cls._defect_bracket(visual_notes)
                     if has_visual_defects and poor_members:
                         remedial_clause = (
-                            'proffer solution to the defects observed, give technical '
+                            'proffer solution to the defects observed'
+                            + defect_bracket + ', give technical '
                             'advice on the poor structural members tested and further '
                             'analyse the structural arrangement'
                         )
                     elif has_visual_defects:
                         remedial_clause = (
-                            'proffer solution to the defects observed and further '
+                            'proffer solution to the defects observed'
+                            + defect_bracket + ' and further '
                             'analyse the structural arrangement'
                         )
                     else:
@@ -3170,16 +3490,20 @@ class NDTReportService:
                     map_sources.append(bim_plan)
             except Exception:  # noqa: BLE001
                 pass
-            # Google static map around the project's recorded GNSS coordinates
-            # (C6) — a real 500 m radius map image when coordinates + API key
-            # exist; absent otherwise, never fabricated.
-            static_map = cls._google_static_map(project)
+            # A real map of the site (C6): Google's static imagery when the
+            # key is entitled to it, otherwise a labelled street map stitched
+            # from tiles. The coordinates are the project's own fix, or the
+            # median of the fixes its tests recorded when the project holds
+            # none. No coordinates anywhere means no map — never a drawn guess
+            # — and the caller falls through to the placeholder below.
+            map_lat, map_lon = cls._site_coordinates(project, tests)
+            static_map, map_source = cls._site_map_image(project, tests)
             if static_map is not None:
                 map_sources.insert(0, static_map)
-                
+
             pdf = builder.pdf
-            map_link = cls._maps_link(project) if static_map is not None else None
-            
+            map_link = cls._maps_link(project, map_lat, map_lon) if static_map is not None else None
+
             if not map_sources:
                 location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
                 if project.lga:
@@ -3204,18 +3528,28 @@ class NDTReportService:
                 pdf.set_text_color(*INK)
                 pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
                          align='C')
+            # Credit the map source under the frames. Both tile providers
+            # licence their imagery on the condition that the report says
+            # where it came from, and the client can then see whether the
+            # map is satellite imagery or a street map.
+            attribution = cls._map_attribution(map_source)
+            if attribution and static_map is not None:
+                pdf.set_xy(pdf.l_margin, 190.5)
+                pdf.set_font('Cambria', 'I', 7)
+                pdf.set_text_color(*INK)
+                pdf.cell(0, 4.5, _latin1(attribution), align='C')
             # Recorded GNSS coordinates + the Google Maps link to the site (C6).
-            # Only when the project carries real coordinates — nothing is guessed.
-            if project.latitude is not None and project.longitude is not None:
-                link = cls._maps_link(project)
+            # Only when the platform holds real coordinates — nothing is guessed.
+            if map_lat is not None and map_lon is not None:
+                link = cls._maps_link(project, map_lat, map_lon)
                 pdf.set_xy(pdf.l_margin, 196)
                 pdf.set_font('Cambria', 'I', 10)
                 pdf.set_text_color(*INK)
                 pdf.multi_cell(
                     0, 5.0,
                     _latin1(
-                        f'Coordinates: {project.latitude:.6f}°, '
-                        f'{project.longitude:.6f}°  —  view location on Google Maps:'
+                        f'Coordinates: {map_lat:.6f}°, '
+                        f'{map_lon:.6f}°  —  view location on Google Maps:'
                         f' {link}'),
                     align='C', new_x='LMARGIN', new_y='NEXT')
 
@@ -3791,17 +4125,17 @@ class NDTReportService:
                         rev_name = (review.reviewed_by.get_full_name() or review.reviewed_by.email
                                     if review.reviewed_by else 'Principal Engineer')
                         rev_date = review.reviewed_at.strftime('%d/%m/%Y, %I:%M %p') if review.reviewed_at else ''
-                        builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}")
+                        builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}", markdown=True)
                         if review.notes:
-                            builder.para(f"**Review Directives:** “{review.notes}”")
+                            builder.para(f"**Review Directives:** “{review.notes}”", markdown=True)
                     if review.inspector_notes or review.inspector_verdict:
                         insp_name = (review.inspector_responded_by.get_full_name() or review.inspector_responded_by.email
                                      if review.inspector_responded_by else 'Field Inspector')
                         insp_date = review.inspector_responded_at.strftime('%d/%m/%Y, %I:%M %p') if review.inspector_responded_at else ''
                         v_label = f" | **Verdict:** {review.get_inspector_verdict_display()}" if review.inspector_verdict else ""
-                        builder.para(f"**Field Inspector Review:** {insp_name} {f'({insp_date})' if insp_date else ''}{v_label}")
+                        builder.para(f"**Field Inspector Review:** {insp_name} {f'({insp_date})' if insp_date else ''}{v_label}", markdown=True)
                         if review.inspector_notes:
-                            builder.para(f"**Field Observations:** “{review.inspector_notes}”")
+                            builder.para(f"**Field Observations:** “{review.inspector_notes}”", markdown=True)
                     builder.ln_gap(2)
 
                 for obs in ai_record.observations:
@@ -3809,7 +4143,7 @@ class NDTReportService:
                     if ':' in obs_text:
                         prefix, rest = obs_text.split(':', 1)
                         obs_text = f'**{prefix}:**{rest}'
-                    builder.bullet(obs_text)
+                    builder.bullet(obs_text, markdown=True)
                 # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
                 # intervals, probability below design strength, cross-element
                 # outlier checks, data quality and the reasoning trace — computed
@@ -4016,7 +4350,8 @@ class NDTReportService:
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
                 + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
-                + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork.")
+                + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork."),
+                markdown=True,
             )
 
         def emit_reco():
@@ -4029,15 +4364,20 @@ class NDTReportService:
                 lead_in = get_cms_text(project, 'recommendation_preamble')[0]
                 findings_body, _src = get_cms_text(project, 'findings_statement',
                                                    computed=cms)
+                # §6.0 is the recommendation itself, so the whole statement
+                # prints bold — the lead-in and the findings it hands to the
+                # client (client request, Oct 2026: recommendations bold in
+                # every section).
                 builder.para(
-                    lead_in.rstrip()
-                    + ' ' + findings_body,
+                    ' '.join(part for part in
+                             (_bold(lead_in.rstrip()), _bold(findings_body))
+                             if part),
                     markdown=True
                 )
             else:
-                builder.para('No pulse velocity results are available for this '
-                             'project; no recommendation on concrete quality can '
-                             'be made.')
+                builder.para(_bold('No pulse velocity results are available for '
+                                   'this project; no recommendation on concrete '
+                                   'quality can be made.'), markdown=True)
             # Stored analysis records carry the platform's official wording —
             # surface them when present.
             recommendations = []
@@ -4061,13 +4401,15 @@ class NDTReportService:
                         seen_recs.add(clean_line)
                         recommendations.append(line)
             if recommendations:
-                builder.para("The platform's stored analysis records add the "
-                             'following recommendations:')
+                builder.para(_bold("The platform's stored analysis records add "
+                                   'the following recommendations:'),
+                             markdown=True)
                 for rec in recommendations:
                     builder.bullet(rec, markdown=True)
             elif not poor_members and not crack_tests:
-                builder.para('No adverse findings recorded; recorded concrete '
-                             'quality falls within acceptable velocity bands.')
+                builder.para(_bold('No adverse findings recorded; recorded '
+                                   'concrete quality falls within acceptable '
+                                   'velocity bands.'), markdown=True)
 
         def emit_conclusion():
             # -------------------------------------------------- 7.0 CONCLUSION
@@ -4081,9 +4423,12 @@ class NDTReportService:
                 # override rewords them.
                 conclusion_body, _src = get_cms_text(project, 'conclusion_items',
                                                      computed=cms)
-                # Reference §7.0: text 12.7mm across, 7.5mm leading.
-                builder.numbered(cms_list_items(conclusion_body),
-                                 text_indent=12.7, leading=7.5)
+                # Reference §7.0: text 12.7mm across, 7.5mm leading. Each
+                # numbered line is a conclusion the client acts on, so all of
+                # them print bold (client request, Oct 2026).
+                builder.numbered(
+                    [_bold(item) for item in cms_list_items(conclusion_body)],
+                    text_indent=12.7, leading=7.5, markdown=True)
                 builder.ln_gap(3)
                 builder.note_block(
                     'The test assumed 25 N/mm2 as the strength of the '
@@ -4093,8 +4438,10 @@ class NDTReportService:
                 )
             else:
                 builder.para(
-                    'No ultrasonic pulse velocity results are available for this '
-                    'project; no conclusion on concrete quality can be drawn.'
+                    _bold('No ultrasonic pulse velocity results are available '
+                          'for this project; no conclusion on concrete quality '
+                          'can be drawn.'),
+                    markdown=True
                 )
             # Reference sign-off: exactly TWO slots — tested by (left) and
             # approved by (right), dotted line above an ALL-CAPS name. Every
