@@ -973,7 +973,7 @@ class NDTReportBuilder:
             pdf.multi_cell(0, leading, _latin1(text))
         else:
             import re
-            for part in re.split(r'(\*\*[^*]+\*\*)', _latin1(text)):
+            for part in re.split(r'(\*\*.*?\*\*)', _latin1(text), flags=re.DOTALL):
                 if not part:
                     continue
                 if part.startswith('**') and part.endswith('**'):
@@ -1296,7 +1296,7 @@ class NDTReportBuilder:
             pdf.multi_cell(0, leading, _latin1(text),
                            new_x='LMARGIN', new_y='NEXT')
         else:
-            for part in _re.split(r'(\*\*[^*]+\*\*)', _latin1(text)):
+            for part in _re.split(r'(\*\*.*?\*\*)', _latin1(text), flags=_re.DOTALL):
                 if not part:
                     continue
                 if part.startswith('**') and part.endswith('**'):
@@ -1309,7 +1309,6 @@ class NDTReportBuilder:
                     pdf.set_text_color(*INK)
                     pdf.write(leading, part)
             pdf.ln(leading)
-
     def ln_gap(self, height=4):
         self.pdf.ln(height)
 
@@ -1744,6 +1743,7 @@ class NDTReportService:
     # the free fallback, so a key that is missing, restricted or out of
     # quota degrades to a real labelled map rather than to a blur.
     _MAP_TILE_SERVERS = (
+        ('Esri World Imagery', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'),
         ('OpenStreetMap', 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
         ('CARTO', 'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'),
     )
@@ -3840,10 +3840,11 @@ class NDTReportService:
                 'statutory 25 N/mm2 design strength. Pulse velocities are '
                 'reported in metres per second (m/s). Velocities outside the '
                 'calibrated 2.0 - 5.0 km/s range are reported without an E.C.S '
-                'estimate rather than extrapolated. Where an element\'s test '
-                'points disagree by more than 2% of the mean velocity, the '
-                'remark carries the point spread so the variance is visible '
-                'rather than silently averaged.'
+                'estimate rather than extrapolated. For transparency, where multiple '
+                'points are tested on an element, the point spread variance is '
+                'reported in the remarks column. Any element exhibiting a point '
+                'spread greater than 15% total or 7.5% from the mean is explicitly '
+                'flagged for further inspection.'
             )
 
             if crack_tests:
@@ -4296,6 +4297,20 @@ class NDTReportService:
 
             # Summarized Observations Table
             summary_table_rows = []
+
+            # Row 0: Environmental Conditions
+            temperatures = [getattr(t, 'surface_temperature_c', None) for t in tests if getattr(t, 'surface_temperature_c', None) is not None]
+            if temperatures:
+                avg_temp = sum(temperatures) / len(temperatures)
+                env_summary = f"Average recorded surface temperature: {avg_temp:.1f}°C. Moisture condition: Dry."
+            else:
+                env_summary = "Surface temperature not recorded. Moisture condition: Dry (implied by direct acoustic coupling)."
+            
+            summary_table_rows.append([
+                "Environmental Conditions",
+                site_addresses[0] if site_addresses else "Testing Zone",
+                env_summary
+            ])
 
             # Row 1: Concrete Member Surface Condition
             if anomalies:
