@@ -1994,6 +1994,14 @@ class NDTReportService:
                            if len(velocities) > 1 else None)
             spread_pct = (spread_km_s / mean_v * 100
                           if spread_km_s is not None and mean_v else None)
+            flagged_spread = False
+            if len(velocities) > 1 and mean_v:
+                max_v = max(velocities)
+                min_v = min(velocities)
+                total_spread = (max_v - min_v) / mean_v * 100
+                either_side = max((max_v - mean_v) / mean_v * 100, (mean_v - min_v) / mean_v * 100)
+                if total_spread > 15.0 or either_side > 7.5:
+                    flagged_spread = True
             
             # UPV range in m/s (max-min), for the RANGE column per the
             # 7 Oct meeting: range = highest - lowest reading in m/s.
@@ -2019,6 +2027,7 @@ class NDTReportService:
                 'spread_km_s': spread_km_s,
                 'spread_pct': spread_pct,
                 'upv_range_m_s': upv_range_m_s,
+                'flagged_spread': flagged_spread,
             })
         out.sort(key=lambda e: (_natural_sort_key(e['floor_label']), _natural_sort_key(e['member_type']), _natural_sort_key(e['element'])))
         return out
@@ -2229,23 +2238,23 @@ class NDTReportService:
             para3 = ' '.join([visual_sentence, analysis_sentence,
                               arrangement_sentence])
             exec_paras = [para1, para2, para3]
-            if has_visual_defects or poor_members:
-                if has_visual_defects and poor_members:
-                    action_clause = (
-                        'proffer solution to the defects observed, give technical '
-                        'advice on the poor structural members tested and further '
-                        'analyse the structural arrangement'
-                    )
-                elif has_visual_defects:
-                    action_clause = (
-                        'proffer solution to the defects observed and further '
-                        'analyse the structural arrangement'
-                    )
+            has_flagged_members = any(e.get('flagged_spread') for e in element_data)
+            if has_visual_defects or poor_members or has_flagged_members:
+                reco_parts = []
+                if has_visual_defects:
+                    reco_parts.append('proffer solution to the defects observed')
+                if poor_members:
+                    reco_parts.append('give technical advice on the poor structural members tested')
+                if has_flagged_members and not poor_members:
+                    reco_parts.append('investigate the structural members flagged for excessive point spread')
+                
+                reco_parts.append('and further analyse the structural arrangement')
+                
+                if len(reco_parts) > 2:
+                    action_clause = ', '.join(reco_parts[:-1]) + ' ' + reco_parts[-1]
                 else:
-                    action_clause = (
-                        'give technical advice on the poor structural members '
-                        'tested and further analyse the structural arrangement'
-                    )
+                    action_clause = ' '.join(reco_parts)
+                    
                 para4 = (
                     '**In view of the above, it is advised that a qualified '
                     f'structural engineer should be engaged to {action_clause} '
@@ -2326,26 +2335,26 @@ class NDTReportService:
                    if poor_members else '')
                 + '.'
             )
-            if has_visual_defects or poor_members:
+            has_flagged_members = any(e.get('flagged_spread') for e in element_data)
+            if has_visual_defects or poor_members or has_flagged_members:
                 eff_client = cls._effective_client_name(project)
                 client_target = (eff_client.upper() if eff_client
                                  else 'the client')
-                if has_visual_defects and poor_members:
-                    reco_clause = (
-                        'proffer solution to the defects observed, technical '
-                        'advice on the poor structural members tested and further '
-                        'analyse the structural arrangement'
-                    )
-                elif has_visual_defects:
-                    reco_clause = (
-                        'proffer solution to the defects observed and further '
-                        'analyse the structural arrangement'
-                    )
+                
+                reco_parts = []
+                if has_visual_defects:
+                    reco_parts.append('proffer solution to the defects observed')
+                if poor_members:
+                    reco_parts.append('technical advice on the poor structural members tested')
+                if has_flagged_members and not poor_members:
+                    reco_parts.append('investigate the structural members flagged for excessive point spread')
+                reco_parts.append('and further analyse the structural arrangement')
+                
+                if len(reco_parts) > 2:
+                    reco_clause = ', '.join(reco_parts[:-1]) + ' ' + reco_parts[-1]
                 else:
-                    reco_clause = (
-                        'technical advice on the poor structural members '
-                        'tested and further analyse the structural arrangement'
-                    )
+                    reco_clause = ' '.join(reco_parts)
+                    
                 advice_sentence = (
                     f'**It is advised that {client_target} engage a qualified '
                     f'structural engineer and other relevant professionals in the '
@@ -3513,18 +3522,32 @@ class NDTReportService:
             if not element_data:
                 builder.para('No pulse velocity tests recorded for this project.')
             else:
-                # ---- Summary of Test Analysis: each structural member listed
+                # ---- Summary of Test Analysis: grouped by member type
                 builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
-                analysis_rows = [
-                    [_element_display(e['element']), '1', e['floor_label'].title(), str(e['n_points'])]
-                    for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element']))
-                ]
+                analysis_rows = []
+                for floor in floors_present:
+                    floor_elements = sorted(
+                        [e for e in element_data if e['floor_label'] == floor],
+                        key=lambda e: _natural_sort_key(e['element'])
+                    )
+                    member_order = []
+                    for e in floor_elements:
+                        if e['member_type'] not in member_order:
+                            member_order.append(e['member_type'])
+                    for member in member_order:
+                        group = [e for e in floor_elements if e['member_type'] == member]
+                        count = len(group)
+                        floor_abbr = cls._floor_code(floor)
+                        member_abbr = cls._member_code(member)
+                        label = f'**{floor_abbr}{member_abbr} - {floor.title()} {member.title()}**'
+                        tested_str = f'**{count} Tested Panels**' if member.endswith('SLAB') else f'**{count} Tested Elements**'
+                        analysis_rows.append([label, tested_str])
+                
                 builder.ruled_table(
-                    ['STRUCTURAL MEMBER', 'NUMBER TESTED', 'LOCATION',
-                     'NO OF POINT TAKEN'],
+                    ['STRUCTURAL ELEMENT', 'NUMBER TESTED'],
                     analysis_rows,
-                    [50, 32, 60, 40],
-                    ['C', 'C', 'C', 'C'],
+                    [120, 62],
+                    ['L', 'R'],
                 )
                 builder.ln_gap(6)
 
@@ -3541,73 +3564,42 @@ class NDTReportService:
                             member_order.append(e['member_type'])
                     member_order = sorted(member_order, key=_natural_sort_key)
 
-                    # Grouped summary: one row per member-type group (e.g.
-                    # "GROUND SLAB  20  3650 m/s  120 m/s  ±1.5%  32.4  18G/2P")
-                    # instead of one row per element × per point — saves dozens
-                    # of rows when 20 slabs are tested on the same floor.
-                    summary_rows = []
+                    all_floor_rows = []
                     for member in member_order:
                         group = sorted(
                             [e for e in floor_elements if e['member_type'] == member],
                             key=lambda e: _natural_sort_key(e['element'])
                         )
-                        if not group:
-                            continue
-
-                        count = len(group)
-                        floor_abbr = cls._floor_code(floor)
-                        member_abbr = cls._member_code(member)
-                        label = f'{floor_abbr}{member_abbr}  ({floor.title()} {member.title()})\nn={count}'
-
-                        # Aggregate mean velocity across all elements in group
-                        mean_vs = [e['mean_v'] for e in group if e['mean_v'] is not None]
-                        grp_mean_v = (sum(mean_vs) / len(mean_vs)) if mean_vs else None
-
-                        # UPV range = max velocity - min velocity across all elements
-                        all_vs = [e['mean_v'] for e in group if e['mean_v'] is not None]
-                        grp_range = (int(round((max(all_vs) - min(all_vs)) * 1000))
-                                     if len(all_vs) > 1 else None)
-                        range_cell = f'{grp_range} M/S' if grp_range is not None else '-'
-
-                        # Point spread: (max-min)/mean/2 × 100 across group means
-                        if len(all_vs) > 1 and grp_mean_v:
-                            grp_spread_pct = (max(all_vs) - min(all_vs)) / grp_mean_v * 100
-                            spread_cell = f'{grp_range} M/S\n(±{grp_spread_pct / 2:.1f}%)'
-                            flagged = grp_spread_pct > 15.0
-                        else:
-                            spread_cell = '-'
-                            flagged = False
-
-                        # Mean ECS across group
-                        ecs_vals = [e['mean_ecs'] for e in group if e['mean_ecs'] is not None]
-                        grp_mean_ecs = (sum(ecs_vals) / len(ecs_vals)) if ecs_vals else None
-
-                        # GOOD / POOR counts
-                        good_count = sum(1 for e in group if e['remark'] == 'GOOD')
-                        poor_count = sum(1 for e in group if e['remark'] == 'POOR')
-                        unverif = sum(1 for e in group if e['remark'] == 'UNVERIFIED')
-                        remark_parts = []
-                        if good_count:
-                            remark_parts.append(f'{good_count}G')
-                        if poor_count:
-                            remark_parts.append(f'{poor_count}P')
-                        if unverif:
-                            remark_parts.append(f'{unverif}U')
-                        remark_cell = '/'.join(remark_parts) or '-'
-                        if poor_count:
-                            remark_cell += '\nPOOR ELEMENTS PRESENT'
-                        if flagged:
-                            remark_cell += '\nFLAGGED: SPREAD >15%'
-
-                        summary_rows.append([
-                            label,
-                            str(count),
-                            f'{round(grp_mean_v * 1000)} M/S' if grp_mean_v else '-',
-                            range_cell,
-                            spread_cell,
-                            cls._f1(grp_mean_ecs),
-                            remark_cell,
-                        ])
+                        for e in group:
+                            rows = e['rows']
+                            mid = len(rows) // 2 if len(rows) > 1 else 0
+                            element_cell = _element_display(e['element'])
+                            remark = f"**{e['remark']}**" if e['remark'] else "-"
+                            
+                            flag_text = ""
+                            spread_str = "-"
+                            if e.get('flagged_spread'):
+                                flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
+                            
+                            point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
+                            if len(point_vels) > 1 and e['mean_v']:
+                                total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
+                                spread_str = f"{total_spread:.1f}%"
+                            
+                            if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None and e['spread_pct'] > 2.0):
+                                remark += (f"\nUPV VARIANCE BETWEEN POINTS {e['spread_km_s'] * 1000:.0f} M/S (±{e['spread_pct'] / 2:.1f}%)")
+                            remark += flag_text
+                            
+                            for i, r in enumerate(rows):
+                                all_floor_rows.append([
+                                    element_cell if i == 0 else '-',
+                                    cls._fp(r['path_mm']),
+                                    cls._f1(r['transit_us']),
+                                    cls._fms(r['velocity_km_s']),
+                                    spread_str if i == mid else '-',
+                                    cls._f1(e['mean_ecs']) if i == mid else '-',
+                                    remark if i == mid else '-',
+                                ])
 
                     if member_order:
                         member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
@@ -3621,16 +3613,16 @@ class NDTReportService:
                         f'{floor.upper()} {member_label}'
                         + (f' OF {project.name.upper()}'
                            if project.name else ''))
+                    
                     builder.ruled_table(
-                        ['STRUCTURAL\nGROUP', 'NO.\nTESTED',
-                         'MEAN PULSE\nVELOCITY (M/S)',
-                         'UPV\nRANGE',
-                         'POINT\nSPREAD',
-                         'MEAN E.C.S\n(N/mm2)',
+                        ['STRUCTURAL\nELEMENT', 'PATH\nLENGT\nH',
+                         'TRANSI\nT\nTIME', 'PULSE\nVELOCITY\n(M/S)',
+                         'POINT\nSPREAD\n(%)',
+                         'AVERAGE\nCOMPRESSIVE\nSTRENGTH\n(N/mm2)',
                          'REMARK'],
-                        summary_rows,
-                        [32, 14, 28, 18, 22, 22, 43],
-                        ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
+                        all_floor_rows,
+                        [22, 12, 12, 17, 17, 22, 80],
+                        ['L', 'C', 'C', 'C', 'C', 'C', 'L']
                     )
                     builder.ln_gap(2)
 
