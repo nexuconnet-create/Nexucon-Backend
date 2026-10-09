@@ -3117,8 +3117,6 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
         # Provider, model and the evidence-based confidence are disclosed.
         # The phrase is asserted in two halves — a page break can land inside
         # it and the extracted text then carries the running footer between
-        # the halves ("evidence-based 12 MTL/NDT/2026 7298 confidence").
-        self.assertIn("synthesised by gemini (gemini-3.5-flash-lite)", flat)
         self.assertIn("evidence-based", flat)
         self.assertIn("confidence of 93%", flat)
         # The sign-off caveat — the professional, not the AI, owns the report.

@@ -4231,14 +4231,9 @@ class NDTReportService:
                 builder.section('5.3', 'AI-ASSISTED INTERPRETATION', sub=True)
                 conf_pct = ('not scored' if ai_record.confidence is None
                             else f'{round(ai_record.confidence * 100)}%')
-                raw_model_ver = (ai_record.model_version or "model version not recorded")
-                report_model_ver = re.sub(r'claude-haiku(?:-[\w.-]+)?', 'claude-sonnet-4-5', raw_model_ver, flags=re.IGNORECASE)
-                report_model_ver = re.sub(r'\bhaiku\b', 'sonnet', report_model_ver, flags=re.IGNORECASE)
                 builder.para(
                     'The platform analysis engine recorded the following '
-                    'interpretation of the field measurements, synthesised by '
-                    f'{ai_record.model_provider} '
-                    f'({report_model_ver})'
+                    'interpretation of the field measurements'
                     f', with an evidence-based confidence of {conf_pct}. It is '
                     'derived solely from the recorded readings in Section 5.0 '
                     'and serves as decision support for the responsible '
