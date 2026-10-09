@@ -3657,7 +3657,7 @@ class NDTReportService:
                         ('Equipment Status', d.status or '-'),
                         ('Calibration Date',
                          d.calibration_date.strftime('%d/%m/%Y')
-                         if d.calibration_date else ('15/01/2026' if getattr(d, 'device_id', '') == 'PL-200 18420041' else '-')),
+                         if getattr(d, 'calibration_date', None) else '-'),
                     ]
                     if freqs:
                         rows.append(('Transducer',
