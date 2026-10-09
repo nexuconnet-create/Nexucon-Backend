@@ -154,6 +154,41 @@ class FieldDeviceViewSet(viewsets.ModelViewSet):
                       {'device_id': device.device_id, 'type': device.device_type})
 
     @action(detail=True, methods=['post'])
+    def calibrate(self, request, pk=None):
+        """
+        Record a formal laboratory calibration date for the instrument.
+        This provides a dedicated endpoint to update the calibration status 
+        without a full PATCH on the device.
+        """
+        device = self.get_object()
+        date_str = request.data.get('calibration_date')
+        
+        if not date_str:
+            return Response({'detail': 'calibration_date is required.'}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+                            
+        device.calibration_date = date_str
+        updates = ['calibration_date', 'updated_at']
+        
+        if request.data.get('calibration_expiry'):
+            device.calibration_expiry = request.data.get('calibration_expiry')
+            updates.append('calibration_expiry')
+            
+        if request.data.get('calibration_certificate_url'):
+            device.calibration_certificate_url = request.data.get('calibration_certificate_url')
+            updates.append('calibration_certificate_url')
+            
+        device.save(update_fields=updates)
+        _record_audit(request.user, 'digital_eye.device.calibrate',
+                      'FieldDevice', device.id,
+                      {'calibration_date': str(device.calibration_date)})
+                      
+        return Response({
+            'status': 'calibrated',
+            'calibration_date': device.calibration_date
+        })
+
+    @action(detail=True, methods=['post'])
     def heartbeat(self, request, pk=None):
         device = self.get_object()
         battery = request.data.get('battery_level')
