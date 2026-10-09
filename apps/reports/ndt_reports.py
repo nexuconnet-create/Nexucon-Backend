@@ -22,6 +22,7 @@ import os
 import re
 from datetime import datetime
 
+from django.core.files.storage import default_storage
 from fpdf import FPDF
 
 from .ai_reports import _latin1
@@ -1482,10 +1483,11 @@ class NDTReportService:
         """
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
         import io
 
-        plt.rcParams['font.family'] = 'Calibri'
+        matplotlib.rcParams['font.family'] = 'Calibri'
 
         categories = {}
         code_labels = {}
@@ -1507,7 +1509,9 @@ class NDTReportService:
         poor_c = tuple(c / 255 for c in CHART_POOR)
 
         # Chart A — reference figure 4.93 x 3.0 in.
-        fig, ax = plt.subplots(figsize=(4.93, 3.0))
+        fig = Figure(figsize=(4.93, 3.0))
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
         ax.bar(codes, goods, width=0.4, color=good_c, label='GOOD')
         ax.bar(codes, poors, width=0.4, bottom=goods, color=poor_c, label='POOR')
         ax.set_title('BAR CHART A', fontsize=14)
@@ -1523,12 +1527,13 @@ class NDTReportService:
         buf_a = io.BytesIO()
         fig.savefig(buf_a, format='png', dpi=150)
         buf_a.seek(0)
-        plt.close(fig)
 
         # Chart B — reference figure 4.93 x 3.52 in, y-axis 0-100% step 10.
         pct_good = [100 * g / t if t else 0 for g, t in zip(goods, totals)]
         pct_poor = [100 * p / t if t else 0 for p, t in zip(poors, totals)]
-        fig, ax = plt.subplots(figsize=(4.93, 3.52))
+        fig = Figure(figsize=(4.93, 3.52))
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
         ax.bar(codes, pct_good, width=0.4, color=good_c, label='GOOD')
         ax.bar(codes, pct_poor, width=0.4, bottom=pct_good, color=poor_c, label='POOR')
         ax.set_title('BAR CHART B', fontsize=14)
@@ -1548,7 +1553,6 @@ class NDTReportService:
         buf_b = io.BytesIO()
         fig.savefig(buf_b, format='png', dpi=150)
         buf_b.seek(0)
-        plt.close(fig)
         return buf_a, buf_b
 
     @staticmethod
@@ -1568,7 +1572,8 @@ class NDTReportService:
 
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
         from matplotlib.collections import PolyCollection
         import io
 
@@ -1594,7 +1599,9 @@ class NDTReportService:
         if len(set(xs)) < 2 or len(set(ys)) < 2:
             return None, ''      # degenerate footprint — nothing to draw
 
-        fig, ax = plt.subplots(figsize=(8.2, 6.2))
+        fig = Figure(figsize=(8.2, 6.2))
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
         ax.add_collection(PolyCollection(
             polys, facecolor='#d8dee9', edgecolor='#222222', linewidth=0.12))
         pad_x = 0.02 * (max(xs) - min(xs)) or 1.0
@@ -1608,9 +1615,8 @@ class NDTReportService:
             spine.set_linewidth(0.4)
         ax.set_title('SITE PLAN — IMPORTED BIM MODEL', fontsize=10)
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
         buf.seek(0)
-        plt.close(fig)
 
         source = geo.source_file or 'imported BIM model'
         caption = (
@@ -1683,7 +1689,8 @@ class NDTReportService:
 
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
         from matplotlib.collections import PolyCollection
         import io
 
@@ -1707,7 +1714,9 @@ class NDTReportService:
             ys = [p[1] for tri in polys for p in tri]
             if len(set(xs)) < 2 or len(set(ys)) < 2:
                 continue    # degenerate footprint — skip this level
-            fig, ax = plt.subplots(figsize=(8.2, 6.2))
+            fig = Figure(figsize=(8.2, 6.2))
+            FigureCanvas(fig)
+            ax = fig.add_subplot(111)
             ax.add_collection(PolyCollection(
                 polys, facecolor='#d8dee9', edgecolor='#222222',
                 linewidth=0.12))
@@ -1722,9 +1731,8 @@ class NDTReportService:
                 spine.set_linewidth(0.4)
             ax.set_title(f'FLOOR PLAN — {level.upper()}', fontsize=10)
             buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
             buf.seek(0)
-            plt.close(fig)
             caption = (
                 f'Floor plan projected from the imported BIM model '
                 f'({source}, level "{level}", '
@@ -1976,6 +1984,88 @@ class NDTReportService:
         return (f'https://www.google.com/maps/search/?api=1&query={lat},{lon}')
 
     @staticmethod
+    def _storage_key_for_url(url):
+        """The storage key behind one of our own media URLs, or None.
+
+        Photographs recorded by the telemetry and inspection modules are
+        persisted as *absolute* media URLs. On the R2/S3 backends those URLs
+        carry a presigned signature that expires one hour after it is
+        minted, so a photograph recorded days ago is a guaranteed HTTP 403
+        by the time a report tries to embed it. The key is what can be
+        re-signed; the stored URL cannot.
+        """
+        from urllib.parse import unquote, urlparse
+        try:
+            parsed = urlparse(str(url))
+            path = unquote(parsed.path or '')
+            if not path:
+                return None
+            from django.conf import settings
+            media_url = (getattr(settings, 'MEDIA_URL', '') or '').rstrip('/')
+            if media_url and path.startswith(media_url + '/'):
+                return path[len(media_url) + 1:] or None
+            bucket = getattr(default_storage, 'bucket_name', None)
+            if bucket:
+                marker = f'/{bucket}/'
+                if marker in path:
+                    return path.split(marker, 1)[1] or None
+            return None
+        except Exception:                       # noqa: BLE001 — never break a report
+            return None
+
+    @classmethod
+    def _fresh_media_source(cls, source):
+        """``source`` re-signed so it loads now.
+
+        A stored media reference whose signature has expired is re-signed
+        through the storage backend (a fresh one-hour URL on R2). Anything
+        we cannot re-sign is returned unchanged, so the caller's own error
+        handling still decides what the report says about it.
+        """
+        if not isinstance(source, str) or not source:
+            return source
+        if '/media/' not in source and 'X-Amz-Signature' not in source:
+            return source
+        key = cls._storage_key_for_url(source)
+        if not key:
+            return source
+        try:
+            fresh = default_storage.url(key)
+        except Exception as exc:                # noqa: BLE001 — never break a report
+            logger.error('media re-signing failed for %r: %s', key, exc)
+            return source
+        return fresh or source
+
+    @staticmethod
+    def _open_image_source(url, timeout=15):
+        """Read an image URL into a buffer.
+
+        A 401/403 from our own storage means the signature in the URL has
+        expired, not that the photograph is gone: the reference is re-signed
+        once and re-fetched, which is what turns a silently dropped appendix
+        photograph back into a printed one.
+        """
+        import urllib.error
+        import urllib.request
+
+        def _fetch(target):
+            req = urllib.request.Request(
+                target, headers={'User-Agent': 'Mozilla/5.0'})
+            return io.BytesIO(urllib.request.urlopen(req, timeout=timeout).read())
+
+        try:
+            return _fetch(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (401, 403):
+                raise
+            fresh = NDTReportService._fresh_media_source(url)
+            if fresh == url:
+                raise
+            logger.warning('media URL signature expired, re-signed and retried: %s',
+                           exc)
+            return _fetch(fresh)
+
+    @staticmethod
     def _boxed_image(pdf, source, x, y, w, h, link=None):
         """Embed an image inside a fixed box (reference map page's two
         side-by-side image frames), preserving aspect ratio. ``source`` is a
@@ -1992,14 +2082,20 @@ class NDTReportService:
                     local_candidate = os.path.join(settings.MEDIA_ROOT, rel_path)
                     if os.path.exists(local_candidate):
                         source = local_candidate
+                    else:
+                        # Not on local disk: the media lives on the remote
+                        # storage backend, so the key — not the path — is
+                        # what has to be signed before it can be fetched.
+                        fresh = NDTReportService._fresh_media_source(
+                            (getattr(settings, 'MEDIA_URL', '/media/') or '/media/'
+                             ).rstrip('/') + '/' + rel_path)
+                        if isinstance(fresh, str) and fresh.startswith('http'):
+                            source = NDTReportService._open_image_source(fresh)
                 elif os.path.exists(source):
                     pass
                 elif source.startswith('http'):
-                    import urllib.request
-                    req = urllib.request.Request(
-                        source, headers={'User-Agent': 'Mozilla/5.0'})
-                    source = io.BytesIO(
-                        urllib.request.urlopen(req, timeout=15).read())
+                    source = NDTReportService._open_image_source(
+                        NDTReportService._fresh_media_source(source))
             pdf.image(source, x=x, y=y, w=w, h=h, keep_aspect_ratio=True, link=link)
             return True
         except Exception as exc:            # noqa: BLE001 — a missing image
@@ -3056,9 +3152,34 @@ class NDTReportService:
         else:
             tests = all_tests
 
-        if element_id:
-            tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
-        
+        # ---- Element scope (optional). The caller may narrow the report to
+        # one structural element. An id that matches no recorded test is NOT
+        # allowed to gut the document: the scope is dropped and the report
+        # states so. (The workspace's element selector sends IFC element
+        # GUIDs, which never equal a recorded ``structural_element`` or
+        # ``batch_id``; treating "matched nothing" as "no tests at all" is
+        # what made Section 5.0's summaries and every appendix photograph
+        # vanish from an otherwise complete dossier.)
+        element_scope_note = None
+        if element_id and str(element_id).strip():
+            wanted = str(element_id).strip()
+            scoped = [t for t in tests
+                      if str(t.structural_element).strip().lower() == wanted.lower()
+                      or str(t.batch_id).strip().lower() == wanted.lower()]
+            if scoped:
+                tests = scoped
+                element_scope_note = (
+                    f'Report scope: {len(scoped)} of {len(all_tests)} recorded '
+                    f'test(s) on this project, filtered to the structural '
+                    f'element recorded as \'{wanted}\'.')
+            else:
+                element_scope_note = (
+                    f'Report scope: the requested element filter \'{wanted}\' '
+                    f'matches no test recorded on this project, so it was not '
+                    f'applied. This report covers all {len(tests)} test(s) it '
+                    f'selects.')
+
+
         rebar_tests = list(
             RebarTest.objects
             .filter(project=project)
@@ -3244,6 +3365,11 @@ class NDTReportService:
             # ------------------------------- EXECUTIVE SUMMARY (p3, un-TOC'd, C1)
             builder.record_section('executive_summary', 'Executive Summary')
             builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
+            if element_scope_note:
+                # The one thing that decides which measurements the whole
+                # document describes prints first, so a scoped report can
+                # never be mistaken for a report that lost its sections.
+                builder.para(f'**{element_scope_note}**', markdown=True)
             exec_body, _src = get_cms_text(project, 'executive_summary',
                                            computed=cms)
             if exec_body is not None:
@@ -3819,6 +3945,8 @@ class NDTReportService:
         def emit_analysis():
             # ------------------------------------------------ 5.0 ANALYSIS
             builder.divider_page('5.0 ANALYSIS OF TEST RESULT')
+            if element_scope_note:
+                builder.para(f'**{element_scope_note}**', markdown=True)
             pending_count = sum(1 for t in tests if t.quality_grade == 'pending')
             if pending_count:
                 builder.para(

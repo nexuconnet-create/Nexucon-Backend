@@ -22,7 +22,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
 
 from .ndt_reports import (
-    ECS_FORMULA_LINE, NDTReportService, _element_display,
+    ECS_FORMULA_LINE, NDTReportService, _bold, _element_display,
     ecs_report_disclosure,
 )
 from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
@@ -41,16 +41,44 @@ def _natural_sort_key(item):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
 
 
+def _fill_runs(para, text, *, bold=False, size=11):
+    """Write ``text`` into ``para``, rendering **bold** runs as bold runs.
+
+    The CMS bodies carry the same **bold** markup the certified PDF renders
+    (every recommendation and every statement the client has to act on is
+    emphasised there), so without this the .docx printed the asterisks
+    literally. ``bold=True`` still sets the whole paragraph bold.
+    """
+    import re
+
+    body = str(text or '')
+    parts = re.split(r'(\*\*[^*]+\*\*)', body) if '**' in body else [body]
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**'):
+            run = para.add_run(part[2:-2])
+            run.bold = True
+        else:
+            run = para.add_run(part)
+            run.bold = bold
+        run.font.size = Pt(size)
+        run.font.name = 'Cambria'
+    return para
+
+
 def _add_para(doc, text, *, bold=False, size=11, align=None, space_after=6):
     para = doc.add_paragraph()
-    run = para.add_run(text)
-    run.bold = bold
-    run.font.size = Pt(size)
-    run.font.name = 'Cambria'
+    _fill_runs(para, text, bold=bold, size=size)
     if align is not None:
         para.alignment = align
     para.paragraph_format.space_after = Pt(space_after)
     return para
+
+
+def _add_bullet(doc, text, *, size=11):
+    """A bulleted line, with **bold** runs honoured like a body paragraph."""
+    return _fill_runs(doc.add_paragraph(style='List Bullet'), text, size=size)
 
 
 def _add_heading(doc, text, level=1):
@@ -199,8 +227,28 @@ class NDTWordExporter:
         else:
             tests = all_tests
             
-        if element_id:
-            tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
+        # Element scope (optional) — the same rule the PDF applies: an id
+        # that matches no recorded test is dropped and stated, never
+        # allowed to empty the document (the workspace's element selector
+        # sends IFC GUIDs, which no recorded structural_element equals).
+        element_scope_note = None
+        if element_id and str(element_id).strip():
+            wanted = str(element_id).strip()
+            scoped = [t for t in tests
+                      if str(t.structural_element).strip().lower() == wanted.lower()
+                      or str(t.batch_id).strip().lower() == wanted.lower()]
+            if scoped:
+                tests = scoped
+                element_scope_note = (
+                    f'Report scope: {len(scoped)} of {len(all_tests)} recorded '
+                    f'test(s) on this project, filtered to the structural '
+                    f'element recorded as \'{wanted}\'.')
+            else:
+                element_scope_note = (
+                    f'Report scope: the requested element filter \'{wanted}\' '
+                    f'matches no test recorded on this project, so it was not '
+                    f'applied. This report covers all {len(tests)} test(s) it '
+                    f'selects.')
 
         rebar_tests = list(
             RebarTest.objects.filter(project=project).order_by('recorded_at')
@@ -283,7 +331,10 @@ class NDTWordExporter:
             _add_para(doc, 'The purpose of the investigation is to:')
             for item in cms_list_items(get_cms_text(project,
                                                     'purpose_items')[0]):
-                para = doc.add_paragraph(item, style='List Number')
+                # CMS list bodies carry the PDF's **bold** markup; rendered
+                # literally the .docx printed the asterisks.
+                para = doc.add_paragraph(style='List Number')
+                _fill_runs(para, item)
                 para.paragraph_format.space_after = Pt(4)
 
         def emit_lit():
@@ -353,7 +404,7 @@ class NDTWordExporter:
                          'requirements.',
                          'The quality of one element of concrete in relation to '
                          'another.'):
-                doc.add_paragraph(item, style='List Bullet')
+                _add_bullet(doc, item)
             from apps.digital_eye.strength_curves import resolve_active_curve
             try:
                 active_curve = resolve_active_curve(project)
@@ -409,6 +460,8 @@ class NDTWordExporter:
         def emit_analysis():
             # ------------------------------------------------------------ 5.0
             _add_heading(doc, '5.0 ANALYSIS OF TEST RESULT')
+            if element_scope_note:
+                _add_para(doc, element_scope_note, bold=True)
             if crack_tests:
                 _add_heading(doc, '5.1 CRACK DEPTH MEASUREMENTS '
                                   '(TIME-DIFFERENCE METHOD)', level=2)
@@ -671,11 +724,15 @@ class NDTWordExporter:
                 lead_in = get_cms_text(project, 'recommendation_preamble')[0]
                 findings_body, _src = get_cms_text(project, 'findings_statement',
                                                    computed=cms)
-                _add_para(doc, lead_in.rstrip() + ' ' + findings_body)
+                # §6.0 is the recommendation itself, so the whole statement
+                # prints bold, as it does in the certified PDF.
+                _add_para(doc, ' '.join(
+                    part for part in
+                    (_bold(lead_in.rstrip()), _bold(findings_body)) if part))
             else:
-                _add_para(doc, 'No pulse velocity results are available for '
-                               'this project; no recommendation on concrete '
-                               'quality can be made.')
+                _add_para(doc, _bold('No pulse velocity results are available '
+                                     'for this project; no recommendation on '
+                                     'concrete quality can be made.'))
             from apps.evidence.models import AIAnalysisRecord
             recommendations = []
             ai_record = (AIAnalysisRecord.objects
@@ -691,7 +748,7 @@ class NDTWordExporter:
                     if line not in recommendations:
                         recommendations.append(line)
             for rec in recommendations:
-                doc.add_paragraph(rec, style='List Bullet')
+                _add_bullet(doc, _bold(rec))
 
         def emit_conclusion():
             # ------------------------------------------------------------ 7.0
@@ -701,27 +758,28 @@ class NDTWordExporter:
                                                         'conclusion_preamble')[0]):
                     _add_para(doc, para)
                 # Generated-content CMS section (11 Sep): the conclusion items
-                # resolve exactly as the PDF renders them.
+                # resolve exactly as the PDF renders them, bold included.
                 for item in cms_list_items(
                         get_cms_text(project, 'conclusion_items',
                                      computed=cms)[0]):
-                    para = doc.add_paragraph(item, style='List Number')
+                    para = doc.add_paragraph(style='List Number')
+                    _fill_runs(para, _bold(item))
                     para.paragraph_format.space_after = Pt(4)
                 _add_para(
                     doc,
-                    'However, it is imperative to state clearly that '
-                    'non-adherence to the recommendation excludes the testing '
-                    'laboratory of any responsibility.')
+                    _bold('However, it is imperative to state clearly that '
+                          'non-adherence to the recommendation excludes the '
+                          'testing laboratory of any responsibility.'))
                 _add_para(
                     doc,
-                    'The test assumed 25 N/mm2 as the strength of the '
-                    'structural members, however a substructure probe is '
-                    'required to ascertain the integrity of the building '
-                    'foundation.')
+                    _bold('The test assumed 25 N/mm2 as the strength of the '
+                          'structural members, however a substructure probe is '
+                          'required to ascertain the integrity of the building '
+                          'foundation.'))
             else:
-                _add_para(doc, 'No ultrasonic pulse velocity results are '
-                               'available for this project; no conclusion on '
-                               'concrete quality can be drawn.')
+                _add_para(doc, _bold('No ultrasonic pulse velocity results are '
+                                     'available for this project; no conclusion '
+                                     'on concrete quality can be drawn.'))
 
         # ---------------------- §2.5 ordered emission (document structure)
         # Same source of truth as the certified PDF: the project's structure
