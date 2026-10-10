@@ -922,7 +922,7 @@ class NDTReportBuilder:
 
     # ------------------------------------------------------------- sections
     def section(self, number, heading, size=12, centered=False, sub=False,
-                underline=True):
+                underline=True, key=None):
         """Registers a TOC entry and outputs the reference's section
         heading: number in regular Cambria at the margin, title in bold
         UNDERLINED starting 63.5mm across — subsections 50.8mm — both on
@@ -941,8 +941,8 @@ class NDTReportBuilder:
             # Body page numbering starts at the first numbered section
             # (reference: Introduction = page 1).
             self.pdf.body_page_offset = self.pdf.page_no() - 1
-        if number:
-            self.record_section(number, heading)
+        if number or key:
+            self.record_section(key or number, heading)
         title_text = f'{number} {heading}'.strip()
         self.pdf.start_section(title_text, level=1 if sub else 0)
         self.pdf.set_text_color(*INK)
@@ -4343,10 +4343,10 @@ class NDTReportService:
                     )
 
         def emit_discussion_of_results():
-            # ----------------------------- 5.4 DISCUSSION OF RESULTS
+            # ----------------------------- 5.5 DISCUSSION OF RESULTS
             if builder.pdf.will_page_break(35):
                 builder.pdf.add_page()
-            builder.section('5.4', 'DISCUSSION OF RESULTS', sub=True)
+            builder.section('5.5', 'DISCUSSION OF RESULTS', sub=True, key='discussion_of_results')
             body = get_cms_text(project, 'discussion_of_results')[0]
             for para in cms_paragraphs(body):
                 builder.para(para)
