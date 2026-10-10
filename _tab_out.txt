@@ -1,0 +1,55 @@
+Ground Floor element-by-element:
+
+| STRUCTURAL ELEMENT | MEAN PULSE VELOCITY (M/S) | EST. COMPRESSIVE STRENGTH (N/MM2) | POINT SPREAD (%) | GRADE |
+| --- | --- | --- | --- | --- |
+| S20 | 4,294.92 | 46.2 | 3.4 | good |
+| S19 | 4,335.56 | 47.8 | 7.8 | good |
+| S18 | 4,397.06 | 50.4 | 5.2 | good |
+| S17 | 4,134.54 | 40.3 | 5.5 | good |
+| S16 | 4,288.57 | 46.0 | 9.8 | good |
+| S15 | 4,345.70 | 48.2 | 4.9 | good |
+| S14 | 4,331.19 | 47.6 | 1.2 | good |
+| S13 | 4,252.85 | 44.6 | 10.3 | good |
+| S12 | 4,273.53 | 45.4 | 0.6 | good |
+| S11 | 4,276.32 | 45.5 | 5.1 | good |
+| S10 | 4,257.95 | 44.8 | 7.1 | good |
+| S9 | 4,410.05 | 51.0 | 5.5 | good |
+| S8 | 4,491.21 | 54.6 | 1.5 | good |
+| S7 | 4,356.35 | 48.7 | 1.2 | good |
+| S6 | 4,370.24 | 49.3 | 3.8 | good |
+| S5 | 4,386.65 | 50.0 | 2.7 | good |
+| S4 | 4,469.28 | 53.6 | 2.4 | good |
+| S3 | 4,420.75 | 51.4 | 2.1 | good |
+| S2 | 4,470.09 | 53.6 | 8.7 | good |
+| S1 | 4,416.54 | 51.2 | 2.4 | good |
+| S8 | 4491.21 | 54.6 | - | - |
+| S9 | 4410.05 | 51.0 | - | - |
+| S4 | 4469.28 | 53.6 | - | - |
+| S3 | 4420.75 | 51.4 | - | - |
+| S2 | 4470.09 | 53.6 | - | - |
+| S1 | 4416.54 | 51.2 | - | - |
+
+These six elements exhibit excellent concrete quality with tight point-to-point velocity consistency (1.2-2.4% spread). No defects indicated. Mid-velocity group (mean V 4350-4449 m/s, estimated f_cu 48-52 N/mm²):
+
+| STRUCTURAL ELEMENT | MEAN PULSE VELOCITY (M/S) | EST. COMPRESSIVE STRENGTH (N/MM2) |
+| --- | --- | --- |
+| S20 | 4294.92 | 46.2 |
+| S19 | 4335.56 | 47.8 |
+| S18 | 4397.06 | 50.4 |
+| S15 | 4345.7 | 48.2 |
+| S14 | 4331.19 | 47.6 |
+| S6 | 4370.24 | 49.3 |
+| S5 | 4386.65 | 50.0 |
+| S7 | 4356.35 | 48.7 |
+
+Eight elements in this band show consistent good-quality concrete (point spread 1.2-4.9%), all above 25 MPa target. No defects indicated. Lower mid-velocity group (mean V 4250-4349 m/s, estimated f_cu 44-48 N/mm²):
+
+| STRUCTURAL ELEMENT | MEAN PULSE VELOCITY (M/S) | EST. COMPRESSIVE STRENGTH (N/MM2) |
+| --- | --- | --- |
+| S16 | 4288.57 | 46.0 |
+| S13 | 4252.85 | 44.6 |
+| S12 | 4273.53 | 45.4 |
+| S11 | 4276.32 | 45.5 |
+| S10 | 4257.95 | 44.8 |
+
+Five elements; all exceed 25 MPa target. S13 and S16 show elevated point spread (10.3% and 9.8% respectively), indicating minor spatial velocity variation but not falling below acceptable threshold. No defects indicated

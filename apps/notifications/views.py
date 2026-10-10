@@ -191,6 +191,7 @@ class WebhookEndpointViewSet(viewsets.ModelViewSet):
     """
     queryset = WebhookEndpoint.objects.all().order_by('-created_at')
     serializer_class = WebhookEndpointSerializer
+<<<<<<< Updated upstream
 
 
 
@@ -249,3 +250,5 @@ class PushDeviceTokenViewSet(viewsets.ModelViewSet):
                 token=serializer.validated_data['token']).first()
         return Response(self.get_serializer(instance).data,
                         status=status.HTTP_201_CREATED)
+=======
+>>>>>>> Stashed changes

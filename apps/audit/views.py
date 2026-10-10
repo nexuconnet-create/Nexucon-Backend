@@ -93,6 +93,7 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         summary_data = AuditService.get_audit_summary()
         return Response(summary_data, status=status.HTTP_200_OK)
 
+<<<<<<< Updated upstream
     @action(detail=False, methods=['get', 'post'], url_path='export', permission_classes=[permissions.IsAuthenticated])
     def export_ledger(self, request):
         filters = {
@@ -106,6 +107,8 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         response['Content-Disposition'] = 'attachment; filename="Nexucon_Audit_Ledger.csv"'
         return response
 
+=======
+>>>>>>> Stashed changes
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -128,8 +131,14 @@ class SessionTimelineView(APIView):
     )
     @method_decorator(cache_page(60 * 15))
     def get(self, request, session_id):
+<<<<<<< Updated upstream
         events = AuditEvent.objects.filter(
             Q(session_id=session_id) | Q(resource_id=str(session_id))
         ).order_by('timestamp')
         serializer = AuditEventSerializer(events, many=True)
         return Response(serializer.data)
+=======
+        events = AuditEvent.objects.filter(session_id=session_id).order_by('timestamp')
+        serializer = AuditEventSerializer(events, many=True)
+        return Response(serializer.data)
+>>>>>>> Stashed changes

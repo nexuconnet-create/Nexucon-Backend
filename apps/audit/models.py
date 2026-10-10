@@ -36,9 +36,15 @@ class AuditEvent(models.Model):
     action = models.CharField(max_length=100, db_index=True)
     event_type = models.CharField(max_length=100, blank=True, null=True, db_index=True)
     resource_type = models.CharField(max_length=100, db_index=True)
+<<<<<<< Updated upstream
     resource_id = models.CharField(max_length=255, db_index=True)
     session_id = models.UUIDField(null=True, blank=True, help_text="UUID of the parent ScanSession, for easy timeline queries.")
     project_name = models.CharField(max_length=255, blank=True, null=True)
+=======
+    resource_id = models.CharField(max_length=255)
+    session_id = models.UUIDField(null=True, blank=True, help_text="UUID of the parent ScanSession, for easy timeline queries.")
+    project_name = models.CharField(max_length=255, default='Central Metro Transit Hub')
+>>>>>>> Stashed changes
     
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.TextField(blank=True, null=True)
