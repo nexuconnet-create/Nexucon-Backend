@@ -565,17 +565,34 @@ class StakeholderService:
             }
         )
 
-        # Update linked entity if present
+        # Update linked entity if present and revoke active sessions
+        linked_users = []
         if entity_type.lower() == 'contractor':
+            contractors = list(Contractor.objects.filter(contractor_id=entity_id))
             Contractor.objects.filter(contractor_id=entity_id).update(is_blacklisted=(status == 'Blacklisted'))
+            for c in contractors:
+                if c.user:
+                    linked_users.append(c.user)
         elif entity_type.lower() == 'developer':
+            developers = list(Developer.objects.filter(developer_id=entity_id))
             Developer.objects.filter(developer_id=entity_id).update(is_blacklisted=(status == 'Blacklisted'))
+            for d in developers:
+                if d.user:
+                    linked_users.append(d.user)
+
+        # Invalidate active user sessions if blacklisted
+        if status.lower() == 'blacklisted' and linked_users:
+            try:
+                from apps.accounts.models import UserSession
+                UserSession.objects.filter(user__in=linked_users).update(is_active=False)
+            except Exception:
+                pass
 
         StakeholderService.log_audit(
             user=user,
             action=f"STAKEHOLDER_{status.upper()}",
             resource_id=rec.id,
-            new_state={"status": status, "reason": reason}
+            new_state={"status": status, "reason": reason, "revoked_sessions_count": len(linked_users)}
         )
         return rec
 
