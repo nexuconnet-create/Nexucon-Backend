@@ -1234,16 +1234,28 @@ class PUNDITAdapter:
             floors.setdefault(s['floor'] or 'Unspecified level', []).append(
                 {k: v for k, v in s.items() if v is not None})
 
-        from apps.digital_eye.strength_curves import formula_display, resolve_active_curve
-        if curve_profile:
+        from apps.digital_eye.strength_curves import (
+            documented_default_params, formula_display, resolve_active_curve)
+        # A profile that names a model but carries no coefficients must not
+        # state the laboratory default to the model as if it were this
+        # project's calibration: the factor pack feeds the narrative, so it
+        # has to name the same curve the report's Section 3.0 discloses.
+        profile_params = (curve_profile or {}).get('params')
+        if curve_profile and profile_params:
             ctype_active = curve_profile.get('curve_type', 'exponential')
-            params_active = curve_profile.get('params')
+            params_active = profile_params
             target_str_active = curve_profile.get('design_strength_mpa', 25.0)
         else:
             resolved = resolve_active_curve(project)
-            ctype_active = getattr(resolved, 'curve_type', 'exponential') if resolved else 'exponential'
-            params_active = getattr(resolved, 'formula_params', {'a': 1.20, 'b': 0.85, 'c': 0.0}) if resolved else {'a': 1.20, 'b': 0.85, 'c': 0.0}
-            target_str_active = 25.0
+            if resolved is not None and resolved.formula_params:
+                ctype_active = resolved.curve_type
+                params_active = resolved.formula_params
+            else:
+                ctype_active = ((curve_profile or {}).get('curve_type')
+                                or 'exponential')
+                params_active = documented_default_params(ctype_active)
+            target_str_active = (curve_profile or {}).get(
+                'design_strength_mpa', 25.0)
 
         fact_pack = {
             'project': project.name,

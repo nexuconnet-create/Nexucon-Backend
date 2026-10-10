@@ -400,56 +400,107 @@ def _bold(text):
     return f'**{stripped}**'
 
 
-def _wrap_lines(pdf, text, width):
+def _extract_styled_words(text):
+    words = []
+    tokens = re.split(r'(\*\*[^*]+\*\*)', text)
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith('**') and tok.endswith('**') and len(tok) > 4:
+            for w in tok[2:-2].split(' '):
+                if w:
+                    words.append((w, True))
+        else:
+            for w in tok.split(' '):
+                if w:
+                    words.append((w, False))
+    return words
+
+
+def _format_styled_words(words_list):
+    runs = []
+    for w, b in words_list:
+        if runs and runs[-1][1] == b:
+            runs[-1][0].append(w)
+        else:
+            runs.append(([w], b))
+    parts = []
+    for ws, b in runs:
+        chunk = ' '.join(ws)
+        parts.append(f'**{chunk}**' if b else chunk)
+    return ' '.join(parts)
+
+
+def _measure_markup_width(pdf, text, base_bold=False, size=None):
+    orig_size = pdf.font_size_pt
+    eff_size = size or orig_size
+    runs = []
+    for part in re.split(r'(\*\*[^*]+\*\*)', _latin1(str(text or ''))):
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**') and len(part) > 4:
+            runs.append((part[2:-2], True))
+        else:
+            runs.append((part.replace('**', ''), False))
+    total = 0.0
+    family = pdf.font_family or 'Cambria'
+    for t, bold in runs:
+        if t:
+            try:
+                pdf.set_font(family, 'B' if (bold or base_bold) else '', eff_size)
+            except Exception:
+                pass
+            total += pdf.get_string_width(t)
+    try:
+        pdf.set_font(family, 'B' if base_bold else '', orig_size)
+    except Exception:
+        pass
+    return total
+
+
+def _wrap_lines(pdf, text, width, base_bold=False, size=None):
     """
     Word-wrap ``text`` into lines no wider than ``width`` mm using the PDF's
-    current font. Explicit newlines are respected as hard line breaks (cell
-    content may pre-format e.g. Revit 'Family:Type:Tag' names one segment
-    per line). A single token wider than the column (e.g. a 64-character
-    content digest) is hard-broken — no characters are ever inserted or
-    dropped, so cell contents can never spill into the neighbouring column.
+    target font and size, preserving markdown bold segments without dropping
+    markup across line boundaries or miscalculating string widths.
     """
-    # Transcribe first: fpdf2's get_string_width encodes strictly latin-1,
-    # so measuring raw live-DB text (em-dashes, curly quotes, ...) would
-    # raise — and wrapping must measure exactly the text that gets drawn.
     text = _latin1('-' if text in (None, '') else text)
-    lines = []
-    for part in text.split('\n'):
-        words = [w for w in part.split(' ') if w]
-        cur = ''
-        for word in words:
-            trial = f'{cur} {word}'.strip()
-            if cur and pdf.get_string_width(trial) > width:
-                lines.append(cur)
-                cur = word
-            else:
-                cur = trial
-        if cur:
-            lines.append(cur)
+    paragraphs = text.split('\n')
     out = []
-    for line in lines:
-        while pdf.get_string_width(line) > width and len(line) > 1:
+    for para in paragraphs:
+        words = _extract_styled_words(para)
+        if not words:
+            out.append('-')
+            continue
+        cur_line = []
+        for word, is_bold in words:
+            trial = cur_line + [(word, is_bold)]
+            trial_str = _format_styled_words(trial)
+            if cur_line and _measure_markup_width(pdf, trial_str, base_bold=base_bold, size=size) > width:
+                out.append(_format_styled_words(cur_line))
+                cur_line = [(word, is_bold)]
+            else:
+                cur_line = trial
+        if cur_line:
+            out.append(_format_styled_words(cur_line))
+
+    final_out = []
+    for line in out:
+        while _measure_markup_width(pdf, line, base_bold=base_bold, size=size) > width and len(line) > 1:
             cut = len(line) - 1
-            while cut > 1 and pdf.get_string_width(line[:cut]) > width:
+            while cut > 1 and _measure_markup_width(pdf, line[:cut], base_bold=base_bold, size=size) > width:
                 cut -= 1
-            out.append(line[:cut])
+            final_out.append(line[:cut])
             line = line[cut:]
-        out.append(line)
-    return out or ['-']
+        final_out.append(line)
+    return final_out or ['-']
 
 
 def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
                       base_bold=False):
     """Draw one table-cell line, honouring the ``**bold**`` markup.
-
-    Table cells are written by the same code that writes the body
-    paragraphs, so they carry the same markup; drawn literally they printed
-    the asterisks to the client. The markers are measured as nothing and
-    rendered as Cambria-Bold runs, and the alignment is computed on the
-    visible width so a bolded cell stays centred. ``base_bold`` keeps the
-    header row's own weight, and any marker a hard character-break left
-    unbalanced is dropped rather than printed: the client never receives an
-    asterisk.
+    Ensures precise font sizing (matching `size`), zero cell padding drift,
+    and accurate horizontal positioning within the column.
     """
     base = 'B' if base_bold else ''
     runs = []
@@ -463,23 +514,30 @@ def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
     runs = [(text, bold) for text, bold in runs if text]
     if not runs:
         return
-    pdf.set_font('Cambria', base, size)
-    visible = ''.join(text for text, _bold in runs)
-    if not any(bold for _text, bold in runs):
-        # No emphasis in this line: one plain cell, aligned as before.
-        pdf.cell(width, line_h, visible, align=align)
-        return
-    cursor = x + pdf.c_margin
-    if align == 'C':
-        cursor = x + (width - pdf.get_string_width(visible)) / 2.0
-    elif align == 'R':
-        cursor = x + width - pdf.c_margin - pdf.get_string_width(visible)
+
+    family = pdf.font_family or 'Cambria'
+    run_widths = []
     for text, bold in runs:
-        pdf.set_font('Cambria', 'B' if (bold or base_bold) else '', size)
+        pdf.set_font(family, 'B' if (bold or base_bold) else '', size)
+        run_widths.append(pdf.get_string_width(text))
+    total_w = sum(run_widths)
+
+    if align == 'C':
+        cursor = x + (width - total_w) / 2.0
+    elif align == 'R':
+        cursor = x + width - pdf.c_margin - total_w
+    else:
+        cursor = x + pdf.c_margin
+
+    old_cm = pdf.c_margin
+    pdf.c_margin = 0
+    for (text, bold), rw in zip(runs, run_widths):
+        pdf.set_font(family, 'B' if (bold or base_bold) else '', size)
         pdf.set_xy(cursor, y)
-        pdf.cell(pdf.get_string_width(text), line_h, text)
-        cursor += pdf.get_string_width(text)
-    pdf.set_font('Cambria', base, size)
+        pdf.cell(rw, line_h, text)
+        cursor += rw
+    pdf.c_margin = old_cm
+    pdf.set_font(family, base, size)
 
 
 def _element_display(name):
@@ -1332,23 +1390,26 @@ class NDTReportBuilder:
                        new_x='LMARGIN', new_y='NEXT')
 
     def kv_table(self, rows):
-        """Reference p9 equipment status grid: table runs 36.1 -> 192.5mm,
-        columns split at 115.5mm, 7.2mm rows, text centred in both columns
+        """Equipment status grid: table runs centered at 180mm width,
+        columns split at 108mm, 7.5mm rows, text centred in both columns
         (Cambria 12). ``rows`` = [(label, value), ...]; every value is a
         real platform record."""
         pdf = self.pdf
-        x0, split, x1 = 36.1, 115.5, 192.5
-        line_h = 7.2
+        table_w = 180.0
+        x0 = (pdf.w - table_w) / 2.0
+        split = x0 + 90.0
+        x1 = x0 + table_w
+        line_h = 7.5
         label_w = split - x0
         value_w = x1 - split
-        pad = 2 * pdf.c_margin
+        pad = 2 * pdf.c_margin + 0.5
         for label, value in rows:
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
-            label_lines = _wrap_lines(pdf, label, label_w - pad)
+            label_lines = _wrap_lines(pdf, label, label_w - pad, size=12)
             value_lines = _wrap_lines(
-                pdf, value if value not in (None, '') else '-', value_w - pad)
-            h = max(len(label_lines), len(value_lines), 1) * line_h
+                pdf, value if value not in (None, '') else '-', value_w - pad, size=12)
+            h = max(len(label_lines), len(value_lines), 1) * line_h + 1.2
             if pdf.get_y() + h > pdf.h - pdf.b_margin:
                 pdf.add_page()
             y = pdf.get_y()
@@ -1356,10 +1417,10 @@ class NDTReportBuilder:
                                 (split, value_w, value_lines)):
                 pdf.set_xy(x, y)
                 pdf.cell(w, h, border=1)
-                ty = y + (h - len(lines) * line_h) / 2
+                ty = y + (h - len(lines) * line_h) / 2.0
                 for ln in lines:
                     pdf.set_xy(x, ty)
-                    pdf.cell(w, line_h, _latin1(ln), align='C')
+                    _draw_markup_line(pdf, x, ty, w, ln, 'C', line_h, size=12)
                     ty += line_h
             # Return the cursor to the margin so following prose starts
             # at the margin, not the table's inset edge.
@@ -1367,38 +1428,47 @@ class NDTReportBuilder:
 
     def ruled_table(self, headers, rows, widths, aligns=None, font_size=11, line_h=5.5):
         """Plain bordered table. Every cell's text is word-wrapped to its
-        column width before drawing (fpdf2's ``cell`` never wraps, so
-        unwrapped text would run into the neighbouring column), and each row
-        is as tall as its tallest wrapped cell. A manual page-break guard
-        redraws the header row on the new page."""
+        column width before drawing, each row accommodates wrapped lines with
+        clean vertical spacing, and the table is horizontally centered on the page
+        with an expanded width (target 180mm). A manual page-break guard redraws
+        the header row on the new page."""
         pdf = self.pdf
         aligns = aligns or ['L'] * len(headers)
-        page_w = pdf.w - pdf.l_margin - pdf.r_margin
-        if sum(widths) > page_w:
-            widths = [w * page_w / sum(widths) for w in widths]
-        pad = 2 * pdf.c_margin      # text area inside each cell border
+        max_table_w = 182.0
+        cur_w = float(sum(widths))
+        if 150.0 <= cur_w <= 178.0:
+            target_w = 180.0
+            widths = [w * target_w / cur_w for w in widths]
+            cur_w = target_w
+        elif cur_w > max_table_w:
+            widths = [w * max_table_w / cur_w for w in widths]
+            cur_w = max_table_w
+
+        table_w = sum(widths)
+        x_start = max(14.0, (pdf.w - table_w) / 2.0)
+        pad = 2 * pdf.c_margin + 0.5  # text area inside each cell border
 
         def _draw_row(cells, is_header):
             pdf.set_font('Cambria', 'B' if is_header else '', font_size)
             pdf.set_text_color(*INK)
-            wrapped = [_wrap_lines(pdf, c, w - pad)
+            wrapped = [_wrap_lines(pdf, c, w - pad, base_bold=is_header, size=font_size)
                        for c, w in zip(cells, widths)]
-            n_lines = max(len(lines) for lines in wrapped)
-            row_h = n_lines * line_h
+            n_lines = max((len(lines) for lines in wrapped), default=1)
+            row_h = n_lines * line_h + 1.2
             if pdf.get_y() + row_h > pdf.h - pdf.b_margin - 2:
                 pdf.add_page()
                 if not is_header:
                     _draw_row(headers, is_header=True)   # redraw header row
             y0 = pdf.get_y()
-            x = pdf.l_margin
+            x = x_start
             for lines, w, a in zip(wrapped, widths, aligns):
                 pdf.set_xy(x, y0)
                 pdf.cell(w, row_h, border=1)             # the ruled box
-                ty = y0 + (row_h - len(lines) * line_h) / 2
+                ty = y0 + (row_h - len(lines) * line_h) / 2.0
                 for ln in lines:
                     pdf.set_xy(x, ty)
                     _draw_markup_line(pdf, x, ty, w, ln, a, line_h,
-                                      base_bold=is_header)
+                                      size=font_size, base_bold=is_header)
                     ty += line_h
                 x += w
             pdf.set_xy(pdf.l_margin, y0 + row_h)
@@ -3962,7 +4032,7 @@ class NDTReportService:
                     ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
                      'SPACING (MM)', 'COVER DEPTH (MM)'],
                     rebar_data,
-                    [12, 45, 30, 28, 30, 31],
+                    [12, 48, 30, 30, 30, 30],
                     ['C', 'L', 'C', 'C', 'C', 'C'],
                 )
             else:
@@ -4040,7 +4110,7 @@ class NDTReportService:
                          'T CRACKED (US)', 'T UNCRACKED (US)',
                          'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
                         table_rows,
-                        [42, 12, 16, 20, 21, 20, 34],
+                        [44, 14, 18, 22, 22, 22, 38],
                         ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
                     )
                     builder.ln_gap(2)
@@ -4072,7 +4142,7 @@ class NDTReportService:
                 builder.ruled_table(
                     ['STRUCTURAL ELEMENT', 'NUMBER TESTED'],
                     analysis_rows,
-                    [120, 62],
+                    [115, 65],
                     ['L', 'R'],
                 )
                 builder.ln_gap(6)
@@ -4147,10 +4217,10 @@ class NDTReportService:
                          'AVG. STRENGTH\n(N/mm²)',
                          'REMARKS'],
                         all_floor_rows,
-                        [24, 20, 20, 24, 19, 23, 35],
+                        [26, 21, 21, 25, 20, 24, 43],
                         ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
                         font_size=9.5,
-                        line_h=4.8
+                        line_h=5.0
                     )
                     builder.ln_gap(3)
 
@@ -4171,7 +4241,7 @@ class NDTReportService:
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
                      'POOR (NO, %)'],
                     result_rows,
-                    [50, 60, 34, 32],
+                    [52, 60, 34, 34],
                     ['C', 'C', 'C', 'C'],
                 )
                 unverified_members = [e for e in element_data
@@ -4214,7 +4284,7 @@ class NDTReportService:
                     builder.ruled_table(
                         ['ELEMENT', 'POINT', 'SURFACE CONDITION', 'NOTES'],
                         table_rows,
-                        [42, 14, 55, 54],
+                        [44, 16, 60, 60],
                         ['L', 'C', 'L', 'L'],
                     )
                     builder.ln_gap(2)
@@ -4318,7 +4388,7 @@ class NDTReportService:
                         for kind, body in blocks:
                             if kind == 'table':
                                 headers, data_rows = body
-                                widths = ([100.0 / max(1, len(headers))]
+                                widths = ([180.0 / max(1, len(headers))]
                                           * len(headers))
                                 builder.ln_gap(2)
                                 builder.ruled_table(headers, data_rows, widths,
@@ -4349,34 +4419,101 @@ class NDTReportService:
                     builder.bullet(obs_text, markdown=True)
 
                 # ---- Confidence metrics: strictly sorted ascending (S1, S2, ... S20)
+                # The record's stored correlations were computed when the
+                # analysis last ran. Every figure here that DEPENDS ON THE
+                # CALIBRATION CURVE is therefore recomputed now through the
+                # same active curve Section 5.0 applies and Section 3.0
+                # discloses, so the strength and the interval in one row can
+                # never come from two different formulas. A project
+                # re-calibrated after its analysis ran previously kept the old
+                # curve's strengths here while Section 3.0 printed the new
+                # formula: element S20 at 4295 m/s showed 46.2 N/mm2 against a
+                # project curve yielding 34.5, with the +/-0.6 interval in the
+                # same row already taken from the project curve's standard
+                # error. Nothing is invented — the recomputation takes each
+                # element's own recorded mean velocity, exactly as 5.0 does.
+                from apps.digital_eye import confidence_metrics as cm
+                try:
+                    se_active = cm.curve_standard_error_mpa(project)
+                except Exception as e:
+                    logger.error('Could not read the active curve standard '
+                                 'error: %s', e)
+                    se_active = None
+
+                def _row_key(floor, element):
+                    return (floor or None, element or None)
+
+                live_by_key = {}
+                peer_by_key = {}
+                for e in element_data:
+                    key = _row_key(e['test'].floor, e['test'].structural_element)
+                    live_by_key.setdefault(key, e)
+                    peer_by_key.setdefault(key, {
+                        'element': e['test'].structural_element or None,
+                        'floor': e['test'].floor or None,
+                        'mean_velocity_m_s': (
+                            None if e.get('mean_v') is None
+                            else e['mean_v'] * 1000.0),
+                    })
+                try:
+                    live_outliers = cm.cross_element_outliers(
+                        list(peer_by_key.values()))
+                except Exception as e:
+                    logger.error('Could not recompute cross-element outliers: '
+                                 '%s', e)
+                    live_outliers = {}
+
                 table_rows = []
                 corr_list = [m for m in (ai_record.correlations or []) if isinstance(m, dict) and 'mean_ecs_n_mm2' in m]
                 corr_list.sort(key=lambda m: (_natural_sort_key(m.get('floor') or ''), _natural_sort_key(m.get('element') or '')))
                 for m in corr_list:
                     element = m.get('element') or 'element'
                     floor = f"\n({m['floor']})" if m.get('floor') else ''
-                    
-                    vel = '-' if m.get('mean_velocity_m_s') is None else f"{m['mean_velocity_m_s']:.0f}"
-                    ecs = f"{m['mean_ecs_n_mm2']:.1f}"
-                    
+
+                    # Stored figures stand only where no live reading matches
+                    # the row (an element since removed), so no row vanishes.
+                    vel = m.get('mean_velocity_m_s')
+                    ecs = m.get('mean_ecs_n_mm2')
                     ci = m.get('confidence_interval_n_mm2')
-                    ci_str = f"{ci[0]:.1f} - {ci[1]:.1f}" if ci else "Not available"
-                    
                     p_below = m.get('probability_below_design')
+                    dq = m.get('data_quality')
+                    outlier = m.get('cross_element_outlier')
+
+                    key = _row_key(m.get('floor'), m.get('element'))
+                    live = live_by_key.get(key)
+                    if live is not None:
+                        vel = (None if live.get('mean_v') is None
+                               else round(live['mean_v'] * 1000.0, 2))
+                        ecs = live.get('mean_ecs')
+                        ci = cm.strength_confidence_interval(ecs, se_active)
+                        if ci is not None:
+                            ci = [round(ci[0], 1), round(ci[1], 1)]
+                        p_below = (cm.probability_below_design(ecs, se_active)
+                                   if ci is not None else None)
+                        label, reason = cm.data_quality_score(
+                            live.get('n_points'), live.get('spread_pct'))
+                        dq = {'label': label, 'reason': reason} if label else None
+                    peer = peer_by_key.get(key)
+                    if peer is not None:
+                        outlier = live_outliers.get(id(peer))
+
+                    vel_str = '-' if vel is None else f"{vel:.0f}"
+                    ecs_str = 'UNVERIFIED' if ecs is None else f"{ecs:.1f}"
+
+                    ci_str = f"{ci[0]:.1f} - {ci[1]:.1f}" if ci else "Not available"
+
                     if p_below is not None:
                         ci_str += f"\n(Prob < 25N/mm2: {p_below * 100:.1f}%)"
-                        
-                    dq = m.get('data_quality')
+
                     dq_str = f"{dq['label']}\n{dq['reason']}" if dq else "Not scored"
-                    
-                    outlier = m.get('cross_element_outlier')
+
                     if outlier:
                         dq_str += f"\nOUTLIER: {outlier['deviation_pct']:+.1f}% from {outlier['group']}"
-                        
+
                     table_rows.append([
                         f"**{_element_display(element).upper()}**{floor}",
-                        vel,
-                        ecs,
+                        vel_str,
+                        ecs_str,
                         ci_str,
                         dq_str
                     ])
@@ -4385,10 +4522,10 @@ class NDTReportService:
                     builder.ruled_table(
                         ['STRUCTURAL\nELEMENT', 'MEAN\nVELOCITY (m/s)', 'EST. STRENGTH\n(N/mm2)', '95% CONFIDENCE\nINTERVAL', 'DATA QUALITY\nRATING & REMARKS'],
                         table_rows,
-                        [26, 26, 26, 40, 47],
+                        [27, 27, 27, 44, 55],
                         ['C', 'C', 'C', 'C', 'L'],
                         font_size=9.5,
-                        line_h=4.8
+                        line_h=5.0
                     )
 
         def emit_discussion_of_results():
@@ -4604,7 +4741,7 @@ class NDTReportService:
             builder.ruled_table(
                 ['FIELD ASSESSMENT SCOPE', 'LOCATION / LEVEL', 'SUMMARIZED REMARKS & OBSERVATIONS'],
                 summary_table_rows,
-                [50, 45, 70],
+                [52, 48, 80],
                 ['L', 'L', 'L']
             )
             builder.ln_gap(3)
@@ -4616,7 +4753,7 @@ class NDTReportService:
                     ['STRUCTURAL ELEMENT', 'POINT', 'RECORDED OBSERVATION'],
                     [[_element_display(el), point, note]
                      for el, point, note in anomalies],
-                    [45, 18, 119],
+                    [45, 18, 117],
                     ['L', 'C', 'L'],
                 )
                 builder.ln_gap(3)
@@ -4626,10 +4763,10 @@ class NDTReportService:
                 builder.ruled_table(
                     ['OBS. NO.', 'ASSESSMENT ACTIVITY', 'LOCATION / LEVEL', 'OBSERVATION / FINDING', 'REMARKS / REQUIRED ACTION'],
                     obs_table_rows,
-                    [16, 34, 32, 48, 35],
+                    [16, 36, 34, 52, 42],
                     ['C', 'L', 'L', 'L', 'L'],
                     font_size=9.5,
-                    line_h=4.8
+                    line_h=5.0
                 )
                 builder.ln_gap(3)
 

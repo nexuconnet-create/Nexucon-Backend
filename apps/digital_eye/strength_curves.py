@@ -640,6 +640,81 @@ def resolve_active_curve(project):
     return StrengthCurve.objects.filter(is_default=True).first()
 
 
+# The documented laboratory coefficients for each curve type. These are the
+# published fallbacks, applied when a project has NO calibration curve of its
+# own — never a substitute for a curve the project has fitted.
+DOCUMENTED_DEFAULT_PARAMS = {
+    'exponential': {'a': 1.20, 'b': 0.85, 'c': 0.0},
+    'linear': {'m': 8.961, 'c': -7.97},
+    'polynomial': {'coeffs': [-12.5, 4.2, 1.8],
+                   'a': -12.5, 'b': 4.2, 'c': 1.8},
+    'sonreb': {'a': 0.0286, 'b': 0.84, 'c': 0.35},
+}
+
+
+def documented_default_params(curve_type):
+    """A copy of the published default coefficients for ``curve_type``.
+
+    Read-only fallback: a project that has fitted its own curve must never be
+    handed these numbers instead of it (see ``resolve_analysis_curve``).
+    """
+    return dict(DOCUMENTED_DEFAULT_PARAMS.get(curve_type)
+                or DOCUMENTED_DEFAULT_PARAMS['exponential'])
+
+
+def resolve_analysis_curve(project, requested_type=None, requested_params=None,
+                           calibration=None):
+    """The (curve_type, params, source, writes_project_curve) an analysis run
+    must use.
+
+    Precedence, highest first:
+
+    1. ``requested_params`` — coefficients the caller supplied explicitly.
+       Only this case may change the project's stored calibration.
+    2. a curve of the SEARCHED type belonging to the project (the active
+       curve Section 3.0 discloses and Section 5.0 applies).
+    3. ``calibration`` — the batch/project CalibrationProfile the run is
+       scoped to, when it is of that type.
+    4. the documented laboratory default for that type.
+
+    A request that names a curve TYPE without coefficients therefore never
+    replaces the project's fitted curve. Before this resolver existed a bare
+    ``curve_type`` fell through to the laboratory default, so Section 5.3
+    computed every figure on f_cu = 1.20 x exp(0.85 x V) while Section 3.0
+    printed the project's own fitted formula — two different curves inside one
+    report, and 46.2 N/mm2 printed for a 4295 m/s element whose project curve
+    yields 34.5.
+
+    ``source`` is one of 'request', 'project_curve', 'calibration_profile',
+    'documented_default'; only 'request' authorises writing to the stored
+    curve.
+    """
+    if isinstance(requested_params, dict) and requested_params:
+        return (str(requested_type or 'exponential'), dict(requested_params),
+                'request', True)
+
+    curve = resolve_active_curve(project)
+    calibration_type = (getattr(calibration, 'curve_type', None)
+                        if calibration is not None else None)
+
+    # An explicitly requested type wins; otherwise the project's own curve,
+    # then the batch calibration, then the documented exponential.
+    curve_type = str(
+        requested_type
+        or (curve.curve_type if curve is not None else None)
+        or calibration_type
+        or 'exponential')
+
+    # Coefficients for that type, from the most specific source holding them.
+    if (curve is not None and curve.curve_type == curve_type
+            and curve.formula_params):
+        return curve_type, dict(curve.formula_params), 'project_curve', False
+    if (calibration_type == curve_type and getattr(calibration, 'params', None)):
+        return curve_type, dict(calibration.params), 'calibration_profile', False
+    return curve_type, documented_default_params(curve_type), \
+        'documented_default', False
+
+
 def curve_snapshot(curve, temperature_c=None):
     """JSON snapshot of the curve that produced a strength value — the
     formula provenance stored on every reading/test (client spec §B.1

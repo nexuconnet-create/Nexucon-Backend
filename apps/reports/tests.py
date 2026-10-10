@@ -5138,3 +5138,119 @@ class NDTInspectorNotificationTests(_HermeticMediaMixin, NDTReportFixtureMixin, 
         )
         self.assertEqual(dl_res.status_code, status.HTTP_200_OK)
         self.assertEqual(dl_res['Content-Type'], 'application/pdf')
+
+
+class NDTReportCalibrationConsistencyTests(NDTReportFixtureMixin, TestCase):
+    """Section 5.3 must print the calibration curve the report itself
+    discloses in Section 3.0.
+
+    A project re-calibrated after its analysis ran used to keep the old
+    curve's strengths in Section 5.3 while Section 3.0 printed the new
+    formula: one report, two curves. The client's own 4295 m/s element
+    showed 46.2 N/mm2 (the laboratory default f_cu = 1.20 x exp(0.85 x V))
+    against a project curve yielding 34.5, with the +/- 0.6 interval in the
+    very same row already taken from the project curve's standard error.
+    """
+
+    def setUp(self):
+        self.project = self.make_project(name="Lekki Calibration Project")
+        self.device = self.make_device(self.project)
+        # Three points averaging 4294.92 m/s.
+        test = self.make_test(
+            self.project, self.device,
+            structural_element="S20", floor="Ground Floor")
+        from apps.digital_eye.models import PUNDITReading
+        for label, transit in (('A', 69.80), ('B', 69.85), ('C', 69.90)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label,
+                path_length_mm=300.0, transit_time_us=transit)
+        self.test_obj = test
+        # The project's own fitted calibration, exactly as the client's
+        # Section 3.0 states it.
+        from apps.digital_eye.models import StrengthCurve, ProjectCurveSetting
+        self.curve = StrengthCurve.objects.create(
+            project=self.project, name="Lekki project calibration",
+            curve_type='exponential',
+            formula_params={'a': 3051.166318, 'b': 0.000003,
+                            'c': -3056.280893},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
+            standard='BS 1881-203 / BS EN 12504-4',
+            data_points=[{'v': 3200.0, 'f': 7.4}, {'v': 3400.0, 'f': 11.2},
+                         {'v': 3600.0, 'f': 15.1}, {'v': 3800.0, 'f': 19.0},
+                         {'v': 4000.0, 'f': 22.9}, {'v': 4200.0, 'f': 26.8},
+                         {'v': 4400.0, 'f': 30.5}, {'v': 4600.0, 'f': 34.3},
+                         {'v': 4800.0, 'f': 38.2}, {'v': 5000.0, 'f': 42.0}])
+        setting, _ = ProjectCurveSetting.objects.get_or_create(
+            project=self.project)
+        setting.active_curve = self.curve
+        setting.save()
+
+    def _stale_ai_record(self):
+        """An analysis record computed while the laboratory default was
+        still the active curve — the state every already-issued report is
+        in."""
+        from apps.evidence.models import AIAnalysisRecord
+        return AIAnalysisRecord.objects.create(
+            project=self.project, analysis_type="pundit",
+            observations=["Ground Floor: S20 shows a mean pulse velocity of "
+                          "4295 m/s."],
+            recommendations=[], model_provider="gemini",
+            model_version="gemini-3.5-flash-lite", confidence=0.9,
+            correlations=[{
+                'element': 'S20', 'floor': 'Ground Floor',
+                'mean_velocity_m_s': 4294.92,
+                # The laboratory default's answers, kept on the record.
+                'mean_ecs_n_mm2': 46.2,
+                'point_spread_pct': 0.1,
+                'confidence_interval_n_mm2': [45.6, 46.8],
+                'probability_below_design': 0.0,
+                'data_quality': {'label': 'HIGH', 'reason': '3 points'},
+                'cross_element_outlier': None,
+            }])
+
+    def test_section_5_3_strength_comes_from_the_projects_own_curve(self):
+        from apps.digital_eye.confidence_metrics import (
+            curve_standard_error_mpa, strength_confidence_interval)
+        from apps.digital_eye.strength_curves import apply_active_curve
+        self._stale_ai_record()
+
+        mean_v = self.test_obj.element_mean_velocity_km_s()
+        expected_ecs, _ = apply_active_curve(self.project, mean_v)
+        self.assertIsNotNone(expected_ecs)
+        # The two curves must genuinely differ here, or the test proves
+        # nothing.
+        self.assertNotAlmostEqual(expected_ecs, 46.2, places=1)
+
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # Section 3.0 discloses the project's formula ...
+        self.assertIn("3051.166318", flat)
+        # ... and Section 5.3 prints that formula's answer, not the
+        # laboratory default's.
+        self.assertIn(f"{expected_ecs:.1f}", flat)
+        self.assertNotIn("46.2", flat)
+
+        # The interval in the same row is built from the same curve's
+        # regression error, so strength and interval cannot come from two
+        # different formulas.
+        se = curve_standard_error_mpa(self.project)
+        self.assertIsNotNone(se)
+        low, high = strength_confidence_interval(expected_ecs, se)
+        self.assertIn(f"{low:.1f} - {high:.1f}", flat)
+
+    def test_unmatched_rows_keep_their_stored_figures(self):
+        """A correlation row whose element has since been removed still
+        prints, so no row silently vanishes from the table."""
+        record = self._stale_ai_record()
+        record.correlations = [{
+            'element': 'S99', 'floor': 'Ground Floor',
+            'mean_velocity_m_s': 4294.92, 'mean_ecs_n_mm2': 46.2,
+            'point_spread_pct': 0.1, 'confidence_interval_n_mm2': [45.6, 46.8],
+            'probability_below_design': 0.0,
+            'data_quality': {'label': 'HIGH', 'reason': '3 points'},
+            'cross_element_outlier': None,
+        }]
+        record.save(update_fields=['correlations'])
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("46.2", flat)

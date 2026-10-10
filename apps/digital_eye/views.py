@@ -758,33 +758,21 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         if not calibration:
             calibration = CalibrationProfile.objects.filter(project=project, is_active=True).first()
 
-        from .strength_curves import resolve_active_curve
+        from .strength_curves import resolve_active_curve, resolve_analysis_curve
         active_curve = resolve_active_curve(project)
 
-        req_curve_type = request.data.get('curve_type')
-        if req_curve_type:
-            curve_type = req_curve_type
-            params = request.data.get('params') or (calibration.params if calibration and calibration.curve_type == curve_type else None)
-        elif calibration:
-            curve_type = calibration.curve_type
-            params = calibration.params
-        elif active_curve:
-            curve_type = active_curve.curve_type
-            params = active_curve.formula_params
-        else:
-            curve_type = 'exponential'
-            params = None
-
-        if not params:
-            if curve_type == 'linear':
-                params = {'m': 8.961, 'c': -7.97}
-            elif curve_type == 'polynomial':
-                params = {'coeffs': [-12.5, 4.2, 1.8], 'a': -12.5, 'b': 4.2, 'c': 1.8}
-            elif curve_type == 'sonreb':
-                params = {'a': 0.0286, 'b': 0.84, 'c': 0.35}
-            else:
-                curve_type = 'exponential'
-                params = {'a': 1.20, 'b': 0.85, 'c': 0.0}
+        # The curve this run computes with. A request that carries no
+        # coefficients of its own no longer silently falls back to the
+        # laboratory default: it uses the project's own fitted curve, which is
+        # the curve Section 3.0 of the report discloses and Section 5.0
+        # applies. Otherwise a report could state one formula in 3.0 and print
+        # another formula's strengths in 5.3.
+        curve_type, params, curve_source, writes_curve = resolve_analysis_curve(
+            project,
+            requested_type=request.data.get('curve_type'),
+            requested_params=request.data.get('params'),
+            calibration=calibration,
+        )
 
         design_strength_mpa = request.data.get('design_strength_mpa') or (
             calibration.design_strength_mpa if calibration else 25.0
@@ -797,24 +785,36 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'calibration_id': str(calibration.id) if calibration else None,
         }
 
-        # Sync project-level active curve setting so all reports & services use this chosen curve
+        # Point the project at the curve this run used — but only write to the
+        # stored calibration when the run actually supplied coefficients, or
+        # when the project has no curve at all to fall back on. Every analyze
+        # call used to upsert a StrengthCurve seeded with the laboratory
+        # default, which is how a project's own 10-pair calibration could be
+        # replaced by f_cu = 1.20 x exp(0.85 x V) without anyone asking.
         from .models import StrengthCurve, ProjectCurveSetting
-        strength_curve, _ = StrengthCurve.objects.update_or_create(
-            project=project,
-            name=f"{project.name} - {curve_type.capitalize()} Calibration",
-            defaults={
-                'curve_type': curve_type,
-                'formula_params': params,
-                'valid_range_min_ms': 2000.0,
-                'valid_range_max_ms': 5000.0,
-                'standard': 'BS 1881-203 / BS EN 12504-4',
-                'created_by': request.user if request.user.is_authenticated else None,
-            }
-        )
-        setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
-        setting.active_curve = strength_curve
-        setting.updated_by = request.user if request.user.is_authenticated else None
-        setting.save()
+        if writes_curve or active_curve is None:
+            strength_curve, _ = StrengthCurve.objects.update_or_create(
+                project=project,
+                name=f"{project.name} - {curve_type.capitalize()} Calibration",
+                defaults={
+                    'curve_type': curve_type,
+                    'formula_params': params,
+                    'valid_range_min_ms': 2000.0,
+                    'valid_range_max_ms': 5000.0,
+                    'standard': 'BS 1881-203 / BS EN 12504-4',
+                    'created_by': request.user if request.user.is_authenticated else None,
+                }
+            )
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            setting.active_curve = strength_curve
+            setting.updated_by = request.user if request.user.is_authenticated else None
+            setting.save()
+        else:
+            strength_curve = active_curve
+
+        # Surface the provenance so a caller can see which curve answered.
+        curve_profile['source'] = curve_source
+        curve_profile['curve_id'] = str(strength_curve.id) if strength_curve else None
 
         # Update each test's compressive strength based on chosen curve
         for t in tests:
@@ -3056,14 +3056,14 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
         curve_type = request.data.get('curve_type', 'exponential')
         params = request.data.get('params')
         if not params:
-            if curve_type == 'linear':
-                params = {'m': 8.961, 'c': -7.97}
-            elif curve_type == 'polynomial':
-                params = {'coeffs': [-12.5, 4.2, 1.8], 'a': -12.5, 'b': 4.2, 'c': 1.8}
-            elif curve_type == 'sonreb':
-                params = {'a': 0.0286, 'b': 0.84, 'c': 0.35}
-            else:
-                params = {'a': 1.20, 'b': 0.85, 'c': 0.0}
+            # No coefficients supplied: reuse the project's own curve of this
+            # type when it has one, so calibrating a batch cannot quietly
+            # re-seat a fitted calibration on the laboratory default. The
+            # documented default is used only for a project with no such
+            # curve, where it is the honest starting point.
+            from .strength_curves import resolve_analysis_curve
+            _, params, _, _ = resolve_analysis_curve(
+                batch.project, requested_type=curve_type)
 
         design_strength_mpa = float(request.data.get('design_strength_mpa', 25.0))
         cube_points = request.data.get('cube_correlation_points') or request.data.get('cube_correlation_data', [])
