@@ -261,6 +261,7 @@ class InAppNotification(models.Model):
 
     def __str__(self):
         return f"[{self.type.upper()}] {self.title}"
+<<<<<<< Updated upstream
 
 
 class PushDeviceToken(models.Model):
@@ -296,3 +297,5 @@ class PushDeviceToken(models.Model):
 
     def __str__(self):
         return f"{self.user_id} {self.platform} ({self.token[:12]}…)"
+=======
+>>>>>>> Stashed changes

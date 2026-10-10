@@ -185,9 +185,12 @@ INSTALLED_APPS += [
     'apps.processing',
     'apps.reports',
     'apps.scans',
+<<<<<<< Updated upstream
     'apps.sync',
     'apps.telemetry',
     'apps.data_import',
+=======
+>>>>>>> Stashed changes
     'apps.storage',
 ]
 

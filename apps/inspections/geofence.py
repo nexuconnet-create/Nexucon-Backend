@@ -34,6 +34,8 @@ place where a plausible-looking implementation would lie:
    ``strict`` is a one-line settings change once the coordinate backfill is
    done — no code change.
 """
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
 
