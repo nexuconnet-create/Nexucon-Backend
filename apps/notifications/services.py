@@ -171,7 +171,6 @@ class NotificationService:
             except Exception:
                 continue
 
-<<<<<<< Updated upstream
 
         text_content = ""
         try:
@@ -319,10 +318,6 @@ class NotificationService:
             entity_id=entity_id,
             action_url=action_url or "/government/dashboard/notifications/critical"
         )
-=======
-        for item in defaults:
-            Notification.objects.create(**item)
->>>>>>> Stashed changes
 
 import requests
 import json
@@ -368,10 +363,6 @@ class WebhookService:
         return delivery
 
 
-<<<<<<< Updated upstream
-=======
-
->>>>>>> Stashed changes
 class _LegacyNotificationServiceHelper:
     @classmethod
     def trigger_stop_work(cls, defect):
@@ -404,14 +395,9 @@ class _LegacyNotificationServiceHelper:
             related_entity_id=defect.id
         )
         
-<<<<<<< Updated upstream
         # 2. Fire the REAL webhook dispatch task — deliveries are recorded by
         # WebhookService per endpoint; nothing is claimed as delivered here.
         from apps.notifications.tasks import dispatch_webhooks
-=======
-        # 2. Fire webhook payload (Simulated)
-        # In a real app, this would iterate over WebhookEndpoints and create WebhookDeliveries.
->>>>>>> Stashed changes
         payload = {
             "event": "defect.critical_stop_work",
             "defect_id": str(defect.id),
@@ -419,9 +405,4 @@ class _LegacyNotificationServiceHelper:
             "severity": defect.severity,
             "message": message
         }
-<<<<<<< Updated upstream
         dispatch_webhooks.delay('defect.critical_stop_work', payload, str(project.id) if project else None)
-=======
-        logger.info(f"Webhook Payload Dispatched: {json.dumps(payload)}")
-
->>>>>>> Stashed changes
