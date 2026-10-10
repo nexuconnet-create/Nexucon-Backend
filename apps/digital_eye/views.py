@@ -22,6 +22,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.audit.models import AuditEvent
+from apps.common.measurement_tables import normalize_observations
 from common.permissions import IsDirector, scoped_projects, user_is_director
 from common.responses.standard import StandardResponse
 
@@ -507,7 +508,7 @@ class GPRSurveyViewSet(viewsets.ModelViewSet):
             'analysis_id': str(record.id),
             'risk_level': record.risk_level,
             'risk_score': record.risk_score,
-            'observations': record.observations,
+            'observations': normalize_observations(record.observations),
             'recommendations': record.recommendations,
             'reasoning_log': record.reasoning_log,
         })
@@ -665,7 +666,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'crack_depth_mm': test.crack_depth_mm,
             'analysis_id': str(record.id),
             'risk_level': record.risk_level,
-            'observations': record.observations,
+            'observations': normalize_observations(record.observations),
             'recommendations': record.recommendations,
             'reasoning_log': record.reasoning_log,
         })
@@ -774,7 +775,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'analysis_id': str(project_record.id),
             'risk_level': project_record.risk_level,
             'confidence': project_record.confidence,
-            'observations': project_record.observations,
+            'observations': normalize_observations(project_record.observations),
             'recommendations': project_record.recommendations,
             'reasoning_log': project_record.reasoning_log,
             'model_provider': project_record.model_provider,
@@ -2595,7 +2596,7 @@ class PunditAnalysisReviewView(APIView):
             'analysis_reference': analysis.analysis_reference,
             'analysis_title': getattr(analysis, 'title', '') or analysis.analysis_reference,
             'ai_summary': getattr(analysis, 'summary', '') or '',
-            'ai_observations': getattr(analysis, 'observations', []) or [],
+            'ai_observations': normalize_observations(getattr(analysis, 'observations', []) or []),
             'ai_reasoning_log': getattr(analysis, 'reasoning_log', '') or '',
             'ai_confidence_score': getattr(analysis, 'confidence_score', None),
         }
@@ -2778,7 +2779,7 @@ class PunditAnalysisJointRegenerateView(APIView):
         return Response({
             'analysis_id': str(new_analysis.id),
             'analysis_reference': new_analysis.analysis_reference,
-            'observations': new_analysis.observations,
+            'observations': normalize_observations(new_analysis.observations),
             'reasoning_log': new_analysis.reasoning_log,
         }, status=status.HTTP_200_OK)
 

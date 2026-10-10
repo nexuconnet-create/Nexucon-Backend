@@ -1,6 +1,8 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.common.measurement_tables import normalize_observations
+
 from .models import (
     AIAnalysisRecord, CorrelationFinding, EvidenceFile, EvidenceRecord,
     FindingRevision,
@@ -236,6 +238,15 @@ class AIAnalysisRecordSerializer(serializers.ModelSerializer):
             'requires_human_review', 'confidence', 'model_provider', 'model_version',
             'created_at',
         ]
+
+    def to_representation(self, instance):
+        # A run that answered in prose instead of tables prints one long
+        # sentence per element on the analysis screens; the same rewrite the
+        # certified PDF applies turns those runs into markdown tables, so
+        # both editions of the narrative read the same way.
+        data = super().to_representation(instance)
+        data['observations'] = normalize_observations(data.get('observations'))
+        return data
 
 
 class FindingRevisionSerializer(serializers.ModelSerializer):

@@ -661,16 +661,22 @@ class NDTWordExporter:
                 clean_notes = (S._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
                                if t.notes else '')
                 if clean_notes and _is_substantive(clean_notes):
-                    anomalies.append(f"{t.structural_element or 'Element'}: {clean_notes}")
+                    anomalies.append((t.structural_element or 'Element', '-',
+                                      clean_notes))
                 for r in t.reading_rows():
                     raw_pt = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
                     pt_note = (S._PROVENANCE_STAMP_RE.sub('', raw_pt).strip() if raw_pt else '')
                     if pt_note and _is_substantive(pt_note):
-                        anomalies.append(f"{t.structural_element or 'Element'} (Pt {r.get('label', '')}): {pt_note}")
+                        anomalies.append((t.structural_element or 'Element',
+                                          r.get('label') or '-', pt_note))
 
             summary_table_rows = []
             if anomalies:
-                cond_summary = "; ".join(anomalies[:5])
+                # One recorded observation per row below; the cell states how
+                # many there are instead of running them together.
+                cond_summary = (
+                    f"{len(anomalies)} recorded surface observation(s) — "
+                    "tabulated below.")
             else:
                 cond_summary = (
                     "Uniform surface preparation per BS 1881-203. Concrete surfaces sound, "
@@ -682,8 +688,12 @@ class NDTWordExporter:
                 cond_summary
             ])
 
-            if site_visual_obs:
-                vis_summary = "; ".join(site_visual_obs)
+            if len(site_visual_obs) > 1:
+                vis_summary = (
+                    f"{len(site_visual_obs)} recorded site observation(s) — "
+                    "tabulated below.")
+            elif site_visual_obs:
+                vis_summary = site_visual_obs[0]
             else:
                 vis_summary = "Standard field conditions recorded on site during testing."
             summary_table_rows.append([
@@ -708,12 +718,34 @@ class NDTWordExporter:
                 summary_table_rows
             )
 
+            # The recorded observations themselves, one per row.
+            if anomalies:
+                _add_heading(doc, 'RECORDED SURFACE CONDITION OBSERVATIONS', level=3)
+                _add_table(
+                    doc,
+                    ['STRUCTURAL ELEMENT', 'POINT', 'RECORDED OBSERVATION'],
+                    [[_element_display(el), point, note]
+                     for el, point, note in anomalies]
+                )
+
+            if len(site_visual_obs) > 1:
+                _add_heading(doc, 'RECORDED SITE OBSERVATIONS', level=3)
+                _add_table(
+                    doc,
+                    ['#', 'FIELD OBSERVATION'],
+                    [[str(i + 1), obs] for i, obs in enumerate(site_visual_obs)]
+                )
+
             _add_para(
                 doc,
                 f"Fieldwork & Surface Synthesis: A total of {len(tests)} structural member test stations "
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
-                + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
+                + (f"On-site visual observation noted: “{site_visual_obs[0]}”. "
+                   if len(site_visual_obs) == 1 else
+                   (f"On-site visual observations are recorded in the table above "
+                    f"({len(site_visual_obs)} entries). "
+                    if site_visual_obs else ""))
                 + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork.")
             )
 
