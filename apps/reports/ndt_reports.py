@@ -4261,7 +4261,29 @@ class NDTReportService:
                     builder.ln_gap(2)
 
                 for obs in ai_record.observations:
-                    obs_text = str(obs)
+                    obs_text = str(obs).strip()
+                    
+                    # Detect and render Markdown tables
+                    if obs_text.startswith('|') and '\n|' in obs_text and '---' in obs_text:
+                        lines = [line.strip() for line in obs_text.splitlines() if line.strip().startswith('|')]
+                        if len(lines) >= 3:
+                            headers = [c.strip() for c in lines[0].strip('|').split('|')]
+                            data_rows = []
+                            for line in lines[2:]:
+                                row = [c.strip() for c in line.strip('|').split('|')]
+                                if len(row) < len(headers):
+                                    row.extend([''] * (len(headers) - len(row)))
+                                elif len(row) > len(headers):
+                                    row = row[:len(headers)]
+                                data_rows.append(row)
+                            
+                            widths = [100.0 / max(1, len(headers))] * len(headers)
+                            aligns = ['C'] * len(headers)
+                            builder.ln_gap(2)
+                            builder.ruled_table(headers, data_rows, widths, aligns)
+                            builder.ln_gap(2)
+                            continue
+
                     if ':' in obs_text:
                         prefix, rest = obs_text.split(':', 1)
                         clean_prefix = prefix.strip().lower()
