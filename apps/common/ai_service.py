@@ -870,8 +870,22 @@ class AIService:
         try:
             return json.loads(content)
         except json.JSONDecodeError as e:
+            # Fallback: search for markdown json block or outermost braces
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    pass
+            m2 = re.search(r'(\{.*\})', content, re.DOTALL)
+            if m2:
+                try:
+                    return json.loads(m2.group(1))
+                except json.JSONDecodeError:
+                    pass
             logger.error("AI returned invalid JSON: %s", e)
             raise ValueError("AI returned invalid JSON.") from e
+
 
     @staticmethod
     def _normalise_list(data, key=None):
@@ -1329,10 +1343,37 @@ class AIService:
         for prov, data in successful_results.items():
             if isinstance(data, dict):
                 obs = data.get("observations")
-                if isinstance(obs, list):
+                if isinstance(obs, list) and obs:
                     for o in obs:
                         cleaned = str(o).strip()
                         if cleaned and cleaned not in merged_observations:
+                            merged_observations.append(cleaned)
+                else:
+                    # Parse V3 prompt schema keys if present
+                    if data.get('executive_summary'):
+                        cleaned = f"**Executive Summary:** {data['executive_summary']}".strip()
+                        if cleaned not in merged_observations:
+                            merged_observations.append(cleaned)
+                    if data.get('scope_verification'):
+                        cleaned = f"**Scope:** {data['scope_verification']}".strip()
+                        if cleaned not in merged_observations:
+                            merged_observations.append(cleaned)
+                    for g in (data.get('grouped_analysis') or []):
+                        if isinstance(g, dict):
+                            cleaned = f"**{g.get('group', 'Group')} ({g.get('quality', '')}):** {g.get('correlation', '')}".strip()
+                            if cleaned not in merged_observations:
+                                merged_observations.append(cleaned)
+                    recs = data.get('remedial_recommendations') or []
+                    if recs:
+                        if isinstance(recs, list):
+                            cleaned = f"**Recommendations:** {'; '.join(str(r) for r in recs)}".strip()
+                        else:
+                            cleaned = f"**Recommendations:** {recs}".strip()
+                        if cleaned not in merged_observations:
+                            merged_observations.append(cleaned)
+                    if data.get('code_compliance_statement'):
+                        cleaned = f"**Compliance:** {data['code_compliance_statement']}".strip()
+                        if cleaned not in merged_observations:
                             merged_observations.append(cleaned)
 
         active_models = [
@@ -1359,6 +1400,14 @@ class AIService:
             "version_label": version_title,
             "ensemble_active": len(successful_results) > 0,
         }
+        # Retain all top-level keys returned by any responding model
+        for prov, data in successful_results.items():
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k not in res_dict and v is not None:
+                        res_dict[k] = v
+        res_dict["provider_results"] = successful_results
+
         return StructuredResult(
             res_dict,
             provider=provider_title,
