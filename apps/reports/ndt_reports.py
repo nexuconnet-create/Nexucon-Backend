@@ -27,6 +27,7 @@ from fpdf import FPDF
 
 from .ai_reports import _latin1
 from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
+from apps.common.measurement_tables import markdown_blocks, tabulate_measurements
 
 logger = logging.getLogger(__name__)
 
@@ -4261,29 +4262,32 @@ class NDTReportService:
                             builder.para(f"**Field Observations:** “{review.inspector_notes}”", markdown=True)
                     builder.ln_gap(2)
 
+                # The narrative reaches this point as it was stored, which for
+                # a run that answered in prose rather than tables means one
+                # sentence per element (see apps/common/measurement_tables.py).
+                # Rewriting those runs as tables happens here, against the
+                # elements this project actually recorded, so a name the
+                # report cannot place leaves the sentence alone.
+                known_elements = {str(e.get('element') or '').strip().lower()
+                                  for e in element_data}
                 for obs in ai_record.observations:
-                    obs_text = str(obs).strip()
-                    
-                    # Detect and render Markdown tables
-                    if obs_text.startswith('|') and '\n|' in obs_text and '---' in obs_text:
-                        lines = [line.strip() for line in obs_text.splitlines() if line.strip().startswith('|')]
-                        if len(lines) >= 3:
-                            headers = [c.strip() for c in lines[0].strip('|').split('|')]
-                            data_rows = []
-                            for line in lines[2:]:
-                                row = [c.strip() for c in line.strip('|').split('|')]
-                                if len(row) < len(headers):
-                                    row.extend([''] * (len(headers) - len(row)))
-                                elif len(row) > len(headers):
-                                    row = row[:len(headers)]
-                                data_rows.append(row)
-                            
-                            widths = [100.0 / max(1, len(headers))] * len(headers)
-                            aligns = ['C'] * len(headers)
-                            builder.ln_gap(2)
-                            builder.ruled_table(headers, data_rows, widths, aligns)
-                            builder.ln_gap(2)
-                            continue
+                    obs_text = tabulate_measurements(str(obs).strip(),
+                                                     known_elements=known_elements)
+                    blocks = markdown_blocks(obs_text)
+
+                    if any(kind == 'table' for kind, _ in blocks):
+                        for kind, body in blocks:
+                            if kind == 'table':
+                                headers, data_rows = body
+                                widths = ([100.0 / max(1, len(headers))]
+                                          * len(headers))
+                                builder.ln_gap(2)
+                                builder.ruled_table(headers, data_rows, widths,
+                                                    ['C'] * len(headers))
+                                builder.ln_gap(2)
+                            else:
+                                builder.para(body, markdown=True)
+                        continue
 
                     if ':' in obs_text:
                         prefix, rest = obs_text.split(':', 1)
@@ -4434,18 +4438,22 @@ class NDTReportService:
             floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
             floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
 
-            # Check if there are genuine specific defects or anomalies across elements
+            # Genuine specific defects or anomalies across elements, kept as
+            # (element, point, observation) triples: one recorded observation
+            # per table row below, never a run of them inside a sentence.
             anomalies = []
             for t in tests:
                 clean_notes = (cls._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
                                if t.notes else '')
                 if clean_notes and _is_substantive(clean_notes):
-                    anomalies.append(f"{t.structural_element or 'Element'}: {clean_notes}")
+                    anomalies.append((t.structural_element or 'Element', '-',
+                                      clean_notes))
                 for r in t.reading_rows():
                     raw_pt = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
                     pt_note = (cls._PROVENANCE_STAMP_RE.sub('', raw_pt).strip() if raw_pt else '')
                     if pt_note and _is_substantive(pt_note):
-                        anomalies.append(f"{t.structural_element or 'Element'} (Pt {r.get('label', '')}): {pt_note}")
+                        anomalies.append((t.structural_element or 'Element',
+                                          r.get('label') or '-', pt_note))
 
             # Summarized Observations Table
             summary_table_rows = []
@@ -4466,7 +4474,12 @@ class NDTReportService:
 
             # Row 1: Concrete Member Surface Condition
             if anomalies:
-                cond_summary = "; ".join(anomalies[:5])
+                # The observations themselves print one per row below; the
+                # cell states how many there are rather than running them
+                # together, which is unreadable past two or three.
+                cond_summary = (
+                    f"{len(anomalies)} recorded surface observation(s) — "
+                    "tabulated below.")
             else:
                 cond_summary = (
                     "Uniform surface preparation per BS 1881-203. Concrete surfaces sound, "
@@ -4479,8 +4492,14 @@ class NDTReportService:
             ])
 
             # Row 2: On-Site Visual Observations
-            if site_visual_obs:
-                vis_summary = "; ".join(site_visual_obs)
+            if len(site_visual_obs) > 1:
+                # Several recorded observations are tabulated below, one per
+                # row. A single one reads fine in the cell.
+                vis_summary = (
+                    f"{len(site_visual_obs)} recorded site observation(s) — "
+                    "tabulated below.")
+            elif site_visual_obs:
+                vis_summary = site_visual_obs[0]
             else:
                 vis_summary = "Standard field conditions recorded on site during testing."
             summary_table_rows.append([
@@ -4511,12 +4530,38 @@ class NDTReportService:
             )
             builder.ln_gap(3)
 
+            # ---- The recorded observations themselves, one per row
+            if anomalies:
+                builder.subheading('RECORDED SURFACE CONDITION OBSERVATIONS')
+                builder.ruled_table(
+                    ['STRUCTURAL ELEMENT', 'POINT', 'RECORDED OBSERVATION'],
+                    [[_element_display(el), point, note]
+                     for el, point, note in anomalies],
+                    [45, 18, 119],
+                    ['L', 'C', 'L'],
+                )
+                builder.ln_gap(3)
+
+            if len(site_visual_obs) > 1:
+                builder.subheading('RECORDED SITE OBSERVATIONS')
+                builder.ruled_table(
+                    ['#', 'FIELD OBSERVATION'],
+                    [[str(i + 1), obs] for i, obs in enumerate(site_visual_obs)],
+                    [12, 170],
+                    ['C', 'L'],
+                )
+                builder.ln_gap(3)
+
             # Synthesis narrative paragraph
             builder.para(
                 f"**Fieldwork & Surface Synthesis:** A total of {len(tests)} structural member test stations "
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
-                + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
+                + (f"On-site visual observation noted: “{site_visual_obs[0]}”. "
+                   if len(site_visual_obs) == 1 else
+                   (f"On-site visual observations are recorded in the table above "
+                    f"({len(site_visual_obs)} entries). "
+                    if site_visual_obs else ""))
                 + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork."),
                 markdown=True,
             )

@@ -3133,6 +3133,52 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
             NDTReportService.generate_ndt_report(self.project)).split())
         self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)
 
+    def test_a_prose_element_run_prints_as_a_table(self):
+        """The analysis layer sometimes answers with one clause per element.
+        §5.3 prints that run as a table, over the elements the project
+        actually recorded, rather than as a wall of numbers in a sentence."""
+        for label, path, transit in (("S1", 250.0, 56.8),
+                                     ("S2", 250.0, 58.1),
+                                     ("S3", 250.0, 57.4),
+                                     ("S4", 250.0, 56.2)):
+            self.make_test(self.project, self.device,
+                           structural_element=label, floor="Ground Floor",
+                           path_length_mm=path, pulse_time_us=transit)
+        run = ("Ground Floor element-by-element: "
+               "S1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good; "
+               "S2 4,320.00 m/s, 48.5 MPa, spread 3.0%, good; "
+               "S3 4,360.00 m/s, 49.5 MPa, spread 4.0%, good; "
+               "S4 4,440.00 m/s, 51.5 MPa, spread 1.0%, good. "
+               "All four elements sit above the 25 MPa target.")
+        self._ai_record(observations=[run])
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The table's own header, distinct from Section 5.0's point tables.
+        self.assertIn("MEAN PULSE VELOCITY (M/S)", flat)
+        # Each element on its own row, in the order the narrative gave them.
+        self.assertIn("S1 4,400.00 50.0 2.0 good", flat)
+        self.assertIn("S4 4,440.00 51.5 1.0 good", flat)
+        # The sentence it replaced is gone, and the writer's closing remark
+        # is not.
+        self.assertNotIn("S1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good;", flat)
+        self.assertIn("All four elements sit above the 25 MPa target.", flat)
+
+    def test_a_prose_run_over_unrecorded_elements_is_left_as_written(self):
+        """One name the project never recorded and the whole run stays
+        prose — the report will not print a table that drops a figure."""
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        run = ("Slab run: X1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good; "
+               "X2 4,320.00 m/s, 48.5 MPa, spread 3.0%, good; "
+               "X3 4,360.00 m/s, 49.5 MPa, spread 4.0%, good; "
+               "X4 4,440.00 m/s, 51.5 MPa, spread 1.0%, good.")
+        self._ai_record(observations=[run])
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("X1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good", flat)
+        self.assertNotIn("MEAN PULSE VELOCITY (M/S)", flat)
+
 
 # ======================================================================
 # Report CMS + Word export (8 Sep 2026 review meeting, item H7; 4 Sep
