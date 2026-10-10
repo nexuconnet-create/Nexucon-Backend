@@ -1963,8 +1963,6 @@ class NDTReportService:
         org_valid = org and org.upper() != 'NOT PROVIDED'
         dev_valid = dev and dev.upper() != 'NOT PROVIDED'
         
-        if org_valid and dev_valid:
-            return f"{org} - {dev}"
         if org_valid:
             return org
         if dev_valid:
