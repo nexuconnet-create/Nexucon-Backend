@@ -96,7 +96,10 @@ class ApiKey(models.Model):
         self.revoked_at = timezone.now()
         self.save(update_fields=['is_active', 'revoked_at'])
 
-<<<<<<< Updated upstream
+    def save(self, *args, **kwargs):
+        if not self.key:
+            self.key = self.generate_key()
+        super().save(*args, **kwargs)
 
 class TwoFactorSecret(models.Model):
     """
@@ -177,10 +180,3 @@ class EmailVerificationToken(models.Model):
             expires_at=expires_at,
         )
         return token
-
-=======
-    def save(self, *args, **kwargs):
-        if not self.key:
-            self.key = self.generate_key()
-        super().save(*args, **kwargs)
->>>>>>> Stashed changes
