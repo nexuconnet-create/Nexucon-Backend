@@ -32,7 +32,6 @@ urlpatterns = [
     # New Client Requests Apps
     path('api/v1/emergency/', include('apps.emergency.urls')),
     path('api/v1/public-portal/', include('apps.public_portal.urls')),
-<<<<<<< Updated upstream
     path('api/v1/public/', include('apps.public_portal.urls')),
     
     # Migrated Apps
@@ -64,18 +63,10 @@ urlpatterns = [
     # error; the URL prefix stays `import/`, because a URL string is not a
     # Python identifier and the spec's contract is the URL.
     path('api/v1/import/', include('apps.data_import.urls')),
-=======
-    
-    # Migrated Apps
-    path('api/v1/scans/', include('apps.scans.urls')),
-    path('api/v1/', include('apps.reports.urls')),
-    path('api/v1/processing/', include('apps.processing.urls')),
->>>>>>> Stashed changes
 ]
 
 from django.conf import settings
 from django.conf.urls.static import static
-<<<<<<< Updated upstream
 from django.urls import re_path
 from django.views.static import serve
 
@@ -85,8 +76,3 @@ else:
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
     ]
-=======
-
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
->>>>>>> Stashed changes

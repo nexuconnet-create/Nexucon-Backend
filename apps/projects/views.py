@@ -20,7 +20,6 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiRespo
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
 from django.views.decorators.cache import cache_page
-<<<<<<< Updated upstream
 from django.views.decorators.vary import vary_on_headers
 
 from rest_framework.permissions import IsAuthenticated
@@ -42,30 +41,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
-=======
-
-from rest_framework.permissions import IsAuthenticated
-
-@method_decorator(ratelimit(key='ip', rate='60/m', block=True), name='dispatch')
-@method_decorator(cache_page(60 * 15), name='list')
-@method_decorator(cache_page(60 * 15), name='retrieve')
-class ProjectViewSet(viewsets.ModelViewSet):
-    """CRUD API for Project model"""
-    queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
-    serializer_class = ProjectSerializer
-    permission_classes = [IsAuthenticated]
->>>>>>> Stashed changes
 
     @extend_schema(responses={200: ProjectSerializer(many=True)})
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
-<<<<<<< Updated upstream
         queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
-=======
-        queryset = Project.objects.prefetch_related('scans', 'bim_models').all().order_by('-created_at')
->>>>>>> Stashed changes
         status_param = self.request.query_params.get('status')
         search_param = self.request.query_params.get('search')
 
@@ -115,7 +97,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         return queryset
 
-<<<<<<< Updated upstream
     @extend_schema(responses={200: ProjectSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='assignable', permission_classes=[IsAuthenticated])
     def assignable(self, request):
@@ -322,8 +303,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return Response({'id': str(project.id), 'name': project.name,
                          'cold_storage': False})
 
-=======
->>>>>>> Stashed changes
     @extend_schema(request=ProjectSerializer, responses={201: ProjectSerializer})
     def create(self, request, *args, **kwargs):
         return super().create(request, *args, **kwargs)
@@ -331,7 +310,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         project = serializer.save(status='PLANNING')
         # Automatically create an Application for this new project to appear in the review queue
-<<<<<<< Updated upstream
         from django.contrib.auth import get_user_model
         UserModel = get_user_model()
         applicant_user = self.request.user if (self.request.user and self.request.user.is_authenticated) else UserModel.objects.first()
@@ -342,14 +320,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 application_type='General Construction Permit',
                 status='SUBMITTED'
             )
-=======
-        Application.objects.create(
-            project=project,
-            applicant=self.request.user,
-            application_type='General Construction Permit',
-            status='SUBMITTED'
-        )
->>>>>>> Stashed changes
         from django.core.cache import cache
         cache.clear()
 

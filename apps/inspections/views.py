@@ -539,11 +539,7 @@ class FindingViewSet(viewsets.ModelViewSet):
 class ChecklistViewSet(viewsets.ModelViewSet):
     queryset = Checklist.objects.all()
     serializer_class = ChecklistSerializer
-<<<<<<< Updated upstream
     permission_classes = [IsAuthenticated]
-=======
-    permission_classes = [AllowAny]
->>>>>>> Stashed changes
 
 
 from drf_spectacular.utils import extend_schema
@@ -561,10 +557,7 @@ class IssueViewSet(viewsets.ModelViewSet):
     """
     queryset = Issue.objects.select_related('project', 'session', 'created_by', 'assignee').prefetch_related('comments', 'comments__user').all().order_by('-created_at')
     serializer_class = IssueSerializer
-<<<<<<< Updated upstream
     permission_classes = [IsAuthenticated]
-=======
->>>>>>> Stashed changes
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
@@ -590,15 +583,12 @@ class NonConformanceReportViewSet(viewsets.ModelViewSet):
     """
     queryset = NonConformanceReport.objects.select_related('project', 'session').prefetch_related('corrective_actions').all().order_by('-created_at')
     serializer_class = NonConformanceReportSerializer
-<<<<<<< Updated upstream
     permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
         # ncr_number is unique and has no model default — generate a real
         # reference instead of crashing with an IntegrityError (NULL pk value).
         serializer.save(ncr_number=f"NCR-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}")
-=======
->>>>>>> Stashed changes
 
     @extend_schema(request=CorrectiveActionSerializer, responses={201: CorrectiveActionSerializer})
     @action(detail=True, methods=['post'])
@@ -618,7 +608,4 @@ class CorrectiveActionViewSet(viewsets.ModelViewSet):
     """
     queryset = CorrectiveAction.objects.select_related('ncr', 'assigned_to').all().order_by('-created_at')
     serializer_class = CorrectiveActionSerializer
-<<<<<<< Updated upstream
     permission_classes = [IsAuthenticated]
-=======
->>>>>>> Stashed changes

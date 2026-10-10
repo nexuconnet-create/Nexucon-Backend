@@ -18,15 +18,7 @@ router.register(r'corrective-actions', CorrectiveActionViewSet, basename='correc
 # ncrs/, ...) and makes those endpoints unreachable.
 router.register(r'', InspectionViewSet, basename='inspection')
 
-<<<<<<< Updated upstream
 from . import execution_views
-=======
-
-from .views import IssueViewSet, NonConformanceReportViewSet, CorrectiveActionViewSet
-router.register(r'issues', IssueViewSet, basename='issue')
-router.register(r'ncrs', NonConformanceReportViewSet, basename='ncr')
-router.register(r'corrective-actions', CorrectiveActionViewSet, basename='corrective-action')
->>>>>>> Stashed changes
 
 urlpatterns = [
     # Inspection Execution API (plan §5 Week 7) — must precede the router's

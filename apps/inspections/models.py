@@ -351,7 +351,6 @@ class CorrectiveAction(models.Model):
 
     def __str__(self):
         return f"Action for NCR {self.ncr.ncr_number} - {self.status}"
-<<<<<<< Updated upstream
 
 
 # ==========================================================================
@@ -426,5 +425,3 @@ class InspectionSignoff(models.Model):
 
     def __str__(self):
         return f"Sign-off for {self.submission.inspection.inspection_reference}"
-=======
->>>>>>> Stashed changes
