@@ -29,6 +29,18 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def _natural_sort_key(item):
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+        item = item[0]
+    if isinstance(item, tuple) and len(item) == 2:
+        floor_str = str(item[0]).lower()
+        member_str = str(item[1])
+        parts = [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+        return [floor_str] + parts
+    member_str = str(item or '')
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+
+
 # ======================================================================
 # PUNDIT — pulse velocity & concrete quality grading
 # ======================================================================
@@ -943,35 +955,30 @@ class PUNDITAdapter:
 
     # ------------------------------------------------ project-level narrative
     @staticmethod
-    def compute_profile_ecs(velocity_km_s, curve_profile):
+    def compute_profile_ecs(velocity_km_s, curve_profile, rebound_number=None):
         """
         Compute estimated compressive strength (MPa) using project-calibrated
-        correlation parameters. Defaults strictly to exponential model:
-            f_cu = a * exp(b * V) + c
+        correlation parameters. Defaults to exponential model if uncalibrated,
+        or dynamically calculates with linear, polynomial, sonreb, or lookup.
         """
         if velocity_km_s is None or velocity_km_s <= 0:
             return None
+        from apps.digital_eye.strength_curves import apply_curve_params
         ctype = (curve_profile or {}).get('curve_type', 'exponential')
-        params = (curve_profile or {}).get('params') or {'a': 1.20, 'b': 0.85, 'c': 0.0}
-        try:
-            if ctype == 'exponential':
-                a = float(params.get('a', 1.20))
-                b = float(params.get('b', 0.85))
-                c = float(params.get('c', 0.0))
-                # Domain normalization:
-                # If b < 0.01 (e.g. 0.00085), it represents per m/s -> b * (V_km/s * 1000)
-                # If b >= 0.01 (e.g. 0.85), it represents per km/s -> b * V_km/s
-                exp_arg = b * (velocity_km_s * 1000.0) if b < 0.01 else b * velocity_km_s
-                val = a * math.exp(exp_arg) + c
-                return round(val, 2) if math.isfinite(val) else None
-            elif ctype == 'linear':
-                m_raw = float(params.get('m', 8.961))
-                m = m_raw if m_raw > 1.0 else (m_raw * 1000.0)
-                c = float(params.get('c', -7.97))
-                val = m * velocity_km_s + c
-                return round(val, 2) if math.isfinite(val) else None
-        except (ValueError, TypeError, OverflowError):
-            return None
+        params = (curve_profile or {}).get('params')
+        if not params:
+            if ctype == 'linear':
+                params = {'m': 8.961, 'c': -7.97}
+            elif ctype == 'polynomial':
+                params = {'coeffs': [-12.5, 4.2, 1.8], 'a': -12.5, 'b': 4.2, 'c': 1.8}
+            elif ctype == 'sonreb':
+                params = {'a': 0.0286, 'b': 0.84, 'c': 0.35}
+            else:
+                params = {'a': 1.20, 'b': 0.85, 'c': 0.0}
+
+        val = apply_curve_params(ctype, params, velocity_km_s, rebound_number=rebound_number)
+        if val is not None:
+            return round(val, 2)
         return None
 
 
@@ -1072,7 +1079,10 @@ class PUNDITAdapter:
         if batch is not None:
             queryset = queryset.filter(batch=batch)
 
-        tests = list(queryset)
+        tests = sorted(
+            list(queryset),
+            key=lambda t: (_natural_sort_key(t.floor or ''), _natural_sort_key(t.structural_element or t.structural_element_name or ''))
+        )
 
         batch_name = getattr(batch, 'folder_name', 'General Project Scan') if batch else None
         if batch_name:
@@ -1084,9 +1094,13 @@ class PUNDITAdapter:
             steps = [f"Project PUNDIT roll-up over {len(tests)} recorded element(s)."]
 
         if curve_profile:
+            ctype = curve_profile.get('curve_type', 'exponential')
+            target_str = curve_profile.get('design_strength_mpa', 25.0)
+            from apps.digital_eye.strength_curves import formula_display
+            f_disp = formula_display(ctype, curve_profile.get('params') or {})
             steps.append(
-                f"Calibrated correlation model applied: {curve_profile.get('curve_type', 'exponential')} "
-                f"(params: {curve_profile.get('params')}, target: {curve_profile.get('design_strength_mpa', 25.0)} MPa)."
+                f"Calibrated correlation model applied: {ctype} "
+                f"(formula: {f_disp}, target: {target_str} MPa)."
             )
         if peer_review and getattr(peer_review, 'decision', None):
             rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
@@ -1131,10 +1145,12 @@ class PUNDITAdapter:
             ecs_snapshot = None
             if velocity is not None:
                 if curve_profile:
-                    mean_ecs = cls.compute_profile_ecs(velocity, curve_profile)
+                    mean_ecs = cls.compute_profile_ecs(velocity, curve_profile, rebound_number=test.rebound_number)
+                    from apps.digital_eye.strength_curves import formula_display
                     ecs_snapshot = {
                         'curve_type': curve_profile.get('curve_type', 'exponential'),
                         'formula_params': curve_profile.get('params', {}),
+                        'formula': formula_display(curve_profile.get('curve_type', 'exponential'), curve_profile.get('params', {})),
                         'provenance_source': f"Calibrated {curve_profile.get('curve_type', 'exponential')} model",
                     }
                 else:
@@ -1218,6 +1234,17 @@ class PUNDITAdapter:
             floors.setdefault(s['floor'] or 'Unspecified level', []).append(
                 {k: v for k, v in s.items() if v is not None})
 
+        from apps.digital_eye.strength_curves import formula_display, resolve_active_curve
+        if curve_profile:
+            ctype_active = curve_profile.get('curve_type', 'exponential')
+            params_active = curve_profile.get('params')
+            target_str_active = curve_profile.get('design_strength_mpa', 25.0)
+        else:
+            resolved = resolve_active_curve(project)
+            ctype_active = getattr(resolved, 'curve_type', 'exponential') if resolved else 'exponential'
+            params_active = getattr(resolved, 'formula_params', {'a': 1.20, 'b': 0.85, 'c': 0.0}) if resolved else {'a': 1.20, 'b': 0.85, 'c': 0.0}
+            target_str_active = 25.0
+
         fact_pack = {
             'project': project.name,
             'scan_batch': {
@@ -1227,12 +1254,9 @@ class PUNDITAdapter:
                 'floor': getattr(batch, 'floor', 'Unspecified level') if batch else 'Unspecified level',
             },
             'correlation_model': {
-                'curve_type': curve_profile.get('curve_type', 'exponential') if curve_profile else 'Exponential (BS 1881-203)',
-                'formula': (
-                    f"f_cu = {curve_profile.get('params', {}).get('a', 1.20)} * exp({curve_profile.get('params', {}).get('b', 0.85)} * V_km/s) + {curve_profile.get('params', {}).get('c', 0.0)}"
-                    if curve_profile else "f_cu = 1.20 * exp(0.85 * V_km/s)"
-                ),
-                'target_strength_mpa': curve_profile.get('design_strength_mpa', 25.0) if curve_profile else 25.0,
+                'curve_type': ctype_active,
+                'formula': formula_display(ctype_active, params_active or {}),
+                'target_strength_mpa': float(target_str_active),
             },
             'ndt_results_summary': {
                 'total_elements': len(tests),
@@ -1608,7 +1632,11 @@ class PUNDITAdapter:
         se = cm.curve_standard_error_mpa(project)
         outliers = cm.cross_element_outliers(element_summaries)
         metrics = []
-        for s in element_summaries:
+        sorted_summaries = sorted(
+            element_summaries,
+            key=lambda s: (_natural_sort_key(s.get('floor') or ''), _natural_sort_key(s.get('element') or ''))
+        )
+        for s in sorted_summaries:
             if s['mean_ecs_n_mm2'] is None:
                 continue        # no strength estimate: nothing to interval
             ci = cm.strength_confidence_interval(s['mean_ecs_n_mm2'], se)

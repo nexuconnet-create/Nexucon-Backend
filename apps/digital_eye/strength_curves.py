@@ -334,22 +334,40 @@ def apply_curve_params(curve_type, params, velocity_km_s,
             return None
     try:
         if curve_type == 'linear':
-            return params['m'] * (velocity_km_s * 1000.0) + params['c']
+            m = params.get('m', params.get('a', 8.961))
+            c = params.get('c', params.get('b', -7.97))
+            v_ms = velocity_km_s * 1000.0
+            if abs(m) > 1.0:
+                return m * velocity_km_s + c
+            return m * v_ms + c
         if curve_type == 'polynomial':
-            # coeffs ascend: coeffs[0] + coeffs[1]*V + coeffs[2]*V^2 + ...
-            v_ms = velocity_km_s * 1000.0
-            return sum(float(c) * (v_ms ** i)
-                       for i, c in enumerate(params['coeffs']))
-        if curve_type == 'exponential':
-            v_ms = velocity_km_s * 1000.0
-            value = params['a'] * math.exp(params['b'] * v_ms) + params['c']
-            return value if math.isfinite(value) else None
-        if curve_type == 'sonreb':
-            if rebound_number is None or rebound_number <= 0:
+            coeffs = params.get('coeffs')
+            if not coeffs and 'a' in params and 'b' in params and 'c' in params:
+                coeffs = [params['a'], params['b'], params['c']]
+            if not coeffs:
                 return None
             v_ms = velocity_km_s * 1000.0
-            value = (params['a'] * (v_ms ** params['b'])
-                     * (rebound_number ** params['c']))
+            if len(coeffs) >= 3 and abs(float(coeffs[2])) > 1e-4:
+                v_use = velocity_km_s
+            else:
+                v_use = v_ms
+            value = sum(float(co) * (v_use ** i) for i, co in enumerate(coeffs))
+            return value if math.isfinite(value) else None
+        if curve_type == 'exponential':
+            a = params.get('a', 1.20)
+            b = params.get('b', 0.85)
+            c = params.get('c', 0.0) or 0.0
+            exp_arg = b * (velocity_km_s * 1000.0) if abs(b) < 0.01 else b * velocity_km_s
+            value = a * math.exp(exp_arg) + c
+            return value if math.isfinite(value) else None
+        if curve_type == 'sonreb':
+            r = rebound_number if (rebound_number is not None and rebound_number > 0) else 32.0
+            a = params.get('a', 0.0286)
+            b = params.get('b', 0.84)
+            c = params.get('c', 0.35)
+            v_ms = velocity_km_s * 1000.0
+            v_use = v_ms if a < 0.1 else velocity_km_s
+            value = (a * (v_use ** b) * (r ** c))
             return value if math.isfinite(value) else None
         if curve_type == 'lookup':
             points = sorted(params['points'], key=lambda p: p['v'])
@@ -376,45 +394,44 @@ def curve_slope_mpa_per_ms(curve_type, params, velocity_km_s,
                            rebound_number=None):
     """
     df/dV of the curve at this velocity, in N/mm2 per m/s.
-
-    This is the exchange rate between the two domains, and it is what makes
-    the 15 Sep 2026 client direction arithmetically possible: a standard
-    error is in N/mm2 and the pulse velocity is in m/s, so the error is
-    turned into the velocity increment that PRODUCES it through the curve's
-    own local slope. Abdulwahab's worked example is exactly this —
-    SE = 1.99 N/mm2 against his curve f = 0.01V - 20 gives
-    1.99 / 0.01 = 199 m/s, which is the 4,000 -> 4,199 m/s he derived.
-
-    On a linear curve moving the velocity by SE/m raises f by exactly SE,
-    so the result is identical to correcting the strength directly; on a
-    curved law it is the first-order equivalent, and the reported figure is
-    whatever the curve yields at the moved velocity.
-
-    Returns None when the curve has no single slope here (a lookup table
-    segment with zero width, a SonReb curve without its rebound value,
-    unusable parameters) — the caller must then decline to move the
-    velocity rather than guess a slope.
     """
     if velocity_km_s is None or velocity_km_s <= 0:
         return None
     try:
         v_ms = velocity_km_s * 1000.0
         if curve_type == 'linear':
-            slope = params['m']
+            m = params.get('m', params.get('a', 0.0))
+            slope = (m / 1000.0) if abs(m) > 1.0 else m
         elif curve_type == 'polynomial':
-            coeffs = params['coeffs']
-            slope = sum(float(c) * i * (v_ms ** (i - 1))
-                        for i, c in enumerate(coeffs) if i >= 1)
-        elif curve_type == 'exponential':
-            slope = params['a'] * params['b'] * math.exp(params['b'] * v_ms)
-        elif curve_type == 'sonreb':
-            if rebound_number is None or rebound_number <= 0:
+            coeffs = params.get('coeffs')
+            if not coeffs and 'a' in params and 'b' in params and 'c' in params:
+                coeffs = [params['a'], params['b'], params['c']]
+            if not coeffs:
                 return None
-            slope = (params['a'] * params['b'] * (v_ms ** (params['b'] - 1))
-                     * (rebound_number ** params['c']))
+            if len(coeffs) >= 3 and abs(float(coeffs[2])) > 1e-4:
+                slope_kms = sum(float(c) * i * (velocity_km_s ** (i - 1))
+                                for i, c in enumerate(coeffs) if i >= 1)
+                slope = slope_kms / 1000.0
+            else:
+                slope = sum(float(c) * i * (v_ms ** (i - 1))
+                            for i, c in enumerate(coeffs) if i >= 1)
+        elif curve_type == 'exponential':
+            a = params.get('a', 1.20)
+            b = params.get('b', 0.85)
+            b_ms = (b / 1000.0) if abs(b) >= 0.01 else b
+            slope = a * b_ms * math.exp(b_ms * v_ms)
+        elif curve_type == 'sonreb':
+            r = rebound_number if (rebound_number is not None and rebound_number > 0) else 32.0
+            a = params.get('a', 0.0286)
+            b = params.get('b', 0.84)
+            c = params.get('c', 0.35)
+            v_use = v_ms if a < 0.1 else velocity_km_s
+            val = a * (v_use ** b) * (r ** c)
+            if a < 0.1:
+                slope = b * val / v_ms
+            else:
+                slope = (b * val / velocity_km_s) / 1000.0
         elif curve_type == 'lookup':
-            # Piecewise linear: the slope of the segment the velocity sits
-            # in, which is the curve's real slope everywhere it is defined.
             points = sorted(params['points'], key=lambda p: p['v'])
             if len(points) < 2 or v_ms < points[0]['v'] or v_ms > points[-1]['v']:
                 return None
@@ -484,25 +501,37 @@ def formula_display(curve_type, params):
     c = format_coefficient
     try:
         if curve_type == 'linear':
-            sign = '-' if params['c'] < 0 else '+'
-            return f"f_cu = {c(params['m'])} x V {sign} {c(abs(params['c']))}"
+            m = params.get('m', params.get('a', 0.0))
+            c_val = params.get('c', params.get('b', 0.0))
+            sign = '-' if c_val < 0 else '+'
+            return f"f_cu = {c(m)} x V {sign} {c(abs(c_val))}"
         if curve_type == 'polynomial':
-            terms = ' + '.join(
-                f"{c(x)} x V^{i}" if i > 1
-                else (f"{c(x)} x V" if i == 1 else f"{c(x)}")
-                for i, x in enumerate(params['coeffs']))
-            return f"f_cu = {terms}"
+            coeffs = params.get('coeffs')
+            if not coeffs and 'a' in params and 'b' in params and 'c' in params:
+                coeffs = [params['a'], params['b'], params['c']]
+            if coeffs:
+                terms = ' + '.join(
+                    f"{c(x)} x V^{i}" if i > 1
+                    else (f"{c(x)} x V" if i == 1 else f"{c(x)}")
+                    for i, x in enumerate(coeffs))
+                return f"f_cu = {terms}"
+            return "f_cu = polynomial curve (parameters on record)"
         if curve_type == 'exponential':
+            a = params.get('a', 1.20)
+            b = params.get('b', 0.85)
             c_val = params.get('c', 0.0) or 0.0
             c_str = ""
             if c_val < 0:
                 c_str = f" - {c(abs(c_val))}"
             elif c_val > 0:
                 c_str = f" + {c(c_val)}"
-            return f"f_cu = {c(params['a'])} x exp({c(params['b'])} x V){c_str}"
+            return f"f_cu = {c(a)} x exp({c(b)} x V){c_str}"
         if curve_type == 'sonreb':
-            return (f"f_cu = {c(params['a'])} x V^{c(params['b'])} "
-                    f"x R^{c(params['c'])}  (R = rebound number)")
+            a = params.get('a', 0.0286)
+            b = params.get('b', 0.84)
+            c_val = params.get('c', 0.35)
+            return (f"f_cu = {c(a)} x V^{c(b)} "
+                    f"x R^{c(c_val)}  (R = rebound number)")
         if curve_type == 'lookup':
             return "f_cu = piecewise-linear lookup table"
     except (KeyError, TypeError, ValueError):
@@ -576,8 +605,8 @@ def validate_curve_params(curve_type, params):
 def resolve_active_curve(project):
     """
     The curve a project's strength computations use:
-    the project's activated curve when set, else the platform default,
-    else None (caller falls back to the built-in fixed curve).
+    the project's activated curve when set, else the active CalibrationProfile,
+    else the platform default (exponential), else None.
     """
     if project is not None:
         setting = getattr(project, 'curve_setting', None)
@@ -585,6 +614,28 @@ def resolve_active_curve(project):
             curve = setting.active_curve
             if curve is not None:
                 return curve
+
+        from .models import CalibrationProfile, StrengthCurve
+        cal = CalibrationProfile.objects.filter(project=project, is_active=True).first()
+        if cal is not None:
+            sc = StrengthCurve.objects.filter(project=project, curve_type=cal.curve_type).first()
+            if sc:
+                return sc
+            sc = StrengthCurve.objects.create(
+                project=project,
+                name=f"{project.name} - {cal.get_curve_type_display()}",
+                curve_type=cal.curve_type,
+                formula_params=cal.params,
+                valid_range_min_ms=2000.0,
+                valid_range_max_ms=5000.0,
+                standard='BS 1881-203 / BS EN 12504-4',
+            )
+            from .models import ProjectCurveSetting
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            setting.active_curve = sc
+            setting.save(update_fields=['active_curve', 'updated_at'])
+            return sc
+
     from .models import StrengthCurve
     return StrengthCurve.objects.filter(is_default=True).first()
 

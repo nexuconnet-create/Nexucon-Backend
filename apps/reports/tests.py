@@ -1707,9 +1707,8 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                       'on the platform', flat)
 
     def test_appendix_schedule_lists_imported_bim_elements(self):
-        # The appendix schedule lists the REAL imported elements
-        # (BIMElementMapping) with the properties the import recorded —
-        # never the legacy demo table.
+        # The appendix drawings page embeds the BIM drawing / site plan projection,
+        # but omits the verbose tabular element schedule per client direction.
         from apps.digital_eye.models import BIMElementMapping
         self.make_test(self.project, self.device,
                        path_length_mm=250.0, pulse_time_us=62.5)
@@ -1723,17 +1722,11 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         flat = ' '.join(text.split())
         # The appendix 'drawing' page is registered in the TOC and carries
-        # the project-name label; the heading itself is deliberately not
-        # rendered (reference layout).
+        # the project-name label.
         self.assertIn('DRAWING OF THE BUILDING', flat)
-        # One Revit segment per line — whole tokens, no mid-word breaks.
-        self.assertIn('Floor 200THK RC SLAB 780904', flat)
-        # The CATEGORY column reads as plain words for non-technical
-        # reviewers — never the raw IFC class name or a STEP dump.
-        self.assertIn(' Slab ', flat)
-        self.assertNotIn('IfcSlab', flat)
-        self.assertIn('MATERIAL / GRADE RECORDED', flat)
-        self.assertIn('Concrete - Cast-in-Place Concrete (200 mm)', flat)
+        # The verbose tabular element schedule is omitted — the primary purpose of the BIM file is drawings/plans
+        self.assertNotIn('Structural element schedule extracted', flat)
+        self.assertNotIn('MATERIAL / GRADE RECORDED', flat)
 
     def test_visual_observations_are_reference_style_sentences(self):
         # §4.1 reads like the reference — 'Tacky floor observed on <element>
