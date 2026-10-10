@@ -2513,7 +2513,8 @@ class NDTReportService:
         )
         non_defect_negations = (
             'without evidence of', 'no visible', 'no evidence of', 'free of',
-            'without sign of', 'not observed', 'no structural defect'
+            'without sign of', 'not observed', 'no structural defect',
+            'no noticeable', 'no significant', 'no obvious'
         )
 
         notes = []
