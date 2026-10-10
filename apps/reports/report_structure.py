@@ -35,6 +35,7 @@ DEFAULT_STRUCTURE = (
     ('5.0', 'Analysis'),
     ('5.3', 'AI Interpretation'),
     ('5.4', 'Field Remarks & Observations'),
+    ('discussion_of_results', 'Discussion of Results'),
     ('6.0', 'Recommendations'),
     ('7.0', 'Conclusion'),
     ('APPENDIX', 'Appendix'),
