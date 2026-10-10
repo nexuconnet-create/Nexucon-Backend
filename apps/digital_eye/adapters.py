@@ -665,7 +665,7 @@ V3.0
 Consolidated V1 + V2 + Enhancements
 Engr. A.O. Onike
 SECTION 12: APPENDIX – RAW JSON DATA PAYLOAD
-{prompt_payload}
+[INSERT PAYLOAD HERE]
 END OF CONSOLIDATED PRODUCTION PROMPT V3.0
 This document is classified as Commercial in Confidence. Unauthorised distribution is prohibited.
 For technical queries, contact the Nexucon PUNDIT development team.'''
@@ -1481,24 +1481,37 @@ class PUNDITAdapter:
             import json
             prompt_payload = {
                 "raw_data": fact_pack,
-                "precalculated_stats": cls._calculate_point_spread(element_summaries)
+                "precalculated_stats": cls._calculate_point_spread(element_summaries),
+                "cracks_detected": has_crack_findings,
+                "joint_peer_review": bool(peer_review),
+                "peer_review_notes": review_parts if review_parts else None
             }
             
-            # Combine the V3 prompt with dynamic instructions
-            prompt_text = PUNDIT_SYSTEM_PROMPT_V3.replace('{prompt_payload}', json.dumps(prompt_payload, default=str))
-            
-            # Add crack and peer review instructions to the top
-            prompt_text = prompt_text.replace(
-                'NEXUCON PUNDIT – CONSOLIDATED PRODUCTION PROMPT V3.0',
-                f'NEXUCON PUNDIT – CONSOLIDATED PRODUCTION PROMPT V3.0\n{crack_instruction}\n{peer_review_instruction}'
-            )
-            
-            # Ensure alternative schema is requested explicitly for the current parser
-            prompt_text += '\n\nReturn ONLY valid JSON matching this exact schema: {"observations": ["..."]}'
+            # Use the EXACT V3 prompt without any external string manipulation
+            prompt_text = PUNDIT_SYSTEM_PROMPT_V3.replace('[INSERT PAYLOAD HERE]', json.dumps(prompt_payload, default=str))
 
             # Run all available models simultaneously with complete fault isolation
             data = AIService.generate_ensemble_structured_json(prompt_text)
             llm_obs = data.get('observations') if isinstance(data, dict) else None
+            
+            if not llm_obs and isinstance(data, dict):
+                # Parse the exact V3 JSON schema since alternative schema was not requested
+                parsed = []
+                if data.get('executive_summary'):
+                    parsed.append(f"**Executive Summary:** {data['executive_summary']}")
+                if data.get('scope_verification'):
+                    parsed.append(f"**Scope:** {data['scope_verification']}")
+                for g in data.get('grouped_analysis', []):
+                    parsed.append(f"**{g.get('group', 'Group')} ({g.get('quality', '')}):** {g.get('correlation', '')}")
+                recs = data.get('remedial_recommendations', [])
+                if recs:
+                    parsed.append(f"**Recommendations:** {'; '.join(recs)}")
+                if data.get('code_compliance_statement'):
+                    parsed.append(f"**Compliance:** {data['code_compliance_statement']}")
+                
+                if parsed:
+                    llm_obs = parsed
+                    
             if llm_obs and isinstance(llm_obs, list) and not has_crack_findings:
                 llm_obs = [
                     o for o in llm_obs
