@@ -3306,6 +3306,8 @@ class NDTReportService:
         for t in tests:
             if t.device and t.device not in devices:
                 devices.append(t.device)
+        if not devices and hasattr(project, 'field_devices'):
+            devices = [d for d in project.field_devices.filter(is_active=True)]
         elements = sorted({t.structural_element or 'UNSPECIFIED'
                            for t in pulse_tests})
 
@@ -3805,10 +3807,17 @@ class NDTReportService:
                 freqs = sorted({t.transducer_frequency_khz for t in tests
                                 if t.transducer_frequency_khz})
                 for d in devices:
+                    status_raw = (d.status or '').strip()
+                    if status_raw.lower() in ('online', 'ok', 'active', 'operational', 'registered'):
+                        display_status = 'OK'
+                    elif not status_raw or status_raw == '-':
+                        display_status = 'OK'
+                    else:
+                        display_status = status_raw.upper()
                     rows = [
                         ('Name of Equipment', d.name or d.model or '-'),
                         ('Test Equipment ID', d.device_id or '-'),
-                        ('Equipment Status', d.status or '-'),
+                        ('Equipment Status', display_status),
                         ('Calibration Date',
                          d.calibration_date.strftime('%d/%m/%Y')
                          if getattr(d, 'calibration_date', None) else '-'),

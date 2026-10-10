@@ -76,6 +76,7 @@ class FieldDevice(models.Model):
     STATUS_CHOICES = [
         ('registered', 'Registered'),
         ('online', 'Online'),
+        ('ok', 'OK'),
         ('offline', 'Offline'),
         ('maintenance', 'Under Maintenance'),
         ('retired', 'Retired'),

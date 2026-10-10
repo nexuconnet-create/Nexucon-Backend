@@ -4035,6 +4035,13 @@ class ReportQrAndCoverTests(NDTReportFixtureMixin, TestCase):
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         self.assertIn('Rebar Assessment: Not Applicable', text)
 
+    def test_equipment_status_displays_ok_instead_of_online(self):
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn('Equipment Status OK', text)
+        self.assertNotIn('Equipment Status online', text)
+
 
 class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
                                 APITestCase):
