@@ -5254,3 +5254,36 @@ class NDTReportCalibrationConsistencyTests(NDTReportFixtureMixin, TestCase):
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
         self.assertIn("46.2", flat)
+
+    def test_four_corner_boundary_coordinates_rendered_in_report(self):
+        """When 4-corner boundary mapping is calibrated for a project,
+        Section 3.1 includes the 4-Corner Boundary Mapping & Conversion heading,
+        calculated footprint, and table of coordinates."""
+        project = self.make_project(
+            latitude=6.424153, longitude=3.386375,
+            coordinate_system='WGS84_DD',
+            corner_coordinates={
+                'corners': [
+                    {'id': 1, 'label': 'Corner 1 (NW)', 'lat': 6.424359, 'lng': 3.385914, 'easting': 542675.01, 'northing': 710130.59},
+                    {'id': 2, 'label': 'Corner 2 (NE)', 'lat': 6.424398, 'lng': 3.386816, 'easting': 542774.75, 'northing': 710134.97},
+                    {'id': 3, 'label': 'Corner 3 (SE)', 'lat': 6.423947, 'lng': 3.386836, 'easting': 542777.0, 'northing': 710085.12},
+                    {'id': 4, 'label': 'Corner 4 (SW)', 'lat': 6.423908, 'lng': 3.385934, 'easting': 542677.26, 'northing': 710080.73},
+                ],
+                'footprintAreaSqm': 4982.4,
+                'perimeterMeters': 299.48,
+            }
+        )
+        b_data = NDTReportService._get_boundary_data(project)
+        self.assertIsNotNone(b_data)
+        self.assertEqual(len(b_data['corners']), 4)
+        self.assertEqual(b_data['footprintAreaSqm'], 4982.4)
+
+        data = NDTReportService.generate_ndt_report(project)
+        flat = " ".join(_pdf_text(data).split())
+        self.assertIn("4-CORNER BOUNDARY MAPPING & CONVERSION", flat)
+        self.assertIn("4,982.4 sqm footprint", flat)
+        self.assertIn("Corner 1 (NW)", flat)
+        self.assertIn("6.424359", flat)
+        self.assertIn("3.385914", flat)
+        self.assertIn("Corner 4 (SW)", flat)
+

@@ -1838,13 +1838,112 @@ class NDTReportService:
     # default, so the report carries its own.
     _TILE_USER_AGENT = 'NexuconReport/1.0 (+https://nexucon.net; reports@nexucon.net)'
 
-    @staticmethod
-    def _site_coordinates(project, tests=None):
+    @classmethod
+    def _get_boundary_data(cls, project):
+        """Extract 4-corner boundary survey coordinates, footprint area, and
+        perimeter from project.corner_coordinates or surveyed GnssBoundaryPoints.
+        Returns a dict with:
+          - corners: list of dicts with label, lat, lng, easting, northing, utmZone, etc.
+          - footprintAreaSqm: float or None
+          - perimeterMeters: float or None
+          - system: str
+        or None if no boundary coordinates exist.
+        """
+        if not project:
+            return None
+
+        # 1. Try project.corner_coordinates first
+        cc = getattr(project, 'corner_coordinates', None)
+        if isinstance(cc, dict) and cc.get('corners') and len(cc['corners']) >= 3:
+            from apps.projects.coordinates import latlon_to_utm, calculate_polygon_area_sqm, calculate_perimeter_meters
+            corners = []
+            utm_points = []
+            for idx, c in enumerate(cc['corners']):
+                label = c.get('label') or f'Corner {idx + 1}'
+                lat = float(c['lat']) if c.get('lat') is not None else None
+                lng = float(c['lng']) if c.get('lng') is not None else None
+                easting = float(c['easting']) if c.get('easting') is not None else None
+                northing = float(c['northing']) if c.get('northing') is not None else None
+                utm_zone = c.get('utmZone') or ''
+                if (easting is None or northing is None) and lat is not None and lng is not None:
+                    e, n, z = latlon_to_utm(lat, lng, 31, 'WGS84')
+                    easting = round(e, 2)
+                    northing = round(n, 2)
+                    utm_zone = f'{z}N'
+                if easting is not None and northing is not None:
+                    utm_points.append({'easting': easting, 'northing': northing})
+                corners.append({
+                    'label': label,
+                    'lat': lat,
+                    'lng': lng,
+                    'easting': easting,
+                    'northing': northing,
+                    'utmZone': utm_zone,
+                    'formattedLatDms': c.get('formattedLatDms'),
+                    'formattedLngDms': c.get('formattedLngDms'),
+                })
+            area = cc.get('footprintAreaSqm')
+            perim = cc.get('perimeterMeters')
+            if area is None and len(utm_points) >= 3:
+                area = calculate_polygon_area_sqm(utm_points)
+            if perim is None and len(utm_points) >= 2:
+                perim = calculate_perimeter_meters(utm_points)
+            return {
+                'corners': corners,
+                'footprintAreaSqm': float(area) if area is not None else None,
+                'perimeterMeters': float(perim) if perim is not None else None,
+                'system': cc.get('system', getattr(project, 'coordinate_system', 'WGS84_DD') or 'WGS84_DD'),
+            }
+
+        # 2. Try GnssBoundaryPoint survey points
+        try:
+            from apps.digital_eye.models import GnssBoundaryPoint
+            pts = list(GnssBoundaryPoint.objects.filter(survey__project=project).order_by('sequence'))
+            if len(pts) >= 3:
+                from apps.projects.coordinates import latlon_to_utm, calculate_polygon_area_sqm, calculate_perimeter_meters
+                corners = []
+                utm_points = []
+                for idx, p in enumerate(pts):
+                    lat = float(p.latitude)
+                    lng = float(p.longitude)
+                    easting = float(p.easting) if p.easting is not None else None
+                    northing = float(p.northing) if p.northing is not None else None
+                    utm_zone = '31N'
+                    if easting is None or northing is None:
+                        e, n, z = latlon_to_utm(lat, lng, 31, 'WGS84')
+                        easting = round(e, 2)
+                        northing = round(n, 2)
+                        utm_zone = f'{z}N'
+                    corners.append({
+                        'label': p.label or f'Corner {idx + 1}',
+                        'lat': lat,
+                        'lng': lng,
+                        'easting': easting,
+                        'northing': northing,
+                        'utmZone': utm_zone,
+                    })
+                    utm_points.append({'easting': easting, 'northing': northing})
+                area = calculate_polygon_area_sqm(utm_points)
+                perim = calculate_perimeter_meters(utm_points)
+                return {
+                    'corners': corners,
+                    'footprintAreaSqm': area,
+                    'perimeterMeters': perim,
+                    'system': getattr(project, 'coordinate_system', 'WGS84_DD') or 'WGS84_DD',
+                }
+        except Exception:
+            pass
+
+        return None
+
+    @classmethod
+    def _site_coordinates(cls, project, tests=None):
         """The point the report may map.
 
-        The project's own recorded fix wins. Failing that, the median of the
-        fixes recorded on its tests — positions actually taken at this site
-        by the instruments, not a guess at where it might be. `(None, None)`
+        The project's own recorded fix wins. Failing that, the centroid of
+        calibrated 4-corner boundary points, then the median of the fixes
+        recorded on its tests — positions actually taken at this site by
+        the instruments, not a guess at where it might be. `(None, None)`
         when nothing was recorded anywhere, which is what keeps the location
         page honest.
         """
@@ -1854,6 +1953,13 @@ class NDTReportService:
         lon = getattr(project, 'longitude', None)
         if lat is not None and lon is not None:
             return float(lat), float(lon)
+
+        b_data = cls._get_boundary_data(project)
+        if b_data and b_data.get('corners'):
+            v_lats = [c['lat'] for c in b_data['corners'] if c.get('lat') is not None]
+            v_lons = [c['lng'] for c in b_data['corners'] if c.get('lng') is not None]
+            if v_lats and v_lons:
+                return statistics.median(v_lats), statistics.median(v_lons)
 
         lats, lons = [], []
         for test in (tests or []):
@@ -1868,7 +1974,7 @@ class NDTReportService:
         return statistics.median(lats), statistics.median(lons)
 
     @classmethod
-    def _tiled_street_map(cls, lat, lon, zoom=17, width=640, height=640):
+    def _tiled_street_map(cls, lat, lon, zoom=17, width=640, height=640, corners=None):
         """A labelled street map of (lat, lon), stitched from raster tiles
         and marked at the exact point. Returns ``(buffer, source_name)`` or
         ``(None, '')`` when no tile server answers.
@@ -1935,13 +2041,38 @@ class NDTReportService:
             canvas = canvas.crop((int(offset_x), int(offset_y),
                                   int(offset_x) + width, int(offset_y) + height))
             draw = ImageDraw.Draw(canvas)
-            mark_x, mark_y = width / 2.0, height / 2.0
-            radius = 10
-            draw.ellipse([mark_x - radius, mark_y - radius,
-                          mark_x + radius, mark_y + radius],
-                         fill=(214, 40, 40), outline=(255, 255, 255), width=3)
-            draw.ellipse([mark_x - 3, mark_y - 3, mark_x + 3, mark_y + 3],
-                         fill=(255, 255, 255))
+
+            # If boundary corners are provided, render the surveyed perimeter
+            if corners and len(corners) >= 3:
+                pts = []
+                for c in corners:
+                    c_lat = c.get('lat')
+                    c_lng = c.get('lng')
+                    if c_lat is None or c_lng is None:
+                        continue
+                    px = (float(c_lng) + 180.0) / 360.0 * n * cls._TILE_SIZE - left
+                    py = ((1.0 - math.log(math.tan(math.radians(float(c_lat)))
+                                         + 1.0 / math.cos(math.radians(float(c_lat)))) / math.pi)
+                         / 2.0 * n) * cls._TILE_SIZE - top
+                    pts.append((px, py))
+                if len(pts) >= 3:
+                    # Draw polygon outline
+                    draw.polygon(pts, outline=(0, 140, 255), width=3)
+                    # Draw corner markers
+                    for px, py in pts:
+                        r = 5
+                        draw.ellipse([px - r, py - r, px + r, py + r],
+                                     fill=(255, 193, 7), outline=(0, 44, 79), width=2)
+                        draw.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(0, 44, 79))
+            else:
+                mark_x, mark_y = width / 2.0, height / 2.0
+                radius = 10
+                draw.ellipse([mark_x - radius, mark_y - radius,
+                              mark_x + radius, mark_y + radius],
+                             fill=(214, 40, 40), outline=(255, 255, 255), width=3)
+                draw.ellipse([mark_x - 3, mark_y - 3, mark_x + 3, mark_y + 3],
+                             fill=(255, 255, 255))
+
             buffer = io.BytesIO()
             canvas.save(buffer, format='PNG')
             buffer.seek(0)
@@ -1962,10 +2093,11 @@ class NDTReportService:
             'OpenStreetMap': 'Map data © OpenStreetMap contributors.',
             'CARTO': 'Map tiles © CARTO — map data © OpenStreetMap '
                      'contributors.',
+            'Esri World Imagery': 'Satellite imagery © Esri, Maxar, Earthstar Geographics.',
         }.get(str(source_name or '').strip(), '')
 
     @classmethod
-    def _site_map_image(cls, project, tests=None):
+    def _site_map_image(cls, project, tests=None, corners=None):
         """The best available real map of the site, with its source name.
 
         Google's static map first (satellite imagery with labels, when the
@@ -1977,14 +2109,14 @@ class NDTReportService:
         if lat is None or lon is None:
             return None, ''
 
-        google_map = cls._google_static_map(project, latitude=lat, longitude=lon)
+        google_map = cls._google_static_map(project, latitude=lat, longitude=lon, corners=corners)
         if google_map is not None:
             return google_map, 'Google Maps'
 
-        return cls._tiled_street_map(lat, lon)
+        return cls._tiled_street_map(lat, lon, corners=corners)
 
     @staticmethod
-    def _google_static_map(project, latitude=None, longitude=None):
+    def _google_static_map(project, latitude=None, longitude=None, corners=None):
         """A Google Maps static image centred on the site coordinates,
         fetched with the server's GOOGLE_MAPS_API_KEY. Returns a BytesIO
         (image) or None.
@@ -2007,15 +2139,25 @@ class NDTReportService:
             return None
         # Zoom 18 is building scale at these latitudes — the detail the
         # client asked for; hybrid keeps the place names over the imagery.
-        params = urllib.parse.urlencode({
+        params_dict = {
             'center': f'{lat},{lon}',
             'zoom': '18',
             'size': '640x640',
             'scale': '2',
             'maptype': 'hybrid',
-            'markers': f'color:red|{lat},{lon}',
             'key': api_key,
-        })
+        }
+        if corners and len(corners) >= 3:
+            path_coords = '|'.join(f"{c['lat']},{c['lng']}" for c in corners if c.get('lat') is not None and c.get('lng') is not None)
+            first_c = corners[0]
+            if first_c.get('lat') is not None and first_c.get('lng') is not None:
+                path_coords += f"|{first_c['lat']},{first_c['lng']}"
+            params_dict['path'] = f'color:0x0080ffff|weight:3|fill:0x0080ff22|{path_coords}'
+            params_dict['markers'] = f'color:red|{lat},{lon}'
+        else:
+            params_dict['markers'] = f'color:red|{lat},{lon}'
+
+        params = urllib.parse.urlencode(params_dict)
         url = f'https://maps.googleapis.com/maps/api/staticmap?{params}'
         try:
             req = urllib.request.Request(
@@ -3724,6 +3866,9 @@ class NDTReportService:
                     map_sources.append(bim_plan)
             except Exception:  # noqa: BLE001
                 pass
+            boundary_data = cls._get_boundary_data(project)
+            corners_list = boundary_data['corners'] if boundary_data else None
+
             # A real map of the site (C6): Google's static imagery when the
             # key is entitled to it, otherwise a labelled street map stitched
             # from tiles. The coordinates are the project's own fix, or the
@@ -3731,61 +3876,168 @@ class NDTReportService:
             # none. No coordinates anywhere means no map — never a drawn guess
             # — and the caller falls through to the placeholder below.
             map_lat, map_lon = cls._site_coordinates(project, tests)
-            static_map, map_source = cls._site_map_image(project, tests)
+            if (map_lat is None or map_lon is None) and boundary_data:
+                valid_lats = [c['lat'] for c in corners_list if c.get('lat') is not None]
+                valid_lons = [c['lng'] for c in corners_list if c.get('lng') is not None]
+                if valid_lats and valid_lons:
+                    map_lat = sum(valid_lats) / len(valid_lats)
+                    map_lon = sum(valid_lons) / len(valid_lons)
+
+            static_map, map_source = cls._site_map_image(project, tests, corners=corners_list)
             if static_map is not None:
                 map_sources.insert(0, static_map)
 
             pdf = builder.pdf
             map_link = cls._maps_link(project, map_lat, map_lon) if static_map is not None else None
 
-            if not map_sources:
-                location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
-                if project.lga:
-                    location_text += f', {project.lga.upper()}'
-                if project.state:
-                    location_text += f', {project.state.upper()}'
-                builder.placeholder_box(location_text, height=100)
-            elif len(map_sources) == 1:
-                cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
-                                 48.3, 120, 138.9, link=map_link)
+            has_boundary = bool(boundary_data and boundary_data.get('corners'))
+
+            if not has_boundary:
+                if not map_sources:
+                    location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
+                    if project.lga:
+                        location_text += f', {project.lga.upper()}'
+                    if project.state:
+                        location_text += f', {project.state.upper()}'
+                    builder.placeholder_box(location_text, height=100)
+                elif len(map_sources) == 1:
+                    cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
+                                     48.3, 120, 138.9, link=map_link)
+                else:
+                    cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9, link=map_link)
+                    cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
+                # Weather is operator-recorded; the reference prints none, so a
+                # recorded condition gets a single plain centred line below the
+                # frames and nothing is invented when it is absent.
+                weather_values = [t.weather_condition for t in tests
+                                  if t.weather_condition]
+                if weather_values:
+                    pdf.set_xy(pdf.l_margin, 189)
+                    pdf.set_font('Cambria', '', 12)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
+                             align='C')
+                # Credit the map source under the frames. Both tile providers
+                # licence their imagery on the condition that the report says
+                # where it came from, and the client can then see whether the
+                # map is satellite imagery or a street map.
+                attribution = cls._map_attribution(map_source)
+                if attribution and static_map is not None:
+                    pdf.set_xy(pdf.l_margin, 190.5)
+                    pdf.set_font('Cambria', 'I', 7)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 4.5, _latin1(attribution), align='C')
+                # Recorded GNSS coordinates + the Google Maps link to the site (C6).
+                # Only when the platform holds real coordinates — nothing is guessed.
+                if map_lat is not None and map_lon is not None:
+                    link = cls._maps_link(project, map_lat, map_lon)
+                    pdf.set_xy(pdf.l_margin, 196)
+                    pdf.set_font('Cambria', 'I', 10)
+                    pdf.set_text_color(*INK)
+                    pdf.multi_cell(
+                        0, 5.0,
+                        _latin1(
+                            f'Coordinates: {map_lat:.6f}°, '
+                            f'{map_lon:.6f}°  —  view location on Google Maps:'
+                            f' {link}'),
+                        align='C', new_x='LMARGIN', new_y='NEXT')
             else:
-                cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9, link=map_link)
-                cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
-            # Weather is operator-recorded; the reference prints none, so a
-            # recorded condition gets a single plain centred line below the
-            # frames and nothing is invented when it is absent.
-            weather_values = [t.weather_condition for t in tests
-                              if t.weather_condition]
-            if weather_values:
-                pdf.set_xy(pdf.l_margin, 189)
-                pdf.set_font('Cambria', '', 12)
+                # 4-Corner Boundary Mapping Layout
+                map_h = 76.0
+                map_y = 44.0
+                if not map_sources:
+                    location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
+                    if project.lga:
+                        location_text += f', {project.lga.upper()}'
+                    if project.state:
+                        location_text += f', {project.state.upper()}'
+                    builder.placeholder_box(location_text, height=36)
+                    cur_y = pdf.get_y() + 2.0
+                elif len(map_sources) == 1:
+                    map_w = 130.0
+                    cls._boxed_image(pdf, map_sources[0], (pdf.w - map_w) / 2,
+                                     map_y, map_w, map_h, link=map_link)
+                    cur_y = map_y + map_h + 2.0
+                else:
+                    cls._boxed_image(pdf, map_sources[0], 25.0, map_y, 75.0, map_h, link=map_link)
+                    cls._boxed_image(pdf, map_sources[1], 110.0, map_y, 75.0, map_h)
+                    cur_y = map_y + map_h + 2.0
+
+                attribution = cls._map_attribution(map_source)
+                if attribution and static_map is not None:
+                    pdf.set_xy(pdf.l_margin, cur_y)
+                    pdf.set_font('Cambria', 'I', 7)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 4.0, _latin1(attribution), align='C')
+                    cur_y += 4.5
+
+                weather_values = [t.weather_condition for t in tests
+                                  if t.weather_condition]
+                if weather_values:
+                    pdf.set_xy(pdf.l_margin, cur_y)
+                    pdf.set_font('Cambria', '', 10)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 5.0, _latin1('Weather: ' + ', '.join(sorted(set(weather_values)))),
+                             align='C')
+                    cur_y += 5.5
+
+                if map_lat is not None and map_lon is not None:
+                    link = cls._maps_link(project, map_lat, map_lon)
+                    pdf.set_xy(pdf.l_margin, cur_y)
+                    pdf.set_font('Cambria', 'I', 9.5)
+                    pdf.set_text_color(*INK)
+                    pdf.multi_cell(
+                        0, 4.5,
+                        _latin1(
+                            f'Site Center Coordinates: {map_lat:.6f}°, '
+                            f'{map_lon:.6f}°  —  view on Google Maps: {link}'),
+                        align='C', new_x='LMARGIN', new_y='NEXT')
+                    cur_y = pdf.get_y() + 3.0
+                else:
+                    cur_y += 3.0
+
+                # 4-Corner Boundary Mapping & Conversion Block
+                pdf.set_xy(pdf.l_margin, cur_y)
+                pdf.set_font('Cambria', 'B', 11)
                 pdf.set_text_color(*INK)
-                pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
-                         align='C')
-            # Credit the map source under the frames. Both tile providers
-            # licence their imagery on the condition that the report says
-            # where it came from, and the client can then see whether the
-            # map is satellite imagery or a street map.
-            attribution = cls._map_attribution(map_source)
-            if attribution and static_map is not None:
-                pdf.set_xy(pdf.l_margin, 190.5)
-                pdf.set_font('Cambria', 'I', 7)
-                pdf.set_text_color(*INK)
-                pdf.cell(0, 4.5, _latin1(attribution), align='C')
-            # Recorded GNSS coordinates + the Google Maps link to the site (C6).
-            # Only when the platform holds real coordinates — nothing is guessed.
-            if map_lat is not None and map_lon is not None:
-                link = cls._maps_link(project, map_lat, map_lon)
-                pdf.set_xy(pdf.l_margin, 196)
-                pdf.set_font('Cambria', 'I', 10)
-                pdf.set_text_color(*INK)
-                pdf.multi_cell(
-                    0, 5.0,
-                    _latin1(
-                        f'Coordinates: {map_lat:.6f}°, '
-                        f'{map_lon:.6f}°  —  view location on Google Maps:'
-                        f' {link}'),
-                    align='C', new_x='LMARGIN', new_y='NEXT')
+                pdf.cell(0, 6.0, _latin1('4-CORNER BOUNDARY MAPPING & CONVERSION'),
+                         align='C', new_x='LMARGIN', new_y='NEXT')
+
+                footprint_sqm = boundary_data.get('footprintAreaSqm')
+                perimeter_m = boundary_data.get('perimeterMeters')
+                coord_sys = boundary_data.get('system') or 'WGS84_DD'
+
+                badge_parts = []
+                if footprint_sqm is not None:
+                    badge_parts.append(f'Calculated: {footprint_sqm:,.1f} sqm footprint ({footprint_sqm / 10000.0:.3f} ha)')
+                if perimeter_m is not None:
+                    badge_parts.append(f'Perimeter: {perimeter_m:,.2f} m')
+                if coord_sys:
+                    badge_parts.append(f'System: {coord_sys}')
+
+                if badge_parts:
+                    pdf.set_font('Cambria', 'B', 9.5)
+                    pdf.set_text_color(0, 80, 160)
+                    pdf.cell(0, 5.0, _latin1('  |  '.join(badge_parts)),
+                             align='C', new_x='LMARGIN', new_y='NEXT')
+                    pdf.set_text_color(*INK)
+
+                pdf.ln(2.0)
+
+                # Ruled Table for Coordinates
+                table_headers = ['CORNER / POINT', 'LATITUDE (°N)', 'LONGITUDE (°E)', 'UTM EASTING (m)', 'UTM NORTHING (m)']
+                table_rows = []
+                for idx, c in enumerate(corners_list):
+                    c_label = c.get('label') or f'Corner {idx + 1}'
+                    c_lat = f"{c['lat']:.6f}°" if c.get('lat') is not None else '-'
+                    c_lng = f"{c['lng']:.6f}°" if c.get('lng') is not None else '-'
+                    c_east = f"{c['easting']:,.2f}" if c.get('easting') is not None else '-'
+                    c_north = f"{c['northing']:,.2f}" if c.get('northing') is not None else '-'
+                    table_rows.append([c_label, c_lat, c_lng, c_east, c_north])
+
+                col_widths = [36.0, 36.0, 36.0, 36.0, 36.0]
+                col_aligns = ['L', 'C', 'C', 'C', 'C']
+                builder.ruled_table(table_headers, table_rows, col_widths, col_aligns, font_size=9.5, line_h=5.2)
 
         def emit_fieldwork():
             # ------------------------------------------------------ 4.0 FIELD WORK
