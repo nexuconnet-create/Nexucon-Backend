@@ -525,7 +525,8 @@ def formula_display(curve_type, params):
                 c_str = f" - {c(abs(c_val))}"
             elif c_val > 0:
                 c_str = f" + {c(c_val)}"
-            return f"f_cu = {c(a)} x exp({c(b)} x V){c_str}"
+            b_str = f"{float(b):g}" if abs(float(b)) < 0.0001 else c(b)
+            return f"f_cu = {c(a)} x exp({b_str} x V){c_str}"
         if curve_type == 'sonreb':
             a = params.get('a', 0.0286)
             b = params.get('b', 0.84)
