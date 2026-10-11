@@ -4431,17 +4431,36 @@ class NDTReportService:
                             mid = len(rows) // 2 if len(rows) > 1 else 0
                             element_cell = f"**{_element_display(e['element'])}**"
                             remark = f"**{e['remark']}**" if e['remark'] else "-"
-                            
+
+                            # UPV quality classification (BS 1881-203 / ASTM C597)
+                            from apps.digital_eye.adapters import PUNDITAdapter
+                            _upv_grade = (
+                                PUNDITAdapter.grade_quality(e['mean_v'])
+                                if e.get('mean_v') is not None else None
+                            )
+                            _upv_label_map = {
+                                'excellent':    'Excellent',
+                                'good':         'Good',
+                                'questionable': 'Questionable',
+                                'poor':         'Poor',
+                                'very_poor':    'Very Poor',
+                                'unverified':   None,
+                                'pending':      None,
+                            }
+                            _upv_label = _upv_label_map.get(_upv_grade or '', None)
+                            if _upv_label:
+                                remark += f"\nUPV Classification: {_upv_label}"
+
                             flag_text = ""
                             spread_str = "-"
                             if e.get('flagged_spread'):
                                 flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
-                            
+
                             point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
                             if len(point_vels) > 1 and e['mean_v']:
                                 total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
                                 spread_str = f"{total_spread:.1f}%"
-                            
+
                             if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
                                 remark += (f"\nUPV variance between points: {e['spread_km_s'] * 1000:.0f} m/s (±{e['spread_pct'] / 2:.1f}%)")
                             remark += flag_text
@@ -4766,6 +4785,25 @@ class NDTReportService:
                         ci_str += f"\n(Prob < 25N/mm2: {p_below * 100:.1f}%)"
 
                     dq_str = f"{dq['label']}\n{dq['reason']}" if dq else "Not scored"
+
+                    # UPV quality classification (BS 1881-203 / ASTM C597)
+                    from apps.digital_eye.adapters import PUNDITAdapter
+                    _dq_upv_grade = (
+                        PUNDITAdapter.grade_quality(vel / 1000.0)
+                        if vel is not None else None
+                    )
+                    _dq_label_map = {
+                        'excellent':    'Excellent',
+                        'good':         'Good',
+                        'questionable': 'Questionable',
+                        'poor':         'Poor',
+                        'very_poor':    'Very Poor',
+                        'unverified':   None,
+                        'pending':      None,
+                    }
+                    _dq_upv_label = _dq_label_map.get(_dq_upv_grade or '', None)
+                    if _dq_upv_label:
+                        dq_str += f"\nUPV Classification: {_dq_upv_label}"
 
                     if outlier:
                         dq_str += f"\nOUTLIER: {outlier['deviation_pct']:+.1f}% from {outlier['group']}"
