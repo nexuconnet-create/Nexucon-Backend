@@ -868,21 +868,27 @@ class AIService:
             content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
             content = re.sub(r"\s*```$", "", content)
         try:
-            return json.loads(content)
+            return json.loads(content, strict=False)
         except json.JSONDecodeError as e:
             # Fallback: search for markdown json block or outermost braces
             m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
             if m:
                 try:
-                    return json.loads(m.group(1))
+                    return json.loads(m.group(1), strict=False)
                 except json.JSONDecodeError:
                     pass
             m2 = re.search(r'(\{.*\})', content, re.DOTALL)
             if m2:
                 try:
-                    return json.loads(m2.group(1))
+                    return json.loads(m2.group(1), strict=False)
                 except json.JSONDecodeError:
                     pass
+            try:
+                # Replace raw control characters that break JSON decoders
+                cleaned = re.sub(r'[\x00-\x1f]', lambda match: '\\n' if match.group(0) == '\n' else ('\\t' if match.group(0) == '\t' else ' '), content)
+                return json.loads(cleaned, strict=False)
+            except Exception:
+                pass
             logger.error("AI returned invalid JSON: %s", e)
             raise ValueError("AI returned invalid JSON.") from e
 
