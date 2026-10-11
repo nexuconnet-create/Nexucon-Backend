@@ -223,9 +223,8 @@ Example:
 
 PHASE 4: STRENGTH EVALUATION
 Step 4.1: Evaluate f_cu against the calibrated non-linear exponential model:
-text
 f_cu = a × exp(b × V) + c
-Where a, b, c are from the payload.
+Where a, b, c are from the payload correlation_model.coefficients (or use the precalculated mean_ecs_n_mm2 provided for each element and min_derived_strength_mpa / max_derived_strength_mpa from ndt_results_summary). Citing lab default values instead of the payload's calibrated model is strictly prohibited.
 Step 4.2: Compare against statutory design target = 25 MPa.
 Step 4.3: Grade as per BS EN 12504-4 / BS 1881-203 quality ratings.
 Step 4.4: Conservative Strength Rule:
@@ -1276,6 +1275,11 @@ class PUNDITAdapter:
                 ', '.join(_element_floors) if _element_floors else 'Unspecified level'
             )
 
+        ecs_values = [s['mean_ecs_n_mm2'] for s in element_summaries if s.get('mean_ecs_n_mm2') is not None]
+        min_ecs = min(ecs_values) if ecs_values else None
+        max_ecs = max(ecs_values) if ecs_values else None
+        avg_ecs = round(sum(ecs_values) / len(ecs_values), 1) if ecs_values else None
+
         fact_pack = {
             'project': project.name,
             'scan_batch': {
@@ -1287,6 +1291,7 @@ class PUNDITAdapter:
             'correlation_model': {
                 'curve_type': ctype_active,
                 'formula': formula_display(ctype_active, params_active or {}),
+                'coefficients': params_active or {},
                 'target_strength_mpa': float(target_str_active),
             },
             'ndt_results_summary': {
@@ -1298,6 +1303,9 @@ class PUNDITAdapter:
                      / max(1, len([v for v in [t.element_mean_velocity_km_s() for t in tests] if v is not None])))
                     * 1000.0, 1
                 ) if any(t.element_mean_velocity_km_s() for t in tests) else None,
+                'min_derived_strength_mpa': min_ecs,
+                'max_derived_strength_mpa': max_ecs,
+                'mean_derived_strength_mpa': avg_ecs,
             },
             'crack_depth_findings': crack_elements,
             'visual_observations': [
