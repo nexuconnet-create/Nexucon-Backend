@@ -1257,13 +1257,32 @@ class PUNDITAdapter:
             target_str_active = (curve_profile or {}).get(
                 'design_strength_mpa', 25.0)
 
+        # Derive the effective floor label for the batch from the individual
+        # element tests when the batch itself has no floor set.  Sending
+        # 'Unspecified level' to the AI caused it to add a redundant
+        # "batch-level floor field is recorded as 'Unspecified level'" clause
+        # in Phase 1 scope verification even when all elements already carried
+        # a correct floor (e.g. "Ground Floor").
+        _batch_floor_raw = (getattr(batch, 'floor', None) if batch else None) or ''
+        if _batch_floor_raw and _batch_floor_raw.lower() not in ('unspecified level', 'unspecified', ''):
+            _effective_batch_floor = _batch_floor_raw
+        else:
+            # Collect distinct floor labels from the element summaries.
+            _element_floors = sorted({
+                s['floor'] for s in element_summaries
+                if s.get('floor') and s['floor'].lower() not in ('unspecified level', 'unspecified', '')
+            })
+            _effective_batch_floor = (
+                ', '.join(_element_floors) if _element_floors else 'Unspecified level'
+            )
+
         fact_pack = {
             'project': project.name,
             'scan_batch': {
                 'folder_name': batch_name or 'General Project Scan',
                 'batch_reference': getattr(batch, 'batch_reference', 'N/A') if batch else 'N/A',
                 'verified_element_count': len(tests),
-                'floor': getattr(batch, 'floor', 'Unspecified level') if batch else 'Unspecified level',
+                'floor': _effective_batch_floor,
             },
             'correlation_model': {
                 'curve_type': ctype_active,
