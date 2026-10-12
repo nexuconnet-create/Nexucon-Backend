@@ -3647,31 +3647,59 @@ class NDTReportService:
             # frames and nothing is invented when it is absent.
             weather_values = [t.weather_condition for t in tests
                               if t.weather_condition]
+            try:
+                from apps.digital_eye.models import PunditWeatherCondition
+                weather_qs = PunditWeatherCondition.objects.filter(project=project)
+                if tests:
+                    test_dates = {t.test_date for t in tests if t.test_date}
+                    if test_dates:
+                        weather_qs = weather_qs.filter(test_date__in=test_dates)
+                for dw in weather_qs:
+                    cond_str = dw.weather_condition
+                    extras = []
+                    if dw.temperature_c is not None:
+                        extras.append(f"{dw.temperature_c:.1f}°C")
+                    if dw.relative_humidity_pct is not None:
+                        extras.append(f"RH {dw.relative_humidity_pct:.0f}%")
+                    if dw.surface_condition and dw.surface_condition != 'Dry':
+                        extras.append(f"Surface: {dw.surface_condition}")
+                    if extras:
+                        cond_str += f" ({', '.join(extras)})"
+                    if cond_str not in weather_values:
+                        weather_values.append(cond_str)
+            except Exception:
+                pass
+
+            curr_y = 188.0
             if weather_values:
-                pdf.set_xy(pdf.l_margin, 189)
-                pdf.set_font('Cambria', '', 12)
+                pdf.set_xy(pdf.l_margin, curr_y)
+                pdf.set_font('Cambria', '', 10)
                 pdf.set_text_color(*INK)
-                pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
-                         align='C')
+                weather_text = f"Site Weather: {', '.join(sorted(set(weather_values)))}"
+                pdf.cell(0, 5.0, _latin1(weather_text), align='C')
+                curr_y += 5.5
+
             # Credit the map source under the frames. Both tile providers
             # licence their imagery on the condition that the report says
             # where it came from, and the client can then see whether the
             # map is satellite imagery or a street map.
             attribution = cls._map_attribution(map_source)
             if attribution and static_map is not None:
-                pdf.set_xy(pdf.l_margin, 190.5)
+                pdf.set_xy(pdf.l_margin, curr_y)
                 pdf.set_font('Cambria', 'I', 7)
                 pdf.set_text_color(*INK)
-                pdf.cell(0, 4.5, _latin1(attribution), align='C')
+                pdf.cell(0, 3.5, _latin1(attribution), align='C')
+                curr_y += 4.5
+
             # Recorded GNSS coordinates + the Google Maps link to the site (C6).
             # Only when the platform holds real coordinates — nothing is guessed.
             if map_lat is not None and map_lon is not None:
                 link = cls._maps_link(project, map_lat, map_lon)
-                pdf.set_xy(pdf.l_margin, 196)
-                pdf.set_font('Cambria', 'I', 10)
+                pdf.set_xy(pdf.l_margin, curr_y)
+                pdf.set_font('Cambria', 'I', 9.5)
                 pdf.set_text_color(*INK)
                 pdf.multi_cell(
-                    0, 5.0,
+                    0, 4.5,
                     _latin1(
                         f'Coordinates: {map_lat:.6f}°, '
                         f'{map_lon:.6f}°  —  view location on Google Maps:'

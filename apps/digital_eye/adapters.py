@@ -753,10 +753,35 @@ class PUNDITAdapter:
                 for s in unverified
             ]
             fact_pack['counts']['unverified'] = len(unverified)
-        # 8 Sep meeting: weather recorded on any element is surfaced at
+        # 8 Sep meeting: weather recorded on any element or testing day is surfaced at
         # project level so the model can discuss its impact on the dataset.
         weather = sorted({test.weather_condition for test in tests
                           if test.weather_condition})
+        try:
+            from apps.digital_eye.models import PunditWeatherCondition
+            weather_qs = PunditWeatherCondition.objects.filter(project=project)
+            if tests:
+                test_dates = {t.test_date for t in tests if t.test_date}
+                if test_dates:
+                    weather_qs = weather_qs.filter(test_date__in=test_dates)
+            for dw in weather_qs:
+                if dw.weather_condition not in weather:
+                    weather.append(dw.weather_condition)
+            if weather_qs.exists():
+                fact_pack['site_weather_telemetry'] = [
+                    {
+                        'test_date': str(w.test_date),
+                        'weather_condition': w.weather_condition,
+                        'temperature_c': w.temperature_c,
+                        'relative_humidity_pct': w.relative_humidity_pct,
+                        'surface_condition': w.surface_condition,
+                        'impact_on_testing': w.impact_on_testing,
+                    }
+                    for w in weather_qs
+                ]
+        except Exception:
+            pass
+
         if weather:
             fact_pack['weather_conditions'] = weather
 

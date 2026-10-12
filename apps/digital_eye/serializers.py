@@ -15,6 +15,7 @@ from .models import (
     GPRAnomaly, GPRScan, GPRSurvey, GnssBenchmark, GnssBoundaryPoint,
     GnssSurvey, LiveStream, NexuconLinkSettings, ProjectCurveSetting,
     PunditScanBatch, PUNDITReading, PUNDITTest, ProcessingQueueJob,
+    PunditWeatherCondition,
     SensorDataFile, SiteAttendanceRecord, StrengthCurve, TrimbleConnection,
     TrimbleProject, VisualObservation, VisualObservationPhoto,
 )
@@ -529,6 +530,20 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             self._sync_readings(test, readings_data)
         return test
 
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+            val = data.get('batch')
+            if isinstance(val, str) and val.startswith('batch-'):
+                candidate = val[6:]
+                import uuid
+                try:
+                    uuid.UUID(candidate)
+                    data['batch'] = candidate
+                except (ValueError, AttributeError):
+                    pass
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         test_type = attrs.get('test_type', getattr(self.instance, 'test_type', 'pulse_velocity'))
         readings = attrs.get('readings')
@@ -634,7 +649,7 @@ class PunditScanBatchSerializer(serializers.ModelSerializer):
             'inspector_name', 'inspector', 'device_name', 'device_serial',
             'element_count', 'test_count', 'visual_observation_count',
             'attendance_record_count', 'scan_date', 'status', 'status_display',
-            'floor', 'raw_sensor_file', 'notes', 'created_at', 'updated_at',
+            'floor', 'weather_condition', 'raw_sensor_file', 'notes', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -712,6 +727,31 @@ class SiteAttendanceRecordSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class PunditWeatherConditionSerializer(serializers.ModelSerializer):
+    project = ScopedProjectField(required=False, allow_null=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    batch_reference = serializers.CharField(source='batch.batch_reference', read_only=True)
+    batch_folder_name = serializers.CharField(source='batch.folder_name', read_only=True)
+    test_count_on_day = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PunditWeatherCondition
+        fields = [
+            'id', 'project', 'project_name', 'batch', 'batch_reference', 'batch_folder_name',
+            'test_date', 'weather_condition', 'temperature_c', 'relative_humidity_pct',
+            'surface_condition', 'precipitation', 'wind_speed_kmh', 'impact_on_testing',
+            'recorded_by', 'recorded_by_name', 'notes', 'test_count_on_day',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_test_count_on_day(self, obj):
+        try:
+            return PUNDITTest.objects.filter(project=obj.project, test_date=obj.test_date).count()
+        except Exception:
+            return 0
 
 
 class GnssBenchmarkSerializer(serializers.ModelSerializer):

@@ -452,6 +452,10 @@ class PunditScanBatch(models.Model):
         db_index=True,
     )
     floor = models.CharField(max_length=64, blank=True, default='')
+    weather_condition = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text="Weather condition during batch testing session, e.g. 'Clear / Sunny'",
+    )
     raw_sensor_file = models.ForeignKey(
         'digital_eye.SensorDataFile',
         on_delete=models.SET_NULL,
@@ -1206,6 +1210,126 @@ class SiteAttendanceRecord(models.Model):
 
     def __str__(self):
         return f"{self.attendee_name} ({self.role} - {self.organization})"
+
+
+class PunditWeatherCondition(models.Model):
+    """
+    Weather condition and environmental telemetry recorded for site activities
+    during PUNDIT ultrasonic NDT testing on a specific testing day.
+    Captures ambient temperature, relative humidity, surface condition,
+    precipitation, and operational impact on acoustic coupling and wave velocity.
+    """
+    WEATHER_CHOICES = (
+        ('Clear / Sunny', 'Clear / Sunny'),
+        ('Partly Cloudy', 'Partly Cloudy'),
+        ('Overcast / High Humidity', 'Overcast / High Humidity'),
+        ('Intermittent Drizzle', 'Intermittent Drizzle'),
+        ('Adverse Weather / Heavy Downpour', 'Adverse Weather / Heavy Downpour'),
+        ('Hot & Arid (Dry Couplant)', 'Hot & Arid (Dry Couplant)'),
+        ('Mist / High Dew Point', 'Mist / High Dew Point'),
+        ('Other', 'Other Weather Condition'),
+    )
+
+    SURFACE_CHOICES = (
+        ('Dry', 'Dry (Optimal Coupling)'),
+        ('Damp', 'Damp (Moist Surface)'),
+        ('Wet', 'Wet (Surface Water Film)'),
+        ('Saturated', 'Saturated / Standing Water'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.CASCADE,
+        related_name='pundit_weather_conditions',
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        PunditScanBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='weather_conditions',
+        db_index=True,
+    )
+    test_date = models.DateField(
+        default=timezone.localdate,
+        db_index=True,
+        help_text="The specific day testing occurred on site.",
+    )
+    weather_condition = models.CharField(
+        max_length=150,
+        help_text="Weather condition category / description (e.g. 'Clear / Sunny (31°C)', 'Adverse Weather / Rain')",
+    )
+    temperature_c = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Ambient air temperature in Celsius during testing",
+    )
+    relative_humidity_pct = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Relative humidity percentage (%)",
+    )
+    surface_condition = models.CharField(
+        max_length=100,
+        choices=SURFACE_CHOICES,
+        default='Dry',
+        blank=True,
+        help_text="Concrete surface moisture condition per BS 1881-203",
+    )
+    precipitation = models.CharField(
+        max_length=64,
+        blank=True,
+        default='None',
+        help_text="Precipitation status (e.g. None, Light Drizzle, Rain, Downpour)",
+    )
+    wind_speed_kmh = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Wind speed in km/h",
+    )
+    impact_on_testing = models.TextField(
+        blank=True,
+        default='',
+        help_text="Impact of weather on testing activities, transducer couplant stability, surface dampness, etc.",
+    )
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pundit_weather_records',
+    )
+    recorded_by_name = models.CharField(max_length=255, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-test_date', '-created_at']
+        verbose_name = 'PUNDIT Weather Condition'
+        verbose_name_plural = 'PUNDIT Weather Conditions'
+
+    def __str__(self):
+        return f"{self.test_date}: {self.weather_condition} ({self.project.name if self.project else 'No Project'})"
+
+    def sync_to_tests(self) -> int:
+        """Propagates weather_condition onto all matching PUNDITTest instances."""
+        if not self.weather_condition or not self.project:
+            return 0
+        qs = PUNDITTest.objects.filter(project=self.project, test_date=self.test_date)
+        if self.batch:
+            qs = qs.filter(batch=self.batch)
+        updated_count = qs.update(weather_condition=self.weather_condition)
+        if self.batch:
+            self.batch.weather_condition = self.weather_condition
+            self.batch.save(update_fields=['weather_condition', 'updated_at'])
+        return updated_count
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        self.sync_to_tests()
 
 
 # ======================================================================

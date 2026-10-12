@@ -19,6 +19,7 @@ from apps.digital_eye.models import (
     CalibrationProfile,
     PunditScanBatch,
     PUNDITTest,
+    PunditWeatherCondition,
     SiteAttendanceRecord,
     VisualObservation,
 )
@@ -249,7 +250,7 @@ class PunditAPIFlowTestCase(APITestCase):
             'path_length_mm': 300.0,
             'pulse_time_us': 75.0,  # 4.0 km/s
         }, format='json')
-        self.assertEqual(resp_test.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp_test.status_code, status.HTTP_201_CREATED, resp_test.data)
 
         # Verify batch status is STILL RAW_INGESTED (NOT auto-analyzed)
         batch_get = self.client.get(reverse('pundit-batch-detail', kwargs={'pk': batch_id}))
@@ -285,3 +286,127 @@ class PunditAPIFlowTestCase(APITestCase):
         # Batch status must now be ANALYSIS_COMPLETE
         batch_final = self.client.get(reverse('pundit-batch-detail', kwargs={'pk': batch_id}))
         self.assertEqual(batch_final.data['status'], 'ANALYSIS_COMPLETE')
+
+    def test_pundit_weather_capture_and_sync(self):
+        """
+        Validate Weather UI backend capabilities:
+          - Creating a PunditWeatherCondition for the specific day testing occurred.
+          - Propagating weather_condition to PUNDITTest instances on that date.
+          - GET testing-days endpoint returning testing dates with weather status.
+          - POST sync-tests endpoint.
+        """
+        import datetime
+        test_day = datetime.date(2026, 9, 4)
+
+        # Create two tests on that specific day
+        test_1 = PUNDITTest.objects.create(
+            project=self.project,
+            test_reference='TEST-WEATHER-001',
+            test_date=test_day,
+            structural_element='COL-A1',
+            path_length_mm=300.0,
+            pulse_time_us=75.0,
+            velocity_km_s=4.0,
+        )
+        test_2 = PUNDITTest.objects.create(
+            project=self.project,
+            test_reference='TEST-WEATHER-002',
+            test_date=test_day,
+            structural_element='COL-A2',
+            path_length_mm=300.0,
+            pulse_time_us=75.0,
+            velocity_km_s=4.0,
+        )
+
+        # 1. API: Capture weather condition for this specific day
+        weather_payload = {
+            'project': str(self.project.id),
+            'test_date': '2026-09-04',
+            'weather_condition': 'Clear / Sunny (32°C)',
+            'temperature_c': 32.0,
+            'relative_humidity_pct': 65.0,
+            'surface_condition': 'Dry',
+            'precipitation': 'None',
+            'wind_speed_kmh': 12.0,
+            'impact_on_testing': 'Optimal surface coupling; couplant stability verified.',
+            'recorded_by_name': 'Engr. Adeleke',
+            'notes': 'Recorded during morning site testing session.',
+        }
+
+        resp_create = self.client.post(
+            reverse('pundit-weather-condition-list'),
+            weather_payload,
+            format='json'
+        )
+        self.assertEqual(resp_create.status_code, status.HTTP_201_CREATED)
+        weather_id = resp_create.data['id']
+        self.assertEqual(resp_create.data['weather_condition'], 'Clear / Sunny (32°C)')
+        self.assertEqual(resp_create.data['test_count_on_day'], 2)
+
+        # Verify tests on that day were automatically updated
+        test_1.refresh_from_db()
+        test_2.refresh_from_db()
+        self.assertEqual(test_1.weather_condition, 'Clear / Sunny (32°C)')
+        self.assertEqual(test_2.weather_condition, 'Clear / Sunny (32°C)')
+
+        # 2. API: Query testing-days endpoint
+        resp_days = self.client.get(
+            reverse('pundit-weather-condition-testing-days'),
+            {'project': str(self.project.id)}
+        )
+        self.assertEqual(resp_days.status_code, status.HTTP_200_OK)
+        self.assertTrue(len(resp_days.data) >= 1)
+        day_entry = next(d for d in resp_days.data if d['date'] == '2026-09-04')
+        self.assertEqual(day_entry['test_count'], 2)
+        self.assertTrue(day_entry['has_weather'])
+        self.assertEqual(day_entry['weather_record']['temperature_c'], 32.0)
+
+        # 3. API: Manual sync-tests endpoint
+        resp_sync = self.client.post(
+            reverse('pundit-weather-condition-sync-tests', kwargs={'pk': weather_id})
+        )
+        self.assertEqual(resp_sync.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_sync.data['status'], 'synchronized')
+        self.assertEqual(resp_sync.data['updated_test_count'], 2)
+
+    def test_fetch_google_weather_action(self):
+        """
+        Validate fetch-google-weather action on PunditWeatherConditionViewSet:
+          - Queries Google Weather Platform endpoint for project coordinates.
+          - Returns parsed temperature, humidity, surface condition, and acoustic impact.
+          - Supports auto_apply=True to create/update PunditWeatherCondition and sync to station tests.
+        """
+        import datetime
+        test_day = '2026-09-04'
+
+        PUNDITTest.objects.create(
+            id='TEST-GW-001',
+            project=self.project,
+            test_date=datetime.date(2026, 9, 4),
+            structural_element='COL-GW-1',
+            path_length_mm=250.0,
+            pulse_time_us=65.0,
+            velocity_km_s=3.85,
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('pundit-weather-condition-fetch-google-weather'),
+            {
+                'project': str(self.project.id),
+                'date': test_day,
+                'auto_apply': True,
+            },
+            format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data.get('success'))
+        self.assertEqual(resp.data.get('provider'), 'Google Weather Platform')
+        self.assertIn('temperature_c', resp.data)
+        self.assertIn('weather_condition', resp.data)
+        self.assertTrue(resp.data.get('applied'))
+        self.assertEqual(resp.data.get('synced_tests_count'), 1)
+
+        # Verify PUNDITTest record was updated
+        updated_test = PUNDITTest.objects.get(id='TEST-GW-001')
+        self.assertEqual(updated_test.weather_condition, resp.data['weather_condition'])
