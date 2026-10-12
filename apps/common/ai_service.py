@@ -232,15 +232,10 @@ class AIService:
 
     @staticmethod
     def _get_anthropic_model():
-        # Claude Haiku 4.5 — the cheapest Claude model that still does both
-        # vision and structured JSON, at $1/$5 per million tokens against
-        # Opus 5's $5/$25. The prompts here are short and the numbers they
-        # must not touch (pulse velocity, E.C.S., confidence) are computed
-        # deterministically, so the top tier buys little on this workload.
-        # Read at call time: move to `claude-sonnet-5` ($2/$10) or
-        # `claude-opus-5` ($5/$25) in .env alone, no deploy.
+        # Claude Sonnet — advanced multi-modal vision and reasoning.
+        # Read at call time: can be overridden via `NEXUCON_ANTHROPIC_MODEL` in .env.
         return getattr(settings, "ANTHROPIC_MODEL",
-                       AIService._env("ANTHROPIC_MODEL", "claude-haiku-4-5"))
+                       AIService._env("ANTHROPIC_MODEL", "claude-sonnet-4-5"))
 
     @staticmethod
     def _get_anthropic_base_url():

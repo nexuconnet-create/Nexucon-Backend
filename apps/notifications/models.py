@@ -36,6 +36,8 @@ class Notification(models.Model):
         ('Low', 'Low Priority'),
     )
 
+    objects = models.Manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     notification_reference = models.CharField(max_length=100, db_index=True, null=True, blank=True, default=generate_notif_ref)
     recipient = models.ForeignKey(

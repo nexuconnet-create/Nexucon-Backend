@@ -347,7 +347,8 @@ MEDIA_URL = '/media/'
 # a 500 m radius map image around the project's recorded GNSS coordinates.
 # Empty/absent means the report honestly falls back to the operator's map
 # photo / BIM captures — no map is ever fabricated.
-GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
+GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', 'AIzaSyByRA1xp-mLFVtnz_kEZuwkFfpTRslSwwA')
+GOOGLE_WEATHER_API_KEY = os.getenv('GOOGLE_WEATHER_API_KEY', 'AIzaSyByRA1xp-mLFVtnz_kEZuwkFfpTRslSwwA')
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Where the platform writes one field-gateway config per instrument, for the

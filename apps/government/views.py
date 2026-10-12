@@ -82,9 +82,21 @@ class QuickActionsSummaryView(APIView):
         applications_pending = Application.objects.filter(status__in=['SUBMITTED', 'UNDER_REVIEW']).count()
         inspections_due = Inspection.objects.filter(status__in=['REQUESTED', 'SCHEDULED']).count()
         
+        try:
+            from apps.monitoring.models import SiteVerification
+            site_verifications_pending = SiteVerification.objects.filter(status='PENDING_VERIFICATION').count()
+        except Exception:
+            site_verifications_pending = 0
+
+        try:
+            from apps.bim.models import BIMModel
+            bim_models_pending = BIMModel.objects.filter(status__in=['Under Review', 'PENDING', 'processing']).count()
+        except Exception:
+            bim_models_pending = 0
+
         return Response({
             'applications_pending_review': applications_pending,
             'inspections_due': inspections_due,
-            'site_verifications_pending': 0,
-            'bim_models_pending_review': 0,
+            'site_verifications_pending': site_verifications_pending,
+            'bim_models_pending_review': bim_models_pending,
         })

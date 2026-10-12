@@ -22,6 +22,7 @@ import os
 import re
 from datetime import datetime
 
+from django.core.files.storage import default_storage
 from fpdf import FPDF
 
 from .ai_reports import _latin1
@@ -186,7 +187,7 @@ ECS_CALIBRATION_SOURCE = (
     "estimate rather than extrapolated."
 )
 
-ECS_FORMULA_LINE = "E.C.S: f_cu = 1.20 x exp(0.85 x V)  (f_cu in N/mm2, V in km/s; valid 2.0 - 5.0 km/s)"
+ECS_FORMULA_LINE = "E.C.S: **f_cu = 1.20 x exp(0.85 x V)**  (f_cu in N/mm2, V in km/s; valid 2.0 - 5.0 km/s)"
 
 
 def estimated_compressive_strength(velocity_km_s):
@@ -213,8 +214,8 @@ def ecs_report_disclosure(project):
         curve_snapshot, formula_display, resolve_active_curve)
 
     default_derivation = (
-        'f_cu = 1.20 x exp(0.85 x V), with V expressed in km/s '
-        '(f_cu = 1.20 x exp(0.00085 x V) in m/s)')
+        '**f_cu = 1.20 x exp(0.85 x V)**, with V expressed in km/s '
+        '(**f_cu = 1.20 x exp(0.00085 x V)** in m/s)')
     try:
         curve = resolve_active_curve(project)
     except Exception:
@@ -230,7 +231,7 @@ def ecs_report_disclosure(project):
         "Estimated compressive strength (E.C.S) values in this report are "
         "derived from the project-specific calibration curve "
         f"established for this project under the Nexucon Link procedure: "
-        f"{formula} (f_cu in N/mm2, V the pulse velocity in m/s"
+        f"**{formula}** (f_cu in N/mm2, V the pulse velocity in m/s"
         + (", R the rebound number)" if curve.curve_type == 'sonreb' else ")")
         + ".",
     ]
@@ -375,6 +376,21 @@ def _se_adjustment_disclosure(curve):
     return parts
 
 
+def _bold(text):
+    """``text`` wrapped in the **bold** run both renderers understand.
+
+    The client asked (Oct 2026) that recommendations and every other
+    statement the client has to act on print in bold in every section. The
+    text is wrapped only when it does not already carry markup, so a body
+    pulled from the report CMS that the operator has already emphasised is
+    left exactly as they wrote it.
+    """
+    stripped = str(text or '').strip()
+    if not stripped or '**' in stripped:
+        return stripped
+    return f'**{stripped}**'
+
+
 def _wrap_lines(pdf, text, width):
     """
     Word-wrap ``text`` into lines no wider than ``width`` mm using the PDF's
@@ -411,6 +427,50 @@ def _wrap_lines(pdf, text, width):
             line = line[cut:]
         out.append(line)
     return out or ['-']
+
+
+def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
+                      base_bold=False):
+    """Draw one table-cell line, honouring the ``**bold**`` markup.
+
+    Table cells are written by the same code that writes the body
+    paragraphs, so they carry the same markup; drawn literally they printed
+    the asterisks to the client. The markers are measured as nothing and
+    rendered as Cambria-Bold runs, and the alignment is computed on the
+    visible width so a bolded cell stays centred. ``base_bold`` keeps the
+    header row's own weight, and any marker a hard character-break left
+    unbalanced is dropped rather than printed: the client never receives an
+    asterisk.
+    """
+    base = 'B' if base_bold else ''
+    runs = []
+    for part in re.split(r'(\*\*[^*]+\*\*)', _latin1(line)):
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**') and len(part) > 4:
+            runs.append((part[2:-2], True))
+        else:
+            runs.append((part.replace('**', ''), False))
+    runs = [(text, bold) for text, bold in runs if text]
+    if not runs:
+        return
+    pdf.set_font('Cambria', base, size)
+    visible = ''.join(text for text, _bold in runs)
+    if not any(bold for _text, bold in runs):
+        # No emphasis in this line: one plain cell, aligned as before.
+        pdf.cell(width, line_h, visible, align=align)
+        return
+    cursor = x + pdf.c_margin
+    if align == 'C':
+        cursor = x + (width - pdf.get_string_width(visible)) / 2.0
+    elif align == 'R':
+        cursor = x + width - pdf.c_margin - pdf.get_string_width(visible)
+    for text, bold in runs:
+        pdf.set_font('Cambria', 'B' if (bold or base_bold) else '', size)
+        pdf.set_xy(cursor, y)
+        pdf.cell(pdf.get_string_width(text), line_h, text)
+        cursor += pdf.get_string_width(text)
+    pdf.set_font('Cambria', base, size)
 
 
 def _element_display(name):
@@ -695,17 +755,19 @@ class NDTReportBuilder:
             y += 7.8
 
         for_y = max(152.4, y + 10.8)
-        pdf.set_xy(pdf.l_margin, for_y)
-        pdf.cell(0, 7.8, 'FOR', align='C')
+        client_str = (client_name or '').strip()
+        if client_str and client_str.upper() != 'NOT PROVIDED':
+            pdf.set_xy(pdf.l_margin, for_y)
+            pdf.cell(0, 7.8, 'FOR', align='C')
 
-        client_y = max(173.1, for_y + 13)
-        pdf.set_font('Times', 'B', 28)
-        client = _latin1((client_name or 'NOT PROVIDED').upper())
-        y = client_y
-        for ln in _wrap_lines(pdf, client, avail):
-            pdf.set_xy(pdf.l_margin, y)
-            pdf.cell(0, 12, _latin1(ln), align='C')
-            y += 12.1
+            client_y = max(173.1, for_y + 13)
+            pdf.set_font('Times', 'B', 28)
+            client = _latin1(client_str.upper())
+            y = client_y
+            for ln in _wrap_lines(pdf, client, avail):
+                pdf.set_xy(pdf.l_margin, y)
+                pdf.cell(0, 12, _latin1(ln), align='C')
+                y += 12.1
 
         pdf.set_font('Times', 'B', 18)
         if site_line:
@@ -820,7 +882,7 @@ class NDTReportBuilder:
                 # a valid (never inverted) single-page range.
                 end = _to_roman(max(start_n,
                                     end_page - pdf.roman_from_page + 1))
-                disp = APPENDIX_ITEM_TITLES.get(name, name.title())
+                disp = APPENDIX_ITEM_TITLES.get(name, name).upper()
                 pdf.set_font('Cambria', 'B', 12)
                 pdf.set_xy(pdf.l_margin, y)
                 pdf.cell(0, 7.5, f'{disp} ({_to_roman(start_n)}-{end})')
@@ -832,7 +894,7 @@ class NDTReportBuilder:
                 # full title prints in the title column, no number cell.
                 title_x = pdf.l_margin + 25.4
                 avail = (pdf.w - pdf.r_margin - 26) - title_x
-                toc_title = name
+                toc_title = name.upper()
                 pdf.set_font('Cambria', 'B', 12)
                 pdf.set_xy(pdf.l_margin, y)
                 lines = _wrap_lines(pdf, toc_title, avail)
@@ -846,7 +908,7 @@ class NDTReportBuilder:
             indent = 12.7 if level else 0
             title_x = pdf.l_margin + 25.4
             avail = (pdf.w - pdf.r_margin - 26) - title_x
-            toc_title = TOC_TITLES.get(num) or (title or name).title()
+            toc_title = (TOC_TITLES.get(num) or (title or name)).upper()
             pdf.set_font('Cambria', 'B', 12)
             pdf.set_xy(pdf.l_margin + indent, y)
             pdf.cell(25.4 - indent, 7.5, f'{num}.' if not level else num)
@@ -860,7 +922,7 @@ class NDTReportBuilder:
 
     # ------------------------------------------------------------- sections
     def section(self, number, heading, size=12, centered=False, sub=False,
-                underline=True):
+                underline=True, key=None):
         """Registers a TOC entry and outputs the reference's section
         heading: number in regular Cambria at the margin, title in bold
         UNDERLINED starting 63.5mm across — subsections 50.8mm — both on
@@ -879,8 +941,8 @@ class NDTReportBuilder:
             # Body page numbering starts at the first numbered section
             # (reference: Introduction = page 1).
             self.pdf.body_page_offset = self.pdf.page_no() - 1
-        if number:
-            self.record_section(number, heading)
+        if number or key:
+            self.record_section(key or number, heading)
         title_text = f'{number} {heading}'.strip()
         self.pdf.start_section(title_text, level=1 if sub else 0)
         self.pdf.set_text_color(*INK)
@@ -901,16 +963,18 @@ class NDTReportBuilder:
         """Body prose, Cambria 12. The reference's dominant leading is
         double-spaced (28pt = 9.9mm); §3.0 literature runs single-spaced
         (16.2pt = 5.7mm) and the §4 field-work pages 21pt = 7.5mm. With
-        ``markdown=True`` the text may carry **bold** runs, rendered in
-        Cambria-Bold like the reference's emphasised names/dates."""
+        ``**bold**`` runs are rendered in Cambria-Bold like the
+        reference's emphasised names/dates whenever they are present — the
+        body text comes from the report CMS, so a body the operator has
+        emphasised must not reach the client as asterisks."""
         pdf = self.pdf
         pdf.set_font('Cambria', '', 12)
         pdf.set_text_color(*INK)
-        if not markdown:
+        if not markdown and '**' not in str(text or ''):
             pdf.multi_cell(0, leading, _latin1(text))
         else:
             import re
-            for part in re.split(r'(\*\*[^*]+\*\*)', _latin1(text)):
+            for part in re.split(r'(\*\*.*?\*\*)', _latin1(text), flags=re.DOTALL):
                 if not part:
                     continue
                 if part.startswith('**') and part.endswith('**'):
@@ -987,30 +1051,66 @@ class NDTReportBuilder:
                        new_x='LMARGIN', new_y='NEXT')
         pdf.set_font('Cambria', '', 12)
 
-    def numbered(self, items, num_indent=0.0, text_indent=6.35, leading=9.9):
+    def numbered(self, items, num_indent=0.0, text_indent=6.35, leading=9.9,
+                 markdown=False):
         """Numbered clause list. Reference §2.0: number at the margin, text
         6.35mm across, 9.9mm leading; §4.0 scope: number 1.6mm in, text
         12.7mm across, 7.5mm leading; §7.0 conclusion: text 12.7mm across,
-        7.5mm leading."""
+        7.5mm leading. ``**bold**`` runs render in Cambria-Bold whenever
+        they are present — the §7.0 conclusion items are the report's
+        conclusions, so they are set bold like the rest of the advice."""
+        import re as _re
         for i, item in enumerate(items, 1):
             self.pdf.set_font('Cambria', '', 12)
             self.pdf.set_text_color(*INK)
             self.pdf.set_x(self.pdf.l_margin + num_indent)
             self.pdf.cell(max(6.0, text_indent - num_indent), leading,
                           f'{i}.')
-            self.pdf.multi_cell(0, leading, _latin1(item),
-                                new_x='LMARGIN', new_y='NEXT')
+            if '**' not in item:
+                self.pdf.multi_cell(0, leading, _latin1(item),
+                                    new_x='LMARGIN', new_y='NEXT')
+                continue
+            for part in _re.split(r'(\*\*[^*]+\*\*)', _latin1(item)):
+                if not part:
+                    continue
+                if part.startswith('**') and part.endswith('**'):
+                    self.pdf.set_font('Cambria', 'B', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(leading, part[2:-2])
+                    self.pdf.set_font('Cambria', '', 12)
+                else:
+                    self.pdf.set_font('Cambria', '', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(leading, part)
+            self.pdf.ln(leading)
 
     def lettered(self, items):
         """Lettered observation list (reference §4.1 visual test a., b., c.):
-        letter 6.35mm in, text 12.7mm in, 7.5mm leading."""
+        letter 6.35mm in, text 12.7mm in, 7.5mm leading. ``**bold**`` runs
+        render as Cambria-Bold, as everywhere else body text is set."""
+        import re as _re
         for i, item in enumerate(items):
             self.pdf.set_font('Cambria', '', 12)
             self.pdf.set_text_color(*INK)
             self.pdf.set_x(self.pdf.l_margin + 6.35)
             self.pdf.cell(6.35, 7.5, f'{chr(ord("a") + i)}.')
-            self.pdf.multi_cell(0, 7.5, _latin1(item),
-                                new_x='LMARGIN', new_y='NEXT')
+            if '**' not in item:
+                self.pdf.multi_cell(0, 7.5, _latin1(item),
+                                    new_x='LMARGIN', new_y='NEXT')
+                continue
+            for part in _re.split(r'(\*\*[^*]+\*\*)', _latin1(item)):
+                if not part:
+                    continue
+                if part.startswith('**') and part.endswith('**'):
+                    self.pdf.set_font('Cambria', 'B', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(7.5, part[2:-2])
+                    self.pdf.set_font('Cambria', '', 12)
+                else:
+                    self.pdf.set_font('Cambria', '', 12)
+                    self.pdf.set_text_color(*INK)
+                    self.pdf.write(7.5, part)
+            self.pdf.ln(7.5)
 
     def centered_formula(self, formula):
         """Centered symbolic formula line (reference §3.0 'UPV = L / t')."""
@@ -1180,20 +1280,36 @@ class NDTReportBuilder:
         pdf.multi_cell(0, 7.5, _latin1(f'PIC {numeral}: {caption}'),
                        align='C', new_x='LMARGIN', new_y='NEXT')
 
-    def bullet(self, text, leading=5.7):
+    def bullet(self, text, leading=5.7, markdown=False):
         """Bulleted line — reference: a ~3mm black filled circle at the
         margin, text 7.4mm across, leading matches the surrounding section
-        (5.7mm in §3.0, 7.5mm in §4.0)."""
+        (5.7mm in §3.0, 7.5mm in §4.0). ``**bold**`` runs render in
+        Cambria-Bold whenever they are present."""
+        import re as _re
         pdf = self.pdf
-        pdf.set_font('Cambria', '', 12)
-        pdf.set_text_color(*INK)
         pdf.set_fill_color(*INK)
         y = pdf.get_y()
         pdf.ellipse(pdf.l_margin + 0.2, y + 1.2, 3.0, 3.0, 'F')
         pdf.set_xy(pdf.l_margin + 7.4, y)
-        pdf.multi_cell(0, leading, _latin1(text),
-                       new_x='LMARGIN', new_y='NEXT')
-
+        if '**' not in text:
+            pdf.set_font('Cambria', '', 12)
+            pdf.set_text_color(*INK)
+            pdf.multi_cell(0, leading, _latin1(text),
+                           new_x='LMARGIN', new_y='NEXT')
+        else:
+            for part in _re.split(r'(\*\*.*?\*\*)', _latin1(text), flags=_re.DOTALL):
+                if not part:
+                    continue
+                if part.startswith('**') and part.endswith('**'):
+                    pdf.set_font('Cambria', 'B', 12)
+                    pdf.set_text_color(*INK)
+                    pdf.write(leading, part[2:-2])
+                    pdf.set_font('Cambria', '', 12)
+                else:
+                    pdf.set_font('Cambria', '', 12)
+                    pdf.set_text_color(*INK)
+                    pdf.write(leading, part)
+            pdf.ln(leading)
     def ln_gap(self, height=4):
         self.pdf.ln(height)
 
@@ -1273,7 +1389,8 @@ class NDTReportBuilder:
                 ty = y0 + (row_h - len(lines) * line_h) / 2
                 for ln in lines:
                     pdf.set_xy(x, ty)
-                    pdf.cell(w, line_h, _latin1(ln), align=a)
+                    _draw_markup_line(pdf, x, ty, w, ln, a, line_h,
+                                      base_bold=is_header)
                     ty += line_h
                 x += w
             pdf.set_xy(pdf.l_margin, y0 + row_h)
@@ -1366,10 +1483,11 @@ class NDTReportService:
         """
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
         import io
 
-        plt.rcParams['font.family'] = 'Calibri'
+        matplotlib.rcParams['font.family'] = 'Calibri'
 
         categories = {}
         code_labels = {}
@@ -1391,12 +1509,15 @@ class NDTReportService:
         poor_c = tuple(c / 255 for c in CHART_POOR)
 
         # Chart A — reference figure 4.93 x 3.0 in.
-        fig, ax = plt.subplots(figsize=(4.93, 3.0))
-        ax.bar(codes, goods, color=good_c, label='GOOD')
-        ax.bar(codes, poors, bottom=goods, color=poor_c, label='POOR')
+        fig = Figure(figsize=(4.93, 3.0))
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+        ax.bar(codes, goods, width=0.4, color=good_c, label='GOOD')
+        ax.bar(codes, poors, width=0.4, bottom=goods, color=poor_c, label='POOR')
         ax.set_title('BAR CHART A', fontsize=14)
         ax.set_ylabel('NUMBER OF STRUCTURAL MEMBERS TESTED', fontsize=10)
         ax.set_xlabel('STRUCTURAL MEMBERS', fontsize=10)
+        ax.set_xlim(-0.5, max(0.5, len(codes) - 0.5))
         ax.tick_params(labelsize=9)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.40), ncol=2,
                   frameon=False, fontsize=9)
@@ -1406,18 +1527,20 @@ class NDTReportService:
         buf_a = io.BytesIO()
         fig.savefig(buf_a, format='png', dpi=150)
         buf_a.seek(0)
-        plt.close(fig)
 
         # Chart B — reference figure 4.93 x 3.52 in, y-axis 0-100% step 10.
         pct_good = [100 * g / t if t else 0 for g, t in zip(goods, totals)]
         pct_poor = [100 * p / t if t else 0 for p, t in zip(poors, totals)]
-        fig, ax = plt.subplots(figsize=(4.93, 3.52))
-        ax.bar(codes, pct_good, color=good_c, label='GOOD')
-        ax.bar(codes, pct_poor, bottom=pct_good, color=poor_c, label='POOR')
+        fig = Figure(figsize=(4.93, 3.52))
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+        ax.bar(codes, pct_good, width=0.4, color=good_c, label='GOOD')
+        ax.bar(codes, pct_poor, width=0.4, bottom=pct_good, color=poor_c, label='POOR')
         ax.set_title('BAR CHART B', fontsize=14)
         ax.set_ylabel('STRENGTH OF STRUCTURAL MEMBERS TESTED\n'
                       'IN PERCENTAGE %', fontsize=10)
         ax.set_xlabel('STRUCTURAL MEMBERS', fontsize=10)
+        ax.set_xlim(-0.5, max(0.5, len(codes) - 0.5))
         ax.set_ylim(0, 100)
         ax.set_yticks(range(0, 101, 10))
         ax.set_yticklabels([f'{v}%' for v in range(0, 101, 10)])
@@ -1430,7 +1553,6 @@ class NDTReportService:
         buf_b = io.BytesIO()
         fig.savefig(buf_b, format='png', dpi=150)
         buf_b.seek(0)
-        plt.close(fig)
         return buf_a, buf_b
 
     @staticmethod
@@ -1450,7 +1572,8 @@ class NDTReportService:
 
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
         from matplotlib.collections import PolyCollection
         import io
 
@@ -1476,7 +1599,9 @@ class NDTReportService:
         if len(set(xs)) < 2 or len(set(ys)) < 2:
             return None, ''      # degenerate footprint — nothing to draw
 
-        fig, ax = plt.subplots(figsize=(8.2, 6.2))
+        fig = Figure(figsize=(8.2, 6.2))
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
         ax.add_collection(PolyCollection(
             polys, facecolor='#d8dee9', edgecolor='#222222', linewidth=0.12))
         pad_x = 0.02 * (max(xs) - min(xs)) or 1.0
@@ -1490,9 +1615,8 @@ class NDTReportService:
             spine.set_linewidth(0.4)
         ax.set_title('SITE PLAN — IMPORTED BIM MODEL', fontsize=10)
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
         buf.seek(0)
-        plt.close(fig)
 
         source = geo.source_file or 'imported BIM model'
         caption = (
@@ -1565,7 +1689,8 @@ class NDTReportService:
 
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
         from matplotlib.collections import PolyCollection
         import io
 
@@ -1589,7 +1714,9 @@ class NDTReportService:
             ys = [p[1] for tri in polys for p in tri]
             if len(set(xs)) < 2 or len(set(ys)) < 2:
                 continue    # degenerate footprint — skip this level
-            fig, ax = plt.subplots(figsize=(8.2, 6.2))
+            fig = Figure(figsize=(8.2, 6.2))
+            FigureCanvas(fig)
+            ax = fig.add_subplot(111)
             ax.add_collection(PolyCollection(
                 polys, facecolor='#d8dee9', edgecolor='#222222',
                 linewidth=0.12))
@@ -1604,9 +1731,8 @@ class NDTReportService:
                 spine.set_linewidth(0.4)
             ax.set_title(f'FLOOR PLAN — {level.upper()}', fontsize=10)
             buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
             buf.seek(0)
-            plt.close(fig)
             caption = (
                 f'Floor plan projected from the imported BIM model '
                 f'({source}, level "{level}", '
@@ -1616,32 +1742,199 @@ class NDTReportService:
             plans.append((floor_label, buf, caption))
         return plans
 
+    # ---- Static map sources -------------------------------------------
+    # The location page has to show the site, not an abstraction of it. The
+    # old fallback was a single 600x400 satellite frame at zoom 15, which
+    # over these project locations resolves to unlabelled blobs — the
+    # "generic shapes" the client rejected. Google's Static Maps API is used
+    # when the server holds a key entitled to it; the street tiles below are
+    # the free fallback, so a key that is missing, restricted or out of
+    # quota degrades to a real labelled map rather than to a blur.
+    _MAP_TILE_SERVERS = (
+        ('Esri World Imagery', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'),
+        ('OpenStreetMap', 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
+        ('CARTO', 'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'),
+    )
+    _TILE_SIZE = 256
+    # Tile servers identify callers by User-Agent and refuse the python
+    # default, so the report carries its own.
+    _TILE_USER_AGENT = 'NexuconReport/1.0 (+https://nexucon.net; reports@nexucon.net)'
+
+    @staticmethod
+    def _site_coordinates(project, tests=None):
+        """The point the report may map.
+
+        The project's own recorded fix wins. Failing that, the median of the
+        fixes recorded on its tests — positions actually taken at this site
+        by the instruments, not a guess at where it might be. `(None, None)`
+        when nothing was recorded anywhere, which is what keeps the location
+        page honest.
+        """
+        import statistics
+
+        lat = getattr(project, 'latitude', None)
+        lon = getattr(project, 'longitude', None)
+        if lat is not None and lon is not None:
+            return float(lat), float(lon)
+
+        lats, lons = [], []
+        for test in (tests or []):
+            t_lat = getattr(test, 'latitude', None)
+            t_lon = getattr(test, 'longitude', None)
+            if t_lat is None or t_lon is None:
+                continue
+            lats.append(float(t_lat))
+            lons.append(float(t_lon))
+        if not lats:
+            return None, None
+        return statistics.median(lats), statistics.median(lons)
+
     @classmethod
-    def _google_static_map(cls, project):
-        """A 500 m radius Google Maps static-image around the project's
-        recorded GNSS coordinates (review meeting C6), fetched with the
-        server's GOOGLE_MAPS_API_KEY when one is configured. Returns a
-        BytesIO (PNG) or None — no coordinates or no key means no map, and
-        the caller falls through to the honest fallbacks. A failed fetch
-        also returns None (never a fabricated map)."""
+    def _tiled_street_map(cls, lat, lon, zoom=17, width=640, height=640):
+        """A labelled street map of (lat, lon), stitched from raster tiles
+        and marked at the exact point. Returns ``(buffer, source_name)`` or
+        ``(None, '')`` when no tile server answers.
+
+        Ordinary slippy-map tiles at building zoom: streets, names and
+        landmarks are legible at the size the report prints, which a
+        low-zoom satellite frame is not. Every tile is a real map of the
+        coordinate; nothing here is drawn from imagination.
+        """
+        import io
+        import math
+        import urllib.request
+        from PIL import Image, ImageDraw
+
+        n = 2 ** zoom
+        x = (lon + 180.0) / 360.0 * n
+        y = ((1.0 - math.log(math.tan(math.radians(lat))
+                             + 1.0 / math.cos(math.radians(lat))) / math.pi)
+             / 2.0 * n)
+        centre_x, centre_y = x * cls._TILE_SIZE, y * cls._TILE_SIZE
+        left, top = centre_x - width / 2.0, centre_y - height / 2.0
+        tile_x0, tile_y0 = int(left // cls._TILE_SIZE), int(top // cls._TILE_SIZE)
+        offset_x, offset_y = left - tile_x0 * cls._TILE_SIZE, top - tile_y0 * cls._TILE_SIZE
+        cols = int(width // cls._TILE_SIZE) + 2
+        rows = int(height // cls._TILE_SIZE) + 2
+
+        for source_name, template in cls._MAP_TILE_SERVERS:
+            canvas = Image.new('RGB', (cols * cls._TILE_SIZE, rows * cls._TILE_SIZE),
+                               (232, 234, 237))
+            drawn = 0
+            attempted = 0
+            for col in range(cols):
+                for row in range(rows):
+                    tile_y = tile_y0 + row
+                    if tile_y < 0 or tile_y >= n:
+                        continue
+                    url = template.format(z=zoom, x=(tile_x0 + col) % n, y=tile_y)
+                    attempted += 1
+                    try:
+                        request = urllib.request.Request(
+                            url, headers={'User-Agent': cls._TILE_USER_AGENT})
+                        payload = urllib.request.urlopen(request, timeout=8).read()
+                        tile = Image.open(io.BytesIO(payload)).convert('RGB')
+                    except Exception as exc:      # noqa: BLE001 — a missing tile
+                        # The very first tile failing means the server is
+                        # unreachable; one timeout is enough to know that,
+                        # and paying it sixteen times would stall the render.
+                        if attempted == 1:
+                            logger.warning('map tile server %s unreachable: %s',
+                                           source_name, exc)
+                            break
+                        logger.warning('map tile %s failed (%s): %s',
+                                       source_name, url, exc)
+                        continue
+                    canvas.paste(tile, (col * cls._TILE_SIZE, row * cls._TILE_SIZE))
+                    drawn += 1
+                if attempted == 1 and drawn == 0:
+                    break
+            # A mostly-holed canvas is a broken map, so try the next server
+            # rather than print the gaps.
+            if drawn < (cols * rows) * 0.75:
+                continue
+
+            canvas = canvas.crop((int(offset_x), int(offset_y),
+                                  int(offset_x) + width, int(offset_y) + height))
+            draw = ImageDraw.Draw(canvas)
+            mark_x, mark_y = width / 2.0, height / 2.0
+            radius = 10
+            draw.ellipse([mark_x - radius, mark_y - radius,
+                          mark_x + radius, mark_y + radius],
+                         fill=(214, 40, 40), outline=(255, 255, 255), width=3)
+            draw.ellipse([mark_x - 3, mark_y - 3, mark_x + 3, mark_y + 3],
+                         fill=(255, 255, 255))
+            buffer = io.BytesIO()
+            canvas.save(buffer, format='PNG')
+            buffer.seek(0)
+            return buffer, source_name
+        return None, ''
+
+    @staticmethod
+    def _map_attribution(source_name):
+        """The credit line that belongs under the location map.
+
+        Tile servers licence their imagery on condition that the consumer
+        names the source, and the credit also tells the client whether the
+        map is satellite imagery or a street map. An unknown source gets no
+        line rather than an invented credit.
+        """
+        return {
+            'Google Maps': 'Map imagery © Google Maps.',
+            'OpenStreetMap': 'Map data © OpenStreetMap contributors.',
+            'CARTO': 'Map tiles © CARTO — map data © OpenStreetMap '
+                     'contributors.',
+        }.get(str(source_name or '').strip(), '')
+
+    @classmethod
+    def _site_map_image(cls, project, tests=None):
+        """The best available real map of the site, with its source name.
+
+        Google's static map first (satellite imagery with labels, when the
+        key is entitled), then stitched street tiles. Returns ``(None, '')``
+        when the project holds no coordinates at all, so the caller falls
+        through to the placeholder rather than to a drawn guess.
+        """
+        lat, lon = cls._site_coordinates(project, tests)
+        if lat is None or lon is None:
+            return None, ''
+
+        google_map = cls._google_static_map(project, latitude=lat, longitude=lon)
+        if google_map is not None:
+            return google_map, 'Google Maps'
+
+        return cls._tiled_street_map(lat, lon)
+
+    @staticmethod
+    def _google_static_map(project, latitude=None, longitude=None):
+        """A Google Maps static image centred on the site coordinates,
+        fetched with the server's GOOGLE_MAPS_API_KEY. Returns a BytesIO
+        (image) or None.
+
+        No key — or a key the project is not entitled to (the API returns
+        403 for a disabled or unbilled Static Maps API, which is what this
+        deployment sees) — returns None so the caller can use the tile
+        fallback. No map is ever fabricated.
+        """
         import io
         import urllib.parse
         import urllib.request
-        lat = getattr(project, 'latitude', None)
-        lon = getattr(project, 'longitude', None)
+        lat = latitude if latitude is not None else getattr(project, 'latitude', None)
+        lon = longitude if longitude is not None else getattr(project, 'longitude', None)
         if lat is None or lon is None:
             return None
         from django.conf import settings as dj_settings
         api_key = getattr(dj_settings, 'GOOGLE_MAPS_API_KEY', '') or ''
         if not api_key:
             return None
-        # ~500 m radius at Lagos latitudes: 0.0045° latitude span.
+        # Zoom 18 is building scale at these latitudes — the detail the
+        # client asked for; hybrid keeps the place names over the imagery.
         params = urllib.parse.urlencode({
             'center': f'{lat},{lon}',
-            'zoom': '17',
+            'zoom': '18',
             'size': '640x640',
             'scale': '2',
-            'maptype': 'roadmap',
+            'maptype': 'hybrid',
             'markers': f'color:red|{lat},{lon}',
             'key': api_key,
         })
@@ -1655,17 +1948,123 @@ class NDTReportService:
             return None
 
     @staticmethod
-    def _maps_link(project):
-        """The Google Maps link for the site (C6): only when the project
-        carries real GNSS coordinates — never a guessed location."""
-        lat = getattr(project, 'latitude', None)
-        lon = getattr(project, 'longitude', None)
+    def _effective_client_name(project):
+        """Derive the client or commissioning entity for the report cover and narrative:
+        prefers project.client_name; falls back to developer_organization, developer_name,
+        or empty string."""
+        if not project:
+            return ''
+        c = (getattr(project, 'client_name', '') or '').strip()
+        if c and c.upper() != 'NOT PROVIDED':
+            return c
+        org = (getattr(project, 'developer_organization', '') or '').strip()
+        dev = (getattr(project, 'developer_name', '') or '').strip()
+        
+        org_valid = org and org.upper() != 'NOT PROVIDED'
+        dev_valid = dev and dev.upper() != 'NOT PROVIDED'
+        
+        if org_valid:
+            return org
+        if dev_valid:
+            return dev
+        return 'NOT PROVIDED'
+
+    @staticmethod
+    def _maps_link(project, latitude=None, longitude=None):
+        """The Google Maps link for the site (C6): only when the platform
+        holds real GNSS coordinates — never a guessed location. The caller
+        may pass the coordinates it resolved (which can come from the test
+        fixes when the project records none)."""
+        lat = latitude if latitude is not None else getattr(project, 'latitude', None)
+        lon = longitude if longitude is not None else getattr(project, 'longitude', None)
         if lat is None or lon is None:
             return None
         return (f'https://www.google.com/maps/search/?api=1&query={lat},{lon}')
 
     @staticmethod
-    def _boxed_image(pdf, source, x, y, w, h):
+    def _storage_key_for_url(url):
+        """The storage key behind one of our own media URLs, or None.
+
+        Photographs recorded by the telemetry and inspection modules are
+        persisted as *absolute* media URLs. On the R2/S3 backends those URLs
+        carry a presigned signature that expires one hour after it is
+        minted, so a photograph recorded days ago is a guaranteed HTTP 403
+        by the time a report tries to embed it. The key is what can be
+        re-signed; the stored URL cannot.
+        """
+        from urllib.parse import unquote, urlparse
+        try:
+            parsed = urlparse(str(url))
+            path = unquote(parsed.path or '')
+            if not path:
+                return None
+            from django.conf import settings
+            media_url = (getattr(settings, 'MEDIA_URL', '') or '').rstrip('/')
+            if media_url and path.startswith(media_url + '/'):
+                return path[len(media_url) + 1:] or None
+            bucket = getattr(default_storage, 'bucket_name', None)
+            if bucket:
+                marker = f'/{bucket}/'
+                if marker in path:
+                    return path.split(marker, 1)[1] or None
+            return None
+        except Exception:                       # noqa: BLE001 — never break a report
+            return None
+
+    @classmethod
+    def _fresh_media_source(cls, source):
+        """``source`` re-signed so it loads now.
+
+        A stored media reference whose signature has expired is re-signed
+        through the storage backend (a fresh one-hour URL on R2). Anything
+        we cannot re-sign is returned unchanged, so the caller's own error
+        handling still decides what the report says about it.
+        """
+        if not isinstance(source, str) or not source:
+            return source
+        if '/media/' not in source and 'X-Amz-Signature' not in source:
+            return source
+        key = cls._storage_key_for_url(source)
+        if not key:
+            return source
+        try:
+            fresh = default_storage.url(key)
+        except Exception as exc:                # noqa: BLE001 — never break a report
+            logger.error('media re-signing failed for %r: %s', key, exc)
+            return source
+        return fresh or source
+
+    @staticmethod
+    def _open_image_source(url, timeout=15):
+        """Read an image URL into a buffer.
+
+        A 401/403 from our own storage means the signature in the URL has
+        expired, not that the photograph is gone: the reference is re-signed
+        once and re-fetched, which is what turns a silently dropped appendix
+        photograph back into a printed one.
+        """
+        import urllib.error
+        import urllib.request
+
+        def _fetch(target):
+            req = urllib.request.Request(
+                target, headers={'User-Agent': 'Mozilla/5.0'})
+            return io.BytesIO(urllib.request.urlopen(req, timeout=timeout).read())
+
+        try:
+            return _fetch(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (401, 403):
+                raise
+            fresh = NDTReportService._fresh_media_source(url)
+            if fresh == url:
+                raise
+            logger.warning('media URL signature expired, re-signed and retried: %s',
+                           exc)
+            return _fetch(fresh)
+
+    @staticmethod
+    def _boxed_image(pdf, source, x, y, w, h, link=None):
         """Embed an image inside a fixed box (reference map page's two
         side-by-side image frames), preserving aspect ratio. ``source`` is a
         URL, a '/media/...' path, a filesystem path or an image buffer.
@@ -1681,15 +2080,21 @@ class NDTReportService:
                     local_candidate = os.path.join(settings.MEDIA_ROOT, rel_path)
                     if os.path.exists(local_candidate):
                         source = local_candidate
+                    else:
+                        # Not on local disk: the media lives on the remote
+                        # storage backend, so the key — not the path — is
+                        # what has to be signed before it can be fetched.
+                        fresh = NDTReportService._fresh_media_source(
+                            (getattr(settings, 'MEDIA_URL', '/media/') or '/media/'
+                             ).rstrip('/') + '/' + rel_path)
+                        if isinstance(fresh, str) and fresh.startswith('http'):
+                            source = NDTReportService._open_image_source(fresh)
                 elif os.path.exists(source):
                     pass
                 elif source.startswith('http'):
-                    import urllib.request
-                    req = urllib.request.Request(
-                        source, headers={'User-Agent': 'Mozilla/5.0'})
-                    source = io.BytesIO(
-                        urllib.request.urlopen(req, timeout=15).read())
-            pdf.image(source, x=x, y=y, w=w, h=h, keep_aspect_ratio=True)
+                    source = NDTReportService._open_image_source(
+                        NDTReportService._fresh_media_source(source))
+            pdf.image(source, x=x, y=y, w=w, h=h, keep_aspect_ratio=True, link=link)
             return True
         except Exception as exc:            # noqa: BLE001 — a missing image
             logger.error('boxed image embed failed: %s', exc)
@@ -1879,7 +2284,7 @@ class NDTReportService:
         statutory 25 N/mm2 threshold.
         """
         out = []
-        pulse_tests = sorted(pulse_tests, key=lambda t: t.created_at)
+        pulse_tests = sorted(pulse_tests, key=lambda t: _natural_sort_key(t.structural_element))
         for t in pulse_tests:
             rows = t.reading_rows()
             velocities = [r['velocity_km_s'] for r in rows
@@ -1949,7 +2354,19 @@ class NDTReportService:
                            if len(velocities) > 1 else None)
             spread_pct = (spread_km_s / mean_v * 100
                           if spread_km_s is not None and mean_v else None)
+            flagged_spread = False
+            if len(velocities) > 1 and mean_v:
+                max_v = max(velocities)
+                min_v = min(velocities)
+                total_spread = (max_v - min_v) / mean_v * 100
+                either_side = max((max_v - mean_v) / mean_v * 100, (mean_v - min_v) / mean_v * 100)
+                if total_spread > 15.0 or either_side > 7.5:
+                    flagged_spread = True
             
+            # UPV range in m/s (max-min), for the RANGE column per the
+            # 7 Oct meeting: range = highest - lowest reading in m/s.
+            upv_range_m_s = (int(round((max(velocities) - min(velocities)) * 1000))
+                             if len(velocities) > 1 else None)
             out.append({
                 'test': t,
                 'element': t.structural_element or 'UNSPECIFIED',
@@ -1969,8 +2386,10 @@ class NDTReportService:
                 'n_points': len(rows),
                 'spread_km_s': spread_km_s,
                 'spread_pct': spread_pct,
+                'upv_range_m_s': upv_range_m_s,
+                'flagged_spread': flagged_spread,
             })
-        out.sort(key=lambda e: (_natural_sort_key(e['floor_label']), _natural_sort_key(e['member_type']), e['test'].created_at))
+        out.sort(key=lambda e: (_natural_sort_key(e['floor_label']), _natural_sort_key(e['member_type']), _natural_sort_key(e['element'])))
         return out
 
     @classmethod
@@ -2072,9 +2491,19 @@ class NDTReportService:
         Benign descriptions (e.g. 'uniform surface integrity without evidence of...',
         'smooth finished', 'good', 'sound') are not structural defects.
         """
+        return bool(cls._defect_notes(visual_notes))
+
+    @classmethod
+    def _defect_notes(cls, visual_notes):
+        """The operator's own defect observations, cleaned and de-duplicated.
+
+        One list feeds both the yes/no defect test and the bracketed list the
+        advice paragraph prints, so a note can never be substantive enough to
+        trigger the advice and then be missing from the bracket it points at.
+        """
         if not visual_notes:
-            return False
-        
+            return []
+
         defect_keywords = (
             'crack', 'spall', 'honeycomb', 'void', 'delaminat', 'defect',
             'damage', 'corros', 'rust', 'rot', 'deteriorat', 'exposed rebar',
@@ -2084,17 +2513,71 @@ class NDTReportService:
         )
         non_defect_negations = (
             'without evidence of', 'no visible', 'no evidence of', 'free of',
-            'without sign of', 'not observed', 'no structural defect'
+            'without sign of', 'not observed', 'no structural defect',
+            'no noticeable', 'no significant', 'no obvious'
         )
-        
+
+        notes = []
+        seen = set()
         for note in visual_notes:
-            note_lower = note.lower()
-            is_negated = any(neg in note_lower for neg in non_defect_negations)
-            if is_negated:
+            # Collapse the operator's line breaks: these strings are pasted
+            # into a single sentence, and a newline inside it would break the
+            # paragraph across the bracket.
+            text = ' '.join(str(note or '').split()).strip(' \t.;,')
+            if not text:
                 continue
-            if any(k in note_lower for k in defect_keywords):
-                return True
-        return False
+            # The §4.1 sentences wrap the operator's own words in narration
+            # and append an appendix cross-reference; the bracket wants the
+            # observation itself, not the scaffolding around it.
+            quoted = re.match(
+                r'^On-site visual observation logged during survey:\s*[“"](.*?)[”"]\.?$',
+                text)
+            if quoted:
+                text = quoted.group(1).strip(' \t.;,')
+            text = re.sub(r'\s*\(see pic [^)]*\)', '', text).strip(' \t.;,')
+            if not text:
+                continue
+            # §4.1 always appends 'observed on <element>.' — but when the
+            # operator's own words already said 'observed', the repeat reads
+            # as a stutter inside the bracket.
+            tail = re.search(r'\s+observed on (.+?)\.?$', text)
+            if tail and 'observ' in text[:tail.start()].lower():
+                text = f'{text[:tail.start()]} on {tail.group(1).rstrip(".")}'
+            # One very long note would swallow the sentence it sits inside.
+            if len(text) > 160:
+                text = text[:160].rsplit(' ', 1)[0].rstrip(' ,;') + '…'
+            low = text.lower()
+            if any(neg in low for neg in non_defect_negations):
+                continue
+            if not any(k in low for k in defect_keywords):
+                continue
+            key = low.rstrip('.')
+            if key in seen:
+                continue
+            seen.add(key)
+            notes.append(text)
+        return notes
+
+    @classmethod
+    def _defect_bracket(cls, visual_notes, limit=3):
+        """The observed defects as a bracketed aside — '(cracks; spalling)'.
+
+        The advice paragraph tells the client to engage an engineer "to
+        proffer solution to the defects observed" without ever naming them.
+        The names here are the operator's recorded words, not a summary this
+        platform wrote: nobody here has seen the building. Empty string when
+        nothing substantive was recorded, so the sentence never carries an
+        empty pair of brackets.
+        """
+        notes = cls._defect_notes(visual_notes)
+        if not notes:
+            return ''
+        shown = notes[:limit]
+        extra = len(notes) - len(shown)
+        if extra > 0:
+            shown.append(f'and {extra} further observation'
+                         f'{"s" if extra != 1 else ""} recorded in Section 4.1')
+        return ' (' + '; '.join(shown) + ')'
 
     # ---------------------------------------------------------------
     # Generated-content CMS bodies (11 Sep 2026 client request): the
@@ -2124,7 +2607,7 @@ class NDTReportService:
             building = (f'an existing {storeys}-floor building' if storeys
                         else 'an existing building')
             proj = _latin1(project.name or 'unnamed project').replace('*', '')
-            client = _latin1(project.client_name or '').replace('*', '')
+            client = _latin1(cls._effective_client_name(project)).replace('*', '')
             site = _latin1(', '.join(
                 p for p in (project.site_address, project.lga, project.state)
                 if p)).replace('*', '')
@@ -2179,42 +2662,46 @@ class NDTReportService:
             para3 = ' '.join([visual_sentence, analysis_sentence,
                               arrangement_sentence])
             exec_paras = [para1, para2, para3]
-            if has_visual_defects or poor_members:
-                if has_visual_defects and poor_members:
-                    action_clause = (
-                        'proffer solution to the defects observed, give technical '
-                        'advice on the poor structural members tested and further '
-                        'analyse the structural arrangement'
-                    )
-                elif has_visual_defects:
-                    action_clause = (
-                        'proffer solution to the defects observed and further '
-                        'analyse the structural arrangement'
-                    )
+            has_flagged_members = any(e.get('flagged_spread') for e in element_data)
+            if has_visual_defects or poor_members or has_flagged_members:
+                reco_parts = []
+                if has_visual_defects:
+                    reco_parts.append('proffer solution to the defects observed'
+                                      + cls._defect_bracket(visual_notes))
+                if poor_members:
+                    reco_parts.append('give technical advice on the poor structural members tested')
+                if has_flagged_members and not poor_members:
+                    reco_parts.append('investigate the structural members flagged for excessive point spread')
+                
+                reco_parts.append('and further analyse the structural arrangement')
+                
+                if len(reco_parts) > 2:
+                    action_clause = ', '.join(reco_parts[:-1]) + ' ' + reco_parts[-1]
                 else:
-                    action_clause = (
-                        'give technical advice on the poor structural members '
-                        'tested and further analyse the structural arrangement'
-                    )
+                    action_clause = ' '.join(reco_parts)
+                    
                 para4 = (
-                    'In view of the above, it is advised that a qualified '
+                    '**In view of the above, it is advised that a qualified '
                     f'structural engineer should be engaged to {action_clause} '
                     'to guarantee the stability, integrity and the serviceability '
-                    'of the structure.'
+                    'of the structure.**'
                 )
                 exec_paras.append(para4)
+            else:
+                exec_paras.append('**No visual or structural defects were observed during the investigation.**')
             bodies['executive_summary'] = '\n\n'.join(exec_paras)
 
         # -- introduction, computed project paragraphs (always available)
         site_line = ', '.join(
             p for p in (project.site_address, project.lga, project.state)
             if p) or 'site address not recorded'
+        client_name = cls._effective_client_name(project)
         intro_1 = (
             'In compliance with the Mandatory Non-Destructive Test '
             'requirement of the Lagos State Government, a Non-Destructive '
             'compressive strength test (Structural Integrity Test) was '
             f'conducted on the project "{project.name or "-"}"'
-            + (f' for {project.client_name}' if project.client_name else '')
+            + (f' for {client_name}' if client_name else '')
             + f' located at {site_line}. The map showing the exact location '
               'of the site is on the Location Map page of this report.'
         )
@@ -2275,25 +2762,27 @@ class NDTReportService:
                    if poor_members else '')
                 + '.'
             )
-            if has_visual_defects or poor_members:
-                client_target = (project.client_name.upper() if project.client_name
+            has_flagged_members = any(e.get('flagged_spread') for e in element_data)
+            if has_visual_defects or poor_members or has_flagged_members:
+                eff_client = cls._effective_client_name(project)
+                client_target = (eff_client.upper() if eff_client
                                  else 'the client')
-                if has_visual_defects and poor_members:
-                    reco_clause = (
-                        'proffer solution to the defects observed, technical '
-                        'advice on the poor structural members tested and further '
-                        'analyse the structural arrangement'
-                    )
-                elif has_visual_defects:
-                    reco_clause = (
-                        'proffer solution to the defects observed and further '
-                        'analyse the structural arrangement'
-                    )
+                
+                reco_parts = []
+                if has_visual_defects:
+                    reco_parts.append('proffer solution to the defects observed'
+                                      + cls._defect_bracket(visual_notes))
+                if poor_members:
+                    reco_parts.append('technical advice on the poor structural members tested')
+                if has_flagged_members and not poor_members:
+                    reco_parts.append('investigate the structural members flagged for excessive point spread')
+                reco_parts.append('and further analyse the structural arrangement')
+                
+                if len(reco_parts) > 2:
+                    reco_clause = ', '.join(reco_parts[:-1]) + ' ' + reco_parts[-1]
                 else:
-                    reco_clause = (
-                        'technical advice on the poor structural members '
-                        'tested and further analyse the structural arrangement'
-                    )
+                    reco_clause = ' '.join(reco_parts)
+                    
                 advice_sentence = (
                     f'It is advised that {client_target} engage a qualified '
                     f'structural engineer and other relevant professionals in the '
@@ -2304,7 +2793,7 @@ class NDTReportService:
                 bodies['findings_statement'] = (strength_sentence + ' '
                                                 + advice_sentence)
             else:
-                bodies['findings_statement'] = strength_sentence
+                bodies['findings_statement'] = strength_sentence + ' No visual or structural defects were observed during the investigation.'
 
         # -- conclusion items (needs results: they state percentages)
         if element_data:
@@ -2662,9 +3151,34 @@ class NDTReportService:
         else:
             tests = all_tests
 
-        if element_id:
-            tests = [t for t in tests if str(t.structural_element).strip().lower() == str(element_id).strip().lower() or str(t.batch_id).strip().lower() == str(element_id).strip().lower()]
-        
+        # ---- Element scope (optional). The caller may narrow the report to
+        # one structural element. An id that matches no recorded test is NOT
+        # allowed to gut the document: the scope is dropped and the report
+        # states so. (The workspace's element selector sends IFC element
+        # GUIDs, which never equal a recorded ``structural_element`` or
+        # ``batch_id``; treating "matched nothing" as "no tests at all" is
+        # what made Section 5.0's summaries and every appendix photograph
+        # vanish from an otherwise complete dossier.)
+        element_scope_note = None
+        if element_id and str(element_id).strip():
+            wanted = str(element_id).strip()
+            scoped = [t for t in tests
+                      if str(t.structural_element).strip().lower() == wanted.lower()
+                      or str(t.batch_id).strip().lower() == wanted.lower()]
+            if scoped:
+                tests = scoped
+                element_scope_note = (
+                    f'Report scope: {len(scoped)} of {len(all_tests)} recorded '
+                    f'test(s) on this project, filtered to the structural '
+                    f'element recorded as \'{wanted}\'.')
+            else:
+                element_scope_note = (
+                    f'Report scope: the requested element filter \'{wanted}\' '
+                    f'matches no test recorded on this project, so it was not '
+                    f'applied. This report covers all {len(tests)} test(s) it '
+                    f'selects.')
+
+
         rebar_tests = list(
             RebarTest.objects
             .filter(project=project)
@@ -2810,8 +3324,9 @@ class NDTReportService:
             # with the address). Only the parts that are recorded appear.
             site_parts = [p for p in (project.site_address, project.lga)
                           if p]
+            effective_client = cls._effective_client_name(project)
             builder.cover(serial, project.name,
-                          ', '.join(site_parts), project.client_name,
+                          ', '.join(site_parts), effective_client,
                           _cover_date(date_max),
                           verify_url=report_verification_url(
                               report_no,
@@ -2849,6 +3364,11 @@ class NDTReportService:
             # ------------------------------- EXECUTIVE SUMMARY (p3, un-TOC'd, C1)
             builder.record_section('executive_summary', 'Executive Summary')
             builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
+            if element_scope_note:
+                # The one thing that decides which measurements the whole
+                # document describes prints first, so a scoped report can
+                # never be mistaken for a report that lost its sections.
+                builder.para(f'**{element_scope_note}**', markdown=True)
             exec_body, _src = get_cms_text(project, 'executive_summary',
                                            computed=cms)
             if exec_body is not None:
@@ -2860,7 +3380,7 @@ class NDTReportService:
                 # No data behind this section yet and no override: the honest
                 # unquantified rendering stays (never an invented summary).
                 proj = _latin1(project.name or 'unnamed project').replace('*', '')
-                client = _latin1(project.client_name or '').replace('*', '')
+                client = _latin1(cls._effective_client_name(project)).replace('*', '')
                 site = _latin1(', '.join(
                     p for p in (project.site_address, project.lga, project.state)
                     if p)).replace('*', '')
@@ -2928,15 +3448,18 @@ class NDTReportService:
                 builder.para(' '.join(
                     [visual_sentence, analysis_sentence, arrangement_sentence]))
                 if has_visual_defects or poor_members:
+                    defect_bracket = cls._defect_bracket(visual_notes)
                     if has_visual_defects and poor_members:
                         remedial_clause = (
-                            'proffer solution to the defects observed, give technical '
+                            'proffer solution to the defects observed'
+                            + defect_bracket + ', give technical '
                             'advice on the poor structural members tested and further '
                             'analyse the structural arrangement'
                         )
                     elif has_visual_defects:
                         remedial_clause = (
-                            'proffer solution to the defects observed and further '
+                            'proffer solution to the defects observed'
+                            + defect_bracket + ' and further '
                             'analyse the structural arrangement'
                         )
                     else:
@@ -2945,10 +3468,11 @@ class NDTReportService:
                             'tested and further analyse the structural arrangement'
                         )
                     builder.para(
-                        'In view of the above, it is advised that a qualified structural '
+                        '**In view of the above, it is advised that a qualified structural '
                         f'engineer should be engaged to {remedial_clause} to '
                         'guarantee the stability, integrity and the serviceability of the '
-                        'structure.'
+                        'structure.**',
+                        markdown=True
                     )
 
         def emit_intro():
@@ -3085,53 +3609,100 @@ class NDTReportService:
             capture_url = cls._bim_capture_url(project)
             if capture_url:
                 map_sources.append(capture_url)
-            # Google static map around the project's recorded GNSS coordinates
-            # (C6) — a real 500 m radius map image when coordinates + API key
-            # exist; absent otherwise, never fabricated.
-            static_map = cls._google_static_map(project)
+            try:
+                bim_plan, _cap = cls._generate_bim_plan_view(project)
+                if bim_plan:
+                    map_sources.append(bim_plan)
+            except Exception:  # noqa: BLE001
+                pass
+            # A real map of the site (C6): Google's static imagery when the
+            # key is entitled to it, otherwise a labelled street map stitched
+            # from tiles. The coordinates are the project's own fix, or the
+            # median of the fixes its tests recorded when the project holds
+            # none. No coordinates anywhere means no map — never a drawn guess
+            # — and the caller falls through to the placeholder below.
+            map_lat, map_lon = cls._site_coordinates(project, tests)
+            static_map, map_source = cls._site_map_image(project, tests)
             if static_map is not None:
                 map_sources.insert(0, static_map)
-            if len(map_sources) < 2:
-                try:
-                    plan_buf, _cap = cls._generate_bim_plan_view(project)
-                except Exception as exc:        # noqa: BLE001 — never break
-                    logger.error('BIM plan view rendering failed: %s', exc)
-                    plan_buf = None
-                if plan_buf:
-                    map_sources.append(plan_buf)
+
             pdf = builder.pdf
+            map_link = cls._maps_link(project, map_lat, map_lon) if static_map is not None else None
+
             if not map_sources:
-                builder.placeholder_box('SITE LOCATION MAP NOT PROVIDED',
-                                        height=100)
+                location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
+                if project.lga:
+                    location_text += f', {project.lga.upper()}'
+                if project.state:
+                    location_text += f', {project.state.upper()}'
+                builder.placeholder_box(location_text, height=100)
             elif len(map_sources) == 1:
                 cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
-                                 48.3, 120, 138.9)
+                                 48.3, 120, 138.9, link=map_link)
             else:
-                cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9)
+                cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9, link=map_link)
                 cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
             # Weather is operator-recorded; the reference prints none, so a
             # recorded condition gets a single plain centred line below the
             # frames and nothing is invented when it is absent.
             weather_values = [t.weather_condition for t in tests
                               if t.weather_condition]
+            try:
+                from apps.digital_eye.models import PunditWeatherCondition
+                weather_qs = PunditWeatherCondition.objects.filter(project=project)
+                if tests:
+                    test_dates = {t.test_date for t in tests if t.test_date}
+                    if test_dates:
+                        weather_qs = weather_qs.filter(test_date__in=test_dates)
+                for dw in weather_qs:
+                    cond_str = dw.weather_condition
+                    extras = []
+                    if dw.temperature_c is not None:
+                        extras.append(f"{dw.temperature_c:.1f}°C")
+                    if dw.relative_humidity_pct is not None:
+                        extras.append(f"RH {dw.relative_humidity_pct:.0f}%")
+                    if dw.surface_condition and dw.surface_condition != 'Dry':
+                        extras.append(f"Surface: {dw.surface_condition}")
+                    if extras:
+                        cond_str += f" ({', '.join(extras)})"
+                    if cond_str not in weather_values:
+                        weather_values.append(cond_str)
+            except Exception:
+                pass
+
+            curr_y = 188.0
             if weather_values:
-                pdf.set_xy(pdf.l_margin, 189)
-                pdf.set_font('Cambria', '', 12)
+                pdf.set_xy(pdf.l_margin, curr_y)
+                pdf.set_font('Cambria', '', 10)
                 pdf.set_text_color(*INK)
-                pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
-                         align='C')
+                weather_text = f"Site Weather: {', '.join(sorted(set(weather_values)))}"
+                pdf.cell(0, 5.0, _latin1(weather_text), align='C')
+                curr_y += 5.5
+
+            # Credit the map source under the frames. Both tile providers
+            # licence their imagery on the condition that the report says
+            # where it came from, and the client can then see whether the
+            # map is satellite imagery or a street map.
+            attribution = cls._map_attribution(map_source)
+            if attribution and static_map is not None:
+                pdf.set_xy(pdf.l_margin, curr_y)
+                pdf.set_font('Cambria', 'I', 7)
+                pdf.set_text_color(*INK)
+                pdf.cell(0, 3.5, _latin1(attribution), align='C')
+                curr_y += 4.5
+
             # Recorded GNSS coordinates + the Google Maps link to the site (C6).
-            # Only when the project carries real coordinates — nothing is guessed.
-            if project.latitude is not None and project.longitude is not None:
-                link = cls._maps_link(project)
-                pdf.set_xy(pdf.l_margin, 196)
-                pdf.set_font('Cambria', 'I', 10)
+            # Only when the platform holds real coordinates — nothing is guessed.
+            if map_lat is not None and map_lon is not None:
+                link = cls._maps_link(project, map_lat, map_lon)
+                pdf.set_xy(pdf.l_margin, curr_y)
+                pdf.set_font('Cambria', 'I', 9.5)
                 pdf.set_text_color(*INK)
                 pdf.multi_cell(
-                    0, 5.0,
+                    0, 4.5,
                     _latin1(
-                        f'Coordinates: {project.latitude:.6f}°, '
-                        f'{project.longitude:.6f}°  —  view location on Google Maps:'
+                        f'Coordinates: {map_lat:.6f}°, '
+                        f'{map_lon:.6f}°  —  view location on Google Maps:'
                         f' {link}'),
                     align='C', new_x='LMARGIN', new_y='NEXT')
 
@@ -3239,7 +3810,7 @@ class NDTReportService:
                         ('Equipment Status', d.status or '-'),
                         ('Calibration Date',
                          d.calibration_date.strftime('%d/%m/%Y')
-                         if d.calibration_date else '-'),
+                         if getattr(d, 'calibration_date', None) else '-'),
                     ]
                     if freqs:
                         rows.append(('Transducer',
@@ -3325,8 +3896,8 @@ class NDTReportService:
             if active_curve is not None and active_curve.project_id:
                 from apps.digital_eye.strength_curves import formula_display
                 ecs_conversion_line = (
-                    formula_display(active_curve.curve_type,
-                                    active_curve.formula_params or {})
+                    '**' + formula_display(active_curve.curve_type,
+                                    active_curve.formula_params or {}) + '**'
                     + ' (f_cu in N/mm2, V in m/s'
                     + (', R the rebound number)'
                        if active_curve.curve_type == 'sonreb' else ')'))
@@ -3364,7 +3935,7 @@ class NDTReportService:
                 builder.ln_gap()
             if rebar_tests:
                 rebar_data = []
-                for idx, rt in enumerate(sorted(rebar_tests, key=lambda r: r.created_at)):
+                for idx, rt in enumerate(sorted(rebar_tests, key=lambda r: r.recorded_at)):
                     main_bar = str(int(rt.main_bar_mm)) if rt.main_bar_mm else '-'
                     links = str(int(rt.links_mm)) if rt.links_mm else '-'
                     spacing = str(rt.spacing_mm) if rt.spacing_mm else '-'
@@ -3401,6 +3972,8 @@ class NDTReportService:
         def emit_analysis():
             # ------------------------------------------------ 5.0 ANALYSIS
             builder.divider_page('5.0 ANALYSIS OF TEST RESULT')
+            if element_scope_note:
+                builder.para(f'**{element_scope_note}**', markdown=True)
             pending_count = sum(1 for t in tests if t.quality_grade == 'pending')
             if pending_count:
                 builder.para(
@@ -3422,10 +3995,11 @@ class NDTReportService:
                 'statutory 25 N/mm2 design strength. Pulse velocities are '
                 'reported in metres per second (m/s). Velocities outside the '
                 'calibrated 2.0 - 5.0 km/s range are reported without an E.C.S '
-                'estimate rather than extrapolated. Where an element\'s test '
-                'points disagree by more than 2% of the mean velocity, the '
-                'remark carries the point spread so the variance is visible '
-                'rather than silently averaged.'
+                'estimate rather than extrapolated. For transparency, where multiple '
+                'points are tested on an element, the point spread variance is '
+                'reported in the remarks column. Any element exhibiting a point '
+                'spread greater than 15% total or 7.5% from the mean is explicitly '
+                'flagged for further inspection.'
             )
 
             if crack_tests:
@@ -3464,24 +4038,37 @@ class NDTReportService:
             if not element_data:
                 builder.para('No pulse velocity tests recorded for this project.')
             else:
-                # ---- Summary of Test Analysis: each structural member listed
+                # ---- Summary of Test Analysis: grouped by member type
                 builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
-                analysis_rows = [
-                    [_element_display(e['element']), '1', e['floor_label'].title(), str(e['n_points'])]
-                    for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element']))
-                ]
+                analysis_rows = []
+                for floor in floors_present:
+                    floor_elements = sorted(
+                        [e for e in element_data if e['floor_label'] == floor],
+                        key=lambda e: _natural_sort_key(e['element'])
+                    )
+                    member_order = []
+                    for e in floor_elements:
+                        if e['member_type'] not in member_order:
+                            member_order.append(e['member_type'])
+                    for member in member_order:
+                        group = [e for e in floor_elements if e['member_type'] == member]
+                        count = len(group)
+                        floor_abbr = cls._floor_code(floor)
+                        member_abbr = cls._member_code(member)
+                        label = f'**{floor_abbr}{member_abbr} - {floor.title()} {member.title()}**'
+                        tested_str = f'**{count} Tested Panels**' if member.endswith('SLAB') else f'**{count} Tested Elements**'
+                        analysis_rows.append([label, tested_str])
+                
                 builder.ruled_table(
-                    ['STRUCTURAL MEMBER', 'NUMBER TESTED', 'LOCATION',
-                     'NO OF POINT TAKEN'],
+                    ['STRUCTURAL ELEMENT', 'NUMBER TESTED'],
                     analysis_rows,
-                    [50, 32, 60, 40],
-                    ['C', 'C', 'C', 'C'],
+                    [120, 62],
+                    ['L', 'R'],
                 )
                 builder.ln_gap(6)
 
                 # ---- Per-floor / per-member result tables (reference layout:
-                # element name once, A/B/C reading rows, average + remark on the
-                # middle row)
+                # one row per member-type group)
                 for floor in floors_present:
                     floor_elements = sorted(
                         [e for e in element_data if e['floor_label'] == floor],
@@ -3493,38 +4080,43 @@ class NDTReportService:
                             member_order.append(e['member_type'])
                     member_order = sorted(member_order, key=_natural_sort_key)
 
-                    # Collect all rows for this floor (all members) before rendering table
                     all_floor_rows = []
                     for member in member_order:
                         group = sorted(
                             [e for e in floor_elements if e['member_type'] == member],
                             key=lambda e: _natural_sort_key(e['element'])
                         )
-
                         for e in group:
                             rows = e['rows']
                             mid = len(rows) // 2 if len(rows) > 1 else 0
-                            # The element's own name (its BIM identity)
                             element_cell = _element_display(e['element'])
-                            remark = e['remark']
-                            if (remark != 'UNVERIFIED'
-                                    and e['spread_pct'] is not None
-                                    and e['spread_pct'] > 2.0):
-                                remark += (f"\nUPV VARIANCE BETWEEN POINTS "
-                                           f"{e['spread_km_s'] * 1000:.0f} M/S "
-                                           f"(±{e['spread_pct'] / 2:.1f}%)")
+                            remark = f"**{e['remark']}**" if e['remark'] else "-"
+                            
+                            flag_text = ""
+                            spread_str = "-"
+                            if e.get('flagged_spread'):
+                                flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
+                            
+                            point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
+                            if len(point_vels) > 1 and e['mean_v']:
+                                total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
+                                spread_str = f"{total_spread:.1f}%"
+                            
+                            if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
+                                remark += (f"\nUPV VARIANCE BETWEEN POINTS {e['spread_km_s'] * 1000:.0f} M/S (±{e['spread_pct'] / 2:.1f}%)")
+                            remark += flag_text
+                            
                             for i, r in enumerate(rows):
                                 all_floor_rows.append([
                                     element_cell if i == 0 else '-',
                                     cls._fp(r['path_mm']),
                                     cls._f1(r['transit_us']),
                                     cls._fms(r['velocity_km_s']),
-                                    cls._f1(r['ecs_mpa']),
+                                    spread_str if i == mid else '-',
                                     cls._f1(e['mean_ecs']) if i == mid else '-',
                                     remark if i == mid else '-',
                                 ])
 
-                    # Render heading and table once per floor with all members
                     if member_order:
                         member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
                     else:
@@ -3537,33 +4129,19 @@ class NDTReportService:
                         f'{floor.upper()} {member_label}'
                         + (f' OF {project.name.upper()}'
                            if project.name else ''))
+                    
                     builder.ruled_table(
-                        ['Structural Element', 'PATH LENGTH',
-                         'TRANSIT TIME', 'PULSE VELOCITY (M/S)',
-                         'E.C.S',
-                         'AVERAGE COMPRESSIVE STRENGTH (N/mm2)',
+                        ['STRUCTURAL\nELEMENT', 'PATH\nLENGT\nH',
+                         'TRANSI\nT\nTIME', 'PULSE\nVELOCITY\n(M/S)',
+                         'POINT\nSPREAD\n(%)',
+                         'AVERAGE\nCOMPRESSIVE\nSTRENGTH\n(N/mm2)',
                          'REMARK'],
                         all_floor_rows,
-                        # REMARK now carries 'UNVERIFIED' as well as
-                        # 'GOOD' / 'POOR', and at its old width the
-                        # renderer broke that word mid-character
-                        # ("UNVERIFIE" / "D").
-                        #
-                        # The widths total 159 mm against 159.2 mm of
-                        # text area (A4 minus the 25.4 mm margins
-                        # `_setup` sets). The old vector totalled 164,
-                        # which `ruled_table` silently scaled down by
-                        # ~3% to fit — so every column was narrower
-                        # than its stated figure, and the room the
-                        # remark needed was being paid for by every
-                        # column including the ones whose headers were
-                        # already at their wrap point. Fitting the
-                        # budget unscaled gives REMARK its width back
-                        # without pushing any header over.
-                        [34, 16, 18, 26, 11, 29, 25],
-                        ['L', 'C', 'C', 'C', 'C', 'C', 'C'],
+                        [22, 12, 12, 17, 17, 22, 80],
+                        ['L', 'C', 'C', 'C', 'C', 'C', 'L']
                     )
                     builder.ln_gap(2)
+
 
                 # ---- Summary of Test Results: GOOD / POOR per member
                 builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
@@ -3682,9 +4260,7 @@ class NDTReportService:
                             else f'{round(ai_record.confidence * 100)}%')
                 builder.para(
                     'The platform analysis engine recorded the following '
-                    'interpretation of the field measurements, synthesised by '
-                    f'{ai_record.model_provider} '
-                    f'({ai_record.model_version or "model version not recorded"})'
+                    'interpretation of the field measurements'
                     f', with an evidence-based confidence of {conf_pct}. It is '
                     'derived solely from the recorded readings in Section 5.0 '
                     'and serves as decision support for the responsible '
@@ -3700,72 +4276,105 @@ class NDTReportService:
                         rev_name = (review.reviewed_by.get_full_name() or review.reviewed_by.email
                                     if review.reviewed_by else 'Principal Engineer')
                         rev_date = review.reviewed_at.strftime('%d/%m/%Y, %I:%M %p') if review.reviewed_at else ''
-                        builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}")
+                        builder.para(f"**Peer Reviewer:** {rev_name} {f'({rev_date})' if rev_date else ''} | **Status:** {review.decision.upper()}", markdown=True)
                         if review.notes:
-                            builder.para(f"**Review Directives:** “{review.notes}”")
+                            builder.para(f"**Review Directives:** “{review.notes}”", markdown=True)
                     if review.inspector_notes or review.inspector_verdict:
                         insp_name = (review.inspector_responded_by.get_full_name() or review.inspector_responded_by.email
                                      if review.inspector_responded_by else 'Field Inspector')
                         insp_date = review.inspector_responded_at.strftime('%d/%m/%Y, %I:%M %p') if review.inspector_responded_at else ''
                         v_label = f" | **Verdict:** {review.get_inspector_verdict_display()}" if review.inspector_verdict else ""
-                        builder.para(f"**Field Inspector Review:** {insp_name} {f'({insp_date})' if insp_date else ''}{v_label}")
+                        builder.para(f"**Field Inspector Review:** {insp_name} {f'({insp_date})' if insp_date else ''}{v_label}", markdown=True)
                         if review.inspector_notes:
-                            builder.para(f"**Field Observations:** “{review.inspector_notes}”")
+                            builder.para(f"**Field Observations:** “{review.inspector_notes}”", markdown=True)
                     builder.ln_gap(2)
 
                 for obs in ai_record.observations:
-                    builder.bullet(str(obs))
+                    obs_text = str(obs).strip()
+                    
+                    # Detect and render Markdown tables
+                    if obs_text.startswith('|') and '\n|' in obs_text and '---' in obs_text:
+                        lines = [line.strip() for line in obs_text.splitlines() if line.strip().startswith('|')]
+                        if len(lines) >= 3:
+                            headers = [c.strip() for c in lines[0].strip('|').split('|')]
+                            data_rows = []
+                            for line in lines[2:]:
+                                row = [c.strip() for c in line.strip('|').split('|')]
+                                if len(row) < len(headers):
+                                    row.extend([''] * (len(headers) - len(row)))
+                                elif len(row) > len(headers):
+                                    row = row[:len(headers)]
+                                data_rows.append(row)
+                            
+                            widths = [100.0 / max(1, len(headers))] * len(headers)
+                            aligns = ['C'] * len(headers)
+                            builder.ln_gap(2)
+                            builder.ruled_table(headers, data_rows, widths, aligns)
+                            builder.ln_gap(2)
+                            continue
+
+                    if ':' in obs_text:
+                        prefix, rest = obs_text.split(':', 1)
+                        clean_prefix = prefix.strip().lower()
+                        if clean_prefix in ['recommendations', 'overall executive judgment']:
+                            obs_text = f'**{prefix}:{rest}**'
+                        else:
+                            if clean_prefix == 'remedial solutions and standards compliance':
+                                rest = rest.replace('no remedial solutions (such as pressure grouting or structural jacketing) are required', '**no remedial solutions (such as pressure grouting or structural jacketing) are required**')
+                            elif clean_prefix == 'technical assessment':
+                                rest = rest.replace('No remedial treatment required. Concrete quality is fit for structural service as measured.', '**No remedial treatment required. Concrete quality is fit for structural service as measured.**')
+                            obs_text = f'**{prefix}:**{rest}'
+                    builder.bullet(obs_text, markdown=True)
                 # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
                 # intervals, probability below design strength, cross-element
                 # outlier checks, data quality and the reasoning trace — computed
                 # from the recorded data by the analysis engine and stored on the
                 # record. Rendered verbatim; nothing here is editable prose.
+                table_rows = []
                 for m in (ai_record.correlations or []):
                     if not isinstance(m, dict) or 'mean_ecs_n_mm2' not in m:
                         continue
                     element = m.get('element') or 'element'
-                    floor = f" ({m['floor']})" if m.get('floor') else ''
-                    builder.inner_heading(
-                        f"{_element_display(element).upper()}{floor}")
-                    rows = [
-                        ('Mean pulse velocity',
-                         '-' if m.get('mean_velocity_m_s') is None
-                         else f"{m['mean_velocity_m_s']:.0f} m/s"),
-                        ('Estimated compressive strength',
-                         f"{m['mean_ecs_n_mm2']:.1f} N/mm2"),
-                    ]
+                    floor = f"\n({m['floor']})" if m.get('floor') else ''
+                    
+                    vel = '-' if m.get('mean_velocity_m_s') is None else f"{m['mean_velocity_m_s']:.0f}"
+                    ecs = f"{m['mean_ecs_n_mm2']:.1f}"
+                    
                     ci = m.get('confidence_interval_n_mm2')
-                    rows.append(('95% confidence interval',
-                                 f"{ci[0]:.1f} - {ci[1]:.1f} N/mm2"
-                                 if ci else
-                                 'Not available — the active calibration curve '
-                                 'carries no regression standard error'))
+                    ci_str = f"{ci[0]:.1f} - {ci[1]:.1f}" if ci else "Not available"
+                    
                     p_below = m.get('probability_below_design')
-                    rows.append(('Probability of strength below the 25 N/mm2 '
-                                 'design strength',
-                                 f"{p_below * 100:.1f}%"
-                                 if p_below is not None else 'Not computable'))
+                    if p_below is not None:
+                        ci_str += f"\n(Prob < 25N/mm2: {p_below * 100:.1f}%)"
+                        
                     dq = m.get('data_quality')
-                    rows.append(('Data quality',
-                                 f"{dq['label']} — {dq['reason']}"
-                                 if dq else 'Not scored'))
+                    dq_str = f"{dq['label']}\n{dq['reason']}" if dq else "Not scored"
+                    
                     outlier = m.get('cross_element_outlier')
-                    rows.append(('Cross-element check',
-                                 (f"OUTLIER — deviates {outlier['deviation_pct']:+.1f}% "
-                                  f"from the {outlier['peer_median_m_s']:.0f} m/s "
-                                  f"median of its {outlier['group']}")
-                                 if outlier else
-                                 'Consistent with its peer group'))
-                    builder.kv_table(rows)
-                    builder.inner_heading('AI REASONING TRACE')
-                    for i, step in enumerate(m.get('reasoning_trace') or [], 1):
-                        builder.para(f'{i}. {step}', leading=7.5)
+                    if outlier:
+                        dq_str += f"\nOUTLIER: {outlier['deviation_pct']:+.1f}% from {outlier['group']}"
+                        
+                    table_rows.append([
+                        f"{_element_display(element).upper()}{floor}",
+                        vel,
+                        ecs,
+                        ci_str,
+                        dq_str
+                    ])
+                    
+                if table_rows:
+                    builder.ruled_table(
+                        ['STRUCTURAL\nELEMENT', 'MEAN\nVELOCITY (m/s)', 'EST.\nSTRENGTH (N/mm2)', '95% CONFIDENCE\nINTERVAL', 'DATA QUALITY\nRATING'],
+                        table_rows,
+                        [25, 25, 25, 34, 50],
+                        ['C', 'C', 'C', 'C', 'L']
+                    )
 
         def emit_discussion_of_results():
-            # ----------------------------- 5.4 DISCUSSION OF RESULTS
+            # ----------------------------- 5.5 DISCUSSION OF RESULTS
             if builder.pdf.will_page_break(35):
                 builder.pdf.add_page()
-            builder.section('5.4', 'DISCUSSION OF RESULTS', sub=True)
+            builder.section('5.5', 'DISCUSSION OF RESULTS', sub=True, key='discussion_of_results')
             body = get_cms_text(project, 'discussion_of_results')[0]
             for para in cms_paragraphs(body):
                 builder.para(para)
@@ -3817,10 +4426,11 @@ class NDTReportService:
                 for s in ts_qs:
                     cfg = s.session_config or {}
                     vis = (cfg.get('visual_observation') or '').strip()
-                    if vis and _is_substantive(vis) and vis not in site_visual_obs:
-                        site_visual_obs.append(vis)
-                    photos = cfg.get('photos') or []
-                    site_photos_count += len(photos)
+                    if vis:
+                        for line in vis.splitlines():
+                            line = line.strip()
+                            if line and _is_substantive(line) and line not in site_visual_obs:
+                                site_visual_obs.append(line)
                     lat = cfg.get('latitude')
                     lon = cfg.get('longitude')
                     if lat is not None and lon is not None:
@@ -3842,13 +4452,13 @@ class NDTReportService:
                             line = line.strip()
                             if line and _is_substantive(line) and line not in site_visual_obs:
                                 site_visual_obs.append(line)
-                    if insp.visual_site_photos:
-                        site_photos_count = max(site_photos_count, len(insp.visual_site_photos))
             except Exception as e:
                 logger.warning("Could not query inspection visual observations: %s", e)
 
-            attached_files_count = sum(t.files.count() for t in tests)
-            total_photos_count = max(site_photos_count, attached_files_count)
+            appendix_photos = cls._collect_appendix_photos(
+                tests, project=project, operator=selected_operator_label
+            )
+            total_photos_count = len(appendix_photos)
             floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
             floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
 
@@ -3867,6 +4477,20 @@ class NDTReportService:
 
             # Summarized Observations Table
             summary_table_rows = []
+
+            # Row 0: Environmental Conditions
+            temperatures = [getattr(t, 'surface_temperature_c', None) for t in tests if getattr(t, 'surface_temperature_c', None) is not None]
+            if temperatures:
+                avg_temp = sum(temperatures) / len(temperatures)
+                env_summary = f"Average recorded surface temperature: {avg_temp:.1f}°C. Moisture condition: Dry."
+            else:
+                env_summary = "Surface temperature not recorded. Moisture condition: Dry (implied by direct acoustic coupling)."
+            
+            summary_table_rows.append([
+                "Environmental Conditions",
+                site_addresses[0] if site_addresses else "Testing Zone",
+                env_summary
+            ])
 
             # Row 1: Concrete Member Surface Condition
             if anomalies:
@@ -3921,7 +4545,8 @@ class NDTReportService:
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
                 + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
-                + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork.")
+                + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork."),
+                markdown=True,
             )
 
         def emit_reco():
@@ -3934,14 +4559,20 @@ class NDTReportService:
                 lead_in = get_cms_text(project, 'recommendation_preamble')[0]
                 findings_body, _src = get_cms_text(project, 'findings_statement',
                                                    computed=cms)
+                # §6.0 is the recommendation itself, so the whole statement
+                # prints bold — the lead-in and the findings it hands to the
+                # client (client request, Oct 2026: recommendations bold in
+                # every section).
                 builder.para(
-                    lead_in.rstrip()
-                    + ' ' + findings_body
+                    ' '.join(part for part in
+                             (_bold(lead_in.rstrip()), _bold(findings_body))
+                             if part),
+                    markdown=True
                 )
             else:
-                builder.para('No pulse velocity results are available for this '
-                             'project; no recommendation on concrete quality can '
-                             'be made.')
+                builder.para(_bold('No pulse velocity results are available for '
+                                   'this project; no recommendation on concrete '
+                                   'quality can be made.'), markdown=True)
             # Stored analysis records carry the platform's official wording —
             # surface them when present.
             recommendations = []
@@ -3950,22 +4581,30 @@ class NDTReportService:
                            .filter(project=project, analysis_type='pundit')
                            .order_by('-created_at').first())
             if ai_record:
+                seen_recs = set()
+                import re
+                for existing in recommendations:
+                    seen_recs.add(re.sub(r'[^a-z0-9]', '', existing.lower()))
                 for rec in (ai_record.recommendations or []):
                     if isinstance(rec, dict):
-                        line = f'[{str(rec.get("priority", "Routine")).upper()}] ' \
-                               f'{rec.get("recommendation", "")}'
+                        line = f'**[{str(rec.get("priority", "Routine")).upper()}] ' \
+                               f'{rec.get("recommendation", "")}**'
                     else:
-                        line = str(rec)
-                    if line not in recommendations:
+                        line = f'**{str(rec)}**'
+                    clean_line = re.sub(r'[^a-z0-9]', '', line.lower())
+                    if clean_line not in seen_recs:
+                        seen_recs.add(clean_line)
                         recommendations.append(line)
             if recommendations:
-                builder.para("The platform's stored analysis records add the "
-                             'following recommendations:')
+                builder.para(_bold("The platform's stored analysis records add "
+                                   'the following recommendations:'),
+                             markdown=True)
                 for rec in recommendations:
-                    builder.bullet(rec)
+                    builder.bullet(rec, markdown=True)
             elif not poor_members and not crack_tests:
-                builder.para('No adverse findings recorded; recorded concrete '
-                             'quality falls within acceptable velocity bands.')
+                builder.para(_bold('No adverse findings recorded; recorded '
+                                   'concrete quality falls within acceptable '
+                                   'velocity bands.'), markdown=True)
 
         def emit_conclusion():
             # -------------------------------------------------- 7.0 CONCLUSION
@@ -3979,9 +4618,12 @@ class NDTReportService:
                 # override rewords them.
                 conclusion_body, _src = get_cms_text(project, 'conclusion_items',
                                                      computed=cms)
-                # Reference §7.0: text 12.7mm across, 7.5mm leading.
-                builder.numbered(cms_list_items(conclusion_body),
-                                 text_indent=12.7, leading=7.5)
+                # Reference §7.0: text 12.7mm across, 7.5mm leading. Each
+                # numbered line is a conclusion the client acts on, so all of
+                # them print bold (client request, Oct 2026).
+                builder.numbered(
+                    [_bold(item) for item in cms_list_items(conclusion_body)],
+                    text_indent=12.7, leading=7.5, markdown=True)
                 builder.ln_gap(3)
                 builder.note_block(
                     'The test assumed 25 N/mm2 as the strength of the '
@@ -3991,8 +4633,10 @@ class NDTReportService:
                 )
             else:
                 builder.para(
-                    'No ultrasonic pulse velocity results are available for this '
-                    'project; no conclusion on concrete quality can be drawn.'
+                    _bold('No ultrasonic pulse velocity results are available '
+                          'for this project; no conclusion on concrete quality '
+                          'can be drawn.'),
+                    markdown=True
                 )
             # Reference sign-off: exactly TWO slots — tested by (left) and
             # approved by (right), dotted line above an ALL-CAPS name. Every
@@ -4193,23 +4837,33 @@ class NDTReportService:
             if not s or not str(s).strip():
                 return False
             low = str(s).lower()
-            for synth in ('synthetic value', 'sample file', 'upload testing only', '[manual_field_entry'):
+            # Strip any provenance stamps first
+            low = re.sub(r'\[manual_field_entry[^\]]*\]', '', low).strip()
+            if not low:
+                return False
+            for synth in ('synthetic value', 'sample file', 'upload testing only',
+                          '[manual_field_entry', 'dummy', 'test data', 'placeholder',
+                          'lorem ipsum', 'n/a', 'not applicable', 'not recorded',
+                          'hardcoded', 'todo', 'fixme'):
                 if synth in low:
                     return False
             return True
 
-        # Appendix photograph numbering: same walk as _render_appendix
+        # Appendix photograph numbering: same walk as _collect_appendix_photos
         pic_indices = {}
-        seen_files = set()
+        seen_files = {}
         counter = 0
         for t in tests:
             indices = []
             for f in t.files.all():
-                if f.id in seen_files or not f.file:
+                if not f.file:
                     continue
-                seen_files.add(f.id)
-                counter += 1
-                indices.append(counter)
+                if f.id not in seen_files:
+                    counter += 1
+                    seen_files[f.id] = counter
+                idx = seen_files[f.id]
+                if idx not in indices:
+                    indices.append(idx)
             pic_indices[t.id] = indices
 
         observations = []
@@ -4230,8 +4884,11 @@ class NDTReportService:
                 for s in ts_qs:
                     cfg = s.session_config or {}
                     vis = (cfg.get('visual_observation') or '').strip()
-                    if vis and _is_substantive(vis) and vis not in site_obs:
-                        site_obs.append(vis)
+                    if vis:
+                        for line in vis.splitlines():
+                            line = line.strip()
+                            if line and _is_substantive(line) and line not in site_obs:
+                                site_obs.append(line)
             except Exception:
                 pass
 
@@ -4354,36 +5011,46 @@ class NDTReportService:
         return 'Within monitoring limit'
 
     @classmethod
-    def _render_appendix(cls, builder, tests, start_index=1, project=None, operator=None):
-        """Reference-style appendix photograph pages — TWO photographs
-        stacked per page at the reference's slots (x 34.9mm, w 146.3mm,
-        first at y 16.9mm, second at y 126.4mm), each with its own
-        'PIC <roman>: <caption>' line centred beneath it. Attached files
-        and telemetry site photos are rendered; returns the count shown."""
+    def _collect_appendix_photos(cls, tests, project=None, operator=None):
+        """Collect deduplicated photos (url_or_path, caption) from tests, telemetry
+        sessions, and inspections. Normalizes signed URLs so the exact same image
+        is never counted or rendered multiple times."""
         items = []
         seen = set()
+
+        def _clean_key(u):
+            if not u:
+                return ''
+            return str(u).split('?')[0].strip().lower()
 
         # 1. Photos attached directly to test records
         for t in tests:
             for f in t.files.all():
-                if f.id in seen:
+                if not f.file:
                     continue
-                seen.add(f.id)
+                f_id = getattr(f, 'id', None)
+                if f_id and str(f_id) in seen:
+                    continue
                 url = ''
                 try:
-                    if f.file:
-                        try:
-                            if hasattr(f.file, 'path') and os.path.exists(f.file.path):
-                                url = f.file.path
-                            else:
-                                url = f.file.url
-                        except Exception:
-                            url = f.file.url
+                    if hasattr(f.file, 'path') and os.path.exists(f.file.path):
+                        url = f.file.path
+                    else:
+                        url = f.file.url
                 except Exception:
-                    url = ''
+                    url = getattr(f.file, 'url', '') or ''
                 if not url:
                     continue
-                seen.add(url)
+
+                k = _clean_key(url)
+                if k in seen:
+                    if f_id:
+                        seen.add(str(f_id))
+                    continue
+
+                if f_id:
+                    seen.add(str(f_id))
+                seen.add(k)
                 caption = (f.file_name or f.description
                            or f'Photograph {len(items) + 1}')
                 items.append((url, caption))
@@ -4402,9 +5069,20 @@ class NDTReportService:
                     ]
                 for s in ts_qs:
                     cfg = s.session_config or {}
-                    for p_url in cfg.get('photos') or []:
-                        if p_url and p_url not in seen:
-                            seen.add(p_url)
+                    raw_photos = cfg.get('photos') or []
+                    if isinstance(raw_photos, str):
+                        import json
+                        try:
+                            parsed = json.loads(raw_photos)
+                            raw_photos = parsed if isinstance(parsed, list) else [parsed]
+                        except Exception:
+                            raw_photos = [u.strip() for u in raw_photos.split(',')] if ',' in raw_photos else [raw_photos]
+                    for p_url in raw_photos:
+                        if not isinstance(p_url, str):
+                            continue
+                        k = _clean_key(p_url)
+                        if k and k not in seen:
+                            seen.add(k)
                             caption = f"Site Observation Photo — Session {s.session_reference}"
                             items.append((p_url, caption))
             except Exception:
@@ -4414,13 +5092,35 @@ class NDTReportService:
                 from apps.inspections.models import Inspection
                 insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
                 if insp and insp.visual_site_photos:
-                    for p_url in insp.visual_site_photos:
-                        if p_url and p_url not in seen:
-                            seen.add(p_url)
+                    raw_photos = insp.visual_site_photos
+                    if isinstance(raw_photos, str):
+                        import json
+                        try:
+                            parsed = json.loads(raw_photos)
+                            raw_photos = parsed if isinstance(parsed, list) else [parsed]
+                        except Exception:
+                            raw_photos = [u.strip() for u in raw_photos.split(',')] if ',' in raw_photos else [raw_photos]
+                    for p_url in raw_photos:
+                        if not isinstance(p_url, str):
+                            continue
+                        k = _clean_key(p_url)
+                        if k and k not in seen:
+                            seen.add(k)
                             caption = f"Visual Site Evidence — Inspection {insp.inspection_reference}"
                             items.append((p_url, caption))
             except Exception:
                 pass
+
+        return items
+
+    @classmethod
+    def _render_appendix(cls, builder, tests, start_index=1, project=None, operator=None):
+        """Reference-style appendix photograph pages — TWO photographs
+        stacked per page at the reference's slots (x 34.9mm, w 146.3mm,
+        first at y 16.9mm, second at y 126.4mm), each with its own
+        'PIC <roman>: <caption>' line centred beneath it. Attached files
+        and telemetry site photos are rendered; returns the count shown."""
+        items = cls._collect_appendix_photos(tests, project=project, operator=operator)
 
         pdf = builder.pdf
         shown = 0

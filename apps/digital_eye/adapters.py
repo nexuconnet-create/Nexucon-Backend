@@ -753,10 +753,35 @@ class PUNDITAdapter:
                 for s in unverified
             ]
             fact_pack['counts']['unverified'] = len(unverified)
-        # 8 Sep meeting: weather recorded on any element is surfaced at
+        # 8 Sep meeting: weather recorded on any element or testing day is surfaced at
         # project level so the model can discuss its impact on the dataset.
         weather = sorted({test.weather_condition for test in tests
                           if test.weather_condition})
+        try:
+            from apps.digital_eye.models import PunditWeatherCondition
+            weather_qs = PunditWeatherCondition.objects.filter(project=project)
+            if tests:
+                test_dates = {t.test_date for t in tests if t.test_date}
+                if test_dates:
+                    weather_qs = weather_qs.filter(test_date__in=test_dates)
+            for dw in weather_qs:
+                if dw.weather_condition not in weather:
+                    weather.append(dw.weather_condition)
+            if weather_qs.exists():
+                fact_pack['site_weather_telemetry'] = [
+                    {
+                        'test_date': str(w.test_date),
+                        'weather_condition': w.weather_condition,
+                        'temperature_c': w.temperature_c,
+                        'relative_humidity_pct': w.relative_humidity_pct,
+                        'surface_condition': w.surface_condition,
+                        'impact_on_testing': w.impact_on_testing,
+                    }
+                    for w in weather_qs
+                ]
+        except Exception:
+            pass
+
         if weather:
             fact_pack['weather_conditions'] = weather
 
@@ -815,13 +840,11 @@ class PUNDITAdapter:
                 "Based ONLY on the following real field measurements (velocities in m/s), visual defect observations, and site attendance log: "
                 f"{crack_instruction}"
                 "(2) State the exact scope and verified element count tested in this isolated scan folder/batch (e.g. 48 elements); "
-                "(3) then analyse the pulse velocity results floor-by-floor and element-by-element, "
-                "referencing each element's grid location where given; directly correlate visual defects (such as honeycombing, voiding, spalling, exposed rebar) with low ultrasonic velocity zones (V < 3,000 m/s); "
+                "(3) directly correlate visual defects (such as honeycombing, voiding, spalling, exposed rebar) with low ultrasonic velocity zones (V < 3,000 m/s); "
                 "(4) analyse the dataset COLLECTIVELY: group elements that "
                 "show similar behaviour (same floor, same member type, or "
                 "similar velocities/grades) and give ONE collective judgment "
-                "per group rather than repeating near-identical verdicts "
-                "element by element; evaluate compressive strength against the calibrated non-linear exponential model (f_cu = a * exp(b * V) + c) relative to statutory design target strength (25 MPa); "
+                "per group. IF you need to list multiple individual elements and their velocities/strengths, YOU MUST FORMAT THAT LIST STRICTLY AS A MARKDOWN TABLE (using '|' and '---' syntax). Do NOT output long comma-separated paragraph lists of elements. Keep your analysis to high-level structural trends and evaluate compressive strength against the calibrated non-linear exponential model (f_cu = a * exp(b * V) + c) relative to statutory design target strength (25 MPa); "
                 "(5) where field_notes, weather_condition or attachment descriptions are present, weigh them as contributing evidence; "
                 "(6) explicitly list the site and client representatives who witnessed and signed off on the test; "
                 "(7) for each weak or variable element or group state the technical impact, a remedial solution (e.g. pressure grouting, structural jacketing), and a recommendation citing relevant codes (BS 1881-203, BS EN 12504-4, BS EN 13791, ASTM C597, ACI 228.2R); "
