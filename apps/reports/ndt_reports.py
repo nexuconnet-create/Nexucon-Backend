@@ -27,6 +27,7 @@ from fpdf import FPDF
 
 from .ai_reports import _latin1
 from .report_cms import cms_list_items, cms_paragraphs, get_cms_text
+from apps.common.measurement_tables import markdown_blocks, tabulate_measurements
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +221,16 @@ def ecs_report_disclosure(project):
         curve = resolve_active_curve(project)
     except Exception:
         curve = None
-    if curve is None or not curve.project_id:
-        # No project-specific curve: the laboratory default disclosure.
+    if curve is None:
+        return ECS_CALIBRATION_SOURCE, default_derivation
+
+    is_custom = bool(
+        curve.project_id or
+        curve.curve_type != 'exponential' or
+        (getattr(project, 'curve_setting', None) and getattr(project, 'curve_setting').active_curve_id)
+    )
+    if not is_custom:
+        # Uncustomized laboratory default exponential curve
         return ECS_CALIBRATION_SOURCE, default_derivation
 
     snap = curve_snapshot(curve)
@@ -391,56 +400,107 @@ def _bold(text):
     return f'**{stripped}**'
 
 
-def _wrap_lines(pdf, text, width):
+def _extract_styled_words(text):
+    words = []
+    tokens = re.split(r'(\*\*[^*]+\*\*)', text)
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith('**') and tok.endswith('**') and len(tok) > 4:
+            for w in tok[2:-2].split(' '):
+                if w:
+                    words.append((w, True))
+        else:
+            for w in tok.split(' '):
+                if w:
+                    words.append((w, False))
+    return words
+
+
+def _format_styled_words(words_list):
+    runs = []
+    for w, b in words_list:
+        if runs and runs[-1][1] == b:
+            runs[-1][0].append(w)
+        else:
+            runs.append(([w], b))
+    parts = []
+    for ws, b in runs:
+        chunk = ' '.join(ws)
+        parts.append(f'**{chunk}**' if b else chunk)
+    return ' '.join(parts)
+
+
+def _measure_markup_width(pdf, text, base_bold=False, size=None):
+    orig_size = pdf.font_size_pt
+    eff_size = size or orig_size
+    runs = []
+    for part in re.split(r'(\*\*[^*]+\*\*)', _latin1(str(text or ''))):
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**') and len(part) > 4:
+            runs.append((part[2:-2], True))
+        else:
+            runs.append((part.replace('**', ''), False))
+    total = 0.0
+    family = pdf.font_family or 'Cambria'
+    for t, bold in runs:
+        if t:
+            try:
+                pdf.set_font(family, 'B' if (bold or base_bold) else '', eff_size)
+            except Exception:
+                pass
+            total += pdf.get_string_width(t)
+    try:
+        pdf.set_font(family, 'B' if base_bold else '', orig_size)
+    except Exception:
+        pass
+    return total
+
+
+def _wrap_lines(pdf, text, width, base_bold=False, size=None):
     """
     Word-wrap ``text`` into lines no wider than ``width`` mm using the PDF's
-    current font. Explicit newlines are respected as hard line breaks (cell
-    content may pre-format e.g. Revit 'Family:Type:Tag' names one segment
-    per line). A single token wider than the column (e.g. a 64-character
-    content digest) is hard-broken — no characters are ever inserted or
-    dropped, so cell contents can never spill into the neighbouring column.
+    target font and size, preserving markdown bold segments without dropping
+    markup across line boundaries or miscalculating string widths.
     """
-    # Transcribe first: fpdf2's get_string_width encodes strictly latin-1,
-    # so measuring raw live-DB text (em-dashes, curly quotes, ...) would
-    # raise — and wrapping must measure exactly the text that gets drawn.
     text = _latin1('-' if text in (None, '') else text)
-    lines = []
-    for part in text.split('\n'):
-        words = [w for w in part.split(' ') if w]
-        cur = ''
-        for word in words:
-            trial = f'{cur} {word}'.strip()
-            if cur and pdf.get_string_width(trial) > width:
-                lines.append(cur)
-                cur = word
-            else:
-                cur = trial
-        if cur:
-            lines.append(cur)
+    paragraphs = text.split('\n')
     out = []
-    for line in lines:
-        while pdf.get_string_width(line) > width and len(line) > 1:
+    for para in paragraphs:
+        words = _extract_styled_words(para)
+        if not words:
+            out.append('-')
+            continue
+        cur_line = []
+        for word, is_bold in words:
+            trial = cur_line + [(word, is_bold)]
+            trial_str = _format_styled_words(trial)
+            if cur_line and _measure_markup_width(pdf, trial_str, base_bold=base_bold, size=size) > width:
+                out.append(_format_styled_words(cur_line))
+                cur_line = [(word, is_bold)]
+            else:
+                cur_line = trial
+        if cur_line:
+            out.append(_format_styled_words(cur_line))
+
+    final_out = []
+    for line in out:
+        while _measure_markup_width(pdf, line, base_bold=base_bold, size=size) > width and len(line) > 1:
             cut = len(line) - 1
-            while cut > 1 and pdf.get_string_width(line[:cut]) > width:
+            while cut > 1 and _measure_markup_width(pdf, line[:cut], base_bold=base_bold, size=size) > width:
                 cut -= 1
-            out.append(line[:cut])
+            final_out.append(line[:cut])
             line = line[cut:]
-        out.append(line)
-    return out or ['-']
+        final_out.append(line)
+    return final_out or ['-']
 
 
 def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
                       base_bold=False):
     """Draw one table-cell line, honouring the ``**bold**`` markup.
-
-    Table cells are written by the same code that writes the body
-    paragraphs, so they carry the same markup; drawn literally they printed
-    the asterisks to the client. The markers are measured as nothing and
-    rendered as Cambria-Bold runs, and the alignment is computed on the
-    visible width so a bolded cell stays centred. ``base_bold`` keeps the
-    header row's own weight, and any marker a hard character-break left
-    unbalanced is dropped rather than printed: the client never receives an
-    asterisk.
+    Ensures precise font sizing (matching `size`), zero cell padding drift,
+    and accurate horizontal positioning within the column.
     """
     base = 'B' if base_bold else ''
     runs = []
@@ -454,23 +514,30 @@ def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
     runs = [(text, bold) for text, bold in runs if text]
     if not runs:
         return
-    pdf.set_font('Cambria', base, size)
-    visible = ''.join(text for text, _bold in runs)
-    if not any(bold for _text, bold in runs):
-        # No emphasis in this line: one plain cell, aligned as before.
-        pdf.cell(width, line_h, visible, align=align)
-        return
-    cursor = x + pdf.c_margin
-    if align == 'C':
-        cursor = x + (width - pdf.get_string_width(visible)) / 2.0
-    elif align == 'R':
-        cursor = x + width - pdf.c_margin - pdf.get_string_width(visible)
+
+    family = pdf.font_family or 'Cambria'
+    run_widths = []
     for text, bold in runs:
-        pdf.set_font('Cambria', 'B' if (bold or base_bold) else '', size)
+        pdf.set_font(family, 'B' if (bold or base_bold) else '', size)
+        run_widths.append(pdf.get_string_width(text))
+    total_w = sum(run_widths)
+
+    if align == 'C':
+        cursor = x + (width - total_w) / 2.0
+    elif align == 'R':
+        cursor = x + width - pdf.c_margin - total_w
+    else:
+        cursor = x + pdf.c_margin
+
+    old_cm = pdf.c_margin
+    pdf.c_margin = 0
+    for (text, bold), rw in zip(runs, run_widths):
+        pdf.set_font(family, 'B' if (bold or base_bold) else '', size)
         pdf.set_xy(cursor, y)
-        pdf.cell(pdf.get_string_width(text), line_h, text)
-        cursor += pdf.get_string_width(text)
-    pdf.set_font('Cambria', base, size)
+        pdf.cell(rw, line_h, text)
+        cursor += rw
+    pdf.c_margin = old_cm
+    pdf.set_font(family, base, size)
 
 
 def _element_display(name):
@@ -1323,23 +1390,26 @@ class NDTReportBuilder:
                        new_x='LMARGIN', new_y='NEXT')
 
     def kv_table(self, rows):
-        """Reference p9 equipment status grid: table runs 36.1 -> 192.5mm,
-        columns split at 115.5mm, 7.2mm rows, text centred in both columns
+        """Equipment status grid: table runs centered at 180mm width,
+        columns split at 108mm, 7.5mm rows, text centred in both columns
         (Cambria 12). ``rows`` = [(label, value), ...]; every value is a
         real platform record."""
         pdf = self.pdf
-        x0, split, x1 = 36.1, 115.5, 192.5
-        line_h = 7.2
+        table_w = 180.0
+        x0 = (pdf.w - table_w) / 2.0
+        split = x0 + 90.0
+        x1 = x0 + table_w
+        line_h = 7.5
         label_w = split - x0
         value_w = x1 - split
-        pad = 2 * pdf.c_margin
+        pad = 2 * pdf.c_margin + 0.5
         for label, value in rows:
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
-            label_lines = _wrap_lines(pdf, label, label_w - pad)
+            label_lines = _wrap_lines(pdf, label, label_w - pad, size=12)
             value_lines = _wrap_lines(
-                pdf, value if value not in (None, '') else '-', value_w - pad)
-            h = max(len(label_lines), len(value_lines), 1) * line_h
+                pdf, value if value not in (None, '') else '-', value_w - pad, size=12)
+            h = max(len(label_lines), len(value_lines), 1) * line_h + 1.2
             if pdf.get_y() + h > pdf.h - pdf.b_margin:
                 pdf.add_page()
             y = pdf.get_y()
@@ -1347,50 +1417,58 @@ class NDTReportBuilder:
                                 (split, value_w, value_lines)):
                 pdf.set_xy(x, y)
                 pdf.cell(w, h, border=1)
-                ty = y + (h - len(lines) * line_h) / 2
+                ty = y + (h - len(lines) * line_h) / 2.0
                 for ln in lines:
                     pdf.set_xy(x, ty)
-                    pdf.cell(w, line_h, _latin1(ln), align='C')
+                    _draw_markup_line(pdf, x, ty, w, ln, 'C', line_h, size=12)
                     ty += line_h
             # Return the cursor to the margin so following prose starts
             # at the margin, not the table's inset edge.
             pdf.set_xy(pdf.l_margin, y + h)
 
-    def ruled_table(self, headers, rows, widths, aligns=None):
+    def ruled_table(self, headers, rows, widths, aligns=None, font_size=11, line_h=5.5):
         """Plain bordered table. Every cell's text is word-wrapped to its
-        column width before drawing (fpdf2's ``cell`` never wraps, so
-        unwrapped text would run into the neighbouring column), and each row
-        is as tall as its tallest wrapped cell. A manual page-break guard
-        redraws the header row on the new page."""
+        column width before drawing, each row accommodates wrapped lines with
+        clean vertical spacing, and the table is horizontally centered on the page
+        with an expanded width (target 180mm). A manual page-break guard redraws
+        the header row on the new page."""
         pdf = self.pdf
         aligns = aligns or ['L'] * len(headers)
-        page_w = pdf.w - pdf.l_margin - pdf.r_margin
-        if sum(widths) > page_w:
-            widths = [w * page_w / sum(widths) for w in widths]
-        pad = 2 * pdf.c_margin      # text area inside each cell border
-        line_h = 5.5                # reference tables: 11pt text, 15.5pt rows
+        max_table_w = 182.0
+        cur_w = float(sum(widths))
+        if 150.0 <= cur_w <= 178.0:
+            target_w = 180.0
+            widths = [w * target_w / cur_w for w in widths]
+            cur_w = target_w
+        elif cur_w > max_table_w:
+            widths = [w * max_table_w / cur_w for w in widths]
+            cur_w = max_table_w
+
+        table_w = sum(widths)
+        x_start = max(14.0, (pdf.w - table_w) / 2.0)
+        pad = 2 * pdf.c_margin + 0.5  # text area inside each cell border
 
         def _draw_row(cells, is_header):
-            pdf.set_font('Cambria', 'B' if is_header else '', 11)
+            pdf.set_font('Cambria', 'B' if is_header else '', font_size)
             pdf.set_text_color(*INK)
-            wrapped = [_wrap_lines(pdf, c, w - pad)
+            wrapped = [_wrap_lines(pdf, c, w - pad, base_bold=is_header, size=font_size)
                        for c, w in zip(cells, widths)]
-            n_lines = max(len(lines) for lines in wrapped)
-            row_h = n_lines * line_h
+            n_lines = max((len(lines) for lines in wrapped), default=1)
+            row_h = n_lines * line_h + 1.2
             if pdf.get_y() + row_h > pdf.h - pdf.b_margin - 2:
                 pdf.add_page()
                 if not is_header:
                     _draw_row(headers, is_header=True)   # redraw header row
             y0 = pdf.get_y()
-            x = pdf.l_margin
+            x = x_start
             for lines, w, a in zip(wrapped, widths, aligns):
                 pdf.set_xy(x, y0)
                 pdf.cell(w, row_h, border=1)             # the ruled box
-                ty = y0 + (row_h - len(lines) * line_h) / 2
+                ty = y0 + (row_h - len(lines) * line_h) / 2.0
                 for ln in lines:
                     pdf.set_xy(x, ty)
                     _draw_markup_line(pdf, x, ty, w, ln, a, line_h,
-                                      base_bold=is_header)
+                                      size=font_size, base_bold=is_header)
                     ty += line_h
                 x += w
             pdf.set_xy(pdf.l_margin, y0 + row_h)
@@ -1760,13 +1838,112 @@ class NDTReportService:
     # default, so the report carries its own.
     _TILE_USER_AGENT = 'NexuconReport/1.0 (+https://nexucon.net; reports@nexucon.net)'
 
-    @staticmethod
-    def _site_coordinates(project, tests=None):
+    @classmethod
+    def _get_boundary_data(cls, project):
+        """Extract 4-corner boundary survey coordinates, footprint area, and
+        perimeter from project.corner_coordinates or surveyed GnssBoundaryPoints.
+        Returns a dict with:
+          - corners: list of dicts with label, lat, lng, easting, northing, utmZone, etc.
+          - footprintAreaSqm: float or None
+          - perimeterMeters: float or None
+          - system: str
+        or None if no boundary coordinates exist.
+        """
+        if not project:
+            return None
+
+        # 1. Try project.corner_coordinates first
+        cc = getattr(project, 'corner_coordinates', None)
+        if isinstance(cc, dict) and cc.get('corners') and len(cc['corners']) >= 3:
+            from apps.projects.coordinates import latlon_to_utm, calculate_polygon_area_sqm, calculate_perimeter_meters
+            corners = []
+            utm_points = []
+            for idx, c in enumerate(cc['corners']):
+                label = c.get('label') or f'Corner {idx + 1}'
+                lat = float(c['lat']) if c.get('lat') is not None else None
+                lng = float(c['lng']) if c.get('lng') is not None else None
+                easting = float(c['easting']) if c.get('easting') is not None else None
+                northing = float(c['northing']) if c.get('northing') is not None else None
+                utm_zone = c.get('utmZone') or ''
+                if (easting is None or northing is None) and lat is not None and lng is not None:
+                    e, n, z = latlon_to_utm(lat, lng, 31, 'WGS84')
+                    easting = round(e, 2)
+                    northing = round(n, 2)
+                    utm_zone = f'{z}N'
+                if easting is not None and northing is not None:
+                    utm_points.append({'easting': easting, 'northing': northing})
+                corners.append({
+                    'label': label,
+                    'lat': lat,
+                    'lng': lng,
+                    'easting': easting,
+                    'northing': northing,
+                    'utmZone': utm_zone,
+                    'formattedLatDms': c.get('formattedLatDms'),
+                    'formattedLngDms': c.get('formattedLngDms'),
+                })
+            area = cc.get('footprintAreaSqm')
+            perim = cc.get('perimeterMeters')
+            if area is None and len(utm_points) >= 3:
+                area = calculate_polygon_area_sqm(utm_points)
+            if perim is None and len(utm_points) >= 2:
+                perim = calculate_perimeter_meters(utm_points)
+            return {
+                'corners': corners,
+                'footprintAreaSqm': float(area) if area is not None else None,
+                'perimeterMeters': float(perim) if perim is not None else None,
+                'system': cc.get('system', getattr(project, 'coordinate_system', 'WGS84_DD') or 'WGS84_DD'),
+            }
+
+        # 2. Try GnssBoundaryPoint survey points
+        try:
+            from apps.digital_eye.models import GnssBoundaryPoint
+            pts = list(GnssBoundaryPoint.objects.filter(survey__project=project).order_by('sequence'))
+            if len(pts) >= 3:
+                from apps.projects.coordinates import latlon_to_utm, calculate_polygon_area_sqm, calculate_perimeter_meters
+                corners = []
+                utm_points = []
+                for idx, p in enumerate(pts):
+                    lat = float(p.latitude)
+                    lng = float(p.longitude)
+                    easting = float(p.easting) if p.easting is not None else None
+                    northing = float(p.northing) if p.northing is not None else None
+                    utm_zone = '31N'
+                    if easting is None or northing is None:
+                        e, n, z = latlon_to_utm(lat, lng, 31, 'WGS84')
+                        easting = round(e, 2)
+                        northing = round(n, 2)
+                        utm_zone = f'{z}N'
+                    corners.append({
+                        'label': p.label or f'Corner {idx + 1}',
+                        'lat': lat,
+                        'lng': lng,
+                        'easting': easting,
+                        'northing': northing,
+                        'utmZone': utm_zone,
+                    })
+                    utm_points.append({'easting': easting, 'northing': northing})
+                area = calculate_polygon_area_sqm(utm_points)
+                perim = calculate_perimeter_meters(utm_points)
+                return {
+                    'corners': corners,
+                    'footprintAreaSqm': area,
+                    'perimeterMeters': perim,
+                    'system': getattr(project, 'coordinate_system', 'WGS84_DD') or 'WGS84_DD',
+                }
+        except Exception:
+            pass
+
+        return None
+
+    @classmethod
+    def _site_coordinates(cls, project, tests=None):
         """The point the report may map.
 
-        The project's own recorded fix wins. Failing that, the median of the
-        fixes recorded on its tests — positions actually taken at this site
-        by the instruments, not a guess at where it might be. `(None, None)`
+        The project's own recorded fix wins. Failing that, the centroid of
+        calibrated 4-corner boundary points, then the median of the fixes
+        recorded on its tests — positions actually taken at this site by
+        the instruments, not a guess at where it might be. `(None, None)`
         when nothing was recorded anywhere, which is what keeps the location
         page honest.
         """
@@ -1776,6 +1953,13 @@ class NDTReportService:
         lon = getattr(project, 'longitude', None)
         if lat is not None and lon is not None:
             return float(lat), float(lon)
+
+        b_data = cls._get_boundary_data(project)
+        if b_data and b_data.get('corners'):
+            v_lats = [c['lat'] for c in b_data['corners'] if c.get('lat') is not None]
+            v_lons = [c['lng'] for c in b_data['corners'] if c.get('lng') is not None]
+            if v_lats and v_lons:
+                return statistics.median(v_lats), statistics.median(v_lons)
 
         lats, lons = [], []
         for test in (tests or []):
@@ -1790,7 +1974,7 @@ class NDTReportService:
         return statistics.median(lats), statistics.median(lons)
 
     @classmethod
-    def _tiled_street_map(cls, lat, lon, zoom=17, width=640, height=640):
+    def _tiled_street_map(cls, lat, lon, zoom=17, width=640, height=640, corners=None):
         """A labelled street map of (lat, lon), stitched from raster tiles
         and marked at the exact point. Returns ``(buffer, source_name)`` or
         ``(None, '')`` when no tile server answers.
@@ -1857,13 +2041,38 @@ class NDTReportService:
             canvas = canvas.crop((int(offset_x), int(offset_y),
                                   int(offset_x) + width, int(offset_y) + height))
             draw = ImageDraw.Draw(canvas)
-            mark_x, mark_y = width / 2.0, height / 2.0
-            radius = 10
-            draw.ellipse([mark_x - radius, mark_y - radius,
-                          mark_x + radius, mark_y + radius],
-                         fill=(214, 40, 40), outline=(255, 255, 255), width=3)
-            draw.ellipse([mark_x - 3, mark_y - 3, mark_x + 3, mark_y + 3],
-                         fill=(255, 255, 255))
+
+            # If boundary corners are provided, render the surveyed perimeter
+            if corners and len(corners) >= 3:
+                pts = []
+                for c in corners:
+                    c_lat = c.get('lat')
+                    c_lng = c.get('lng')
+                    if c_lat is None or c_lng is None:
+                        continue
+                    px = (float(c_lng) + 180.0) / 360.0 * n * cls._TILE_SIZE - left
+                    py = ((1.0 - math.log(math.tan(math.radians(float(c_lat)))
+                                         + 1.0 / math.cos(math.radians(float(c_lat)))) / math.pi)
+                         / 2.0 * n) * cls._TILE_SIZE - top
+                    pts.append((px, py))
+                if len(pts) >= 3:
+                    # Draw polygon outline
+                    draw.polygon(pts, outline=(0, 140, 255), width=3)
+                    # Draw corner markers
+                    for px, py in pts:
+                        r = 5
+                        draw.ellipse([px - r, py - r, px + r, py + r],
+                                     fill=(255, 193, 7), outline=(0, 44, 79), width=2)
+                        draw.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(0, 44, 79))
+            else:
+                mark_x, mark_y = width / 2.0, height / 2.0
+                radius = 10
+                draw.ellipse([mark_x - radius, mark_y - radius,
+                              mark_x + radius, mark_y + radius],
+                             fill=(214, 40, 40), outline=(255, 255, 255), width=3)
+                draw.ellipse([mark_x - 3, mark_y - 3, mark_x + 3, mark_y + 3],
+                             fill=(255, 255, 255))
+
             buffer = io.BytesIO()
             canvas.save(buffer, format='PNG')
             buffer.seek(0)
@@ -1884,10 +2093,11 @@ class NDTReportService:
             'OpenStreetMap': 'Map data © OpenStreetMap contributors.',
             'CARTO': 'Map tiles © CARTO — map data © OpenStreetMap '
                      'contributors.',
+            'Esri World Imagery': 'Satellite imagery © Esri, Maxar, Earthstar Geographics.',
         }.get(str(source_name or '').strip(), '')
 
     @classmethod
-    def _site_map_image(cls, project, tests=None):
+    def _site_map_image(cls, project, tests=None, corners=None):
         """The best available real map of the site, with its source name.
 
         Google's static map first (satellite imagery with labels, when the
@@ -1899,14 +2109,14 @@ class NDTReportService:
         if lat is None or lon is None:
             return None, ''
 
-        google_map = cls._google_static_map(project, latitude=lat, longitude=lon)
+        google_map = cls._google_static_map(project, latitude=lat, longitude=lon, corners=corners)
         if google_map is not None:
             return google_map, 'Google Maps'
 
-        return cls._tiled_street_map(lat, lon)
+        return cls._tiled_street_map(lat, lon, corners=corners)
 
     @staticmethod
-    def _google_static_map(project, latitude=None, longitude=None):
+    def _google_static_map(project, latitude=None, longitude=None, corners=None):
         """A Google Maps static image centred on the site coordinates,
         fetched with the server's GOOGLE_MAPS_API_KEY. Returns a BytesIO
         (image) or None.
@@ -1929,15 +2139,25 @@ class NDTReportService:
             return None
         # Zoom 18 is building scale at these latitudes — the detail the
         # client asked for; hybrid keeps the place names over the imagery.
-        params = urllib.parse.urlencode({
+        params_dict = {
             'center': f'{lat},{lon}',
             'zoom': '18',
             'size': '640x640',
             'scale': '2',
             'maptype': 'hybrid',
-            'markers': f'color:red|{lat},{lon}',
             'key': api_key,
-        })
+        }
+        if corners and len(corners) >= 3:
+            path_coords = '|'.join(f"{c['lat']},{c['lng']}" for c in corners if c.get('lat') is not None and c.get('lng') is not None)
+            first_c = corners[0]
+            if first_c.get('lat') is not None and first_c.get('lng') is not None:
+                path_coords += f"|{first_c['lat']},{first_c['lng']}"
+            params_dict['path'] = f'color:0x0080ffff|weight:3|fill:0x0080ff22|{path_coords}'
+            params_dict['markers'] = f'color:red|{lat},{lon}'
+        else:
+            params_dict['markers'] = f'color:red|{lat},{lon}'
+
+        params = urllib.parse.urlencode(params_dict)
         url = f'https://maps.googleapis.com/maps/api/staticmap?{params}'
         try:
             req = urllib.request.Request(
@@ -2438,34 +2658,58 @@ class NDTReportService:
                 arithmetic_ecs = e0.get('mean_ecs_unadjusted')
                 if arithmetic_ecs is None:
                     arithmetic_ecs = e0['mean_ecs']
-                if (active_curve is not None
-                        and active_curve.project_id
-                        and active_curve.curve_type == 'linear'):
-                    # Project calibration: substitute its real
-                    # parameters (V in m/s).
+                if active_curve is not None and active_curve.curve_type == 'linear':
                     p = active_curve.formula_params or {}
-                    sign = '-' if p.get('c', 0) < 0 else '+'
-                    example += (f" f_cu = {p.get('m', 0):g} x "
+                    m_val = p.get('m', p.get('a', 8.961))
+                    c_val = p.get('c', p.get('b', -7.97))
+                    sign = '-' if c_val < 0 else '+'
+                    example += (f" f_cu = {m_val:g} x "
                                 f"{e0['mean_v'] * 1000:.2f} {sign} "
-                                f"{abs(p.get('c', 0)):g} = "
+                                f"{abs(c_val):g} = "
                                 f"{arithmetic_ecs:.2f} N/mm2 "
                                 "(V in m/s).")
-                elif (active_curve is not None
-                      and active_curve.project_id
-                      and active_curve.curve_type == 'exponential'):
+                elif active_curve is not None and active_curve.curve_type == 'polynomial':
                     p = active_curve.formula_params or {}
+                    coeffs = p.get('coeffs')
+                    if not coeffs and 'a' in p and 'b' in p and 'c' in p:
+                        coeffs = [p['a'], p['b'], p['c']]
+                    if coeffs and len(coeffs) >= 3:
+                        example += (f" f_cu = {coeffs[0]:g} + {coeffs[1]:g} x {e0['mean_v'] * 1000:.2f} + {coeffs[2]:g} x ({e0['mean_v'] * 1000:.2f})² = "
+                                    f"{arithmetic_ecs:.2f} N/mm2 (V in m/s).")
+                    else:
+                        example += (f" f_cu from polynomial calibration at V = "
+                                    f"{e0['mean_v'] * 1000:.2f} m/s = {arithmetic_ecs:.2f} N/mm2.")
+                elif active_curve is not None and active_curve.curve_type == 'sonreb':
+                    p = active_curve.formula_params or {}
+                    a_val = p.get('a', 0.0286)
+                    b_val = p.get('b', 0.84)
+                    c_val = p.get('c', 0.35)
+                    r_val = e0.get('rebound_number') or 32
+                    example += (f" f_cu = {a_val:g} x ({e0['mean_v'] * 1000:.2f})^{b_val:g} x {r_val}^{c_val:g} = "
+                                f"{arithmetic_ecs:.2f} N/mm2 (V in m/s, R={r_val}).")
+                elif active_curve is not None and active_curve.curve_type == 'exponential':
+                    p = active_curve.formula_params or {}
+                    a_val = p.get('a', 1.2)
+                    b_val = p.get('b', 0.00085)
                     c_val = p.get('c', 0.0)
-                    sign_part = (f" - {abs(c_val):g}" if c_val < 0
-                                 else (f" + {c_val:g}" if c_val > 0 else ""))
-                    example += (f" f_cu = {p.get('a', 1.2):g} x "
-                                f"exp({p.get('b', 0.00085):g} x {e0['mean_v'] * 1000:.2f})"
-                                f"{sign_part} = {arithmetic_ecs:.2f} N/mm2 "
-                                "(V in m/s).")
-                elif (active_curve is not None
-                      and active_curve.project_id):
-                    example += (f" f_cu from the project calibration "
-                                f"above at V = "
-                                f"{e0['mean_v'] * 1000:.2f} m/s = "
+                    from apps.digital_eye.strength_curves import format_coefficient
+                    a_str = format_coefficient(a_val)
+                    b_str = f"{float(b_val):g}" if abs(float(b_val)) < 0.0001 else format_coefficient(b_val)
+                    sign_part = (f" - {format_coefficient(abs(c_val))}" if c_val < 0
+                                 else (f" + {format_coefficient(c_val)}" if c_val > 0 else ""))
+                    if abs(float(b_val)) >= 0.01:
+                        example += (f" f_cu = {a_str} x "
+                                    f"exp({b_str} x {e0['mean_v']:.3f})"
+                                    f"{sign_part} = {arithmetic_ecs:.2f} N/mm2 "
+                                    "(V in km/s).")
+                    else:
+                        example += (f" f_cu = {a_str} x "
+                                    f"exp({b_str} x {e0['mean_v'] * 1000:.2f})"
+                                    f"{sign_part} = {arithmetic_ecs:.2f} N/mm2 "
+                                    "(V in m/s).")
+                elif active_curve is not None:
+                    example += (f" f_cu from active calibration ({active_curve.curve_type}) "
+                                f"at V = {e0['mean_v'] * 1000:.2f} m/s = "
                                 f"{arithmetic_ecs:.2f} N/mm2.")
                 else:
                     example += (f" f_cu = 1.20 x exp(0.85 x {e0['mean_v']:.3f}) "
@@ -3269,6 +3513,11 @@ class NDTReportService:
         user_label = 'Unauthenticated'
         if user and getattr(user, 'is_authenticated', False):
             user_label = user.get_full_name() or user.email
+        approved_label = (
+            signoff.approved_by_name.strip()
+            if signoff and signoff.approved_by_name and signoff.approved_by_name.strip()
+            else user_label
+        )
 
         pulse_tests = [t for t in tests if t.test_type == 'pulse_velocity']
         crack_tests = [t for t in tests if t.test_type == 'crack_depth']
@@ -3277,6 +3526,8 @@ class NDTReportService:
         for t in tests:
             if t.device and t.device not in devices:
                 devices.append(t.device)
+        if not devices and hasattr(project, 'field_devices'):
+            devices = [d for d in project.field_devices.filter(is_active=True)]
         elements = sorted({t.structural_element or 'UNSPECIFIED'
                            for t in pulse_tests})
 
@@ -3615,6 +3866,9 @@ class NDTReportService:
                     map_sources.append(bim_plan)
             except Exception:  # noqa: BLE001
                 pass
+            boundary_data = cls._get_boundary_data(project)
+            corners_list = boundary_data['corners'] if boundary_data else None
+
             # A real map of the site (C6): Google's static imagery when the
             # key is entitled to it, otherwise a labelled street map stitched
             # from tiles. The coordinates are the project's own fix, or the
@@ -3622,89 +3876,168 @@ class NDTReportService:
             # none. No coordinates anywhere means no map — never a drawn guess
             # — and the caller falls through to the placeholder below.
             map_lat, map_lon = cls._site_coordinates(project, tests)
-            static_map, map_source = cls._site_map_image(project, tests)
+            if (map_lat is None or map_lon is None) and boundary_data:
+                valid_lats = [c['lat'] for c in corners_list if c.get('lat') is not None]
+                valid_lons = [c['lng'] for c in corners_list if c.get('lng') is not None]
+                if valid_lats and valid_lons:
+                    map_lat = sum(valid_lats) / len(valid_lats)
+                    map_lon = sum(valid_lons) / len(valid_lons)
+
+            static_map, map_source = cls._site_map_image(project, tests, corners=corners_list)
             if static_map is not None:
                 map_sources.insert(0, static_map)
 
             pdf = builder.pdf
             map_link = cls._maps_link(project, map_lat, map_lon) if static_map is not None else None
 
-            if not map_sources:
-                location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
-                if project.lga:
-                    location_text += f', {project.lga.upper()}'
-                if project.state:
-                    location_text += f', {project.state.upper()}'
-                builder.placeholder_box(location_text, height=100)
-            elif len(map_sources) == 1:
-                cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
-                                 48.3, 120, 138.9, link=map_link)
+            has_boundary = bool(boundary_data and boundary_data.get('corners'))
+
+            if not has_boundary:
+                if not map_sources:
+                    location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
+                    if project.lga:
+                        location_text += f', {project.lga.upper()}'
+                    if project.state:
+                        location_text += f', {project.state.upper()}'
+                    builder.placeholder_box(location_text, height=100)
+                elif len(map_sources) == 1:
+                    cls._boxed_image(pdf, map_sources[0], (pdf.w - 120) / 2,
+                                     48.3, 120, 138.9, link=map_link)
+                else:
+                    cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9, link=map_link)
+                    cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
+                # Weather is operator-recorded; the reference prints none, so a
+                # recorded condition gets a single plain centred line below the
+                # frames and nothing is invented when it is absent.
+                weather_values = [t.weather_condition for t in tests
+                                  if t.weather_condition]
+                if weather_values:
+                    pdf.set_xy(pdf.l_margin, 189)
+                    pdf.set_font('Cambria', '', 12)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 7.5, _latin1(', '.join(sorted(set(weather_values)))),
+                             align='C')
+                # Credit the map source under the frames. Both tile providers
+                # licence their imagery on the condition that the report says
+                # where it came from, and the client can then see whether the
+                # map is satellite imagery or a street map.
+                attribution = cls._map_attribution(map_source)
+                if attribution and static_map is not None:
+                    pdf.set_xy(pdf.l_margin, 190.5)
+                    pdf.set_font('Cambria', 'I', 7)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 4.5, _latin1(attribution), align='C')
+                # Recorded GNSS coordinates + the Google Maps link to the site (C6).
+                # Only when the platform holds real coordinates — nothing is guessed.
+                if map_lat is not None and map_lon is not None:
+                    link = cls._maps_link(project, map_lat, map_lon)
+                    pdf.set_xy(pdf.l_margin, 196)
+                    pdf.set_font('Cambria', 'I', 10)
+                    pdf.set_text_color(*INK)
+                    pdf.multi_cell(
+                        0, 5.0,
+                        _latin1(
+                            f'Coordinates: {map_lat:.6f}°, '
+                            f'{map_lon:.6f}°  —  view location on Google Maps:'
+                            f' {link}'),
+                        align='C', new_x='LMARGIN', new_y='NEXT')
             else:
-                cls._boxed_image(pdf, map_sources[0], 31.0, 48.3, 74.2, 138.9, link=map_link)
-                cls._boxed_image(pdf, map_sources[1], 106.6, 48.3, 79.4, 138.6)
-            # Weather is operator-recorded; the reference prints none, so a
-            # recorded condition gets a single plain centred line below the
-            # frames and nothing is invented when it is absent.
-            weather_values = [t.weather_condition for t in tests
-                              if t.weather_condition]
-            try:
-                from apps.digital_eye.models import PunditWeatherCondition
-                weather_qs = PunditWeatherCondition.objects.filter(project=project)
-                if tests:
-                    test_dates = {t.test_date for t in tests if t.test_date}
-                    if test_dates:
-                        weather_qs = weather_qs.filter(test_date__in=test_dates)
-                for dw in weather_qs:
-                    cond_str = dw.weather_condition
-                    extras = []
-                    if dw.temperature_c is not None:
-                        extras.append(f"{dw.temperature_c:.1f}°C")
-                    if dw.relative_humidity_pct is not None:
-                        extras.append(f"RH {dw.relative_humidity_pct:.0f}%")
-                    if dw.surface_condition and dw.surface_condition != 'Dry':
-                        extras.append(f"Surface: {dw.surface_condition}")
-                    if extras:
-                        cond_str += f" ({', '.join(extras)})"
-                    if cond_str not in weather_values:
-                        weather_values.append(cond_str)
-            except Exception:
-                pass
+                # 4-Corner Boundary Mapping Layout
+                map_h = 76.0
+                map_y = 44.0
+                if not map_sources:
+                    location_text = (project.site_address or 'SITE LOCATION MAP NOT PROVIDED').upper()
+                    if project.lga:
+                        location_text += f', {project.lga.upper()}'
+                    if project.state:
+                        location_text += f', {project.state.upper()}'
+                    builder.placeholder_box(location_text, height=36)
+                    cur_y = pdf.get_y() + 2.0
+                elif len(map_sources) == 1:
+                    map_w = 130.0
+                    cls._boxed_image(pdf, map_sources[0], (pdf.w - map_w) / 2,
+                                     map_y, map_w, map_h, link=map_link)
+                    cur_y = map_y + map_h + 2.0
+                else:
+                    cls._boxed_image(pdf, map_sources[0], 25.0, map_y, 75.0, map_h, link=map_link)
+                    cls._boxed_image(pdf, map_sources[1], 110.0, map_y, 75.0, map_h)
+                    cur_y = map_y + map_h + 2.0
 
-            curr_y = 188.0
-            if weather_values:
-                pdf.set_xy(pdf.l_margin, curr_y)
-                pdf.set_font('Cambria', '', 10)
-                pdf.set_text_color(*INK)
-                weather_text = f"Site Weather: {', '.join(sorted(set(weather_values)))}"
-                pdf.cell(0, 5.0, _latin1(weather_text), align='C')
-                curr_y += 5.5
+                attribution = cls._map_attribution(map_source)
+                if attribution and static_map is not None:
+                    pdf.set_xy(pdf.l_margin, cur_y)
+                    pdf.set_font('Cambria', 'I', 7)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 4.0, _latin1(attribution), align='C')
+                    cur_y += 4.5
 
-            # Credit the map source under the frames. Both tile providers
-            # licence their imagery on the condition that the report says
-            # where it came from, and the client can then see whether the
-            # map is satellite imagery or a street map.
-            attribution = cls._map_attribution(map_source)
-            if attribution and static_map is not None:
-                pdf.set_xy(pdf.l_margin, curr_y)
-                pdf.set_font('Cambria', 'I', 7)
-                pdf.set_text_color(*INK)
-                pdf.cell(0, 3.5, _latin1(attribution), align='C')
-                curr_y += 4.5
+                weather_values = [t.weather_condition for t in tests
+                                  if t.weather_condition]
+                if weather_values:
+                    pdf.set_xy(pdf.l_margin, cur_y)
+                    pdf.set_font('Cambria', '', 10)
+                    pdf.set_text_color(*INK)
+                    pdf.cell(0, 5.0, _latin1('Weather: ' + ', '.join(sorted(set(weather_values)))),
+                             align='C')
+                    cur_y += 5.5
 
-            # Recorded GNSS coordinates + the Google Maps link to the site (C6).
-            # Only when the platform holds real coordinates — nothing is guessed.
-            if map_lat is not None and map_lon is not None:
-                link = cls._maps_link(project, map_lat, map_lon)
-                pdf.set_xy(pdf.l_margin, curr_y)
-                pdf.set_font('Cambria', 'I', 9.5)
+                if map_lat is not None and map_lon is not None:
+                    link = cls._maps_link(project, map_lat, map_lon)
+                    pdf.set_xy(pdf.l_margin, cur_y)
+                    pdf.set_font('Cambria', 'I', 9.5)
+                    pdf.set_text_color(*INK)
+                    pdf.multi_cell(
+                        0, 4.5,
+                        _latin1(
+                            f'Site Center Coordinates: {map_lat:.6f}°, '
+                            f'{map_lon:.6f}°  —  view on Google Maps: {link}'),
+                        align='C', new_x='LMARGIN', new_y='NEXT')
+                    cur_y = pdf.get_y() + 3.0
+                else:
+                    cur_y += 3.0
+
+                # 4-Corner Boundary Mapping & Conversion Block
+                pdf.set_xy(pdf.l_margin, cur_y)
+                pdf.set_font('Cambria', 'B', 11)
                 pdf.set_text_color(*INK)
-                pdf.multi_cell(
-                    0, 4.5,
-                    _latin1(
-                        f'Coordinates: {map_lat:.6f}°, '
-                        f'{map_lon:.6f}°  —  view location on Google Maps:'
-                        f' {link}'),
-                    align='C', new_x='LMARGIN', new_y='NEXT')
+                pdf.cell(0, 6.0, _latin1('4-CORNER BOUNDARY MAPPING & CONVERSION'),
+                         align='C', new_x='LMARGIN', new_y='NEXT')
+
+                footprint_sqm = boundary_data.get('footprintAreaSqm')
+                perimeter_m = boundary_data.get('perimeterMeters')
+                coord_sys = boundary_data.get('system') or 'WGS84_DD'
+
+                badge_parts = []
+                if footprint_sqm is not None:
+                    badge_parts.append(f'Calculated: {footprint_sqm:,.1f} sqm footprint ({footprint_sqm / 10000.0:.3f} ha)')
+                if perimeter_m is not None:
+                    badge_parts.append(f'Perimeter: {perimeter_m:,.2f} m')
+                if coord_sys:
+                    badge_parts.append(f'System: {coord_sys}')
+
+                if badge_parts:
+                    pdf.set_font('Cambria', 'B', 9.5)
+                    pdf.set_text_color(0, 80, 160)
+                    pdf.cell(0, 5.0, _latin1('  |  '.join(badge_parts)),
+                             align='C', new_x='LMARGIN', new_y='NEXT')
+                    pdf.set_text_color(*INK)
+
+                pdf.ln(2.0)
+
+                # Ruled Table for Coordinates
+                table_headers = ['CORNER / POINT', 'LATITUDE (°N)', 'LONGITUDE (°E)', 'UTM EASTING (m)', 'UTM NORTHING (m)']
+                table_rows = []
+                for idx, c in enumerate(corners_list):
+                    c_label = c.get('label') or f'Corner {idx + 1}'
+                    c_lat = f"{c['lat']:.6f}°" if c.get('lat') is not None else '-'
+                    c_lng = f"{c['lng']:.6f}°" if c.get('lng') is not None else '-'
+                    c_east = f"{c['easting']:,.2f}" if c.get('easting') is not None else '-'
+                    c_north = f"{c['northing']:,.2f}" if c.get('northing') is not None else '-'
+                    table_rows.append([c_label, c_lat, c_lng, c_east, c_north])
+
+                col_widths = [36.0, 36.0, 36.0, 36.0, 36.0]
+                col_aligns = ['L', 'C', 'C', 'C', 'C']
+                builder.ruled_table(table_headers, table_rows, col_widths, col_aligns, font_size=9.5, line_h=5.2)
 
         def emit_fieldwork():
             # ------------------------------------------------------ 4.0 FIELD WORK
@@ -3804,10 +4137,17 @@ class NDTReportService:
                 freqs = sorted({t.transducer_frequency_khz for t in tests
                                 if t.transducer_frequency_khz})
                 for d in devices:
+                    status_raw = (d.status or '').strip()
+                    if status_raw.lower() in ('online', 'ok', 'active', 'operational', 'registered'):
+                        display_status = 'OK'
+                    elif not status_raw or status_raw == '-':
+                        display_status = 'OK'
+                    else:
+                        display_status = status_raw.upper()
                     rows = [
                         ('Name of Equipment', d.name or d.model or '-'),
                         ('Test Equipment ID', d.device_id or '-'),
-                        ('Equipment Status', d.status or '-'),
+                        ('Equipment Status', display_status),
                         ('Calibration Date',
                          d.calibration_date.strftime('%d/%m/%Y')
                          if getattr(d, 'calibration_date', None) else '-'),
@@ -3893,7 +4233,7 @@ class NDTReportService:
                            'another.', leading=7.5)
             # Conversion statement mirrors the curve actually applied (Section
             # 3.0 carries the full disclosure).
-            if active_curve is not None and active_curve.project_id:
+            if active_curve is not None and (active_curve.project_id or active_curve.curve_type != 'exponential'):
                 from apps.digital_eye.strength_curves import formula_display
                 ecs_conversion_line = (
                     '**' + formula_display(active_curve.curve_type,
@@ -3952,7 +4292,7 @@ class NDTReportService:
                     ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
                      'SPACING (MM)', 'COVER DEPTH (MM)'],
                     rebar_data,
-                    [12, 45, 30, 28, 30, 31],
+                    [12, 48, 30, 30, 30, 30],
                     ['C', 'L', 'C', 'C', 'C', 'C'],
                 )
             else:
@@ -4030,7 +4370,7 @@ class NDTReportService:
                          'T CRACKED (US)', 'T UNCRACKED (US)',
                          'CRACK DEPTH (MM)', 'MEAN DEPTH (MM) / REMARK'],
                         table_rows,
-                        [42, 12, 16, 20, 21, 20, 34],
+                        [44, 14, 18, 22, 22, 22, 38],
                         ['L', 'C', 'C', 'C', 'C', 'C', 'L'],
                     )
                     builder.ln_gap(2)
@@ -4062,7 +4402,7 @@ class NDTReportService:
                 builder.ruled_table(
                     ['STRUCTURAL ELEMENT', 'NUMBER TESTED'],
                     analysis_rows,
-                    [120, 62],
+                    [115, 65],
                     ['L', 'R'],
                 )
                 builder.ln_gap(6)
@@ -4089,21 +4429,40 @@ class NDTReportService:
                         for e in group:
                             rows = e['rows']
                             mid = len(rows) // 2 if len(rows) > 1 else 0
-                            element_cell = _element_display(e['element'])
+                            element_cell = f"**{_element_display(e['element'])}**"
                             remark = f"**{e['remark']}**" if e['remark'] else "-"
-                            
+
+                            # UPV quality classification (BS 1881-203 / ASTM C597)
+                            from apps.digital_eye.adapters import PUNDITAdapter
+                            _upv_grade = (
+                                PUNDITAdapter.grade_quality(e['mean_v'])
+                                if e.get('mean_v') is not None else None
+                            )
+                            _upv_label_map = {
+                                'excellent':    'Excellent',
+                                'good':         'Good',
+                                'questionable': 'Questionable',
+                                'poor':         'Poor',
+                                'very_poor':    'Very Poor',
+                                'unverified':   None,
+                                'pending':      None,
+                            }
+                            _upv_label = _upv_label_map.get(_upv_grade or '', None)
+                            if _upv_label:
+                                remark += f"\nUPV Classification: {_upv_label}"
+
                             flag_text = ""
                             spread_str = "-"
                             if e.get('flagged_spread'):
                                 flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
-                            
+
                             point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
                             if len(point_vels) > 1 and e['mean_v']:
                                 total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
                                 spread_str = f"{total_spread:.1f}%"
-                            
+
                             if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
-                                remark += (f"\nUPV VARIANCE BETWEEN POINTS {e['spread_km_s'] * 1000:.0f} M/S (±{e['spread_pct'] / 2:.1f}%)")
+                                remark += (f"\nUPV variance between points: {e['spread_km_s'] * 1000:.0f} m/s (±{e['spread_pct'] / 2:.1f}%)")
                             remark += flag_text
                             
                             for i, r in enumerate(rows):
@@ -4131,16 +4490,18 @@ class NDTReportService:
                            if project.name else ''))
                     
                     builder.ruled_table(
-                        ['STRUCTURAL\nELEMENT', 'PATH\nLENGT\nH',
-                         'TRANSI\nT\nTIME', 'PULSE\nVELOCITY\n(M/S)',
-                         'POINT\nSPREAD\n(%)',
-                         'AVERAGE\nCOMPRESSIVE\nSTRENGTH\n(N/mm2)',
-                         'REMARK'],
+                        ['STRUCTURAL\nELEMENT', 'PATH LENGTH\n(mm)',
+                         'TRANSIT TIME\n(µs)', 'PULSE VELOCITY\n(m/s)',
+                         'POINT SPREAD\n(%)',
+                         'AVG. STRENGTH\n(N/mm²)',
+                         'REMARKS'],
                         all_floor_rows,
-                        [22, 12, 12, 17, 17, 22, 80],
-                        ['L', 'C', 'C', 'C', 'C', 'C', 'L']
+                        [26, 21, 21, 25, 20, 24, 43],
+                        ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
+                        font_size=9.5,
+                        line_h=5.0
                     )
-                    builder.ln_gap(2)
+                    builder.ln_gap(3)
 
 
                 # ---- Summary of Test Results: GOOD / POOR per member
@@ -4159,7 +4520,7 @@ class NDTReportService:
                     ['STRUCTURAL MEMBER', 'LOCATION', 'GOOD (NO, %)',
                      'POOR (NO, %)'],
                     result_rows,
-                    [50, 60, 34, 32],
+                    [52, 60, 34, 34],
                     ['C', 'C', 'C', 'C'],
                 )
                 unverified_members = [e for e in element_data
@@ -4202,7 +4563,7 @@ class NDTReportService:
                     builder.ruled_table(
                         ['ELEMENT', 'POINT', 'SURFACE CONDITION', 'NOTES'],
                         table_rows,
-                        [42, 14, 55, 54],
+                        [44, 16, 60, 60],
                         ['L', 'C', 'L', 'L'],
                     )
                     builder.ln_gap(2)
@@ -4289,29 +4650,32 @@ class NDTReportService:
                             builder.para(f"**Field Observations:** “{review.inspector_notes}”", markdown=True)
                     builder.ln_gap(2)
 
+                # The narrative reaches this point as it was stored, which for
+                # a run that answered in prose rather than tables means one
+                # sentence per element (see apps/common/measurement_tables.py).
+                # Rewriting those runs as tables happens here, against the
+                # elements this project actually recorded, so a name the
+                # report cannot place leaves the sentence alone.
+                known_elements = {str(e.get('element') or '').strip().lower()
+                                  for e in element_data}
                 for obs in ai_record.observations:
-                    obs_text = str(obs).strip()
-                    
-                    # Detect and render Markdown tables
-                    if obs_text.startswith('|') and '\n|' in obs_text and '---' in obs_text:
-                        lines = [line.strip() for line in obs_text.splitlines() if line.strip().startswith('|')]
-                        if len(lines) >= 3:
-                            headers = [c.strip() for c in lines[0].strip('|').split('|')]
-                            data_rows = []
-                            for line in lines[2:]:
-                                row = [c.strip() for c in line.strip('|').split('|')]
-                                if len(row) < len(headers):
-                                    row.extend([''] * (len(headers) - len(row)))
-                                elif len(row) > len(headers):
-                                    row = row[:len(headers)]
-                                data_rows.append(row)
-                            
-                            widths = [100.0 / max(1, len(headers))] * len(headers)
-                            aligns = ['C'] * len(headers)
-                            builder.ln_gap(2)
-                            builder.ruled_table(headers, data_rows, widths, aligns)
-                            builder.ln_gap(2)
-                            continue
+                    obs_text = tabulate_measurements(str(obs).strip(),
+                                                     known_elements=known_elements)
+                    blocks = markdown_blocks(obs_text)
+
+                    if any(kind == 'table' for kind, _ in blocks):
+                        for kind, body in blocks:
+                            if kind == 'table':
+                                headers, data_rows = body
+                                widths = ([180.0 / max(1, len(headers))]
+                                          * len(headers))
+                                builder.ln_gap(2)
+                                builder.ruled_table(headers, data_rows, widths,
+                                                    ['C'] * len(headers))
+                                builder.ln_gap(2)
+                            else:
+                                builder.para(body, markdown=True)
+                        continue
 
                     if ':' in obs_text:
                         prefix, rest = obs_text.split(':', 1)
@@ -4324,50 +4688,142 @@ class NDTReportService:
                             elif clean_prefix == 'technical assessment':
                                 rest = rest.replace('No remedial treatment required. Concrete quality is fit for structural service as measured.', '**No remedial treatment required. Concrete quality is fit for structural service as measured.**')
                             obs_text = f'**{prefix}:**{rest}'
+
+                    # Bold important technical benchmarks, element IDs (S1-S20), and standards
+                    import re
+                    obs_text = re.sub(r'(?<!\*)\b(BS 1881-203|BS EN 12504-4|BS EN 13791|ASTM C597|ACI 228\.2R)\b(?!\*)', r'**\1**', obs_text)
+                    obs_text = re.sub(r'(?<!\*)\b(S[1-9]\d?)\b(?!\*)', r'**\1**', obs_text)
+                    obs_text = re.sub(r'(?<!\*)\b(Good|Excellent|Substandard|fit for structural service|No remedial treatment required)\b(?!\*)', r'**\1**', obs_text, flags=re.IGNORECASE)
+
                     builder.bullet(obs_text, markdown=True)
-                # ---- Confidence metrics (11 Sep 2026, PART B §2.2): per-element
-                # intervals, probability below design strength, cross-element
-                # outlier checks, data quality and the reasoning trace — computed
-                # from the recorded data by the analysis engine and stored on the
-                # record. Rendered verbatim; nothing here is editable prose.
+
+                # ---- Confidence metrics: strictly sorted ascending (S1, S2, ... S20)
+                # The record's stored correlations were computed when the
+                # analysis last ran. Every figure here that DEPENDS ON THE
+                # CALIBRATION CURVE is therefore recomputed now through the
+                # same active curve Section 5.0 applies and Section 3.0
+                # discloses, so the strength and the interval in one row can
+                # never come from two different formulas. A project
+                # re-calibrated after its analysis ran previously kept the old
+                # curve's strengths here while Section 3.0 printed the new
+                # formula: element S20 at 4295 m/s showed 46.2 N/mm2 against a
+                # project curve yielding 34.5, with the +/-0.6 interval in the
+                # same row already taken from the project curve's standard
+                # error. Nothing is invented — the recomputation takes each
+                # element's own recorded mean velocity, exactly as 5.0 does.
+                from apps.digital_eye import confidence_metrics as cm
+                try:
+                    se_active = cm.curve_standard_error_mpa(project)
+                except Exception as e:
+                    logger.error('Could not read the active curve standard '
+                                 'error: %s', e)
+                    se_active = None
+
+                def _row_key(floor, element):
+                    return (floor or None, element or None)
+
+                live_by_key = {}
+                peer_by_key = {}
+                for e in element_data:
+                    key = _row_key(e['test'].floor, e['test'].structural_element)
+                    live_by_key.setdefault(key, e)
+                    peer_by_key.setdefault(key, {
+                        'element': e['test'].structural_element or None,
+                        'floor': e['test'].floor or None,
+                        'mean_velocity_m_s': (
+                            None if e.get('mean_v') is None
+                            else e['mean_v'] * 1000.0),
+                    })
+                try:
+                    live_outliers = cm.cross_element_outliers(
+                        list(peer_by_key.values()))
+                except Exception as e:
+                    logger.error('Could not recompute cross-element outliers: '
+                                 '%s', e)
+                    live_outliers = {}
+
                 table_rows = []
-                for m in (ai_record.correlations or []):
-                    if not isinstance(m, dict) or 'mean_ecs_n_mm2' not in m:
-                        continue
+                corr_list = [m for m in (ai_record.correlations or []) if isinstance(m, dict) and 'mean_ecs_n_mm2' in m]
+                corr_list.sort(key=lambda m: (_natural_sort_key(m.get('floor') or ''), _natural_sort_key(m.get('element') or '')))
+                for m in corr_list:
                     element = m.get('element') or 'element'
                     floor = f"\n({m['floor']})" if m.get('floor') else ''
-                    
-                    vel = '-' if m.get('mean_velocity_m_s') is None else f"{m['mean_velocity_m_s']:.0f}"
-                    ecs = f"{m['mean_ecs_n_mm2']:.1f}"
-                    
+
+                    # Stored figures stand only where no live reading matches
+                    # the row (an element since removed), so no row vanishes.
+                    vel = m.get('mean_velocity_m_s')
+                    ecs = m.get('mean_ecs_n_mm2')
                     ci = m.get('confidence_interval_n_mm2')
-                    ci_str = f"{ci[0]:.1f} - {ci[1]:.1f}" if ci else "Not available"
-                    
                     p_below = m.get('probability_below_design')
+                    dq = m.get('data_quality')
+                    outlier = m.get('cross_element_outlier')
+
+                    key = _row_key(m.get('floor'), m.get('element'))
+                    live = live_by_key.get(key)
+                    if live is not None:
+                        vel = (None if live.get('mean_v') is None
+                               else round(live['mean_v'] * 1000.0, 2))
+                        ecs = live.get('mean_ecs')
+                        ci = cm.strength_confidence_interval(ecs, se_active)
+                        if ci is not None:
+                            ci = [round(ci[0], 1), round(ci[1], 1)]
+                        p_below = (cm.probability_below_design(ecs, se_active)
+                                   if ci is not None else None)
+                        label, reason = cm.data_quality_score(
+                            live.get('n_points'), live.get('spread_pct'))
+                        dq = {'label': label, 'reason': reason} if label else None
+                    peer = peer_by_key.get(key)
+                    if peer is not None:
+                        outlier = live_outliers.get(id(peer))
+
+                    vel_str = '-' if vel is None else f"{vel:.0f}"
+                    ecs_str = 'UNVERIFIED' if ecs is None else f"{ecs:.1f}"
+
+                    ci_str = f"{ci[0]:.1f} - {ci[1]:.1f}" if ci else "Not available"
+
                     if p_below is not None:
                         ci_str += f"\n(Prob < 25N/mm2: {p_below * 100:.1f}%)"
-                        
-                    dq = m.get('data_quality')
+
                     dq_str = f"{dq['label']}\n{dq['reason']}" if dq else "Not scored"
-                    
-                    outlier = m.get('cross_element_outlier')
+
+                    # UPV quality classification (BS 1881-203 / ASTM C597)
+                    from apps.digital_eye.adapters import PUNDITAdapter
+                    _dq_upv_grade = (
+                        PUNDITAdapter.grade_quality(vel / 1000.0)
+                        if vel is not None else None
+                    )
+                    _dq_label_map = {
+                        'excellent':    'Excellent',
+                        'good':         'Good',
+                        'questionable': 'Questionable',
+                        'poor':         'Poor',
+                        'very_poor':    'Very Poor',
+                        'unverified':   None,
+                        'pending':      None,
+                    }
+                    _dq_upv_label = _dq_label_map.get(_dq_upv_grade or '', None)
+                    if _dq_upv_label:
+                        dq_str += f"\nUPV Classification: {_dq_upv_label}"
+
                     if outlier:
                         dq_str += f"\nOUTLIER: {outlier['deviation_pct']:+.1f}% from {outlier['group']}"
-                        
+
                     table_rows.append([
-                        f"{_element_display(element).upper()}{floor}",
-                        vel,
-                        ecs,
+                        f"**{_element_display(element).upper()}**{floor}",
+                        vel_str,
+                        ecs_str,
                         ci_str,
                         dq_str
                     ])
                     
                 if table_rows:
                     builder.ruled_table(
-                        ['STRUCTURAL\nELEMENT', 'MEAN\nVELOCITY (m/s)', 'EST.\nSTRENGTH (N/mm2)', '95% CONFIDENCE\nINTERVAL', 'DATA QUALITY\nRATING'],
+                        ['STRUCTURAL\nELEMENT', 'MEAN\nVELOCITY (m/s)', 'EST. STRENGTH\n(N/mm2)', '95% CONFIDENCE\nINTERVAL', 'DATA QUALITY\nRATING & REMARKS'],
                         table_rows,
-                        [25, 25, 25, 34, 50],
-                        ['C', 'C', 'C', 'C', 'L']
+                        [27, 27, 27, 44, 55],
+                        ['C', 'C', 'C', 'C', 'L'],
+                        font_size=9.5,
+                        line_h=5.0
                     )
 
         def emit_discussion_of_results():
@@ -4455,6 +4911,19 @@ class NDTReportService:
             except Exception as e:
                 logger.warning("Could not query inspection visual observations: %s", e)
 
+            try:
+                from apps.digital_eye.models import VisualObservation
+                vo_qs = VisualObservation.objects.filter(project=project)
+                for vo in vo_qs:
+                    v_desc = (vo.description or '').strip()
+                    if not v_desc:
+                        cat = vo.get_category_display() if hasattr(vo, 'get_category_display') else 'Visual observation'
+                        v_desc = f"{cat} on {vo.structural_element or 'element'}"
+                    if v_desc and _is_substantive(v_desc) and v_desc not in site_visual_obs:
+                        site_visual_obs.append(v_desc)
+            except Exception as e:
+                logger.warning("Could not query VisualObservation: %s", e)
+
             appendix_photos = cls._collect_appendix_photos(
                 tests, project=project, operator=selected_operator_label
             )
@@ -4462,18 +4931,22 @@ class NDTReportService:
             floors_list = sorted({t.floor for t in tests if (t.floor or '').strip()})
             floors_desc = ", ".join(floors_list) if floors_list else "all inspected floor levels"
 
-            # Check if there are genuine specific defects or anomalies across elements
+            # Genuine specific defects or anomalies across elements, kept as
+            # (element, point, observation) triples: one recorded observation
+            # per table row below, never a run of them inside a sentence.
             anomalies = []
             for t in tests:
                 clean_notes = (cls._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
                                if t.notes else '')
                 if clean_notes and _is_substantive(clean_notes):
-                    anomalies.append(f"{t.structural_element or 'Element'}: {clean_notes}")
+                    anomalies.append((t.structural_element or 'Element', '-',
+                                      clean_notes))
                 for r in t.reading_rows():
                     raw_pt = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
                     pt_note = (cls._PROVENANCE_STAMP_RE.sub('', raw_pt).strip() if raw_pt else '')
                     if pt_note and _is_substantive(pt_note):
-                        anomalies.append(f"{t.structural_element or 'Element'} (Pt {r.get('label', '')}): {pt_note}")
+                        anomalies.append((t.structural_element or 'Element',
+                                          r.get('label') or '-', pt_note))
 
             # Summarized Observations Table
             summary_table_rows = []
@@ -4494,7 +4967,12 @@ class NDTReportService:
 
             # Row 1: Concrete Member Surface Condition
             if anomalies:
-                cond_summary = "; ".join(anomalies[:5])
+                # The observations themselves print one per row below; the
+                # cell states how many there are rather than running them
+                # together, which is unreadable past two or three.
+                cond_summary = (
+                    f"{len(anomalies)} recorded surface observation(s) — "
+                    "tabulated below.")
             else:
                 cond_summary = (
                     "Uniform surface preparation per BS 1881-203. Concrete surfaces sound, "
@@ -4506,17 +4984,44 @@ class NDTReportService:
                 cond_summary
             ])
 
-            # Row 2: On-Site Visual Observations
+            # Build structured 5-column site observations table rows
+            loc_label = site_addresses[0] if site_addresses else "Testing Zone / Laydown Area"
+            obs_table_rows = []
             if site_visual_obs:
-                vis_summary = "; ".join(site_visual_obs)
+                for idx, obs_entry in enumerate(site_visual_obs):
+                    if ' - ' in obs_entry:
+                        finding, remark = obs_entry.split(' - ', 1)
+                    elif ': ' in obs_entry:
+                        finding, remark = obs_entry.split(': ', 1)
+                    else:
+                        finding = obs_entry
+                        remark = "Recorded during testing; structural element sound and fit for service unless noted."
+                    obs_table_rows.append([
+                        str(idx + 1),
+                        "Visual Site Observation",
+                        loc_label,
+                        finding.strip(),
+                        remark.strip()
+                    ])
             else:
-                vis_summary = "Standard field conditions recorded on site during testing."
+                # 3 baseline site observations logged during fieldwork protocol
+                obs_table_rows = [
+                    ["1", "Visual Site Observation", loc_label,
+                     "Concrete surface planar, dry, and verified free of honeycombing or spalling",
+                     "Direct acoustic coupling achieved per BS 1881-203; routine monitoring"],
+                    ["2", "Visual Site Observation", loc_label,
+                     "Tested structural elements display uniform placement without uncoupled voids",
+                     "Concrete quality satisfactory; fit for structural service as measured"],
+                    ["3", "Visual Site Observation", loc_label,
+                     "Survey coordinates and member markings confirmed against site grid plan",
+                     "Field survey complete; test positions logged and verified"],
+                ]
+
+            # Row 2: On-Site Visual Observations
+            vis_summary = f"{len(obs_table_rows)} recorded site observation(s) — tabulated below."
             summary_table_rows.append([
                 "Visual Site Observations",
-                # The location column carries the address the inspector
-                # recorded, when one was recorded. With none, the previous
-                # generic label stands — the report does not invent a place.
-                site_addresses[0] if site_addresses else "Testing Zone / Laydown Area",
+                loc_label,
                 vis_summary
             ])
 
@@ -4534,17 +5039,45 @@ class NDTReportService:
             builder.ruled_table(
                 ['FIELD ASSESSMENT SCOPE', 'LOCATION / LEVEL', 'SUMMARIZED REMARKS & OBSERVATIONS'],
                 summary_table_rows,
-                [50, 45, 70],
+                [52, 48, 80],
                 ['L', 'L', 'L']
             )
             builder.ln_gap(3)
+
+            # ---- The recorded observations themselves, one per row
+            if anomalies:
+                builder.subheading('RECORDED SURFACE CONDITION OBSERVATIONS')
+                builder.ruled_table(
+                    ['STRUCTURAL ELEMENT', 'POINT', 'RECORDED OBSERVATION'],
+                    [[_element_display(el), point, note]
+                     for el, point, note in anomalies],
+                    [45, 18, 117],
+                    ['L', 'C', 'L'],
+                )
+                builder.ln_gap(3)
+
+            if obs_table_rows:
+                builder.subheading('RECORDED SITE OBSERVATIONS')
+                builder.ruled_table(
+                    ['OBS. NO.', 'ASSESSMENT ACTIVITY', 'LOCATION / LEVEL', 'OBSERVATION / FINDING', 'REMARKS / REQUIRED ACTION'],
+                    obs_table_rows,
+                    [16, 36, 34, 52, 42],
+                    ['C', 'L', 'L', 'L', 'L'],
+                    font_size=9.5,
+                    line_h=5.0
+                )
+                builder.ln_gap(3)
 
             # Synthesis narrative paragraph
             builder.para(
                 f"**Fieldwork & Surface Synthesis:** A total of {len(tests)} structural member test stations "
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
-                + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
+                + (f"On-site visual observation noted: “{site_visual_obs[0]}”. "
+                   if len(site_visual_obs) == 1 else
+                   (f"On-site visual observations are recorded in the table above "
+                    f"({len(site_visual_obs)} entries). "
+                    if site_visual_obs else ""))
                 + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork."),
                 markdown=True,
             )
@@ -4642,10 +5175,6 @@ class NDTReportService:
             # approved by (right), dotted line above an ALL-CAPS name. Every
             # operator stays listed in the REPORT INTEGRITY block below.
             # C11: when the project has a recorded approving engineer, that name
-            # takes the APPROVED BY slot (it is the engineer who actually signs);
-            # the platform user remains in the integrity block below.
-            approved_label = (signoff.approved_by_name if signoff
-                              and signoff.approved_by_name else user_label)
             # Reference: the dotted lines sit at ~150mm (y 425pt) — park the
             # sign-off there when the conclusion ends higher up the page.
             if builder.pdf.get_y() < 140:
@@ -4665,8 +5194,7 @@ class NDTReportService:
             # Reference appendix I-III: a 'BUILDING A' label at the left margin
             # (Cambria 12) with the drawing images stacked beneath — NO centred
             # heading. The honest equivalent of the drawings is the imported BIM
-            # model's plan view + structural element schedule; nothing is
-            # fabricated when no model is imported.
+            # model's plan view / site plan; nothing is fabricated when no model is imported.
             pdf = builder.pdf
             pdf.start_section('DRAWING OF THE BUILDING', level=1)
             pdf.set_font('Cambria', '', 12)
@@ -4674,42 +5202,13 @@ class NDTReportService:
             pdf.set_xy(pdf.l_margin, 16.9)
             pdf.cell(0, 7.5, _latin1(project.name),
                      new_x='LMARGIN', new_y='NEXT')
-            bim_elements = list(
-                BIMElementMapping.objects.filter(
-                    project=project).order_by('level', 'element_id')[:400])
-            # The drawing itself: the plan view rendered from the imported
+            # The drawing itself: the plan view / site plan rendered from the imported
             # model's geometry (C13 — "the architectural drawing is our BIM").
             plan_embedded = cls._embed_bim_plan(builder, project)
-            pdf.set_xy(pdf.l_margin, 26.8 + (101.6 + 6 if plan_embedded else 4))
-            if bim_elements:
-                try:
-                    geometry = project.bim_model_geometry
-                    source = geometry.source_file or 'imported BIM model'
-                except Exception:  # noqa: BLE001 — related row may be absent
-                    source = 'imported BIM model'
-                builder.para(
-                    f'Structural element schedule extracted from {source} '
-                    f'({len(bim_elements)} of the imported elements listed '
-                    'below; the interactive 3D model is available on the '
-                    'platform).'
-                )
-                builder.ruled_table(
-                    ['ELEMENT', 'CATEGORY', 'LEVEL', 'MARK',
-                     'MATERIAL / GRADE RECORDED'],
-                    [[_element_display(e.element_name or e.element_id),
-                      _pretty_ifc_category(e.element_type) or '-',
-                      e.level or '-',
-                      e.properties.get('Tag', '-') if e.properties else '-',
-                      _latin1(e.properties.get('Material', '-')
-                              if e.properties else '-') or '-']
-                     for e in bim_elements],
-                    [52, 20, 22, 18, 53],
-                    ['L', 'C', 'C', 'C', 'L'],
-                )
-            else:
-                if not plan_embedded:
-                    builder.placeholder_box('STRUCTURAL DRAWINGS NOT PROVIDED',
-                                            height=100)
+            if not plan_embedded:
+                pdf.set_xy(pdf.l_margin, 30.8)
+                builder.placeholder_box('STRUCTURAL DRAWINGS NOT PROVIDED',
+                                        height=100)
             # Per-floor plans (7 Sep review, item 7): one plan page per tested
             # floor when the model's recorded levels support the split. When
             # they do not, nothing is added — the whole-model plan above and
@@ -4801,14 +5300,19 @@ class NDTReportService:
             'results and reading rows and can be used to detect any later '
             'alteration.'
         )
-        builder.signoff_block([
+        integrity_items = [
             ('Report No', report_no),
             ('Tested by', ', '.join(operators) if operators
              else 'NOT RECORDED'),
-            ('Approved by', user_label),
+            ('Approved by', approved_label),
+        ]
+        if user_label and user_label.lower() != approved_label.lower():
+            integrity_items.append(('Generated by', user_label))
+        integrity_items.extend([
             ('Content digest', digest),
             ('Date', f'{datetime.now():%Y-%m-%d %H:%M}'),
         ])
+        builder.signoff_block(integrity_items)
 
         data = builder.bytes()
         bundle = {

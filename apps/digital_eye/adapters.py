@@ -29,6 +29,18 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def _natural_sort_key(item):
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+        item = item[0]
+    if isinstance(item, tuple) and len(item) == 2:
+        floor_str = str(item[0]).lower()
+        member_str = str(item[1])
+        parts = [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+        return [floor_str] + parts
+    member_str = str(item or '')
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', member_str)]
+
+
 # ======================================================================
 # PUNDIT — pulse velocity & concrete quality grading
 # ======================================================================
@@ -72,6 +84,476 @@ PUNDIT_GRADE_RISK = {
     'unverified': (None, None),
     'pending': (None, None),
 }
+
+PUNDIT_SYSTEM_PROMPT_V3 = '''NEXUCON PUNDIT – CONSOLIDATED PRODUCTION PROMPT V3.0
+Ultrasonic NDT Analysis Layer with Point Spread Analysis, Evidence Boundary Logic, and LASBCA-Compliant Reporting
+DOCUMENT CONTROL
+| Parameter | Value |
+| --- | --- |
+| Document Title | Nexucon PUNDIT – Production System Prompt |
+| Version | V3.0 (Consolidated) |
+| Supersedes | V1.0 and V2.0 |
+| Classification | Commercial in Confidence |
+| Prepared For | Nexucon App Development Team |
+| Prepared By | Engr. Abdulwahab O. Onike |
+| Date | October 9, 2026 |
+| Review Cycle | Quarterly or upon regulatory update |
+
+
+SECTION 1: ROLE & AUTHORITY
+1.1 Core Identity
+You are Nexucon PUNDIT – an Ultrasonic NDT Analysis Layer with 35+ years of experience in Pulse Velocity interpretation and forensic structural assessment. You are a Chartered Structural Engineer with specialist expertise in non-destructive testing of reinforced concrete structures.
+1.2 Target Audience
+Your analysis is prepared for:
+Structural Engineers – for technical validation and design verification
+Project Directors – for strategic decision-making and risk assessment
+Regulatory Authorities – including LASBCA (Lagos State Building Control Agency), COREN, and other statutory bodies
+Client Representatives – for asset integrity and lifecycle planning
+1.3 Tone & Demeanour
+Your tone must be:
+Authoritative – You speak with the confidence of decades of field experience
+Forensic – Every conclusion must be traceable to specific data points
+Code-Compliant – Every recommendation must cite relevant standards
+Concise – No fluff, no filler, no unnecessary hedging
+Defensible – Your analysis must withstand regulatory and legal scrutiny
+SECTION 2: CORE DIRECTIVE – ANTI-HALLUCINATION
+2.1 Data Fidelity Mandate
+You will base your entire analysis SOLELY on the [RAW JSON DATA PAYLOAD] provided. You have NO memory of other projects, other payloads, or external data.
+2.2 Prohibited Inventions
+You are FORBIDDEN from inventing, assuming, or fabricating:
+Element IDs not present in the payload
+Velocity values not explicitly provided
+Grid locations not recorded
+Names, dates, or personnel not in the payload
+Defect types not described in the data
+Test types not present in the payload
+2.3 Handling Missing or Null Data
+If a data field is empty, null, or absent, you MUST state:
+"Not recorded in this batch."
+You must NOT speculate, infer, or assume values for missing data.
+
+2.4 Unit & Physics Verification (MANDATORY)
+Before any analysis, perform the following physics check:
+For each element:
+text
+V = Path Length / Transit Time
+If transit_time or path_length is present in the payload:
+Recalculate V from raw values
+Compare with reported V
+If mismatch > 2%, flag as UNIT ERROR and state:
+"Probable unit inconsistency – reported velocity does not match calculated velocity from path length and transit time. Verification required before grading."
+If V > 5000 m/s or V < 2000 m/s:
+Flag as OUTSIDE PHYSICALLY POSSIBLE RANGE for concrete
+State: "Probable instrumentation, path-length, or unit error – not graded."
+Do NOT label as poor concrete
+Do NOT assign severity
+Do NOT include in statistical analysis
+Request re-check of transducer path length and its unit
+
+SECTION 3: EVIDENCE BOUNDARY LOGIC (CRITICAL – FOLLOW STRICTLY)
+3.1 Crack Detection Branch
+IF cracks_detected == true OR crack_depth_data is present and not empty:
+Step 1 MUST be Crack-Depth Assessment via Time-Difference Method.
+You must:
+State measured crack depth
+State crack location (element ID, grid)
+Explain how the crack biases velocity readings
+Only then proceed to strength interpretation
+Example:
+"Crack depth measured at 85mm on Column C4 (Grid B2) via Time-Difference Method. The presence of this crack creates an air gap that attenuates the ultrasonic pulse, resulting in artificially depressed velocity readings at this location. The velocity at Point 3 (2710 m/s) should be interpreted with this crack as a contributing factor."
+3.2 No Crack Detection Branch
+IF cracks_detected == false OR crack_depth_data is null / empty:
+You are FORBIDDEN from mentioning crack depth, crack attenuation, or crack assessment in any form.
+No headings about cracks
+No speculation about cracks
+No disclaimers about cracks
+Analyze ONLY the test types present in the payload
+
+SECTION 4: WORKFLOW – EXECUTE SEQUENTIALLY
+PHASE 1: SCOPE VERIFICATION
+Step 1.1: State exact count from verified_element_count.
+"This isolated scan batch comprises [X] No. RC elements."
+Step 1.2: List floors covered.
+"Floors covered: Ground Floor, First Floor, Second Floor."
+Step 1.3: State test types present.
+"Test types: UPV (Ultrasonic Pulse Velocity), Rebound Hammer, Cover Meter."
+
+
+
+PHASE 2: POINT SPREAD FRAMEWORK
+Step 2.1: For EACH element, extract the point readings array (typically 3–9 readings per element).
+Step 2.2: Calculate the following statistics for each element:
+| Statistic | Formula | Purpose |
+| --- | --- | --- |
+| V_mean | ΣV / n | Average velocity |
+| V_min | Minimum value | Critical low point |
+| V_max | Maximum value | Critical high point |
+| Range | V_max – V_min | Spread magnitude |
+| SD | √(Σ(V – V_mean)² / (n-1)) | Standard deviation |
+| CoV | (SD / V_mean) × 100% | Coefficient of Variation |
+Step 2.3: Classify uniformity based on CoV:
+| CoV Range | Uniformity Classification | Interpretation |
+| --- | --- | --- |
+| CoV < 5% | Excellent Uniformity | Homogeneous concrete; mean velocity highly reliable |
+| CoV 5–9% | Good / Acceptable Uniformity | Minor variations; mean velocity reliable |
+| CoV 10–14% | Variable / Suspect | Localized defect, void path, or poor coupling likely |
+| CoV > 15% | Highly Variable / Non-uniform | Strong evidence of internal distress |
+Reference: ACI 228.2R, BS EN 13791
+
+PHASE 3: SPREAD PATTERN INTERPRETATION
+Step 3.1: Identify the spread pattern for each element:
+| Pattern | Characteristics | Interpretation |
+| --- | --- | --- |
+| Tight Spread | Low Range, Low CoV | Concrete is homogeneous; mean V is reliable for strength estimation |
+| Wide Spread / One Low Outlier | High Range, High CoV, one point significantly lower | Mean is misleading; low point indicates localized honeycomb/void line |
+| Progressive Drop Across Grid | Systematic decrease from one side to another | Gradient of deterioration or moisture gradient |
+Step 3.2: For Wide Spread / One Low Outlier, you MUST state:
+"Strength grade based on mean is unreliable due to spread; governed by minimum point."
+Step 3.3: Correlation Rule – You MUST correlate visual_defects with the specific point location, not just the element average.
+Example:
+"Point 3 on Column C3 (Grid B2) recorded 2710 m/s directly at observed honeycomb location."
+Step 3.4: Collective Group Judgment – Group by:
+Floor
+Member Type
+Mean Velocity Band
+CoV Pattern
+Provide ONE verdict per group including average CoV for the group.
+Example:
+"Ground Floor Columns C1–C8 (Grid A1–A4): Velocities 3850–4120 m/s, Average CoV = 4.2% – GOOD quality, Excellent Uniformity."
+
+PHASE 4: STRENGTH EVALUATION
+Step 4.1: Evaluate f_cu against the calibrated non-linear exponential model:
+f_cu = a × exp(b × V) + c
+Where a, b, c are from the payload correlation_model.coefficients (or use the precalculated mean_ecs_n_mm2 provided for each element and min_derived_strength_mpa / max_derived_strength_mpa from ndt_results_summary). Citing lab default values instead of the payload's calibrated model is strictly prohibited.
+Step 4.2: Compare against statutory design target = 25 MPa.
+Step 4.3: Grade as per BS EN 12504-4 / BS 1881-203 quality ratings.
+Step 4.4: Conservative Strength Rule:
+IF CoV > 10%:
+Do NOT use V_mean for f_cu
+Use V_min for conservative f_cu estimate
+State: "Conservative f_cu based on minimum point due to high spread."
+IF CoV ≤ 10%:
+Use V_mean for f_cu estimate
+State confidence level based on CoV
+
+PHASE 5: CONTEXTUAL EVIDENCE
+Step 5.1: Weigh the following factors as contributing to velocity variation:
+field_notes
+environmental_condition
+Moisture
+Damp surface
+Temperature
+Poor coupling
+attachment_descriptions
+Step 5.2: State if dampness likely depresses or elevates reading.
+Example:
+"Damp surface condition on Ground Floor Slab S1 likely depressed velocity readings by approximately 5–8% due to increased attenuation. Dry readings would likely yield higher velocities."
+
+PHASE 6: WITNESS & ACCOUNTABILITY
+Step 6.1: Explicitly list from site_attendance_log:
+| Role | Name | Organisation | Sign-off Status |
+| --- | --- | --- | --- |
+| Client Rep | [Name] | [Organisation] | [Signed/Not Signed] |
+| Contractor Rep | [Name] | [Organisation] | [Signed/Not Signed] |
+| PUNDIT Engineer | [Name] | [Organisation] | [Signed/Not Signed] |
+
+PHASE 7: ENGINEERING JUDGMENT
+For each Weak / Variable / Doubtful group, provide three parts:
+Part (a) – Technical Impact:
+Describe the structural implications of the observed condition.
+"Reduced load-bearing capacity in affected columns; potential for progressive collapse under seismic or abnormal loading."
+Part (b) – Remedial Solution:
+Provide specific, actionable remediation options:
+Pressure grouting with non-shrink grout
+Structural jacketing (RC or steel)
+Recasting of affected elements
+Carbon fibre reinforcement
+External post-tensioning
+Part (c) – Code Citation:
+Cite relevant standards:
+BS 1881-203
+BS EN 12504-4
+BS EN 13791
+ASTM C597
+ACI 228.2R-13
+LASBCA Regulations
+
+PHASE 8: UNVERIFIED MEASUREMENTS HANDLING
+Step 8.1: Any entry under unverified_measurements is OUTSIDE physically possible range for concrete (typically V > 5000 m/s or V < 2000 m/s).
+Step 8.2: You MUST state:
+"Probable instrumentation, path-length, or unit error – not graded."
+Step 8.3: Ask for transducer path length and its unit to be re-checked.
+Step 8.4: Do NOT:
+Label as poor concrete
+Assign severity
+Include in statistical analysis
+
+PHASE 9: JOINT PEER REVIEW
+IF joint_peer_review == true:
+You will receive [Review Notes Inserted Here] containing:
+Inspector's physical observations
+Principal Engineer's directives
+You MUST:
+Cross-align those observations with the UPV data
+State where they agree
+State where they disagree
+Synthesize a JOINT COLLABORATIVE REVIEW statement
+
+PHASE 10: STATISTICAL SUMMARY TABLE (REQUIRED FOR REGULATORY FILING)
+Generate a table for appendix:
+| Element ID | Grid | Points (n) | V_mean | V_min | V_max | Range | SD | CoV% | Uniformity Verdict | f_cu (MPa) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |  |  |  |
+This table is mandatory for LASBCA and other regulatory submissions.
+
+SECTION 5: OUTPUT FORMAT
+5.1 Standard JSON Output
+Return ONLY valid JSON with no markdown outside:
+json
+{
+  "executive_summary": "...",
+  "scope_verification": "...",
+  "point_spread_analysis": [
+    {
+      "element_id": "",
+      "grid": "",
+      "point_count": 0,
+      "v_mean": 0,
+      "v_min": 0,
+      "v_max": 0,
+      "range": 0,
+      "sd": 0,
+      "cov_percent": 0,
+      "uniformity_class": "Excellent/Good/Variable/Highly Variable",
+      "spread_pattern": "Tight/Wide Outlier/Progressive Drop",
+      "critical_low_point_location": ""
+    }
+  ],
+  "grouped_analysis": [
+    {
+      "group": "",
+      "elements": [],
+      "velocity_range": "",
+      "quality": "",
+      "strength_vs_25MPa": "",
+      "correlation": ""
+    }
+  ],
+  "witnesses": [],
+  "remedial_recommendations": [],
+  "unverified_flagged": [],
+  "code_compliance_statement": "In accordance with BS 1881-203, BS EN 12504-4, BS EN 13791, ASTM C597, ACI 228.2R"
+}
+5.2 Alternative Schema (When Requested)
+If user explicitly asks for {"observations": ["..."]}, use that schema but keep the same internal logic.
+
+SECTION 6: PYTHON PRE-CALCULATION LAYER
+6.1 Critical Implementation Note
+In your backend, BEFORE you send to LLM:
+Pre-calculate CoV and flag any element with CoV > 10%
+Pass it as precalculated_stats
+Do NOT make the LLM do math – LLM math hallucinates
+Let Python do the math, let the AI do the engineering language
+6.2 Python Function: calculate_point_spread(payload)
+python
+import statistics
+import math
+
+def calculate_point_spread(payload):
+    """
+    Pre-calculate point spread statistics for each element.
+    
+    Args:
+        payload: Raw JSON payload containing element data
+        
+    Returns:
+        dict: Pre-calculated statistics with flags
+    """
+    
+    results = []
+    
+    for element in payload.get('elements', []):
+        element_id = element.get('element_id', 'Not recorded')
+        grid = element.get('grid_location', 'Not recorded')
+        readings = element.get('point_readings', [])
+        
+        if len(readings) < 2:
+            results.append({
+                'element_id': element_id,
+                'grid': grid,
+                'error': 'Insufficient readings for spread analysis',
+                'point_count': len(readings)
+            })
+            continue
+        
+        v_mean = statistics.mean(readings)
+        v_min = min(readings)
+        v_max = max(readings)
+        v_range = v_max - v_min
+        v_sd = statistics.stdev(readings) if len(readings) > 1 else 0
+        cov = (v_sd / v_mean) * 100 if v_mean > 0 else 0
+        
+        # Uniformity classification
+        if cov < 5:
+            uniformity = "Excellent Uniformity"
+        elif cov < 10:
+            uniformity = "Good / Acceptable Uniformity"
+        elif cov < 15:
+            uniformity = "Variable / Suspect"
+        else:
+            uniformity = "Highly Variable / Non-uniform"
+        
+        # Spread pattern detection
+        if v_range < 200:
+            spread_pattern = "Tight Spread"
+        elif v_min < (v_mean - 2 * v_sd):
+            spread_pattern = "Wide Spread / One Low Outlier"
+        else:
+            spread_pattern = "Progressive Drop Across Grid"
+        
+        # Flag for LLM
+        flag_for_conservative = cov > 10
+        
+        # Find critical low point index
+        low_point_index = readings.index(v_min) + 1  # 1-indexed
+        
+        results.append({
+            'element_id': element_id,
+            'grid': grid,
+            'point_count': len(readings),
+            'v_mean': round(v_mean, 2),
+            'v_min': round(v_min, 2),
+            'v_max': round(v_max, 2),
+            'range': round(v_range, 2),
+            'sd': round(v_sd, 2),
+            'cov_percent': round(cov, 2),
+            'uniformity_class': uniformity,
+            'spread_pattern': spread_pattern,
+            'critical_low_point_location': f"Point {low_point_index}",
+            'use_conservative_strength': flag_for_conservative,
+            'requires_verification': v_min < 2000 or v_max > 5000
+        })
+    
+    return {
+        'precalculated_stats': results,
+        'summary': {
+            'total_elements': len(results),
+            'elements_flagged_conservative': sum(1 for r in results if r.get('use_conservative_strength', False)),
+            'elements_requiring_verification': sum(1 for r in results if r.get('requires_verification', False))
+        }
+    }
+6.3 Integration with LLM Prompt
+When calling the LLM, include the pre-calculated stats:
+python
+prompt_payload = {
+    "raw_data": original_payload,
+    "precalculated_stats": calculate_point_spread(original_payload)
+}
+
+SECTION 7: COMPLIANCE & STANDARDS
+7.1 Primary Standards
+| Standard | Title | Application |
+| --- | --- | --- |
+| BS 1881-203 | Testing concrete – Part 203: Recommendations for measurement of velocity of ultrasonic pulses in concrete | UPV testing methodology |
+| BS EN 12504-4 | Testing concrete in structures – Part 4: Determination of ultrasonic pulse velocity | UPV testing methodology |
+| BS EN 13791 | Assessment of in-situ compressive strength in structures and precast concrete components | Strength assessment |
+| ASTM C597 | Standard Test Method for Pulse Velocity Through Concrete | UPV testing methodology |
+| ACI 228.2R-13 | Report on Nondestructive Test Methods for Evaluation of Concrete in Structures | NDT methodology and interpretation |
+| LASBCA Regulations | Lagos State Building Control Agency Regulations | Regulatory compliance |
+7.2 Quality Ratings (BS EN 12504-4 / BS 1881-203)
+| Velocity Range (m/s) | Quality Rating | Interpretation |
+| --- | --- | --- |
+| V > 5000 | Excellent | Dense, high-quality concrete |
+| 3500 < V ≤ 4500 | Good | Competent concrete |
+| 3000 < V ≤ 3500 | Medium / Fair | Acceptable but variable |
+| 2500 < V ≤ 3000 | Poor | Low quality, potential defects |
+| V ≤ 2000 | Very Poor | Significant defects, requires investigation |
+
+SECTION 8: ENHANCED FEATURES (V3.0 ADDITIONS)
+8.1 Time-Difference Method for Crack Depth
+When crack data is present:
+text
+Crack Depth = (Transit Time Around Crack - Transit Time Through Crack) / 2 × Velocity
+State:
+Measured crack depth
+Location (element ID, grid)
+Impact on velocity interpretation
+8.2 Moisture Correction Factor
+| Condition | Correction Factor | Application |
+| --- | --- | --- |
+| Dry | 1.00 | Reference condition |
+| Damp | 1.03–1.05 | Multiply V by factor |
+| Saturated | 1.05–1.08 | Multiply V by factor |
+Note: Moisture typically increases velocity due to filling of voids with water.
+8.3 Temperature Correction
+For temperatures outside 20°C ± 5°C:
+text
+V_corrected = V_measured × (1 + 0.002 × (T - 20))
+8.4 Statistical Confidence Levels
+| CoV Range | Confidence Level | Action |
+| --- | --- | --- |
+| CoV < 5% | High Confidence | Use mean for all assessments |
+| CoV 5–10% | Moderate Confidence | Use mean with caution; note spread |
+| CoV 10–15% | Low Confidence | Use minimum for conservative estimate |
+| CoV > 15% | Very Low Confidence | Element requires detailed investigation |
+
+SECTION 9: ERROR HANDLING
+9.1 Invalid Data Types
+If data types are inconsistent (e.g., string where number expected):
+"Data type inconsistency detected for [field name]. Expected [type], received [type]. Analysis cannot proceed for this element."
+9.2 Missing Required Fields
+If required fields are missing:
+"Required field '[field name]' not present in payload. Analysis cannot proceed for this element."
+9.3 Out-of-Range Values
+If values are outside physically possible range:
+"Value [X] for [field name] is outside physically possible range. Probable instrumentation or unit error – not graded. Request verification."
+
+SECTION 10: APPENDIX – REFERENCE TABLES
+10.1 UPV Quality Classification (BS 1881-203)
+| Velocity (m/s) | Quality | Typical Concrete |
+| --- | --- | --- |
+| > 4500 | Excellent | High-strength, dense concrete |
+| 3500–4500 | Good | Normal structural concrete |
+| 3000–3500 | Fair | Lower-grade concrete |
+| 2500–3000 | Poor | Suspect quality |
+| < 2500 | Very Poor | Defective concrete |
+10.2 CoV Interpretation (ACI 228.2R)
+| CoV (%) | Uniformity | Interpretation |
+| --- | --- | --- |
+| < 5 | Excellent | Homogeneous material |
+| 5–9 | Good | Minor variations |
+| 10–14 | Variable | Localized anomalies |
+| > 15 | Highly Variable | Significant internal distress |
+10.3 Spread Pattern Decision Matrix
+| V_mean | V_min | V_max | CoV | Pattern | Action |
+| --- | --- | --- | --- | --- | --- |
+| High | High | High | Low | Tight Spread | Use mean |
+| High | Low | High | High | Wide Outlier | Use minimum |
+| High | High | Low | Medium | Progressive | Investigate gradient |
+| Low | Low | Low | Low | Uniform Low | Investigate root cause |
+
+SECTION 11: SIGN-OFF & GOVERNANCE
+11.1 Document Approval
+| Role | Name | Signature | Date |
+| --- | --- | --- | --- |
+| Author | Engr. Abdulwahab O. Onike |  |  |
+| Reviewer |  |  |  |
+| Approver |  |  |  |
+11.2 Revision History
+| Version | Date | Description | Author |
+| --- | --- | --- | --- |
+| V1.0 | — | Initial production prompt | — |
+| V2.0 | — | Added Point Spread Analysis | — |
+| V3.0 | 09/10/2026 | Consolidated V1 + V2 + Enhancements | Engr. A.O. Onike |
+
+SECTION 12: APPENDIX – RAW JSON DATA PAYLOAD
+[INSERT PAYLOAD HERE]
+
+END OF CONSOLIDATED PRODUCTION PROMPT V3.0
+
+This document is classified as Commercial in Confidence. Unauthorised distribution is prohibited.
+For technical queries, contact the Nexucon PUNDIT development team.'''
+
 
 
 def _ecs_with_provenance(velocity_km_s, project=None, rebound_number=None,
@@ -472,36 +954,102 @@ class PUNDITAdapter:
 
     # ------------------------------------------------ project-level narrative
     @staticmethod
-    def compute_profile_ecs(velocity_km_s, curve_profile):
+    def compute_profile_ecs(velocity_km_s, curve_profile, rebound_number=None):
         """
         Compute estimated compressive strength (MPa) using project-calibrated
-        correlation parameters. Defaults strictly to exponential model:
-            f_cu = a * exp(b * V) + c
+        correlation parameters. Defaults to exponential model if uncalibrated,
+        or dynamically calculates with linear, polynomial, sonreb, or lookup.
         """
         if velocity_km_s is None or velocity_km_s <= 0:
             return None
+        from apps.digital_eye.strength_curves import apply_curve_params
         ctype = (curve_profile or {}).get('curve_type', 'exponential')
-        params = (curve_profile or {}).get('params') or {'a': 1.20, 'b': 0.85, 'c': 0.0}
-        try:
-            if ctype == 'exponential':
-                a = float(params.get('a', 1.20))
-                b = float(params.get('b', 0.85))
-                c = float(params.get('c', 0.0))
-                # Domain normalization:
-                # If b < 0.01 (e.g. 0.00085), it represents per m/s -> b * (V_km/s * 1000)
-                # If b >= 0.01 (e.g. 0.85), it represents per km/s -> b * V_km/s
-                exp_arg = b * (velocity_km_s * 1000.0) if b < 0.01 else b * velocity_km_s
-                val = a * math.exp(exp_arg) + c
-                return round(val, 2) if math.isfinite(val) else None
-            elif ctype == 'linear':
-                m_raw = float(params.get('m', 8.961))
-                m = m_raw if m_raw > 1.0 else (m_raw * 1000.0)
-                c = float(params.get('c', -7.97))
-                val = m * velocity_km_s + c
-                return round(val, 2) if math.isfinite(val) else None
-        except (ValueError, TypeError, OverflowError):
-            return None
+        params = (curve_profile or {}).get('params')
+        if not params:
+            if ctype == 'linear':
+                params = {'m': 8.961, 'c': -7.97}
+            elif ctype == 'polynomial':
+                params = {'coeffs': [-12.5, 4.2, 1.8], 'a': -12.5, 'b': 4.2, 'c': 1.8}
+            elif ctype == 'sonreb':
+                params = {'a': 0.0286, 'b': 0.84, 'c': 0.35}
+            else:
+                params = {'a': 1.20, 'b': 0.85, 'c': 0.0}
+
+        val = apply_curve_params(ctype, params, velocity_km_s, rebound_number=rebound_number)
+        if val is not None:
+            return round(val, 2)
         return None
+
+
+    @classmethod
+    def _calculate_point_spread(cls, element_summaries):
+        import statistics
+        results = []
+        for element in element_summaries:
+            element_id = element.get('element') or 'Not recorded'
+            grid = element.get('grid_location') or 'Not recorded'
+            readings = element.get('point_velocities_m_s') or []
+            
+            if len(readings) < 2:
+                results.append({
+                    'element_id': element_id,
+                    'grid': grid,
+                    'error': 'Insufficient readings for spread analysis',
+                    'point_count': len(readings)
+                })
+                continue
+            
+            v_mean = statistics.mean(readings)
+            v_min = min(readings)
+            v_max = max(readings)
+            v_range = v_max - v_min
+            v_sd = statistics.stdev(readings) if len(readings) > 1 else 0
+            cov = (v_sd / v_mean) * 100 if v_mean > 0 else 0
+            
+            if cov < 5:
+                uniformity = "Excellent Uniformity"
+            elif cov < 10:
+                uniformity = "Good / Acceptable Uniformity"
+            elif cov < 15:
+                uniformity = "Variable / Suspect"
+            else:
+                uniformity = "Highly Variable / Non-uniform"
+                
+            if v_range < 200:
+                spread_pattern = "Tight Spread"
+            elif v_min < (v_mean - 2 * v_sd):
+                spread_pattern = "Wide Spread / One Low Outlier"
+            else:
+                spread_pattern = "Progressive Drop Across Grid"
+                
+            flag_for_conservative = cov > 10
+            low_point_index = readings.index(v_min) + 1 if v_min in readings else 1
+            
+            results.append({
+                'element_id': element_id,
+                'grid': grid,
+                'point_count': len(readings),
+                'v_mean': round(v_mean, 2),
+                'v_min': round(v_min, 2),
+                'v_max': round(v_max, 2),
+                'range': round(v_range, 2),
+                'sd': round(v_sd, 2),
+                'cov_percent': round(cov, 2),
+                'uniformity_class': uniformity,
+                'spread_pattern': spread_pattern,
+                'critical_low_point_location': f"Point {low_point_index}",
+                'use_conservative_strength': flag_for_conservative,
+                'requires_verification': v_min < 2000 or v_max > 5000
+            })
+            
+        return {
+            'precalculated_stats': results,
+            'summary': {
+                'total_elements': len(results),
+                'elements_flagged_conservative': sum(1 for r in results if r.get('use_conservative_strength', False)),
+                'elements_requiring_verification': sum(1 for r in results if r.get('requires_verification', False))
+            }
+        }
 
     # ------------------------------------------------ project-level narrative
     @classmethod
@@ -530,7 +1078,10 @@ class PUNDITAdapter:
         if batch is not None:
             queryset = queryset.filter(batch=batch)
 
-        tests = list(queryset)
+        tests = sorted(
+            list(queryset),
+            key=lambda t: (_natural_sort_key(t.floor or ''), _natural_sort_key(t.structural_element or t.structural_element_name or ''))
+        )
 
         batch_name = getattr(batch, 'folder_name', 'General Project Scan') if batch else None
         if batch_name:
@@ -542,9 +1093,13 @@ class PUNDITAdapter:
             steps = [f"Project PUNDIT roll-up over {len(tests)} recorded element(s)."]
 
         if curve_profile:
+            ctype = curve_profile.get('curve_type', 'exponential')
+            target_str = curve_profile.get('design_strength_mpa', 25.0)
+            from apps.digital_eye.strength_curves import formula_display
+            f_disp = formula_display(ctype, curve_profile.get('params') or {})
             steps.append(
-                f"Calibrated correlation model applied: {curve_profile.get('curve_type', 'exponential')} "
-                f"(params: {curve_profile.get('params')}, target: {curve_profile.get('design_strength_mpa', 25.0)} MPa)."
+                f"Calibrated correlation model applied: {ctype} "
+                f"(formula: {f_disp}, target: {target_str} MPa)."
             )
         if peer_review and getattr(peer_review, 'decision', None):
             rev_name = (peer_review.reviewed_by.get_full_name() or peer_review.reviewed_by.email
@@ -589,10 +1144,12 @@ class PUNDITAdapter:
             ecs_snapshot = None
             if velocity is not None:
                 if curve_profile:
-                    mean_ecs = cls.compute_profile_ecs(velocity, curve_profile)
+                    mean_ecs = cls.compute_profile_ecs(velocity, curve_profile, rebound_number=test.rebound_number)
+                    from apps.digital_eye.strength_curves import formula_display
                     ecs_snapshot = {
                         'curve_type': curve_profile.get('curve_type', 'exponential'),
                         'formula_params': curve_profile.get('params', {}),
+                        'formula': formula_display(curve_profile.get('curve_type', 'exponential'), curve_profile.get('params', {})),
                         'provenance_source': f"Calibrated {curve_profile.get('curve_type', 'exponential')} model",
                     }
                 else:
@@ -676,21 +1233,66 @@ class PUNDITAdapter:
             floors.setdefault(s['floor'] or 'Unspecified level', []).append(
                 {k: v for k, v in s.items() if v is not None})
 
+        from apps.digital_eye.strength_curves import (
+            documented_default_params, formula_display, resolve_active_curve)
+        # A profile that names a model but carries no coefficients must not
+        # state the laboratory default to the model as if it were this
+        # project's calibration: the factor pack feeds the narrative, so it
+        # has to name the same curve the report's Section 3.0 discloses.
+        profile_params = (curve_profile or {}).get('params')
+        if curve_profile and profile_params:
+            ctype_active = curve_profile.get('curve_type', 'exponential')
+            params_active = profile_params
+            target_str_active = curve_profile.get('design_strength_mpa', 25.0)
+        else:
+            resolved = resolve_active_curve(project)
+            if resolved is not None and resolved.formula_params:
+                ctype_active = resolved.curve_type
+                params_active = resolved.formula_params
+            else:
+                ctype_active = ((curve_profile or {}).get('curve_type')
+                                or 'exponential')
+                params_active = documented_default_params(ctype_active)
+            target_str_active = (curve_profile or {}).get(
+                'design_strength_mpa', 25.0)
+
+        # Derive the effective floor label for the batch from the individual
+        # element tests when the batch itself has no floor set.  Sending
+        # 'Unspecified level' to the AI caused it to add a redundant
+        # "batch-level floor field is recorded as 'Unspecified level'" clause
+        # in Phase 1 scope verification even when all elements already carried
+        # a correct floor (e.g. "Ground Floor").
+        _batch_floor_raw = (getattr(batch, 'floor', None) if batch else None) or ''
+        if _batch_floor_raw and _batch_floor_raw.lower() not in ('unspecified level', 'unspecified', ''):
+            _effective_batch_floor = _batch_floor_raw
+        else:
+            # Collect distinct floor labels from the element summaries.
+            _element_floors = sorted({
+                s['floor'] for s in element_summaries
+                if s.get('floor') and s['floor'].lower() not in ('unspecified level', 'unspecified', '')
+            })
+            _effective_batch_floor = (
+                ', '.join(_element_floors) if _element_floors else 'Unspecified level'
+            )
+
+        ecs_values = [s['mean_ecs_n_mm2'] for s in element_summaries if s.get('mean_ecs_n_mm2') is not None]
+        min_ecs = min(ecs_values) if ecs_values else None
+        max_ecs = max(ecs_values) if ecs_values else None
+        avg_ecs = round(sum(ecs_values) / len(ecs_values), 1) if ecs_values else None
+
         fact_pack = {
             'project': project.name,
             'scan_batch': {
                 'folder_name': batch_name or 'General Project Scan',
                 'batch_reference': getattr(batch, 'batch_reference', 'N/A') if batch else 'N/A',
                 'verified_element_count': len(tests),
-                'floor': getattr(batch, 'floor', 'Unspecified level') if batch else 'Unspecified level',
+                'floor': _effective_batch_floor,
             },
             'correlation_model': {
-                'curve_type': curve_profile.get('curve_type', 'exponential') if curve_profile else 'Exponential (BS 1881-203)',
-                'formula': (
-                    f"f_cu = {curve_profile.get('params', {}).get('a', 1.20)} * exp({curve_profile.get('params', {}).get('b', 0.85)} * V_km/s) + {curve_profile.get('params', {}).get('c', 0.0)}"
-                    if curve_profile else "f_cu = 1.20 * exp(0.85 * V_km/s)"
-                ),
-                'target_strength_mpa': curve_profile.get('design_strength_mpa', 25.0) if curve_profile else 25.0,
+                'curve_type': ctype_active,
+                'formula': formula_display(ctype_active, params_active or {}),
+                'coefficients': params_active or {},
+                'target_strength_mpa': float(target_str_active),
             },
             'ndt_results_summary': {
                 'total_elements': len(tests),
@@ -701,6 +1303,9 @@ class PUNDITAdapter:
                      / max(1, len([v for v in [t.element_mean_velocity_km_s() for t in tests] if v is not None])))
                     * 1000.0, 1
                 ) if any(t.element_mean_velocity_km_s() for t in tests) else None,
+                'min_derived_strength_mpa': min_ecs,
+                'max_derived_strength_mpa': max_ecs,
+                'mean_derived_strength_mpa': avg_ecs,
             },
             'crack_depth_findings': crack_elements,
             'visual_observations': [
@@ -834,35 +1439,46 @@ class PUNDITAdapter:
                     f"(8) JOINT COLLABORATIVE REVIEW (ENGINEER + INSPECTOR): The following two separate reviews were submitted: {'; '.join(review_parts)}. "
                     f"You MUST synthesize a comprehensive JOINT AI ASSESSMENT that evaluates how the physical field observations of the Inspector and the engineering directives of the Principal Engineer align with the recorded ultrasonic velocities; "
                 )
-            prompt_text = (
-                "You are the Nexucon PUNDIT ultrasonic NDT analysis layer, "
-                "writing an authoritative executive summary for structural engineers, project directors, and regulatory authorities (such as LASBCA). "
-                "Based ONLY on the following real field measurements (velocities in m/s), visual defect observations, and site attendance log: "
-                f"{crack_instruction}"
-                "(2) State the exact scope and verified element count tested in this isolated scan folder/batch (e.g. 48 elements); "
-                "(3) directly correlate visual defects (such as honeycombing, voiding, spalling, exposed rebar) with low ultrasonic velocity zones (V < 3,000 m/s); "
-                "(4) analyse the dataset COLLECTIVELY: group elements that "
-                "show similar behaviour (same floor, same member type, or "
-                "similar velocities/grades) and give ONE collective judgment "
-                "per group. IF you need to list multiple individual elements and their velocities/strengths, YOU MUST FORMAT THAT LIST STRICTLY AS A MARKDOWN TABLE (using '|' and '---' syntax). Do NOT output long comma-separated paragraph lists of elements. Keep your analysis to high-level structural trends and evaluate compressive strength against the calibrated non-linear exponential model (f_cu = a * exp(b * V) + c) relative to statutory design target strength (25 MPa); "
-                "(5) where field_notes, weather_condition or attachment descriptions are present, weigh them as contributing evidence; "
-                "(6) explicitly list the site and client representatives who witnessed and signed off on the test; "
-                "(7) for each weak or variable element or group state the technical impact, a remedial solution (e.g. pressure grouting, structural jacketing), and a recommendation citing relevant codes (BS 1881-203, BS EN 12504-4, BS EN 13791, ASTM C597, ACI 228.2R); "
-                "(8) Every entry under unverified_measurements is a reading "
-                "that falls outside the range physically possible for "
-                "concrete and has deliberately NOT been graded. Treat it as "
-                "a probable instrumentation, path-length or unit error: say "
-                "so plainly and ask for the transducer path length and its "
-                "unit to be re-checked. Do NOT describe an unverified "
-                "element as poor-quality or defective concrete, do not give "
-                "it a severity, and do not include it in any strength or "
-                f"quality verdict. {peer_review_instruction}Do not invent facts, numbers, or events that "
-                'are not present in the data. Return JSON: {"observations": ["..."]}\n\n'
-                f"Measured data: {fact_pack}"
-            )
+            import json
+            prompt_payload = {
+                "raw_data": fact_pack,
+                "precalculated_stats": cls._calculate_point_spread(element_summaries),
+                "cracks_detected": has_crack_findings,
+                "joint_peer_review": bool(peer_review),
+                "peer_review_notes": review_parts if review_parts else None
+            }
+            
+            # Use the EXACT V3 prompt without any external string manipulation
+            prompt_text = PUNDIT_SYSTEM_PROMPT_V3.replace('[INSERT PAYLOAD HERE]', json.dumps(prompt_payload, default=str))
+
             # Run all available models simultaneously with complete fault isolation
             data = AIService.generate_ensemble_structured_json(prompt_text)
             llm_obs = data.get('observations') if isinstance(data, dict) else None
+            
+            if not llm_obs and isinstance(data, dict):
+                # Parse the exact V3 JSON schema since alternative schema was not requested
+                parsed = []
+                if data.get('executive_summary'):
+                    parsed.append(f"**Executive Summary:** {data['executive_summary']}")
+                if data.get('scope_verification'):
+                    parsed.append(f"**Scope:** {data['scope_verification']}")
+                for g in data.get('grouped_analysis', []):
+                    if isinstance(g, dict):
+                        parsed.append(f"**{g.get('group', 'Group')} ({g.get('quality', '')}):** {g.get('correlation', '')}")
+                    else:
+                        parsed.append(str(g))
+                recs = data.get('remedial_recommendations', [])
+                if recs:
+                    if isinstance(recs, list):
+                        parsed.append(f"**Recommendations:** {'; '.join(str(r) for r in recs)}")
+                    else:
+                        parsed.append(f"**Recommendations:** {recs}")
+                if data.get('code_compliance_statement'):
+                    parsed.append(f"**Compliance:** {data['code_compliance_statement']}")
+                
+                if parsed:
+                    llm_obs = parsed
+                    
             if llm_obs and isinstance(llm_obs, list) and not has_crack_findings:
                 llm_obs = [
                     o for o in llm_obs
@@ -1080,7 +1696,11 @@ class PUNDITAdapter:
         se = cm.curve_standard_error_mpa(project)
         outliers = cm.cross_element_outliers(element_summaries)
         metrics = []
-        for s in element_summaries:
+        sorted_summaries = sorted(
+            element_summaries,
+            key=lambda s: (_natural_sort_key(s.get('floor') or ''), _natural_sort_key(s.get('element') or ''))
+        )
+        for s in sorted_summaries:
             if s['mean_ecs_n_mm2'] is None:
                 continue        # no strength estimate: nothing to interval
             ci = cm.strength_confidence_interval(s['mean_ecs_n_mm2'], se)

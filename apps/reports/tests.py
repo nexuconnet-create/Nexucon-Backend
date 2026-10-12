@@ -1707,9 +1707,8 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
                       'on the platform', flat)
 
     def test_appendix_schedule_lists_imported_bim_elements(self):
-        # The appendix schedule lists the REAL imported elements
-        # (BIMElementMapping) with the properties the import recorded —
-        # never the legacy demo table.
+        # The appendix drawings page embeds the BIM drawing / site plan projection,
+        # but omits the verbose tabular element schedule per client direction.
         from apps.digital_eye.models import BIMElementMapping
         self.make_test(self.project, self.device,
                        path_length_mm=250.0, pulse_time_us=62.5)
@@ -1723,17 +1722,11 @@ class NDTReportUnitTests(NDTReportFixtureMixin, TestCase):
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         flat = ' '.join(text.split())
         # The appendix 'drawing' page is registered in the TOC and carries
-        # the project-name label; the heading itself is deliberately not
-        # rendered (reference layout).
+        # the project-name label.
         self.assertIn('DRAWING OF THE BUILDING', flat)
-        # One Revit segment per line — whole tokens, no mid-word breaks.
-        self.assertIn('Floor 200THK RC SLAB 780904', flat)
-        # The CATEGORY column reads as plain words for non-technical
-        # reviewers — never the raw IFC class name or a STEP dump.
-        self.assertIn(' Slab ', flat)
-        self.assertNotIn('IfcSlab', flat)
-        self.assertIn('MATERIAL / GRADE RECORDED', flat)
-        self.assertIn('Concrete - Cast-in-Place Concrete (200 mm)', flat)
+        # The verbose tabular element schedule is omitted — the primary purpose of the BIM file is drawings/plans
+        self.assertNotIn('Structural element schedule extracted', flat)
+        self.assertNotIn('MATERIAL / GRADE RECORDED', flat)
 
     def test_visual_observations_are_reference_style_sentences(self):
         # §4.1 reads like the reference — 'Tacky floor observed on <element>
@@ -3133,6 +3126,52 @@ class NDTReviewMeeting2ReportTests(NDTReportFixtureMixin, TestCase):
             NDTReportService.generate_ndt_report(self.project)).split())
         self.assertNotIn("AI-ASSISTED INTERPRETATION", flat)
 
+    def test_a_prose_element_run_prints_as_a_table(self):
+        """The analysis layer sometimes answers with one clause per element.
+        §5.3 prints that run as a table, over the elements the project
+        actually recorded, rather than as a wall of numbers in a sentence."""
+        for label, path, transit in (("S1", 250.0, 56.8),
+                                     ("S2", 250.0, 58.1),
+                                     ("S3", 250.0, 57.4),
+                                     ("S4", 250.0, 56.2)):
+            self.make_test(self.project, self.device,
+                           structural_element=label, floor="Ground Floor",
+                           path_length_mm=path, pulse_time_us=transit)
+        run = ("Ground Floor element-by-element: "
+               "S1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good; "
+               "S2 4,320.00 m/s, 48.5 MPa, spread 3.0%, good; "
+               "S3 4,360.00 m/s, 49.5 MPa, spread 4.0%, good; "
+               "S4 4,440.00 m/s, 51.5 MPa, spread 1.0%, good. "
+               "All four elements sit above the 25 MPa target.")
+        self._ai_record(observations=[run])
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # The table's own header, distinct from Section 5.0's point tables.
+        self.assertIn("MEAN PULSE VELOCITY (M/S)", flat)
+        # Each element on its own row, in the order the narrative gave them.
+        self.assertIn("S1 4,400.00 50.0 2.0 good", flat)
+        self.assertIn("S4 4,440.00 51.5 1.0 good", flat)
+        # The sentence it replaced is gone, and the writer's closing remark
+        # is not.
+        self.assertNotIn("S1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good;", flat)
+        self.assertIn("All four elements sit above the 25 MPa target.", flat)
+
+    def test_a_prose_run_over_unrecorded_elements_is_left_as_written(self):
+        """One name the project never recorded and the whole run stays
+        prose — the report will not print a table that drops a figure."""
+        self.make_test(self.project, self.device,
+                       structural_element="COL-G01", floor="Ground Floor",
+                       path_length_mm=250.0, pulse_time_us=62.5)
+        run = ("Slab run: X1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good; "
+               "X2 4,320.00 m/s, 48.5 MPa, spread 3.0%, good; "
+               "X3 4,360.00 m/s, 49.5 MPa, spread 4.0%, good; "
+               "X4 4,440.00 m/s, 51.5 MPa, spread 1.0%, good.")
+        self._ai_record(observations=[run])
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("X1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good", flat)
+        self.assertNotIn("MEAN PULSE VELOCITY (M/S)", flat)
+
 
 # ======================================================================
 # Report CMS + Word export (8 Sep 2026 review meeting, item H7; 4 Sep
@@ -3995,6 +4034,13 @@ class ReportQrAndCoverTests(NDTReportFixtureMixin, TestCase):
                        pulse_time_us=62.5)
         text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
         self.assertIn('Rebar Assessment: Not Applicable', text)
+
+    def test_equipment_status_displays_ok_instead_of_online(self):
+        self.make_test(self.project, self.device, path_length_mm=250.0,
+                       pulse_time_us=62.5)
+        text = _pdf_text(NDTReportService.generate_ndt_report(self.project))
+        self.assertIn('Equipment Status OK', text)
+        self.assertNotIn('Equipment Status online', text)
 
 
 class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
@@ -5092,3 +5138,152 @@ class NDTInspectorNotificationTests(_HermeticMediaMixin, NDTReportFixtureMixin, 
         )
         self.assertEqual(dl_res.status_code, status.HTTP_200_OK)
         self.assertEqual(dl_res['Content-Type'], 'application/pdf')
+
+
+class NDTReportCalibrationConsistencyTests(NDTReportFixtureMixin, TestCase):
+    """Section 5.3 must print the calibration curve the report itself
+    discloses in Section 3.0.
+
+    A project re-calibrated after its analysis ran used to keep the old
+    curve's strengths in Section 5.3 while Section 3.0 printed the new
+    formula: one report, two curves. The client's own 4295 m/s element
+    showed 46.2 N/mm2 (the laboratory default f_cu = 1.20 x exp(0.85 x V))
+    against a project curve yielding 34.5, with the +/- 0.6 interval in the
+    very same row already taken from the project curve's standard error.
+    """
+
+    def setUp(self):
+        self.project = self.make_project(name="Lekki Calibration Project")
+        self.device = self.make_device(self.project)
+        # Three points averaging 4294.92 m/s.
+        test = self.make_test(
+            self.project, self.device,
+            structural_element="S20", floor="Ground Floor")
+        from apps.digital_eye.models import PUNDITReading
+        for label, transit in (('A', 69.80), ('B', 69.85), ('C', 69.90)):
+            PUNDITReading.objects.create(
+                test=test, point_label=label,
+                path_length_mm=300.0, transit_time_us=transit)
+        self.test_obj = test
+        # The project's own fitted calibration, exactly as the client's
+        # Section 3.0 states it.
+        from apps.digital_eye.models import StrengthCurve, ProjectCurveSetting
+        self.curve = StrengthCurve.objects.create(
+            project=self.project, name="Lekki project calibration",
+            curve_type='exponential',
+            formula_params={'a': 3051.166318, 'b': 0.000003,
+                            'c': -3056.280893},
+            valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
+            standard='BS 1881-203 / BS EN 12504-4',
+            data_points=[{'v': 3200.0, 'f': 7.4}, {'v': 3400.0, 'f': 11.2},
+                         {'v': 3600.0, 'f': 15.1}, {'v': 3800.0, 'f': 19.0},
+                         {'v': 4000.0, 'f': 22.9}, {'v': 4200.0, 'f': 26.8},
+                         {'v': 4400.0, 'f': 30.5}, {'v': 4600.0, 'f': 34.3},
+                         {'v': 4800.0, 'f': 38.2}, {'v': 5000.0, 'f': 42.0}])
+        setting, _ = ProjectCurveSetting.objects.get_or_create(
+            project=self.project)
+        setting.active_curve = self.curve
+        setting.save()
+
+    def _stale_ai_record(self):
+        """An analysis record computed while the laboratory default was
+        still the active curve — the state every already-issued report is
+        in."""
+        from apps.evidence.models import AIAnalysisRecord
+        return AIAnalysisRecord.objects.create(
+            project=self.project, analysis_type="pundit",
+            observations=["Ground Floor: S20 shows a mean pulse velocity of "
+                          "4295 m/s."],
+            recommendations=[], model_provider="gemini",
+            model_version="gemini-3.5-flash-lite", confidence=0.9,
+            correlations=[{
+                'element': 'S20', 'floor': 'Ground Floor',
+                'mean_velocity_m_s': 4294.92,
+                # The laboratory default's answers, kept on the record.
+                'mean_ecs_n_mm2': 46.2,
+                'point_spread_pct': 0.1,
+                'confidence_interval_n_mm2': [45.6, 46.8],
+                'probability_below_design': 0.0,
+                'data_quality': {'label': 'HIGH', 'reason': '3 points'},
+                'cross_element_outlier': None,
+            }])
+
+    def test_section_5_3_strength_comes_from_the_projects_own_curve(self):
+        from apps.digital_eye.confidence_metrics import (
+            curve_standard_error_mpa, strength_confidence_interval)
+        from apps.digital_eye.strength_curves import apply_active_curve
+        self._stale_ai_record()
+
+        mean_v = self.test_obj.element_mean_velocity_km_s()
+        expected_ecs, _ = apply_active_curve(self.project, mean_v)
+        self.assertIsNotNone(expected_ecs)
+        # The two curves must genuinely differ here, or the test proves
+        # nothing.
+        self.assertNotAlmostEqual(expected_ecs, 46.2, places=1)
+
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        # Section 3.0 discloses the project's formula ...
+        self.assertIn("3051.166318", flat)
+        # ... and Section 5.3 prints that formula's answer, not the
+        # laboratory default's.
+        self.assertIn(f"{expected_ecs:.1f}", flat)
+        self.assertNotIn("46.2", flat)
+
+        # The interval in the same row is built from the same curve's
+        # regression error, so strength and interval cannot come from two
+        # different formulas.
+        se = curve_standard_error_mpa(self.project)
+        self.assertIsNotNone(se)
+        low, high = strength_confidence_interval(expected_ecs, se)
+        self.assertIn(f"{low:.1f} - {high:.1f}", flat)
+
+    def test_unmatched_rows_keep_their_stored_figures(self):
+        """A correlation row whose element has since been removed still
+        prints, so no row silently vanishes from the table."""
+        record = self._stale_ai_record()
+        record.correlations = [{
+            'element': 'S99', 'floor': 'Ground Floor',
+            'mean_velocity_m_s': 4294.92, 'mean_ecs_n_mm2': 46.2,
+            'point_spread_pct': 0.1, 'confidence_interval_n_mm2': [45.6, 46.8],
+            'probability_below_design': 0.0,
+            'data_quality': {'label': 'HIGH', 'reason': '3 points'},
+            'cross_element_outlier': None,
+        }]
+        record.save(update_fields=['correlations'])
+        flat = " ".join(_pdf_text(
+            NDTReportService.generate_ndt_report(self.project)).split())
+        self.assertIn("46.2", flat)
+
+    def test_four_corner_boundary_coordinates_rendered_in_report(self):
+        """When 4-corner boundary mapping is calibrated for a project,
+        Section 3.1 includes the 4-Corner Boundary Mapping & Conversion heading,
+        calculated footprint, and table of coordinates."""
+        project = self.make_project(
+            latitude=6.424153, longitude=3.386375,
+            coordinate_system='WGS84_DD',
+            corner_coordinates={
+                'corners': [
+                    {'id': 1, 'label': 'Corner 1 (NW)', 'lat': 6.424359, 'lng': 3.385914, 'easting': 542675.01, 'northing': 710130.59},
+                    {'id': 2, 'label': 'Corner 2 (NE)', 'lat': 6.424398, 'lng': 3.386816, 'easting': 542774.75, 'northing': 710134.97},
+                    {'id': 3, 'label': 'Corner 3 (SE)', 'lat': 6.423947, 'lng': 3.386836, 'easting': 542777.0, 'northing': 710085.12},
+                    {'id': 4, 'label': 'Corner 4 (SW)', 'lat': 6.423908, 'lng': 3.385934, 'easting': 542677.26, 'northing': 710080.73},
+                ],
+                'footprintAreaSqm': 4982.4,
+                'perimeterMeters': 299.48,
+            }
+        )
+        b_data = NDTReportService._get_boundary_data(project)
+        self.assertIsNotNone(b_data)
+        self.assertEqual(len(b_data['corners']), 4)
+        self.assertEqual(b_data['footprintAreaSqm'], 4982.4)
+
+        data = NDTReportService.generate_ndt_report(project)
+        flat = " ".join(_pdf_text(data).split())
+        self.assertIn("4-CORNER BOUNDARY MAPPING & CONVERSION", flat)
+        self.assertIn("4,982.4 sqm footprint", flat)
+        self.assertIn("Corner 1 (NW)", flat)
+        self.assertIn("6.424359", flat)
+        self.assertIn("3.385914", flat)
+        self.assertIn("Corner 4 (SW)", flat)
+

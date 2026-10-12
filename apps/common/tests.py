@@ -2104,3 +2104,128 @@ class HaversineTests(TestCase):
         working; if it ever becomes a copy instead, this asserts it."""
         from apps.evidence import correlation
         self.assertIs(correlation.haversine_m, haversine_m)
+
+
+# ======================================================================
+# Measurement-heavy narrative → tables. A run of the AI interpretation
+# layer answers in prose rather than tables: one clause per element with
+# its velocity, strength, spread and grade. The certified report and the
+# analysis screens both rewrite those runs as tables. The rewrite copies
+# its figures; it never recomputes one.
+# ======================================================================
+
+class MeasurementTableTests(TestCase):
+    """apps/common/measurement_tables.py."""
+
+    PROSE = (
+        "Ground Floor element-by-element: S20 4,294.92 m/s, 46.2 MPa, "
+        "spread 3.4%, good; S19 4,335.56 m/s, 47.8 MPa, spread 7.8%, good; "
+        "S18 4,397.06 m/s, 50.4 MPa, spread 5.2%, good; S17 4,134.54 m/s, "
+        "40.3 MPa, spread 5.5%, good. These four elements remain above the "
+        "25 MPa target.")
+
+    def test_prose_element_run_becomes_a_table(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        out = tabulate_measurements(self.PROSE)
+        self.assertIn("| STRUCTURAL ELEMENT | MEAN PULSE VELOCITY (M/S) |", out)
+        self.assertIn("| --- |", out)
+        self.assertIn("| S20 | 4,294.92 | 46.2 | 3.4 | good |", out)
+        self.assertIn("| S17 | 4,134.54 | 40.3 | 5.5 | good |", out)
+        # The writer's own closing sentence survives as its own paragraph.
+        self.assertIn("These four elements remain above the 25 MPa target.",
+                      out)
+        # The lead-in is kept, not swallowed into the table.
+        self.assertIn("Ground Floor element-by-element:", out)
+
+    def test_no_figure_is_dropped_or_altered(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        out = tabulate_measurements(self.PROSE)
+        for figure in ("4,294.92", "4,335.56", "4,397.06", "4,134.54",
+                       "46.2", "47.8", "50.4", "40.3",
+                       "3.4", "7.8", "5.2", "5.5"):
+            self.assertIn(figure, out)
+
+    def test_a_run_shorter_than_four_stays_prose(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        short = ("S1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good; "
+                 "S2 4,300.00 m/s, 48.0 MPa, spread 3.0%, good.")
+        self.assertEqual(tabulate_measurements(short), short)
+
+    def test_plain_prose_is_untouched(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        prose = ("Crack depth was measured by the time-difference method "
+                 "on the ground-floor slab and reported in Section 5.1.")
+        self.assertEqual(tabulate_measurements(prose), prose)
+
+    def test_velocities_without_element_names_stay_prose(self):
+        """'at 3986.71 m/s, 4026.85 m/s' is a list of readings, not of
+        elements; nothing in it may be promoted into an element column."""
+        from apps.common.measurement_tables import tabulate_measurements
+        text = ("Point velocities recorded at 3986.71 m/s, 4026.85 m/s, "
+                "3960.40 m/s and 3990.10 m/s, a tight spread of 1.7%.")
+        self.assertEqual(tabulate_measurements(text), text)
+
+    def test_a_name_outside_the_project_leaves_the_run_alone(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        known = {"s20", "s19", "s18"}
+        # S17 is not a recorded element: the whole run stays as written
+        # rather than printing a table that silently drops it.
+        self.assertEqual(tabulate_measurements(self.PROSE, known_elements=known),
+                         self.PROSE)
+        out = tabulate_measurements(
+            self.PROSE, known_elements={"s20", "s19", "s18", "s17"})
+        self.assertIn("| S17 | 4,134.54 |", out)
+
+    def test_an_existing_markdown_table_passes_through(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        table = ("**High-velocity group**\n"
+                 "| STRUCTURAL ELEMENT | MEAN PULSE VELOCITY (M/S) |\n"
+                 "| --- | --- |\n"
+                 "| S8 | 4491.21 |\n")
+        self.assertEqual(tabulate_measurements(table), table)
+
+    def test_group_headings_keep_their_position_between_tables(self):
+        from apps.common.measurement_tables import tabulate_measurements
+        text = (
+            "Group A: S1 4,400.00 m/s, 50.0 MPa, spread 2.0%, good; "
+            "S2 4,300.00 m/s, 48.0 MPa, spread 3.0%, good; "
+            "S3 4,310.00 m/s, 48.5 MPa, spread 4.0%, good; "
+            "S4 4,320.00 m/s, 49.0 MPa, spread 1.0%, good. "
+            "Group B (mean V 4,250 m/s): "
+            "S5 4,250.00 m/s, 45.0 MPa, spread 2.5%, good; "
+            "S6 4,260.00 m/s, 45.5 MPa, spread 2.6%, good; "
+            "S7 4,270.00 m/s, 46.0 MPa, spread 2.7%, good; "
+            "S8 4,280.00 m/s, 46.5 MPa, spread 2.8%, good.")
+        out = tabulate_measurements(text)
+        separators = [line for line in out.splitlines()
+                      if line.startswith("| ---")]
+        self.assertEqual(len(separators), 2)
+        self.assertLess(out.find("| S4 |"), out.find("Group B (mean V 4,250 m/s):"))
+        self.assertLess(out.find("Group B (mean V 4,250 m/s):"), out.find("| S5 |"))
+
+    def test_markdown_blocks_splits_text_from_tables(self):
+        from apps.common.measurement_tables import markdown_blocks
+        blocks = markdown_blocks(
+            "Lead-in line.\n\n"
+            "| A | B |\n| --- | --- |\n| 1 | 2 |\n\n"
+            "Closing remark.")
+        self.assertEqual([kind for kind, _ in blocks],
+                         ["text", "table", "text"])
+        headers, rows = blocks[1][1]
+        self.assertEqual(headers, ["A", "B"])
+        self.assertEqual(rows, [["1", "2"]])
+
+    def test_markdown_blocks_pads_short_rows(self):
+        from apps.common.measurement_tables import markdown_blocks
+        blocks = markdown_blocks("| A | B | C |\n| --- | --- | --- |\n| 1 |\n")
+        _, (headers, rows) = blocks[0]
+        self.assertEqual(len(headers), 3)
+        self.assertEqual(rows, [["1", "", ""]])
+
+    def test_normalize_observations_maps_every_entry(self):
+        from apps.common.measurement_tables import normalize_observations
+        plain = "A short observation with no measurements at all."
+        out = normalize_observations([self.PROSE, plain])
+        self.assertEqual(len(out), 2)
+        self.assertIn("| S20 |", out[0])
+        self.assertEqual(out[1], plain)

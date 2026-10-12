@@ -868,10 +868,30 @@ class AIService:
             content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
             content = re.sub(r"\s*```$", "", content)
         try:
-            return json.loads(content)
+            return json.loads(content, strict=False)
         except json.JSONDecodeError as e:
+            # Fallback: search for markdown json block or outermost braces
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(1), strict=False)
+                except json.JSONDecodeError:
+                    pass
+            m2 = re.search(r'(\{.*\})', content, re.DOTALL)
+            if m2:
+                try:
+                    return json.loads(m2.group(1), strict=False)
+                except json.JSONDecodeError:
+                    pass
+            try:
+                # Replace raw control characters that break JSON decoders
+                cleaned = re.sub(r'[\x00-\x1f]', lambda match: '\\n' if match.group(0) == '\n' else ('\\t' if match.group(0) == '\t' else ' '), content)
+                return json.loads(cleaned, strict=False)
+            except Exception:
+                pass
             logger.error("AI returned invalid JSON: %s", e)
             raise ValueError("AI returned invalid JSON.") from e
+
 
     @staticmethod
     def _normalise_list(data, key=None):
@@ -1325,15 +1345,85 @@ class AIService:
                         logger.warning("Ensemble engine %s isolated on error: %s", prov, err_str)
 
         # Merge observations across responding models
-        merged_observations = []
+        # For structured reports, singleton sections (Executive Summary, Scope, Compliance)
+        # must never be duplicated across providers. We choose the most detailed / comprehensive version.
+        best_exec_summary = ""
+        best_scope = ""
+        best_compliance = ""
+        grouped_sections = []
+        all_recommendations = []
+        raw_observations = []
+
         for prov, data in successful_results.items():
             if isinstance(data, dict):
                 obs = data.get("observations")
-                if isinstance(obs, list):
+                if isinstance(obs, list) and obs:
                     for o in obs:
                         cleaned = str(o).strip()
-                        if cleaned and cleaned not in merged_observations:
-                            merged_observations.append(cleaned)
+                        if not cleaned:
+                            continue
+                        if cleaned.startswith("**Executive Summary:**"):
+                            if len(cleaned) > len(best_exec_summary):
+                                best_exec_summary = cleaned
+                        elif cleaned.startswith("**Scope:**"):
+                            if len(cleaned) > len(best_scope):
+                                best_scope = cleaned
+                        elif cleaned.startswith("**Compliance:**"):
+                            if len(cleaned) > len(best_compliance):
+                                best_compliance = cleaned
+                        elif cleaned.startswith("**Recommendations:**"):
+                            rec_text = cleaned[len("**Recommendations:**"):].strip()
+                            if rec_text and rec_text not in all_recommendations:
+                                all_recommendations.append(rec_text)
+                        else:
+                            if cleaned not in raw_observations:
+                                raw_observations.append(cleaned)
+                else:
+                    # Parse V3 prompt schema keys if present
+                    if data.get('executive_summary'):
+                        cleaned = f"**Executive Summary:** {data['executive_summary']}".strip()
+                        if len(cleaned) > len(best_exec_summary):
+                            best_exec_summary = cleaned
+                    if data.get('scope_verification'):
+                        cleaned = f"**Scope:** {data['scope_verification']}".strip()
+                        if len(cleaned) > len(best_scope):
+                            best_scope = cleaned
+                    for g in (data.get('grouped_analysis') or []):
+                        if isinstance(g, dict):
+                            cleaned = f"**{g.get('group', 'Group')} ({g.get('quality', '')}):** {g.get('correlation', '')}".strip()
+                            if cleaned not in grouped_sections:
+                                grouped_sections.append(cleaned)
+                    recs = data.get('remedial_recommendations') or []
+                    if recs:
+                        if isinstance(recs, list):
+                            for r in recs:
+                                r_str = str(r).strip()
+                                if r_str and r_str not in all_recommendations:
+                                    all_recommendations.append(r_str)
+                        else:
+                            r_str = str(recs).strip()
+                            if r_str and r_str not in all_recommendations:
+                                all_recommendations.append(r_str)
+                    if data.get('code_compliance_statement'):
+                        cleaned = f"**Compliance:** {data['code_compliance_statement']}".strip()
+                        if len(cleaned) > len(best_compliance):
+                            best_compliance = cleaned
+
+        merged_observations = []
+        if best_exec_summary:
+            merged_observations.append(best_exec_summary)
+        if best_scope:
+            merged_observations.append(best_scope)
+        for g in grouped_sections:
+            if g not in merged_observations:
+                merged_observations.append(g)
+        for raw in raw_observations:
+            if raw not in merged_observations:
+                merged_observations.append(raw)
+        if all_recommendations:
+            merged_observations.append(f"**Recommendations:** {'; '.join(all_recommendations)}")
+        if best_compliance:
+            merged_observations.append(best_compliance)
 
         active_models = [
             f"{cls._model_for(p) or p}" for p in successful_results.keys()
@@ -1359,6 +1449,14 @@ class AIService:
             "version_label": version_title,
             "ensemble_active": len(successful_results) > 0,
         }
+        # Retain all top-level keys returned by any responding model
+        for prov, data in successful_results.items():
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k not in res_dict and v is not None:
+                        res_dict[k] = v
+        res_dict["provider_results"] = successful_results
+
         return StructuredResult(
             res_dict,
             provider=provider_title,

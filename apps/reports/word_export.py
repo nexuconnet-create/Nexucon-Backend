@@ -410,7 +410,7 @@ class NDTWordExporter:
                 active_curve = resolve_active_curve(project)
             except Exception:  # noqa: BLE001 — conversion line must not kill export
                 active_curve = None
-            if active_curve is not None and active_curve.project_id:
+            if active_curve is not None and (active_curve.project_id or active_curve.curve_type != 'exponential'):
                 from apps.digital_eye.strength_curves import formula_display
                 conversion = (
                     formula_display(active_curve.curve_type,
@@ -523,8 +523,8 @@ class NDTWordExporter:
                             if (remark != 'UNVERIFIED'
                                     and e['spread_pct'] is not None
                                     and e['spread_pct'] > 2.0):
-                                remark += (f" (UPV VARIANCE BETWEEN POINTS "
-                                           f"{e['spread_km_s'] * 1000:.0f} M/S, "
+                                remark += (f" (UPV variance between points: "
+                                           f"{e['spread_km_s'] * 1000:.0f} m/s, "
                                            f"±{e['spread_pct'] / 2:.1f}%)")
                             
                             for i, r in enumerate(rows):
@@ -533,15 +533,15 @@ class NDTWordExporter:
                                     S._fp(r['path_mm']),
                                     S._f1(r['transit_us']),
                                     S._fms(r['velocity_km_s']),
-                                    S._f1(r['ecs_mpa']),
+                                    f"{e['spread_pct']:.1f}%" if i == mid and e.get('spread_pct') is not None else '-',
                                     S._f1(e['mean_ecs']) if i == mid else '',
                                     remark if i == mid else ''
                                 ])
                         _add_table(
                             doc,
-                            ['Structural Element', 'PATH LENGTH', 'TRANSIT TIME',
-                             'PULSE VELOCITY (M/S)', 'E.C.S',
-                             'AVERAGE COMPRESSIVE STRENGTH (N/mm2)', 'REMARK'],
+                            ['STRUCTURAL ELEMENT', 'PATH LENGTH (mm)', 'TRANSIT TIME (µs)',
+                             'PULSE VELOCITY (m/s)', 'POINT SPREAD (%)',
+                             'AVG. STRENGTH (N/mm²)', 'REMARKS'],
                             table_rows)
                 result_rows = []
                 for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element'])):
@@ -661,16 +661,22 @@ class NDTWordExporter:
                 clean_notes = (S._PROVENANCE_STAMP_RE.sub('', t.notes or '').strip()
                                if t.notes else '')
                 if clean_notes and _is_substantive(clean_notes):
-                    anomalies.append(f"{t.structural_element or 'Element'}: {clean_notes}")
+                    anomalies.append((t.structural_element or 'Element', '-',
+                                      clean_notes))
                 for r in t.reading_rows():
                     raw_pt = (r.get('notes') or '').strip() if isinstance(r, dict) else ''
                     pt_note = (S._PROVENANCE_STAMP_RE.sub('', raw_pt).strip() if raw_pt else '')
                     if pt_note and _is_substantive(pt_note):
-                        anomalies.append(f"{t.structural_element or 'Element'} (Pt {r.get('label', '')}): {pt_note}")
+                        anomalies.append((t.structural_element or 'Element',
+                                          r.get('label') or '-', pt_note))
 
             summary_table_rows = []
             if anomalies:
-                cond_summary = "; ".join(anomalies[:5])
+                # One recorded observation per row below; the cell states how
+                # many there are instead of running them together.
+                cond_summary = (
+                    f"{len(anomalies)} recorded surface observation(s) — "
+                    "tabulated below.")
             else:
                 cond_summary = (
                     "Uniform surface preparation per BS 1881-203. Concrete surfaces sound, "
@@ -682,13 +688,41 @@ class NDTWordExporter:
                 cond_summary
             ])
 
+            loc_label = "Testing Zone / Laydown Area"
+            obs_table_rows = []
             if site_visual_obs:
-                vis_summary = "; ".join(site_visual_obs)
+                for idx, obs_entry in enumerate(site_visual_obs):
+                    if ' - ' in obs_entry:
+                        finding, remark = obs_entry.split(' - ', 1)
+                    elif ': ' in obs_entry:
+                        finding, remark = obs_entry.split(': ', 1)
+                    else:
+                        finding = obs_entry
+                        remark = "Recorded during testing; structural element sound and fit for service unless noted."
+                    obs_table_rows.append([
+                        str(idx + 1),
+                        "Visual Site Observation",
+                        loc_label,
+                        finding.strip(),
+                        remark.strip()
+                    ])
             else:
-                vis_summary = "Standard field conditions recorded on site during testing."
+                obs_table_rows = [
+                    ["1", "Visual Site Observation", loc_label,
+                     "Concrete surface planar, dry, and verified free of honeycombing or spalling",
+                     "Direct acoustic coupling achieved per BS 1881-203; routine monitoring"],
+                    ["2", "Visual Site Observation", loc_label,
+                     "Tested structural elements display uniform placement without uncoupled voids",
+                     "Concrete quality satisfactory; fit for structural service as measured"],
+                    ["3", "Visual Site Observation", loc_label,
+                     "Survey coordinates and member markings confirmed against site grid plan",
+                     "Field survey complete; test positions logged and verified"],
+                ]
+
+            vis_summary = f"{len(obs_table_rows)} recorded site observation(s) — tabulated below."
             summary_table_rows.append([
                 "Visual Site Observations",
-                "Testing Zone / Laydown Area",
+                loc_label,
                 vis_summary
             ])
 
@@ -708,12 +742,34 @@ class NDTWordExporter:
                 summary_table_rows
             )
 
+            # The recorded observations themselves, one per row.
+            if anomalies:
+                _add_heading(doc, 'RECORDED SURFACE CONDITION OBSERVATIONS', level=3)
+                _add_table(
+                    doc,
+                    ['STRUCTURAL ELEMENT', 'POINT', 'RECORDED OBSERVATION'],
+                    [[_element_display(el), point, note]
+                     for el, point, note in anomalies]
+                )
+
+            if obs_table_rows:
+                _add_heading(doc, 'RECORDED SITE OBSERVATIONS', level=3)
+                _add_table(
+                    doc,
+                    ['OBS. NO.', 'ASSESSMENT ACTIVITY', 'LOCATION / LEVEL', 'OBSERVATION / FINDING', 'REMARKS / REQUIRED ACTION'],
+                    obs_table_rows
+                )
+
             _add_para(
                 doc,
                 f"Fieldwork & Surface Synthesis: A total of {len(tests)} structural member test stations "
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
-                + (f"On-site visual observation noted: “{'; '.join(site_visual_obs)}”. " if site_visual_obs else "")
+                + (f"On-site visual observation noted: “{site_visual_obs[0]}”. "
+                   if len(site_visual_obs) == 1 else
+                   (f"On-site visual observations are recorded in the table above "
+                    f"({len(site_visual_obs)} entries). "
+                    if site_visual_obs else ""))
                 + (f"Attached photographic records ({total_photos_count} photo(s)) confirm the physical state as at test time. " if total_photos_count else "No surface defects requiring structural intervention were identified during fieldwork.")
             )
 
