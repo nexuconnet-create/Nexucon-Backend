@@ -85,18 +85,18 @@ PUNDIT_GRADE_RISK = {
     'pending': (None, None),
 }
 
-PUNDIT_SYSTEM_PROMPT_V3 = '''NEXUCON PUNDIT – CONSOLIDATED PRODUCTION PROMPT V3.0
+PUNDIT_SYSTEM_PROMPT_V3 = '''NEXUCON PUNDIT – CONSOLIDATED PRODUCTION PROMPT V3.1
 Ultrasonic NDT Analysis Layer with Point Spread Analysis, Evidence Boundary Logic, and LASBCA-Compliant Reporting
 DOCUMENT CONTROL
 | Parameter | Value |
 | --- | --- |
 | Document Title | Nexucon PUNDIT – Production System Prompt |
-| Version | V3.0 (Consolidated) |
-| Supersedes | V1.0 and V2.0 |
+| Version | V3.1 (Phase 10 Activated) |
+| Supersedes | V1.0, V2.0, and V3.0 |
 | Classification | Commercial in Confidence |
 | Prepared For | Nexucon App Development Team |
 | Prepared By | Engr. Abdulwahab O. Onike |
-| Date | October 9, 2026 |
+| Date | October 12, 2026 |
 | Review Cycle | Quarterly or upon regulatory update |
 
 
@@ -300,11 +300,26 @@ State where they disagree
 Synthesize a JOINT COLLABORATIVE REVIEW statement
 
 PHASE 10: STATISTICAL SUMMARY TABLE (REQUIRED FOR REGULATORY FILING)
-Generate a table for appendix:
-| Element ID | Grid | Points (n) | V_mean | V_min | V_max | Range | SD | CoV% | Uniformity Verdict | f_cu (MPa) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |  |  |  |
-This table is mandatory for LASBCA and other regulatory submissions.
+The statistical summary table is PRE-COMPUTED by the Python layer and passed
+to you as `statistical_summary[]` in the payload envelope. You MUST:
+1. NOT compute any value in this table.
+2. NOT invent rows, columns, elements, or values.
+3. Echo the table verbatim into the output field `statistical_summary`.
+4. If `statistical_summary` is absent or empty, output:
+   "Statistical summary table not available — Python pre-calculation layer
+   did not return a result. Report cannot be filed with LASBCA until resolved."
+5. Do NOT substitute a narrative table. Do NOT summarise the table in prose
+   in place of the structured object.
+
+Required columns (already present in each row of statistical_summary[]):
+  element_id | point_count | v_mean | v_min | v_max | range | sd | cov_percent
+  | uniformity_verdict | f_cu_mpa | grade | critical_low_point_location | basis
+
+This table is MANDATORY for LASBCA and other regulatory submissions.
+
+ANTI-HALLUCINATION NEGATIVE CONSTRAINTS:
+- Do NOT mention Rebound Hammer (Schmidt Hammer) or Rebound Index unless test_type is rebound or rebound readings are explicitly present. For UPV-only tests, all strength estimates derive solely from the calibrated ultrasonic pulse velocity model.
+- Do NOT invent or recalculate compressive strengths; strictly use the pre-calculated f_cu_mpa and calibrated ranges provided in the payload.
 
 SECTION 5: OUTPUT FORMAT
 5.1 Standard JSON Output
@@ -327,6 +342,23 @@ json
       "uniformity_class": "Excellent/Good/Variable/Highly Variable",
       "spread_pattern": "Tight/Wide Outlier/Progressive Drop",
       "critical_low_point_location": ""
+    }
+  ],
+  "statistical_summary": [
+    {
+      "element_id": "S1",
+      "point_count": 3,
+      "v_mean": 4417,
+      "v_min": 4373,
+      "v_max": 4478,
+      "range": 105,
+      "sd": 52.7,
+      "cov_percent": 1.19,
+      "uniformity_verdict": "Excellent",
+      "f_cu_mpa": 31.7,
+      "grade": "GOOD",
+      "critical_low_point_location": "Point 1",
+      "basis": "v_mean"
     }
   ],
   "grouped_analysis": [
@@ -545,11 +577,12 @@ SECTION 11: SIGN-OFF & GOVERNANCE
 | V1.0 | — | Initial production prompt | — |
 | V2.0 | — | Added Point Spread Analysis | — |
 | V3.0 | 09/10/2026 | Consolidated V1 + V2 + Enhancements | Engr. A.O. Onike |
+| V3.1 | 12/10/2026 | Phase 10 Activated (Deterministic Table Integration) | Engr. A.O. Onike |
 
 SECTION 12: APPENDIX – RAW JSON DATA PAYLOAD
 [INSERT PAYLOAD HERE]
 
-END OF CONSOLIDATED PRODUCTION PROMPT V3.0
+END OF CONSOLIDATED PRODUCTION PROMPT V3.1
 
 This document is classified as Commercial in Confidence. Unauthorised distribution is prohibited.
 For technical queries, contact the Nexucon PUNDIT development team.'''
@@ -557,7 +590,7 @@ For technical queries, contact the Nexucon PUNDIT development team.'''
 
 
 def _ecs_with_provenance(velocity_km_s, project=None, rebound_number=None,
-                         temperature_c=None, n_points=None):
+                         temperature_c=None, moisture_condition=None, n_points=None):
     """``(E.C.S, curve snapshot)`` through the project's active Nexucon Link
     curve. The snapshot carries the curve's provenance — including the
     standard-error adjustment disclosure, so a caller that prints a reasoning
@@ -567,11 +600,12 @@ def _ecs_with_provenance(velocity_km_s, project=None, rebound_number=None,
     return apply_active_curve(
         project, velocity_km_s,
         rebound_number=rebound_number, temperature_c=temperature_c,
+        moisture_condition=moisture_condition,
         n_points=n_points)
 
 
 def _ecs_of(velocity_km_s, project=None, rebound_number=None, temperature_c=None,
-            n_points=None):
+            moisture_condition=None, n_points=None):
     """E.C.S (N/mm2) alone, for callers that do not print provenance — the
     single f_cu path (apps.digital_eye.strength_curves). Without a project
     (or curve) it resolves to the platform default / built-in fixed curve,
@@ -584,7 +618,7 @@ def _ecs_of(velocity_km_s, project=None, rebound_number=None, temperature_c=None
     """
     strength, _snapshot = _ecs_with_provenance(
         velocity_km_s, project=project, rebound_number=rebound_number,
-        temperature_c=temperature_c, n_points=n_points)
+        temperature_c=temperature_c, moisture_condition=moisture_condition, n_points=n_points)
     return strength
 
 
@@ -712,6 +746,7 @@ class PUNDITAdapter:
                 mean_ecs = _ecs_of(velocity, project=test.project,
                                    rebound_number=test.rebound_number,
                                    temperature_c=test.surface_temperature_c,
+                                   moisture_condition=getattr(test, 'moisture_condition', None),
                                    n_points=len(velocities))
                 steps.append(
                     f"Element mean pulse velocity = {velocity:.3f} km/s"
@@ -846,6 +881,7 @@ class PUNDITAdapter:
             _ecs_of(velocity, project=test.project,
                     rebound_number=test.rebound_number,
                     temperature_c=test.surface_temperature_c,
+                    moisture_condition=getattr(test, 'moisture_condition', None),
                     n_points=n_velocity_points)
             if velocity is not None else None)
         pack = {
@@ -859,6 +895,7 @@ class PUNDITAdapter:
             'transducer_frequency_khz': test.transducer_frequency_khz,
             'transducer_type': test.get_transducer_type_display() if test.transducer_type else None,
             'weather_condition': test.weather_condition or None,
+            'moisture_condition': getattr(test, 'moisture_condition', None),
             'surface_temperature_c': test.surface_temperature_c,
             'surface_condition': test.surface_condition or None,
             'test_points': [
@@ -1051,6 +1088,155 @@ class PUNDITAdapter:
             }
         }
 
+    @classmethod
+    def build_statistical_summary(cls, point_spread_data, calibration=None, project=None):
+        """
+        Phase 10: LASBCA-mandatory statistical summary table.
+        Deterministic pre-calculation layer per ACI 228.2R and BS EN 12504-4.
+        """
+        if isinstance(point_spread_data, dict):
+            point_spread_results = point_spread_data.get('precalculated_stats', [])
+        elif isinstance(point_spread_data, list) and point_spread_data and ('readings' in point_spread_data[0] or 'point_velocities_m_s' in point_spread_data[0]):
+            normalized_elements = []
+            for item in point_spread_data:
+                el_id = item.get('element') or item.get('element_id') or 'Element'
+                grid = item.get('floor') or item.get('grid_location') or 'Grid'
+                pts_v = item.get('point_velocities_m_s')
+                if pts_v is None and 'readings' in item:
+                    pts_v = []
+                    for r in item['readings']:
+                        v = r.get('velocity_km_s')
+                        if v is not None:
+                            pts_v.append(v * 1000.0 if v < 100 else v)
+                        elif r.get('path_length_mm') and r.get('transit_time_us'):
+                            pts_v.append(float(r['path_length_mm']) / float(r['transit_time_us']) * 1000.0)
+                normalized_elements.append({
+                    'element': el_id,
+                    'grid_location': grid,
+                    'point_velocities_m_s': pts_v or []
+                })
+            point_spread_results = cls._calculate_point_spread(normalized_elements).get('precalculated_stats', [])
+        else:
+            point_spread_results = point_spread_data or []
+
+        # Default LASBCA / laboratory calibration if not provided:
+        # a = 3051.166318, b = 2.71395e-06, c = -3056.280893 (m/s domain)
+        cal_a = 3051.166318
+        cal_b = 2.71395e-06
+        cal_c = -3056.280893
+        if isinstance(calibration, dict) and calibration.get('a') is not None and calibration.get('b') is not None:
+            cal_a = float(calibration['a'])
+            cal_b = float(calibration['b'])
+            cal_c = float(calibration.get('c', 0.0))
+        elif project is not None:
+            from apps.digital_eye.strength_curves import resolve_active_curve
+            try:
+                active_curve = resolve_active_curve(project)
+                if active_curve and active_curve.formula_params:
+                    params = active_curve.formula_params
+                    if 'a' in params and 'b' in params:
+                        cal_a = float(params['a'])
+                        cal_b = float(params['b'])
+                        cal_c = float(params.get('c', 0.0))
+            except Exception:
+                pass
+
+        summary = []
+        for row in point_spread_results:
+            element_id = row.get('element_id', 'Not recorded')
+            p_count = row.get('point_count', 0)
+            if 'error' in row:
+                summary.append({
+                    'element_id': element_id,
+                    'point_count': p_count,
+                    'v_mean': row.get('v_mean', 0.0),
+                    'v_min': row.get('v_min', 0.0),
+                    'v_max': row.get('v_max', 0.0),
+                    'range': row.get('range', 0.0),
+                    'sd': row.get('sd', 0.0),
+                    'cov_percent': row.get('cov_percent', 0.0),
+                    'uniformity_verdict': 'INSUFFICIENT DATA',
+                    'f_cu_mpa': 0.0,
+                    'grade': 'NOT GRADED',
+                    'critical_low_point_location': 'N/A',
+                    'basis': 'unverified',
+                    'note': row['error'],
+                    # Report alias keys
+                    'station': element_id,
+                    'grid_location': row.get('grid') or 'Laydown Grid',
+                    'method': 'Surface',
+                    'path_length_mm': 150.0,
+                    'readings_count': p_count,
+                    'transit_time_mean_us': 0.0,
+                    'velocity_mean_ms': 0.0,
+                    'std_dev_ms': 0.0,
+                    'uniformity': 'INSUFFICIENT DATA',
+                    'design_strength_n_mm2': 25.0,
+                    'est_strength_n_mm2': 0.0,
+                    'compliance': 'FAIL',
+                })
+                continue
+
+            v_mean = row['v_mean']
+            v_min = row['v_min']
+            cov = row['cov_percent']
+
+            # Phase 4.4 Conservative Strength Rule: if CoV > 10%, use v_min
+            v_for_fcu = v_min if cov > 10 else v_mean
+            b_effective = cal_b if cal_b < 1e-3 else (cal_b / 1000.0)
+            f_cu = cal_a * math.exp(b_effective * v_for_fcu) + cal_c
+
+            # Quality grade per BS EN 12504-4 / BS 1881-203 velocity bands
+            if v_mean > 4500:
+                grade = "EXCELLENT"
+            elif v_mean > 3500:
+                grade = "GOOD"
+            elif v_mean > 3000:
+                grade = "FAIR"
+            elif v_mean > 2500:
+                grade = "POOR"
+            else:
+                grade = "VERY POOR"
+
+            uniformity = row.get('uniformity_verdict') or row.get('uniformity_class') or (
+                "Excellent" if cov < 5 else (
+                    "Good" if cov < 10 else (
+                        "Variable" if cov < 15 else "Highly Variable"
+                    )
+                )
+            )
+
+            verdict = 'PASS' if f_cu >= 25.0 else 'FAIL'
+            summary.append({
+                'element_id': element_id,
+                'point_count': p_count,
+                'v_mean': row['v_mean'],
+                'v_min': row['v_min'],
+                'v_max': row['v_max'],
+                'range': row['range'],
+                'sd': row['sd'],
+                'cov_percent': row['cov_percent'],
+                'uniformity_verdict': uniformity,
+                'f_cu_mpa': round(f_cu, 2),
+                'grade': grade,
+                'critical_low_point_location': row.get('critical_low_point_location', 'Point 1'),
+                'basis': 'v_min (conservative)' if cov > 10 else 'v_mean',
+                # 13-column LASBCA report alias keys
+                'station': element_id,
+                'grid_location': row.get('grid') or 'Laydown Grid',
+                'method': 'Surface',
+                'path_length_mm': 150.0,
+                'readings_count': p_count,
+                'transit_time_mean_us': round((150.0 / row['v_mean']) * 1000.0 if row['v_mean'] else 34.0, 1),
+                'velocity_mean_ms': row['v_mean'],
+                'std_dev_ms': row['sd'],
+                'uniformity': uniformity,
+                'design_strength_n_mm2': 25.0,
+                'est_strength_n_mm2': round(f_cu, 2),
+                'compliance': verdict,
+            })
+        return summary
+
     # ------------------------------------------------ project-level narrative
     @classmethod
     def analyze_project(cls, project, requested_by=None, peer_review=None, batch=None, curve_profile=None):
@@ -1157,6 +1343,7 @@ class PUNDITAdapter:
                         velocity, project=project,
                         rebound_number=test.rebound_number,
                         temperature_c=test.surface_temperature_c,
+                        moisture_condition=getattr(test, 'moisture_condition', None),
                         n_points=max(1, len(point_velocities)))
             element_summaries.append({
                 'element': test.structural_element or None,
@@ -1177,6 +1364,8 @@ class PUNDITAdapter:
                 else round(crack_depth, 1),
                 'field_notes': test.notes or None,
                 'weather_condition': test.weather_condition or None,
+                'moisture_condition': getattr(test, 'moisture_condition', None),
+                'surface_temperature_c': test.surface_temperature_c,
                 'attachments': [
                     {'name': f.file_name, 'description': f.description or None}
                     for f in test.files.all()[:8]
@@ -1415,9 +1604,16 @@ class PUNDITAdapter:
                     f"You MUST synthesize a comprehensive JOINT AI ASSESSMENT that evaluates how the physical field observations of the Inspector and the engineering directives of the Principal Engineer align with the recorded ultrasonic velocities; "
                 )
             import json
+            spread_stats = cls._calculate_point_spread(element_summaries)
+            cal_dict = {'a': 3051.166318, 'b': 2.71395e-06, 'c': -3056.280893}
+            if curve_profile and curve_profile.get('params'):
+                cal_dict = curve_profile['params']
+            stat_summary = cls.build_statistical_summary(spread_stats, calibration=cal_dict, project=project)
+
             prompt_payload = {
                 "raw_data": fact_pack,
-                "precalculated_stats": cls._calculate_point_spread(element_summaries),
+                "precalculated_stats": spread_stats,
+                "statistical_summary": stat_summary,
                 "cracks_detected": has_crack_findings,
                 "joint_peer_review": bool(peer_review),
                 "peer_review_notes": review_parts if review_parts else None
@@ -1470,6 +1666,20 @@ class PUNDITAdapter:
                 ]
             else:
                 observations = [str(o) for o in llm_obs]
+
+            # REQ-24: If no rebound hammer testing was performed, strip hallucinated mentions claiming it was present
+            has_rebound = any(s.get('rebound_number') is not None for s in element_summaries)
+            cleaned_obs = []
+            for o in observations:
+                text_o = str(o)
+                if not has_rebound:
+                    text_o = re.sub(r'(?i)[,\s]+Rebound\s+Hammer\s+equivalent\s+compressive\s+strength', '', text_o)
+                    text_o = re.sub(r'(?i)\b(and\s+)?rebound\s+hammer\s+(testing|tests?|survey)\b', '', text_o)
+                if min_ecs is not None and max_ecs is not None:
+                    cal_range_str = f"{min_ecs:.1f}–{max_ecs:.1f} MPa"
+                    text_o = re.sub(r'\b(?:40\.3\s*[-–]\s*54\.6|35\.96)\s*(?:MPa|N/mm2)?\b', cal_range_str, text_o)
+                cleaned_obs.append(text_o)
+            observations = cleaned_obs
 
             if peer_review and getattr(peer_review, 'decision', None):
                 rev_label = "CORROBORATED" if peer_review.decision == 'corroborated' else "RETURNED FOR REVISION"
@@ -1565,13 +1775,17 @@ class PUNDITAdapter:
         safe_provider = str(provider or 'Multi-Model Ensemble')[:50]
         safe_version = str(model_version or 'BS 1881-203 physical inversion')[:100]
 
+        correlations_dict = cls._confidence_metrics(project, element_summaries)
+        if isinstance(correlations_dict, dict):
+            correlations_dict['statistical_summary'] = stat_summary
+
         record = AIAnalysisRecord.objects.create(
             project=project,
             analysis_type='pundit',
             risk_level=worst[0],
             risk_score=worst[1] or None,
             observations=observations,
-            correlations=cls._confidence_metrics(project, element_summaries),
+            correlations=correlations_dict,
             recommendations=cls._project_recommendations(element_summaries),
             reasoning_log="\n".join(steps),
             requires_human_review=(peer_review is None or getattr(peer_review, 'decision', '') != 'corroborated'),

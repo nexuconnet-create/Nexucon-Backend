@@ -512,6 +512,11 @@ class PUNDITTest(models.Model):
         ('POOR', 'Poor'),
         ('VERY_POOR', 'Very Poor'),
     ]
+    MOISTURE_CONDITIONS = [
+        ('dry', 'Dry (Reference Condition)'),
+        ('damp', 'Damp (Moist Surface)'),
+        ('saturated', 'Saturated (Water-bearing Concrete)'),
+    ]
 
     id = models.CharField(max_length=100, primary_key=True, default=uuid.uuid4)
     test_reference = models.CharField(max_length=100, unique=True, default=generate_test_ref)
@@ -546,6 +551,10 @@ class PUNDITTest(models.Model):
     weather_condition = models.CharField(
         max_length=150, blank=True, default='',
         help_text="Weather condition at test time, recorded by the operator on site",
+    )
+    moisture_condition = models.CharField(
+        max_length=50, choices=MOISTURE_CONDITIONS, blank=True, default='dry',
+        help_text="Concrete moisture state at test time for environmental correction (BS 1881-203)",
     )
     concrete_age_days = models.PositiveIntegerField(
         null=True, blank=True,
@@ -972,7 +981,8 @@ class PUNDITReading(models.Model):
             test.project if test is not None and test.project_id else None,
             self.velocity_km_s,
             rebound_number=rebound,
-            temperature_c=test.surface_temperature_c if test is not None else None)
+            temperature_c=test.surface_temperature_c if test is not None else None,
+            moisture_condition=test.moisture_condition if test is not None else None)
         self.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
             self.path_length_mm, self.transit_time_us,
             self.uncracked_transit_time_us)

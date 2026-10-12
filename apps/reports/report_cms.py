@@ -23,20 +23,21 @@ appended after it.
 """
 
 INTRODUCTION_DEFAULT = (
-    'Non-Destructive Test (NDT), as the name implies, means that the '
-    'material under test is not damaged during test. Direct '
-    'measurement of the strength of concrete involves destructive '
-    'stresses and cannot be used for determining the quality of '
-    'already cast concrete. It is for this reason that direct methods '
-    'are not employed in determining the strength of in-situ '
-    'concrete. As a result, indirect method was used.'
+    'Non-Destructive Testing (NDT), as the name implies, ensures that the '
+    'material under test is not damaged during the evaluation. Direct '
+    'transmission is the preferred ultrasonic pulse velocity method where '
+    'opposite faces of a member are accessible. For structural elements '
+    'cast on grade where opposite faces are inaccessible, indirect (surface) '
+    'transmission is an established and acceptable methodology per BS 1881-203 '
+    'and BS EN 12504-4, and was accordingly employed for the slab on grade tested '
+    'in this investigation.'
 )
 
 PURPOSE_ITEMS_DEFAULT = (
     'Determine the present status of the structures from the outcome '
     'of the visual and Non-Destructive test of the tested structures '
     'to ascertain their state with respect to BS EN 12504-4:2021, '
-    'ASTM C597-09.\n'
+    'ASTM C597-22 (current edition).\n'
     'Determine the ongoing concrete strength of the structure with '
     'respect to BS 8110: Part 1 1997.\n'
     'Provide engineering advice based on the visual and '
@@ -87,15 +88,15 @@ METHODOLOGY_CONCRETE_DEFAULT = (
 
 RECOMMENDATION_LEAD_DEFAULT = (
     'Based on the purpose of investigation, the outcome of the Visual '
-    'and Non-Destructive Test carried out on the building which shows '
-    'the present state of the building as described in the visual '
-    'test and depicted in the bar charts,'
+    'and Non-Destructive Test carried out on the structural elements which shows '
+    'the present integrity of the tested members as described in the field '
+    'records, statistical evaluations and technical charts,'
 )
 
 CONCLUSION_PREAMBLE_DEFAULT = (
     'The visual and structural integrity test was conducted in '
-    'accordance with BS 1881: Part 201: 1986, BS EN 12504-4:2004, '
-    'BS EN 12504-4:2021.'
+    'accordance with BS 1881-203: 1986, BS EN 12504-4: 2021, '
+    'BS EN 13791: 2019, and ACI 228.2R-13.'
 )
 
 REMARKS_PREAMBLE_DEFAULT = (

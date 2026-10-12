@@ -826,12 +826,20 @@ class NDTWordExporter:
                     _bold('However, it is imperative to state clearly that '
                           'non-adherence to the recommendation excludes the '
                           'testing laboratory of any responsibility.'))
-                _add_para(
-                    doc,
-                    _bold('The test assumed 25 N/mm2 as the strength of the '
-                          'structural members, however a substructure probe is '
-                          'required to ascertain the integrity of the building '
-                          'foundation.'))
+                if S._is_slab_on_grade(project, element_data):
+                    _add_para(
+                        doc,
+                        _bold('The test assumed 25 N/mm2 as the strength of the '
+                              'structural members. The RCC slab-on-grade laydown '
+                              'area was assessed directly; no building foundation '
+                              'substructure is present.'))
+                else:
+                    _add_para(
+                        doc,
+                        _bold('The test assumed 25 N/mm2 as the strength of the '
+                              'structural members, however a substructure probe is '
+                              'required to ascertain the integrity of the building '
+                              'foundation.'))
             else:
                 _add_para(doc, _bold('No ultrasonic pulse velocity results are '
                                      'available for this project; no conclusion '
