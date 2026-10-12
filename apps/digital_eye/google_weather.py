@@ -52,10 +52,11 @@ def resolve_project_coordinates(project: Any) -> Tuple[Optional[float], Optional
     Priority:
     1. Project recorded latitude & longitude
     2. Median coordinates from PUNDIT test stations
-    3. State / LGA regional fallback
+    3. State / LGA regional fallback centroid
+    4. None if unavailable (fails clearly, never fabricates Lagos coordinates)
     """
     if project is None:
-        return 6.5244, 3.3792, "Default (Lagos Regional Center)"
+        return None, None, "Unspecified Project"
 
     lat = getattr(project, "latitude", None)
     lon = getattr(project, "longitude", None)
@@ -96,7 +97,7 @@ def resolve_project_coordinates(project: Any) -> Tuple[Optional[float], Optional
             if key in query:
                 return coords[0], coords[1], f"Regional Centroid ({key.title()})"
 
-    return 6.5244, 3.3792, "National Reference Coordinate (Lagos)"
+    return None, None, "Coordinates unavailable for project location"
 
 
 def map_google_condition_to_pundit(
@@ -119,14 +120,14 @@ def map_google_condition_to_pundit(
         surface_condition = "Damp"
         precip_label = "Light Drizzle / Rain"
         pundit_condition = "Intermittent Drizzle"
+    elif "PARTLY" in ctype or "MOSTLY_SUNNY" in ctype:
+        surface_condition = "Dry"
+        precip_label = "None"
+        pundit_condition = "Partly Cloudy"
     elif "CLOUDY" in ctype or "OVERCAST" in ctype or "FOG" in ctype or "HAZE" in ctype:
         surface_condition = "Dry"
         precip_label = "None"
         pundit_condition = "Overcast / High Humidity"
-    elif "PARTLY" in ctype:
-        surface_condition = "Dry"
-        precip_label = "None"
-        pundit_condition = "Partly Cloudy"
     else:
         surface_condition = "Dry"
         precip_label = "None"
@@ -265,8 +266,8 @@ def fetch_google_weather_for_date(
 
     delta_days = (parsed_target - datetime.utcnow().date()).days
 
-    # Future forecast
-    if 0 <= delta_days <= 10:
+    # Future forecast (up to 10 days)
+    if 0 < delta_days <= 10:
         url = f"{GOOGLE_WEATHER_BASE_URL}/forecast/days:lookup"
         params = {
             "key": key,
@@ -326,9 +327,72 @@ def fetch_google_weather_for_date(
         except Exception as exc:
             logger.debug("Google Weather daily forecast lookup failed: %s", exc)
 
-    # For past days or fallback, query current conditions as baseline calibrated reading
-    cur = fetch_google_weather_current(lat, lon, api_key=api_key)
-    if cur.get("success"):
-        cur["target_date"] = target_date
-        cur["note"] = f"Baseline Google Weather observation calibrated for inspection date {target_date}."
-    return cur
+    # Past 24 hours historical lookup (history/hours:lookup)
+    elif -1 <= delta_days < 0:
+        url = f"{GOOGLE_WEATHER_BASE_URL}/history/hours:lookup"
+        params = {
+            "key": key,
+            "location.latitude": f"{lat:.6f}",
+            "location.longitude": f"{lon:.6f}",
+            "hours": 24,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                matching_hours = [
+                    h for h in data.get("historyHours", [])
+                    if h.get("interval", {}).get("startTime", "").startswith(target_date)
+                ]
+                if matching_hours:
+                    mid_idx = len(matching_hours) // 2
+                    hour = matching_hours[mid_idx]
+                    temp_c = float(hour.get("temperature", {}).get("degrees", 28.0))
+                    hum = int(hour.get("relativeHumidity", 60))
+                    w_cond = hour.get("weatherCondition", {})
+                    cond_text = w_cond.get("description", {}).get("text", "Historical Observation")
+                    cond_type = w_cond.get("type", "CLEAR")
+                    icon_url = w_cond.get("iconBaseUri", "https://maps.gstatic.com/weather/v1/mostly_cloudy")
+                    precip_mm = float(hour.get("precipitation", {}).get("qpf", {}).get("quantity", 0.0))
+                    precip_prob = int(hour.get("precipitation", {}).get("probability", {}).get("percent", 0))
+
+                    mapped = map_google_condition_to_pundit(
+                        condition_type=cond_type,
+                        desc_text=cond_text,
+                        temp_c=temp_c,
+                        precip_prob=precip_prob,
+                        qpf_mm=precip_mm,
+                    )
+
+                    return {
+                        "success": True,
+                        "provider": "Google Weather Platform (24-Hour History)",
+                        "model": "Google DeepMind WeatherNext",
+                        "coordinates": {"latitude": lat, "longitude": lon},
+                        "target_date": target_date,
+                        "temperature_c": temp_c,
+                        "feels_like_c": temp_c,
+                        "relative_humidity_pct": hum,
+                        "condition_description": cond_text,
+                        "condition_type": cond_type,
+                        "icon_url": icon_url,
+                        "wind_speed_kmh": float(hour.get("wind", {}).get("speed", {}).get("value", 10.0)),
+                        "wind_direction": hour.get("wind", {}).get("direction", {}).get("cardinal", "VAR"),
+                        "precipitation_probability": precip_prob,
+                        "precipitation_mm": precip_mm,
+                        "uv_index": hour.get("uvIndex", 0),
+                        "weather_condition": mapped["pundit_condition"],
+                        "surface_condition": mapped["surface_condition"],
+                        "precipitation": mapped["precipitation"],
+                        "impact_on_testing": mapped["impact_on_testing"],
+                    }
+        except Exception as exc:
+            logger.debug("Google Weather history hours lookup failed: %s", exc)
+
+    # For dates outside the available history window, reject cleanly:
+    return {
+        "success": False,
+        "error": f"Historical weather observations for {target_date} are outside the available 24-hour Google Weather Platform historical window. Please record site weather manually for this past testing date.",
+        "coordinates": {"latitude": lat, "longitude": lon},
+        "target_date": target_date,
+    }

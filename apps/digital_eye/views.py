@@ -3366,9 +3366,14 @@ class PunditWeatherConditionViewSet(viewsets.ModelViewSet):
             lat, lon, coord_source = resolve_project_coordinates(project)
 
         if lat is None or lon is None:
+            project_label = project.name if project else "Unspecified Project"
             return Response(
-                {'detail': 'Could not resolve site coordinates for Google Weather lookup.'},
-                status=status.HTTP_400_BAD_REQUEST
+                {
+                    "success": False,
+                    "error": f"Could not determine site coordinates for '{project_label}'. Please configure project GPS coordinates or state.",
+                    "detail": "Could not resolve site coordinates for project location.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         telemetry = fetch_google_weather_for_date(lat, lon, target_date=target_date)
@@ -3377,10 +3382,20 @@ class PunditWeatherConditionViewSet(viewsets.ModelViewSet):
             telemetry['project_id'] = str(project.id)
             telemetry['project_name'] = project.name
 
+        if not telemetry.get('success'):
+            return Response(telemetry, status=status.HTTP_400_BAD_REQUEST)
+
+        batch_id = request.data.get('batch') or request.query_params.get('batch') or request.data.get('batch_id')
+        batch = None
+        if batch_id:
+            from apps.digital_eye.models import PunditScanBatch
+            batch = PunditScanBatch.objects.filter(pk=batch_id).first()
+
         auto_apply = request.data.get('auto_apply', False) or request.query_params.get('auto_apply') in ('true', '1')
         if auto_apply and telemetry.get('success') and project and target_date:
             weather_obj, created = PunditWeatherCondition.objects.update_or_create(
                 project=project,
+                batch=batch,
                 test_date=target_date,
                 defaults={
                     'weather_condition': telemetry['weather_condition'],

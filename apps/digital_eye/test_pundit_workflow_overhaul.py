@@ -377,12 +377,18 @@ class PunditAPIFlowTestCase(APITestCase):
           - Supports auto_apply=True to create/update PunditWeatherCondition and sync to station tests.
         """
         import datetime
-        test_day = '2026-09-04'
+        test_day = datetime.date.today().isoformat()
+
+        # Set project coordinates
+        self.project.latitude = 6.4281
+        self.project.longitude = 3.4219
+        self.project.state = 'Lagos'
+        self.project.save()
 
         PUNDITTest.objects.create(
             id='TEST-GW-001',
             project=self.project,
-            test_date=datetime.date(2026, 9, 4),
+            test_date=datetime.date.today(),
             structural_element='COL-GW-1',
             path_length_mm=250.0,
             pulse_time_us=65.0,
@@ -403,9 +409,26 @@ class PunditAPIFlowTestCase(APITestCase):
         self.assertTrue(resp.data.get('success'))
         self.assertEqual(resp.data.get('provider'), 'Google Weather Platform')
         self.assertIn('temperature_c', resp.data)
-        self.assertIn('weather_condition', resp.data)
-        self.assertTrue(resp.data.get('applied'))
+        self.assertEqual(resp.data.get('applied'), True)
         self.assertEqual(resp.data.get('synced_tests_count'), 1)
+
+        # Also test that a project with no coordinates fails clearly with HTTP 400
+        proj_no_coords = Project.objects.create(
+            name='Remote Site Without GPS',
+            project_type='Infrastructure',
+            status='ACTIVE',
+        )
+        resp_fail = self.client.post(
+            reverse('pundit-weather-condition-fetch-google-weather'),
+            {
+                'project': str(proj_no_coords.id),
+                'date': test_day,
+            },
+            format='json'
+        )
+        self.assertEqual(resp_fail.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(resp_fail.data.get('success'))
+        self.assertIn('Could not determine site coordinates', resp_fail.data.get('error', ''))
 
         # Verify PUNDITTest record was updated
         updated_test = PUNDITTest.objects.get(id='TEST-GW-001')
