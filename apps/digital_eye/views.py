@@ -33,6 +33,7 @@ from .models import (
     EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan, GPRSurvey,
     GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
     PunditScanBatch, PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
+    PunditWeatherCondition,
     SiteAttendanceRecord, StrengthCurve, TrimbleConnection, TrimbleProject,
     VisualObservation, VisualObservationPhoto,
 )
@@ -44,6 +45,7 @@ from .serializers import (
     GnssBoundaryPointSerializer, GnssSurveySerializer, LiveStreamSerializer,
     PunditScanBatchSerializer, PUNDITTestSerializer, PunditTestSerializer,
     ProcessingQueueJobSerializer, SensorDataFileSerializer, SiteAttendanceRecordSerializer,
+    PunditWeatherConditionSerializer,
     StrengthCurveSerializer, TrimbleConnectionSerializer, TrimbleProjectSerializer,
     VisualObservationPhotoSerializer, VisualObservationSerializer,
 )
@@ -3160,6 +3162,247 @@ class SiteAttendanceRecordViewSet(viewsets.ModelViewSet):
                       'SiteAttendanceRecord', rec.id, {'attendee_name': rec.attendee_name})
 
 
+class PunditWeatherConditionViewSet(viewsets.ModelViewSet):
+    """
+    Weather conditions and environmental telemetry captured for site activities
+    during PUNDIT ultrasonic NDT testing on a specific testing day.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = PunditWeatherConditionSerializer
+    filter_backends = [SearchFilter]
+    search_fields = ['weather_condition', 'surface_condition', 'impact_on_testing', 'notes', 'recorded_by_name']
+
+    def get_queryset(self):
+        qs = PunditWeatherCondition.objects.filter(
+            project__in=scoped_projects(self.request.user)
+        ).select_related('project', 'batch', 'recorded_by')
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        batch_id = self.request.query_params.get('batch')
+        if batch_id:
+            qs = qs.filter(batch_id=batch_id)
+        test_date = self.request.query_params.get('test_date') or self.request.query_params.get('date')
+        if test_date:
+            qs = qs.filter(test_date=test_date)
+        return qs
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if not project:
+            project_id = self.request.data.get('project')
+            if project_id:
+                project = scoped_projects(self.request.user).filter(pk=project_id).first()
+        batch_id = self.request.data.get('batch')
+        batch = PunditScanBatch.objects.filter(pk=batch_id).first() if batch_id else None
+        user = self.request.user
+        recorder_name = (
+            serializer.validated_data.get('recorded_by_name')
+            or user.get_full_name()
+            or user.email
+        )
+        rec = serializer.save(
+            project=project,
+            batch=batch or serializer.validated_data.get('batch'),
+            recorded_by=user,
+            recorded_by_name=recorder_name,
+        )
+        _record_audit(self.request.user, 'digital_eye.weather_condition.create',
+                      'PunditWeatherCondition', rec.id, {
+                          'test_date': str(rec.test_date),
+                          'weather_condition': rec.weather_condition,
+                          'temperature_c': rec.temperature_c,
+                      })
+
+    def perform_update(self, serializer):
+        rec = serializer.save()
+        _record_audit(self.request.user, 'digital_eye.weather_condition.update',
+                      'PunditWeatherCondition', rec.id, {
+                          'test_date': str(rec.test_date),
+                          'weather_condition': rec.weather_condition,
+                      })
+
+    @action(detail=False, methods=['get'], url_path='testing-days')
+    def testing_days(self, request):
+        """
+        Returns distinct testing days for a project with test counts and weather capture status.
+        Query params: ?project=<project_id>
+        """
+        project_id = request.query_params.get('project')
+        if not project_id:
+            return Response({'detail': 'A "project" query parameter is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found or access denied.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        tests = PUNDITTest.objects.filter(project=project)
+        batches = PunditScanBatch.objects.filter(project=project)
+
+        day_map = {}
+        for t in tests:
+            d = t.test_date or (t.tested_at.date() if t.tested_at else None)
+            if not d:
+                continue
+            d_str = str(d)
+            if d_str not in day_map:
+                day_map[d_str] = {
+                    'date': d_str,
+                    'test_count': 0,
+                    'batch_count': 0,
+                    'element_names': set(),
+                    'batch_ids': set(),
+                    'test_weather_conditions': set(),
+                }
+            day_map[d_str]['test_count'] += 1
+            if t.structural_element_name or t.structural_element:
+                day_map[d_str]['element_names'].add(t.structural_element_name or t.structural_element)
+            if t.batch_id:
+                day_map[d_str]['batch_ids'].add(str(t.batch_id))
+            if t.weather_condition:
+                day_map[d_str]['test_weather_conditions'].add(t.weather_condition)
+
+        for b in batches:
+            if b.scan_date:
+                d_str = str(b.scan_date.date())
+                if d_str not in day_map:
+                    day_map[d_str] = {
+                        'date': d_str,
+                        'test_count': 0,
+                        'batch_count': 0,
+                        'element_names': set(),
+                        'batch_ids': set(),
+                        'test_weather_conditions': set(),
+                    }
+                day_map[d_str]['batch_count'] += 1
+                day_map[d_str]['batch_ids'].add(str(b.id))
+                if b.weather_condition:
+                    day_map[d_str]['test_weather_conditions'].add(b.weather_condition)
+
+        weather_records = {
+            str(w.test_date): PunditWeatherConditionSerializer(w).data
+            for w in PunditWeatherCondition.objects.filter(project=project)
+        }
+
+        result = []
+        all_dates = sorted(set(list(day_map.keys()) + list(weather_records.keys())), reverse=True)
+        for d_str in all_dates:
+            data = day_map.get(d_str, {
+                'date': d_str,
+                'test_count': 0,
+                'batch_count': 0,
+                'element_names': set(),
+                'batch_ids': set(),
+                'test_weather_conditions': set(),
+            })
+            weather_data = weather_records.get(d_str)
+            result.append({
+                'date': d_str,
+                'test_count': data['test_count'],
+                'batch_count': data['batch_count'],
+                'elements_tested': sorted(list(data['element_names']))[:5],
+                'has_weather': bool(weather_data or data['test_weather_conditions']),
+                'weather_record': weather_data,
+                'test_weather_conditions': sorted(list(data['test_weather_conditions'])),
+            })
+
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='sync-tests')
+    def sync_tests(self, request, pk=None):
+        """
+        Manually trigger synchronizing this weather record onto all PUNDIT tests on that date.
+        """
+        rec = self.get_object()
+        tests_qs = PUNDITTest.objects.filter(project=rec.project, test_date=rec.test_date)
+        if rec.batch:
+            tests_qs = tests_qs.filter(batch=rec.batch)
+        updated_count = tests_qs.update(weather_condition=rec.weather_condition)
+        if rec.batch:
+            rec.batch.weather_condition = rec.weather_condition
+            rec.batch.save(update_fields=['weather_condition', 'updated_at'])
+        return Response({
+            'status': 'synchronized',
+            'updated_test_count': updated_count,
+            'weather_condition': rec.weather_condition,
+            'test_date': str(rec.test_date),
+        })
+
+    @action(detail=False, methods=['get', 'post'], url_path='fetch-google-weather')
+    def fetch_google_weather(self, request):
+        """
+        Fetches live or historical atmospheric telemetry from Google Weather Platform
+        (weather.googleapis.com) for the project site coordinates.
+
+        Query params / Body:
+        - project: UUID of the project (uses project coordinates or station median)
+        - latitude, longitude: Optional explicit coordinates override
+        - date: Optional specific testing date (YYYY-MM-DD)
+        - auto_apply: If true (POST), creates or updates PunditWeatherCondition for that date
+        """
+        from apps.digital_eye.google_weather import (
+            resolve_project_coordinates,
+            fetch_google_weather_for_date,
+        )
+
+        project_id = request.data.get('project') or request.query_params.get('project')
+        project = None
+        if project_id:
+            project = scoped_projects(request.user).filter(pk=project_id).first()
+
+        lat_param = request.data.get('latitude') or request.query_params.get('latitude')
+        lon_param = request.data.get('longitude') or request.query_params.get('longitude')
+        target_date = request.data.get('date') or request.query_params.get('date') or request.query_params.get('test_date')
+
+        if lat_param is not None and lon_param is not None:
+            try:
+                lat = float(lat_param)
+                lon = float(lon_param)
+                coord_source = "User Supplied GNSS Coordinates"
+            except (ValueError, TypeError):
+                lat, lon, coord_source = resolve_project_coordinates(project)
+        else:
+            lat, lon, coord_source = resolve_project_coordinates(project)
+
+        if lat is None or lon is None:
+            return Response(
+                {'detail': 'Could not resolve site coordinates for Google Weather lookup.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        telemetry = fetch_google_weather_for_date(lat, lon, target_date=target_date)
+        telemetry['coordinate_resolution'] = coord_source
+        if project:
+            telemetry['project_id'] = str(project.id)
+            telemetry['project_name'] = project.name
+
+        auto_apply = request.data.get('auto_apply', False) or request.query_params.get('auto_apply') in ('true', '1')
+        if auto_apply and telemetry.get('success') and project and target_date:
+            weather_obj, created = PunditWeatherCondition.objects.update_or_create(
+                project=project,
+                test_date=target_date,
+                defaults={
+                    'weather_condition': telemetry['weather_condition'],
+                    'temperature_c': telemetry['temperature_c'],
+                    'relative_humidity_pct': telemetry['relative_humidity_pct'],
+                    'surface_condition': telemetry['surface_condition'],
+                    'precipitation': telemetry['precipitation'],
+                    'wind_speed_kmh': telemetry['wind_speed_kmh'],
+                    'impact_on_testing': telemetry['impact_on_testing'],
+                    'recorded_by': request.user,
+                    'recorded_by_name': f"Google Weather Platform ({request.user.get_full_name() or request.user.email})",
+                    'notes': f"Auto-synchronized via Google Weather Platform ({telemetry.get('condition_description', '')}).",
+                }
+            )
+            synced_tests = weather_obj.sync_to_tests()
+            telemetry['weather_record_id'] = str(weather_obj.id)
+            telemetry['synced_tests_count'] = synced_tests
+            telemetry['applied'] = True
+
+        return Response(telemetry)
+
+
 class PunditBatchesView(APIView):
     """
     Project PUNDIT scan batches & folder isolation endpoints.
@@ -3170,55 +3413,35 @@ class PunditBatchesView(APIView):
 
     def get(self, request):
         project_id = request.query_params.get('project')
-        count = 20
+        qs = PunditScanBatch.objects.filter(project__in=scoped_projects(request.user))
         if project_id:
-            try:
-                c = PUNDITTest.objects.filter(project_id=project_id).count()
-                if c > 0:
-                    count = c
-            except Exception:
-                pass
-
-        batches = [
-            {
-                "id": f"batch-{project_id or 'primary-grid'}",
-                "project_id": project_id or "",
-                "project_name": "Active Project",
-                "folder_name": "Floor 2 RC Slab - Primary Grid",
-                "batch_reference": f"BATCH-{timezone.now().strftime('%Y-%m')}-020",
-                "inspector_name": "Engr. Abdullateef (LASBCA Warrant #LAG-042)",
-                "device_serial": "PE-LIVE-54K",
-                "device_name": "Screening Eagle Pundit Live",
-                "element_count": count,
-                "scan_date": timezone.now().isoformat(),
-                "status": "RAW_INGESTED",
-                "floor": "Floor 2",
-                "notes": "Primary Grid Scan folder isolated for pre-analysis calibration.",
-                "visual_observations_count": 4,
-                "attendance_count": 3,
-            }
-        ]
-        return Response(batches, status=status.HTTP_200_OK)
+            qs = qs.filter(project_id=project_id)
+        serializer = PunditScanBatchSerializer(qs, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         data = request.data or {}
-        batch = {
-            "id": f"batch-{uuid.uuid4()}",
-            "project_id": data.get("project_id", ""),
-            "folder_name": data.get("folder_name", "Primary Grid Scan"),
-            "batch_reference": f"BATCH-{timezone.now().strftime('%Y')}-{uuid.uuid4().hex[:4].upper()}",
-            "inspector_name": data.get("inspector_name", "Field Inspector"),
-            "device_serial": data.get("device_serial", "PE-LIVE-54K"),
-            "device_name": data.get("device_name", "Screening Eagle Pundit Live"),
-            "element_count": int(data.get("element_count") or 48),
-            "scan_date": timezone.now().isoformat(),
-            "status": data.get("status", "RAW_INGESTED"),
-            "floor": data.get("floor", "Level 1"),
-            "notes": data.get("notes", ""),
-            "visual_observations_count": 0,
-            "attendance_count": 0,
-        }
-        return Response(batch, status=status.HTTP_201_CREATED)
+        project_id = data.get("project") or data.get("project_id")
+        project = None
+        if project_id:
+            project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found or access denied.'}, status=status.HTTP_400_BAD_REQUEST)
+        batch = PunditScanBatch.objects.create(
+            project=project,
+            folder_name=data.get("folder_name", "Primary Grid Scan"),
+            batch_reference=data.get("batch_reference") or f"BATCH-{timezone.now().strftime('%Y')}-{uuid.uuid4().hex[:4].upper()}",
+            inspector_name=data.get("inspector_name") or request.user.get_full_name() or request.user.email,
+            device_name=data.get("device_name", "Screening Eagle Pundit Live"),
+            device_serial=data.get("device_serial", "PE-LIVE-54K"),
+            element_count=int(data.get("element_count") or 0),
+            scan_date=data.get("scan_date") or timezone.now(),
+            status=data.get("status", "RAW_INGESTED"),
+            floor=data.get("floor", ""),
+            notes=data.get("notes", ""),
+        )
+        serializer = PunditScanBatchSerializer(batch, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class PunditBatchCalibrateView(APIView):
