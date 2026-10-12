@@ -348,6 +348,7 @@ MEDIA_URL = '/media/'
 # Empty/absent means the report honestly falls back to the operator's map
 # photo / BIM captures — no map is ever fabricated.
 GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
+GOOGLE_WEATHER_API_KEY = os.getenv('GOOGLE_WEATHER_API_KEY', '')
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Where the platform writes one field-gateway config per instrument, for the

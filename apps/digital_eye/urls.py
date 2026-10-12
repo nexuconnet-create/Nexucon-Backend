@@ -15,6 +15,7 @@ router.register(r'pundit-batches', views.PunditScanBatchViewSet, basename='pundi
 router.register(r'calibration-profiles', views.CalibrationProfileViewSet, basename='calibration-profile')
 router.register(r'visual-observations', views.VisualObservationViewSet, basename='visual-observation')
 router.register(r'site-attendance', views.SiteAttendanceRecordViewSet, basename='site-attendance')
+router.register(r'weather-conditions', views.PunditWeatherConditionViewSet, basename='pundit-weather-condition')
 router.register(r'nexucon-link/curves', views.StrengthCurveViewSet, basename='strength-curve')
 # Ground-truth core results (path-to-95% Layer 3): lab-crushed cores whose
 # strength pairs with the in-situ UPV test at the same location.

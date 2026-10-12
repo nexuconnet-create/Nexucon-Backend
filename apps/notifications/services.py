@@ -125,6 +125,7 @@ class NotificationService:
                     resource_type="Notification",
                     resource_id=str(notif.id),
                     new_state={"event": event_type, "category": category, "ref": notif.notification_reference}
+                    
                 )
             except Exception:
                 pass
