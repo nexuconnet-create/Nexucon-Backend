@@ -7,6 +7,7 @@ live streams anchored to BIM coordinates, and Scan-to-BIM / AI analytics endpoin
 """
 import hashlib
 import logging
+import re
 import uuid
 
 from django.db.models import Q

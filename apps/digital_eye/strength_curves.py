@@ -265,7 +265,7 @@ def _builtin_default_params():
 BUILTIN_CURVE_NAME = 'Laboratory fixed calibration (built-in)'
 
 
-def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None):
+def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_condition=None):
     """Snapshot of the built-in fallback curve (used when no DB curve is
     seeded yet — identical maths to the seeded default)."""
     p = _builtin_default_params()
@@ -281,6 +281,9 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None):
         'standard_error': None,  # fixed curve: no regression, no error estimate
         'provenance_source': 'Laboratory default exponential calibration curve (documented in report section 3.0)',
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
+        'moisture_condition': moisture_condition or 'dry',
+        'moisture_correction_applied': moisture_correction_applied(moisture_condition),
+        'moisture_factor': moisture_correction_factor(moisture_condition),
         'se_adjustment': None,
     }
 
@@ -309,6 +312,29 @@ def temperature_corrected_velocity_km_s(velocity_km_s, temperature_c):
     if not temperature_correction_applied(temperature_c):
         return velocity_km_s
     return velocity_km_s * (1.0 + 0.002 * (temperature_c - 20.0))
+
+
+# ---------------------------------------------------------------------------
+# Moisture correction (BS 1881-203 / Consolidated Spec §8.2)
+# ---------------------------------------------------------------------------
+
+MOISTURE_FACTORS = {
+    'dry': 1.00,
+    'damp': 1.03,
+    'saturated': 1.05,
+}
+
+
+def moisture_correction_factor(moisture_condition):
+    """Multiplicative factor for moisture condition: Dry=1.00, Damp=1.03, Saturated=1.05."""
+    if not moisture_condition:
+        return 1.00
+    norm = str(moisture_condition).lower().strip()
+    return MOISTURE_FACTORS.get(norm, 1.00)
+
+
+def moisture_correction_applied(moisture_condition):
+    return moisture_correction_factor(moisture_condition) != 1.00
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +414,17 @@ def apply_curve_params(curve_type, params, velocity_km_s,
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
         return None
     return None
+
+
+def apply_curve(curve_obj, velocity_km_s, rebound_number=None):
+    """Convenience wrapper that evaluates a StrengthCurve model instance."""
+    if not curve_obj:
+        return None
+    params = getattr(curve_obj, 'formula_params', {}) or {}
+    curve_type = getattr(curve_obj, 'curve_type', 'linear')
+    v_range = getattr(curve_obj, 'valid_range_ms', None)
+    return apply_curve_params(curve_type, params, velocity_km_s,
+                              rebound_number=rebound_number, valid_range_ms=v_range)
 
 
 def curve_slope_mpa_per_ms(curve_type, params, velocity_km_s,
@@ -716,12 +753,12 @@ def resolve_analysis_curve(project, requested_type=None, requested_params=None,
         'documented_default', False
 
 
-def curve_snapshot(curve, temperature_c=None):
+def curve_snapshot(curve, temperature_c=None, moisture_condition=None):
     """JSON snapshot of the curve that produced a strength value — the
     formula provenance stored on every reading/test (client spec §B.1
     formula_snapshot_json)."""
     if curve is None:
-        return builtin_curve_snapshot(temperature_c=temperature_c)
+        return builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition)
     return {
         'curve_id': str(curve.id),
         'name': curve.name,
@@ -734,6 +771,9 @@ def curve_snapshot(curve, temperature_c=None):
         'standard_error': curve.standard_error,
         'provenance_source': (curve.provenance or {}).get('source'),
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
+        'moisture_condition': moisture_condition or 'dry',
+        'moisture_correction_applied': moisture_correction_applied(moisture_condition),
+        'moisture_factor': moisture_correction_factor(moisture_condition),
         'se_adjustment': None,
     }
 
@@ -822,31 +862,19 @@ def apply_se_adjustment_at_velocity(velocity_km_s, curve, n_points=None,
 
 
 def apply_active_curve(project, velocity_km_s, rebound_number=None,
-                       temperature_c=None, n_points=None):
+                       temperature_c=None, moisture_condition=None, n_points=None):
     """
     THE f_cu path: resolve the project's active curve, temperature-correct
-    the velocity (ACI 228.2R band), apply the curve's standard-error policy
-    TO THE VELOCITY, then convert (15 Sep 2026 client direction — the
-    standard error is folded into the post-velocity before the f_cu
-    conversion).
-
-    ``n_points`` is how many test points were averaged into this velocity
-    (None for a single reading). The confidence-margin adjustment uses the
-    standard error of that mean rather than of a single measurement.
-
-    Returns (strength_mpa_or_None, curve_snapshot). The snapshot is always
-    returned so every stored strength carries its formula provenance —
-    including the honest built-in fallback when no curve is seeded — and it
-    now also carries the ``se_adjustment`` disclosure describing exactly
-    how the standard error moved the figure, or why it did not, including
-    the velocity increment it was applied as.
-
-    The adjustment is inert ('none') on every curve until a Director
-    deliberately enables one, so existing figures are unaffected.
+    and moisture-correct the velocity (BS 1881-203 / ACI 228.2R band),
+    apply the curve's standard-error policy TO THE VELOCITY, then convert.
     """
     from .se_adjustment import apply_se_adjustment
 
     corrected_v = temperature_corrected_velocity_km_s(velocity_km_s, temperature_c)
+    m_factor = moisture_correction_factor(moisture_condition)
+    if corrected_v is not None and m_factor != 1.0:
+        corrected_v = corrected_v * m_factor
+
     curve = resolve_active_curve(project)
     if curve is None:
         p = _builtin_default_params()
@@ -856,7 +884,7 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
             valid_range_ms=p['valid_range_ms'])
         # The built-in laboratory curve carries no regression, so there is
         # no standard error to adjust by — disclosed, never assumed away.
-        snapshot = builtin_curve_snapshot(temperature_c=temperature_c)
+        snapshot = builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition)
         adjusted, disclosure = apply_se_adjustment(strength, None,
                                                    n_points=n_points)
         snapshot['se_adjustment'] = disclosure
@@ -869,7 +897,7 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
     # velocity, so the strength is not computed here first.
     adjusted, disclosure = apply_se_adjustment_at_velocity(
         corrected_v, curve, n_points=n_points, rebound_number=rebound_number)
-    snapshot = curve_snapshot(curve, temperature_c=temperature_c)
+    snapshot = curve_snapshot(curve, temperature_c=temperature_c, moisture_condition=moisture_condition)
     snapshot['se_adjustment'] = disclosure
     return adjusted, snapshot
 

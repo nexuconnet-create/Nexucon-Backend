@@ -385,6 +385,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             obj.project, obj.velocity_km_s,
             rebound_number=obj.rebound_number,
             temperature_c=obj.surface_temperature_c,
+            moisture_condition=obj.moisture_condition,
             # obj.velocity_km_s is the element mean for a multi-reading test,
             # so the confidence margin narrows as sqrt(n) of its points.
             n_points=obj.element_point_count())
@@ -402,7 +403,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'project_id_str', 'structural_element_id_str', 'structural_element_name',
             'structural_element_guid', 'device_model',
             'test_type', 'test_type_display', 'structural_element', 'floor',
-            'weather_condition', 'concrete_age_days', 'readings',
+            'weather_condition', 'moisture_condition', 'concrete_age_days', 'readings',
             'transducer_frequency_khz', 'transducer_type', 'transducer_type_display',
             'test_location',
             'path_length_mm', 'pulse_time_us', 'transit_time_us',
@@ -484,6 +485,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             test.project, mean_v,
             rebound_number=test.rebound_number,
             temperature_c=test.surface_temperature_c,
+            moisture_condition=test.moisture_condition,
             # mean_v is the mean of the points that yielded a velocity, so the
             # divisor is that same set — the readings are computed above, so
             # the count is now accurate. Not len(readings_data): a submitted

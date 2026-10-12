@@ -7,6 +7,7 @@ Governing Review Items (30 Sep 2026):
   4. Inspector Dashboard Enhancements: Visual defect observations with photos and site attendance register.
 """
 import uuid
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -83,7 +84,8 @@ class PunditWorkflowOverhaulTestCase(TestCase):
         delta_high = f_4000 - f_3500
         self.assertGreater(delta_high, delta_low * 2.0, "Exponential curve must accelerate non-linearly")
 
-    def test_batch_isolation_prevents_element_count_clash(self):
+    @patch('apps.common.ai_service.AIService.generate_ensemble_structured_json', return_value={'observations': ['Sound concrete'], 'executive_summary': 'Sound concrete'})
+    def test_batch_isolation_prevents_element_count_clash(self, _mock_llm):
         """
         Verify that 48 elements in Batch A and 11 elements in Batch B
         do NOT merge into 59 elements when scoped to a batch.
@@ -142,7 +144,8 @@ class PunditWorkflowOverhaulTestCase(TestCase):
         self.assertIn("11 verified element(s)", rec_b.reasoning_log)
         self.assertNotIn("59", rec_b.reasoning_log)
 
-    def test_visual_observations_and_site_attendance_in_summary(self):
+    @patch('apps.common.ai_service.AIService.generate_ensemble_structured_json', return_value={'observations': ['Sound concrete'], 'executive_summary': 'Sound concrete'})
+    def test_visual_observations_and_site_attendance_in_summary(self, _mock_llm):
         """
         Verify that visual defect observations (with photos) and client/site
         attendance logs are captured and fed into the AI fact pack and reasoning log.
@@ -219,7 +222,8 @@ class PunditAPIFlowTestCase(APITestCase):
         refresh = RefreshToken.for_user(self.user)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
 
-    def test_batch_lifecycle_and_calibration_api(self):
+    @patch('apps.common.ai_service.AIService.generate_ensemble_structured_json', return_value={'observations': ['Sound concrete'], 'executive_summary': 'Sound concrete'})
+    def test_batch_lifecycle_and_calibration_api(self, _mock_llm):
         """
         End-to-end API test:
           1. Create scan batch (status: RAW_INGESTED).
