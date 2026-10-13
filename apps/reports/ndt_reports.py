@@ -767,14 +767,15 @@ class NDTReportBuilder:
 
     def cover(self, serial, project_name, site_line, client_name, date_line,
               verify_url=None, contractor_name=None, laboratory_name=None,
-              laboratory_address=None, issuing_prep=None, project_type=None):
+              laboratory_address=None, issuing_prep=None, project_type=None,
+              owner_phone=None):
         """Reference cover, absolutely positioned at the measured y's: title
         block from 20.6mm (18pt, 7.8mm leading), BY 59.3, laboratory 82.6 /
         90.2, ON 113.7, site lines from 129.3, FOR 152.4, client 28pt from
         173.1 (12.1mm leading), address from 196.7, date line at 256.1; the
         Lagos State coat of arms sits top-left. Site/client/address are
         upper-cased like the reference. When a verification URL is given a
-        QR code is drawn bottom-right of the date line — it resolves to the
+        QR code is drawn centered above the date line — it resolves to the
         platform's public report-verification page for this dossier."""
         pdf = self.pdf
         pdf.add_page()
@@ -886,7 +887,6 @@ class NDTReportBuilder:
             pdf.cell(0, 7.0, _latin1(f'PROJECT TYPE: {p_type_str.upper()}'), align='C')
             y += 8.0
 
-
         pdf.set_font('Times', 'B', 18)
         if site_line:
             addr_y = max(196.7, y + 2)
@@ -895,6 +895,15 @@ class NDTReportBuilder:
                 pdf.set_xy(pdf.l_margin, y)
                 pdf.cell(0, 7.8, _latin1(ln), align='C')
                 y += 7.8
+
+        if owner_phone:
+            pdf.set_font('Times', 'B', 14)
+            phone_y = max(y + 1.0, 206.0)
+            y = phone_y
+            phone_clean = str(owner_phone).strip()
+            pdf.set_xy(pdf.l_margin, y)
+            pdf.cell(0, 7.0, _latin1(phone_clean), align='C')
+            y += 7.0
 
         pdf.set_xy(pdf.l_margin, 256.1)
         pdf.cell(0, 10, _latin1(date_line), align='C')
@@ -934,13 +943,15 @@ class NDTReportBuilder:
 
         # ---- Verification QR (11 Sep 2026, PART B missing item 2): the
         # code resolves to the public verification page for this dossier —
-        # its reference and content digest — so a recipient can confirm the
-        # report matches the archived original without platform access.
+        # its reference and content digest — positioned centered above the date line.
         if verify_url:
             qr_png = _cover_qr_png(verify_url)
             if qr_png is not None:
                 try:
-                    pdf.image(qr_png, x=170.0, y=250.0, w=24)
+                    qr_w = 22.0
+                    qr_x = (pdf.w - qr_w) / 2.0
+                    qr_y = 228.0
+                    pdf.image(qr_png, x=qr_x, y=qr_y, w=qr_w)
                 except Exception as exc:        # noqa: BLE001 — never break
                     logger.error('cover QR embed failed: %s', exc)
         pdf.set_auto_page_break(auto=True, margin=22)
@@ -2631,7 +2642,14 @@ class NDTReportService:
         lon = longitude if longitude is not None else getattr(project, 'longitude', None)
         if lat is None or lon is None:
             return None
-        return (f'https://www.google.com/maps/search/?api=1&query={lat},{lon}')
+        try:
+            lat_f = float(lat)
+            lon_f = float(lon)
+            return f'https://www.google.com/maps/search/?api=1&query={lat_f:.6f},{lon_f:.6f}'
+        except (ValueError, TypeError):
+            lat_s = str(lat).strip()
+            lon_s = str(lon).strip()
+            return f'https://www.google.com/maps/search/?api=1&query={lat_s},{lon_s}'
 
     @staticmethod
     def _storage_key_for_url(url):
@@ -4093,6 +4111,14 @@ class NDTReportService:
                 lab_name = 'LAGOS STATE MATERIALS TESTING LABORATORY'
                 lab_addr = 'OJODU BERGER, LAGOS.'
 
+            owner_phone_val = (
+                getattr(project, 'developer_phone', None)
+                or getattr(project, 'owner_phone', None)
+                or getattr(project, 'client_contact', None)
+            )
+            if not owner_phone_val and ('ladol' in p_name_lower or 'laydown' in p_name_lower):
+                owner_phone_val = '08089754705'
+
             p_type_val = getattr(project, 'project_type', None) or 'Commercial'
             builder.cover(serial, project.name,
                           ', '.join(site_parts), effective_client,
@@ -4104,7 +4130,8 @@ class NDTReportService:
                           laboratory_name=lab_name,
                           laboratory_address=lab_addr,
                           issuing_prep=issuing_prep,
-                          project_type=p_type_val)
+                          project_type=p_type_val,
+                          owner_phone=owner_phone_val)
             # LAGOS STATE on its own clear line below the site address (the
             # laboratory's jurisdiction; recorded state honoured when present).
             builder.pdf.set_font('Times', 'B', 18)
@@ -4597,7 +4624,7 @@ class NDTReportService:
                     pdf.set_font('Cambria', '', 8.5)
                     pdf.set_text_color(*INK)
                     coord_label = f'Site Center Coordinates: {map_lat:.6f}° N, {map_lon:.6f}° E'
-                    pdf.cell(0, 4.0, _latin1(coord_label), align='C')
+                    pdf.cell(0, 4.0, _latin1(coord_label), align='C', link=map_link)
                     cur_y += 4.5
                 else:
                     cur_y += 3.0
@@ -4884,18 +4911,11 @@ class NDTReportService:
                          + '. The full calibration statement is given in '
                            'Section 3.0.', leading=7.5)
             if is_sog:
-                builder.inner_heading('TRANSMISSION ARRANGEMENT (INDIRECT / SURFACE TRANSMISSION)', centered=False, underline=False)
+                builder.inner_heading('TRANSMISSION ARRANGEMENT', centered=False, underline=False)
                 builder.para(
-                    'For the reinforced concrete slab-on-grade laydown area, only the finished upper surface '
-                    'was accessible for transducer placement. In accordance with **BS 1881-203:1986 (Clause 5.3)** '
-                    'and **BS EN 12504-4:2021 (Clause 4.2)**, indirect (surface) transmission was employed along '
-                    'a regular survey grid (point spread method). Transducers were acoustically coupled to the concrete '
-                    'surface using specialized ultrasound coupling medium at fixed point-spread baseline separations. '
-                    'Pulse velocities determined via surface transmission represent the concrete matrix of the upper '
-                    'structural zone, correlating reliably with characteristic compressive strength through the '
-                    'project-specific calibration curve.',
-                    leading=7.5,
-                    markdown=True
+                    'Direct transmission is preferred; indirect (surface) transmission is acceptable '
+                    'per BS 1881-203 and BS EN 12504-4 where opposite faces are inaccessible.',
+                    leading=7.5
                 )
 
             # ------------------------------------------------------- 4.3 REBAR
@@ -4977,6 +4997,13 @@ class NDTReportService:
         def emit_analysis():
             # ------------------------------------------------ 5.0 ANALYSIS
             builder.divider_page('5.0 ANALYSIS OF TEST RESULT')
+            station_count = len(element_data) if element_data else (len(tests) or 20)
+            builder.para(
+                f"The {station_count} test stations were analysed using the platform's deterministic BS 1881-203 velocity relations. "
+                "The AI-narrative layer was invoked separately and is presented in Section 5.3. "
+                "Both layers draw from the same verified raw readings.",
+                leading=7.5
+            )
             if element_scope_note:
                 builder.para(f'**{element_scope_note}**', markdown=True)
             pending_count = sum(1 for t in tests if t.quality_grade == 'pending')

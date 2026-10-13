@@ -91,6 +91,7 @@ project.corner_coordinates = {
     ]
 }
 project.project_type = 'Commercial'
+project.developer_phone = '08089754705'
 project.save()
 print(f"Project: ID={project.id}, Name='{project.name}', Client='{project.client_name}', Contractor='{project.developer_organization}', Address='{project.site_address}'")
 print(f"Boundary mapping coordinates configured: 4 corners, {project.corner_coordinates['footprintAreaSqm']} sqm, system {project.corner_coordinates['system']}")
@@ -391,7 +392,9 @@ val_checks = [
     ("Environmental condition banner present under Section 3.1", "surface temp: 28.0°c" in norm_text.lower() and "moisture condition: dry" in norm_text.lower()),
     ("Section 1.0 final paragraph cites central BIM geometry", "proposed stacking area_ifc.rvt" in norm_text.lower() and "testing grid lines" in norm_text.lower()),
     ("Section 4.1 includes 3 site observations", "planar, dry, and verified" in norm_text.lower() and "uniform placement" in norm_text.lower()),
-    ("Section 4.2 has dedicated Transmission Arrangement subsection", "transmission arrangement (indirect / surface transmission)" in norm_text.lower()),
+    ("Section 4.2 dedicated Transmission Arrangement subsection with exact text", "transmission arrangement" in norm_text.lower() and "direct transmission is preferred; indirect (surface) transmission is acceptable per bs 1881-203 and bs en 12504-4 where opposite faces are inaccessible" in norm_text.lower()),
+    ("Section 5.0 analytical clarification text present", "the 20 test stations were analysed using the platform's deterministic bs 1881-203 velocity relations" in norm_text.lower() and "the ai-narrative layer was invoked separately and is presented in section 5.3" in norm_text.lower() and "both layers draw from the same verified raw readings" in norm_text.lower()),
+    ("Cover page owner phone number rendered below address", "08089754705" in norm_text),
     ("S11 2-point statistical note present", "2-point basis" in norm_text.lower() or "bs en 12504-4 recommends" in norm_text.lower()),
     ("TOC updated with Photographs of the Laydown Area", "photographs of the laydown area" in norm_text.lower()),
     ("Appendix PIC I: ladol6.jpg tagged with S6-S10 Grid Setup", "pic i: ladol6.jpg" in norm_text.lower() and ("s6-s10" in norm_text.lower() or "s6–s10" in norm_text.lower())),
