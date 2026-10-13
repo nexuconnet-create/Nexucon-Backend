@@ -476,6 +476,53 @@ class TelemetrySessionStatusView(APIView):
                             status=status.HTTP_404_NOT_FOUND)
         return Response(SessionStatusSerializer(session).data)
 
+    def patch(self, request, session_id):
+        session = _get_session(request, session_id)
+        if not session:
+            return Response({'detail': 'Telemetry session not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        cfg = dict(session.session_config or {})
+        payload_cfg = request.data.get('session_config') if isinstance(request.data.get('session_config'), dict) else {}
+
+        for key in ['surface_temperature_c', 'moisture_condition', 'weather_condition', 'weather', 'visual_observation', 'location_address', 'latitude', 'longitude']:
+            if key in request.data:
+                cfg[key] = request.data[key]
+            elif key in payload_cfg:
+                cfg[key] = payload_cfg[key]
+
+        session.session_config = cfg
+        session.save(update_fields=['session_config', 'updated_at'])
+
+        # Propagate environmental conditions to PUNDITTest instances
+        from apps.digital_eye.models import PUNDITTest
+        update_fields = {}
+        if 'surface_temperature_c' in cfg and cfg['surface_temperature_c'] is not None:
+            try:
+                update_fields['surface_temperature_c'] = float(cfg['surface_temperature_c'])
+            except (ValueError, TypeError):
+                pass
+        if 'moisture_condition' in cfg and cfg['moisture_condition']:
+            update_fields['moisture_condition'] = str(cfg['moisture_condition']).lower().strip()
+        if 'weather_condition' in cfg and cfg['weather_condition']:
+            update_fields['weather_condition'] = str(cfg['weather_condition']).strip()
+
+        if update_fields:
+            promoted_tests = (session.promoted or {}).get('tests', [])
+            test_ids = [t['test_id'] for t in promoted_tests if isinstance(t, dict) and 'test_id' in t]
+            if test_ids:
+                PUNDITTest.objects.filter(id__in=test_ids).update(**update_fields)
+            elif session.project_id:
+                PUNDITTest.objects.filter(project_id=session.project_id).update(**update_fields)
+
+        return Response({
+            'status': 'updated',
+            'session_id': str(session.id),
+            'session_config': session.session_config,
+            'data': SessionStatusSerializer(session).data
+        })
+
+
 
 class TelemetrySessionListView(APIView):
     authentication_classes = TELEMETRY_AUTH
