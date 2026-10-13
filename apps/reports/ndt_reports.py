@@ -5560,7 +5560,6 @@ class NDTReportService:
                     markdown=True
                 )
                 builder.ln_gap(2)
-                builder.inner_heading("Table 5.2: Statistical Summary and Homogeneity Analysis of Test Panels")
 
                 from apps.digital_eye import confidence_metrics as cm
                 try:
@@ -5677,7 +5676,9 @@ class NDTReportService:
                     ])
 
                 if table_rows:
-                    builder.inner_heading('Table 5.4: Multi-Model AI Ensemble Statistical and Acoustic Integrity Analysis')
+                    if builder.pdf.will_page_break(25):
+                        builder.pdf.add_page()
+                    builder.inner_heading('Table 5.3: Multi-Model AI Ensemble Statistical and Acoustic Integrity Analysis')
                     builder.ruled_table(
                         ['STRUCTURAL\nELEMENT', 'MEAN VELOCITY\n(m/s)', 'SD / RANGE\n(m/s)', 'CoV\n(%)', 'EST. STRENGTH\nf_cu (N/mm²)', 'QUALITY\nRATING', 'REMARK'],
                         table_rows,
@@ -6128,7 +6129,11 @@ class NDTReportService:
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
             pdf.set_xy(pdf.l_margin, 16.9)
-            stn_labels = [str(getattr(e, 'structural_element', '') or '').strip() for e in pulse_tests if getattr(e, 'structural_element', None)]
+            stn_labels = sorted(
+                {str(getattr(e, 'structural_element', '') or '').strip()
+                 for e in pulse_tests if getattr(e, 'structural_element', None)},
+                key=_natural_sort_key
+            )
             if stn_labels:
                 stn_range_hdr = f"{stn_labels[0]}–{stn_labels[-1]}" if len(stn_labels) > 1 else stn_labels[0]
             else:
