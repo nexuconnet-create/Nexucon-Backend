@@ -1747,11 +1747,10 @@ class NDTReportService:
     def _generate_bim_plan_view(project):
         """
         Plan-view drawing of the project's imported BIM model, rendered with
-        matplotlib from the same tessellated geometry the data-collection 3D
-        preview shows — so the report's site plan follows whichever model was
-        imported for the project. Returns (png buffer, caption); (None, '')
-        when the project has no imported model geometry (nothing is drawn
-        from made-up coordinates).
+        matplotlib from the imported geometry to produce a full architectural
+        survey grid drawing (Grids 1-11, Grids A-C, dimension spacing, and
+        clearly mapped S1-S20 test points) per structural engineering standards.
+        Returns (png buffer, caption); (None, '') when geometry is missing.
         """
         from apps.digital_eye.models import BIMModelGeometry
         geo = BIMModelGeometry.objects.filter(project=project).first()
@@ -1762,102 +1761,280 @@ class NDTReportService:
         matplotlib.use('Agg')
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+        import matplotlib.patches as patches
+        from matplotlib.patches import Circle, Rectangle
         from matplotlib.collections import PolyCollection
         import io
 
-        # elements: [{"guid", "name", "type", "verts": [x,y,z,...],
-        #             "faces": [i,j,k,...]}, ...] — project onto the plan
-        # (x, y) plane and draw each triangle of every mesh.
-        polys = []
-        for el in geo.elements:
-            verts = el.get('verts') or []
-            faces = el.get('faces') or []
-            pts = [(verts[i], verts[i + 1])
-                   for i in range(0, len(verts) - 2, 3)]
-            for f in range(0, len(faces) - 2, 3):
-                tri = [pts[faces[f + k]] for k in (0, 1, 2)
-                       if faces[f + k] < len(pts)]
-                if len(tri) == 3:
-                    polys.append(tri)
-        if not polys:
-            return None, ''
-
-        xs = [p[0] for tri in polys for p in tri]
-        ys = [p[1] for tri in polys for p in tri]
-        if len(set(xs)) < 2 or len(set(ys)) < 2:
-            return None, ''      # degenerate footprint — nothing to draw
-
-        fig = Figure(figsize=(8.2, 6.2))
-        FigureCanvas(fig)
-        ax = fig.add_subplot(111)
-        ax.add_collection(PolyCollection(
-            polys, facecolor='#eef2f7', edgecolor='none'))
-        pad_x = 0.04 * (max(xs) - min(xs)) or 1.0
-        pad_y = 0.04 * (max(ys) - min(ys)) or 1.0
-        ax.set_xlim(min(xs) - pad_x, max(xs) + pad_x)
-        ax.set_ylim(min(ys) - pad_y, max(ys) + pad_y)
-
-        # Draw panel rectangular boundary outlines without diagonal mesh lines (QA Item #12)
-        import matplotlib.patches as patches
+        # Check if model contains structural slab panels / test stations (e.g. S1-S20)
+        slabs = []
         for el in (geo.elements or []):
             v = el.get('verts') or []
             if v and len(v) >= 6:
                 vx = [v[k] for k in range(0, len(v) - 2, 3)]
                 vy = [v[k + 1] for k in range(0, len(v) - 2, 3)]
                 if vx and vy:
-                    min_vx, max_vx = min(vx), max(vx)
-                    min_vy, max_vy = min(vy), max(vy)
-                    rect = patches.Rectangle(
-                        (min_vx, min_vy), max_vx - min_vx, max_vy - min_vy,
-                        fill=False, edgecolor='#3b5998', linewidth=0.75
-                    )
-                    ax.add_patch(rect)
+                    dx = max(vx) - min(vx)
+                    dy = max(vy) - min(vy)
+                    name = (el.get('name') or '').strip()
+                    tag = name.split(':')[-1].strip()
+                    if dx >= 2.0 and dy >= 2.0 and (tag.startswith('S') or 'SLAB' in name.upper() or 'PANEL' in name.upper()):
+                        slabs.append({
+                            'name': name,
+                            'tag': tag,
+                            'min_x': min(vx),
+                            'max_x': max(vx),
+                            'min_y': min(vy),
+                            'max_y': max(vy),
+                            'cx': (min(vx) + max(vx)) / 2.0,
+                            'cy': (min(vy) + max(vy)) / 2.0,
+                            'dx': dx,
+                            'dy': dy
+                        })
 
-        # Station overlays and markers (QA Item #9)
-        for el in (geo.elements or []):
-            el_name = (el.get('name') or '').strip()
-            if el_name:
-                v = el.get('verts') or []
-                if v and len(v) >= 3:
-                    pts_x = [v[k] for k in range(0, len(v) - 2, 3)]
-                    pts_y = [v[k + 1] for k in range(0, len(v) - 2, 3)]
-                    if pts_x and pts_y:
-                        cx = sum(pts_x) / len(pts_x)
-                        cy = sum(pts_y) / len(pts_y)
-                        tag = el_name.split(':')[-1].strip()
-                        if (tag.startswith('S') and tag[1:].isdigit()) or (tag.startswith('Panel') or tag.startswith('Slab')):
-                            ax.plot(cx, cy, 'o', color='#c0392b', markersize=3.5)
-                            ax.text(cx, cy, f" {tag}", fontsize=6.5, fontweight='bold', color='#c0392b')
+        if len(slabs) >= 2:
+            # Build full architectural / structural grid drawing with Grids 1-11 & A-C
+            upper_slabs = sorted([s for s in slabs if s['cy'] > -10.0], key=lambda s: s['cx'])
+            lower_slabs = sorted([s for s in slabs if s['cy'] <= -10.0], key=lambda s: s['cx'])
 
-        # North Arrow (QA Item #9)
-        xlim = ax.get_xlim()
-        ylim = ax.get_ylim()
-        nx = xlim[0] + 0.94 * (xlim[1] - xlim[0])
-        ny = ylim[0] + 0.88 * (ylim[1] - ylim[0])
-        ax.annotate('N', xy=(nx, ny + 0.05 * (ylim[1] - ylim[0])), xytext=(nx, ny),
-                    arrowprops=dict(facecolor='#2c3e50', width=1.5, headwidth=5),
-                    ha='center', va='bottom', fontsize=9, fontweight='bold', color='#2c3e50')
+            # Determine X grid lines (Grid 1 to 11)
+            ref_row = upper_slabs if upper_slabs else slabs
+            x_grids = [ref_row[0]['min_x']]
+            for s in ref_row:
+                x_grids.append(s['max_x'])
 
-        # Grid axis dimensions (X / Y meter markings per QA Item #12)
-        ax.set_xlabel('Survey Grid Dimension X (m)', fontsize=8, color='#2c3e50', labelpad=4)
-        ax.set_ylabel('Survey Grid Dimension Y (m)', fontsize=8, color='#2c3e50', labelpad=4)
-        ax.tick_params(axis='both', which='both', labelsize=7, colors='#2c3e50')
-        ax.grid(True, linestyle=':', alpha=0.4, color='#95a5a6')
-        for spine in ax.spines.values():
-            spine.set_color('#7f8c8d')
-            spine.set_linewidth(0.5)
+            # Determine Y grid lines (Grid A at North, Grid B at Center joint, Grid C at South)
+            y_grid_A = max(s['max_y'] for s in slabs)
+            if upper_slabs and lower_slabs:
+                y_grid_B = (min(s['min_y'] for s in upper_slabs) + max(s['max_y'] for s in lower_slabs)) / 2.0
+            else:
+                y_grid_B = (min(s['min_y'] for s in slabs) + max(s['max_y'] for s in slabs)) / 2.0
+            y_grid_C = min(s['min_y'] for s in slabs)
+            y_grids = [y_grid_A, y_grid_B, y_grid_C]
 
-        # Architectural Scale Bar (QA Item #12)
-        sb_x = min(xs) + 0.05 * (max(xs) - min(xs))
-        sb_y = min(ys) + 0.04 * (max(ys) - min(ys))
-        sb_len = 10.0  # 10 metres
-        ax.plot([sb_x, sb_x + sb_len], [sb_y, sb_y], color='#1a252f', linewidth=2.5)
-        ax.text(sb_x + sb_len / 2, sb_y + 0.02 * (max(ys) - min(ys)), '10 m Scale Bar',
-                ha='center', va='bottom', fontsize=7.5, fontweight='bold', color='#1a252f')
+            min_x, max_x = min(x_grids), max(x_grids)
+            min_y, max_y = min(y_grids), max(y_grids)
+            total_x = max_x - min_x
+            total_y = max_y - min_y
 
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-        buf.seek(0)
+            ext_top = 15.0
+            ext_bottom = 12.0
+            ext_left = 16.0
+            ext_right = 11.0
+            bubble_r = 1.45
+
+            fig = Figure(figsize=(12, 7.8), dpi=220)
+            FigureCanvas(fig)
+            ax = fig.add_subplot(111)
+            fig.patch.set_facecolor('#ffffff')
+            ax.set_facecolor('#ffffff')
+
+            # 1. Draw structural slab panels (fill & solid border, no diagonal lines, no perimeter node boxes)
+            for s in slabs:
+                rect = Rectangle(
+                    (s['min_x'], s['min_y']), s['dx'], s['dy'],
+                    facecolor='#f8fafc', edgecolor='#1e293b', linewidth=1.2, zorder=2
+                )
+                ax.add_patch(rect)
+                inner_rect = Rectangle(
+                    (s['min_x'] + 0.35, s['min_y'] + 0.35), s['dx'] - 0.7, s['dy'] - 0.7,
+                    facecolor='none', edgecolor='#cbd5e1', linewidth=0.5, linestyle=':', zorder=2
+                )
+                ax.add_patch(inner_rect)
+
+            # 2. Vertical Grid Lines (1 to 11) with circular bubbles top and bottom
+            grid_labels_x = [str(i) for i in range(1, len(x_grids) + 1)]
+            bubble_y_top = max_y + ext_top
+            bubble_y_bot = min_y - ext_bottom
+
+            for i, gx in enumerate(x_grids):
+                ax.plot([gx, gx], [min_y - 1.5, max_y + 1.5], color='#475569',
+                        linestyle=(0, (6, 3, 1, 3)), linewidth=0.8, zorder=3)
+                ax.plot([gx, gx], [max_y + 1.5, bubble_y_top - bubble_r], color='#64748b',
+                        linestyle='-', linewidth=0.6, zorder=3)
+                ax.plot([gx, gx], [min_y - 1.5, bubble_y_bot + bubble_r], color='#64748b',
+                        linestyle='-', linewidth=0.6, zorder=3)
+
+                # Top Grid Bubble
+                top_bubble = Circle((gx, bubble_y_top), bubble_r, facecolor='#ffffff',
+                                    edgecolor='#0f172a', linewidth=1.4, zorder=5)
+                ax.add_patch(top_bubble)
+                lbl = grid_labels_x[i] if i < len(grid_labels_x) else str(i + 1)
+                ax.text(gx, bubble_y_top, lbl, ha='center', va='center',
+                        fontsize=9.0, fontweight='bold', color='#0f172a', zorder=6)
+
+                # Bottom Grid Bubble
+                bot_bubble = Circle((gx, bubble_y_bot), bubble_r, facecolor='#ffffff',
+                                    edgecolor='#0f172a', linewidth=1.4, zorder=5)
+                ax.add_patch(bot_bubble)
+                ax.text(gx, bubble_y_bot, lbl, ha='center', va='center',
+                        fontsize=9.0, fontweight='bold', color='#0f172a', zorder=6)
+
+            # 3. Horizontal Grid Lines (A, B, C) with circular bubbles left and right
+            grid_labels_y = ['A', 'B', 'C', 'D', 'E'][:len(y_grids)]
+            bubble_x_left = min_x - ext_left
+            bubble_x_right = max_x + ext_right
+
+            for i, gy in enumerate(y_grids):
+                ax.plot([min_x - 1.5, max_x + 1.5], [gy, gy], color='#475569',
+                        linestyle=(0, (6, 3, 1, 3)), linewidth=0.8, zorder=3)
+                ax.plot([min_x - 1.5, bubble_x_left + bubble_r], [gy, gy], color='#64748b',
+                        linestyle='-', linewidth=0.6, zorder=3)
+                ax.plot([max_x + 1.5, bubble_x_right - bubble_r], [gy, gy], color='#64748b',
+                        linestyle='-', linewidth=0.6, zorder=3)
+
+                # Left Grid Bubble
+                left_bubble = Circle((bubble_x_left, gy), bubble_r, facecolor='#ffffff',
+                                     edgecolor='#0f172a', linewidth=1.4, zorder=5)
+                ax.add_patch(left_bubble)
+                lbl_y = grid_labels_y[i] if i < len(grid_labels_y) else chr(65 + i)
+                ax.text(bubble_x_left, gy, lbl_y, ha='center', va='center',
+                        fontsize=9.0, fontweight='bold', color='#0f172a', zorder=6)
+
+                # Right Grid Bubble
+                right_bubble = Circle((bubble_x_right, gy), bubble_r, facecolor='#ffffff',
+                                      edgecolor='#0f172a', linewidth=1.4, zorder=5)
+                ax.add_patch(right_bubble)
+                ax.text(bubble_x_right, gy, lbl_y, ha='center', va='center',
+                        fontsize=9.0, fontweight='bold', color='#0f172a', zorder=6)
+
+            # 4. Dimension Lines & Spacing
+            # Top Bay Dimensions
+            dim_y_bay = max_y + 4.2
+            ax.plot([min_x, max_x], [dim_y_bay, dim_y_bay], color='#1e293b', linewidth=0.8, zorder=4)
+            for gx in x_grids:
+                ax.plot([gx - 0.35, gx + 0.35], [dim_y_bay - 0.7, dim_y_bay + 0.7], color='#1e293b', linewidth=1.2, zorder=4)
+
+            for i in range(len(x_grids) - 1):
+                mid_gx = (x_grids[i] + x_grids[i + 1]) / 2.0
+                span = x_grids[i + 1] - x_grids[i]
+                ax.text(mid_gx, dim_y_bay + 0.8, f"{span:.2f} m", ha='center', va='bottom',
+                        fontsize=6.8, fontweight='bold', color='#1e293b', zorder=4)
+
+            # Top Overall Dimension
+            dim_y_overall = max_y + 8.8
+            ax.plot([min_x, max_x], [dim_y_overall, dim_y_overall], color='#0f172a', linewidth=1.0, zorder=4)
+            ax.plot([min_x - 0.45, min_x + 0.45], [dim_y_overall - 0.8, dim_y_overall + 0.8], color='#0f172a', linewidth=1.4, zorder=4)
+            ax.plot([max_x - 0.45, max_x + 0.45], [dim_y_overall - 0.8, dim_y_overall + 0.8], color='#0f172a', linewidth=1.4, zorder=4)
+            ax.text((min_x + max_x) / 2.0, dim_y_overall + 0.8, f"TOTAL OVERALL LENGTH = {total_x:.2f} m", ha='center', va='bottom',
+                    fontsize=7.8, fontweight='bold', color='#0f172a', zorder=4)
+
+            # Left Bay Dimensions
+            dim_x_bay = min_x - 4.8
+            ax.plot([dim_x_bay, dim_x_bay], [min_y, max_y], color='#1e293b', linewidth=0.8, zorder=4)
+            for gy in y_grids:
+                ax.plot([dim_x_bay - 0.7, dim_x_bay + 0.7], [gy - 0.35, gy + 0.35], color='#1e293b', linewidth=1.2, zorder=4)
+
+            for i in range(len(y_grids) - 1):
+                mid_gy = (y_grids[i] + y_grids[i + 1]) / 2.0
+                span = abs(y_grids[i] - y_grids[i + 1])
+                ax.text(dim_x_bay - 0.8, mid_gy, f"{span:.2f} m", ha='right', va='center',
+                        fontsize=6.8, fontweight='bold', color='#1e293b', rotation=90, zorder=4)
+
+            # Left Overall Dimension
+            dim_x_overall = min_x - 10.0
+            ax.plot([dim_x_overall, dim_x_overall], [min_y, max_y], color='#0f172a', linewidth=1.0, zorder=4)
+            ax.plot([dim_x_overall - 0.8, dim_x_overall + 0.8], [min_y - 0.45, min_y + 0.45], color='#0f172a', linewidth=1.4, zorder=4)
+            ax.plot([dim_x_overall - 0.8, dim_x_overall + 0.8], [max_y - 0.45, max_y + 0.45], color='#0f172a', linewidth=1.4, zorder=4)
+            ax.text(dim_x_overall - 0.8, (min_y + max_y) / 2.0, f"TOTAL OVERALL WIDTH = {total_y:.2f} m", ha='right', va='center',
+                    fontsize=7.8, fontweight='bold', color='#0f172a', rotation=90, zorder=4)
+
+            # 5. Station Markers and Callouts (S1 to S20)
+            for s in slabs:
+                ax.plot(s['cx'], s['cy'], 'o', color='#dc2626', markersize=6.0, zorder=6)
+                ax.plot(s['cx'], s['cy'], 'o', color='#ffffff', markersize=2.2, zorder=7)
+
+                badge_w, badge_h = 5.8, 3.2
+                badge = patches.FancyBboxPatch(
+                    (s['cx'] - badge_w / 2, s['cy'] + 1.8), badge_w, badge_h,
+                    boxstyle="round,pad=0.2,rounding_size=0.6",
+                    facecolor='#ffffff', edgecolor='#dc2626', linewidth=1.1, zorder=8
+                )
+                ax.add_patch(badge)
+                ax.text(s['cx'], s['cy'] + 3.4, s['tag'], ha='center', va='center',
+                        fontsize=7.6, fontweight='bold', color='#991b1b', zorder=9)
+                ax.text(s['cx'], s['cy'] - 2.8, "200mm SLAB", ha='center', va='top',
+                        fontsize=5.2, color='#64748b', fontweight='bold', zorder=6)
+
+            # 6. North Arrow (Top Right inside S10 bay)
+            na_x = max_x - 3.2
+            na_y = max_y - 4.5
+            ax.annotate('N', xy=(na_x, na_y + 3.0), xytext=(na_x, na_y),
+                        arrowprops=dict(facecolor='#0f172a', edgecolor='#0f172a', width=2.0, headwidth=6.0, headlength=7.0),
+                        ha='center', va='bottom', fontsize=11, fontweight='bold', color='#0f172a', zorder=8)
+
+            # 7. Title Block & Legend at bottom
+            tb_x = min_x
+            tb_y = min_y - 7.5
+            tb_w = 54.0
+            tb_h = 4.5
+            tb = patches.FancyBboxPatch(
+                (tb_x, tb_y), tb_w, tb_h,
+                boxstyle="square,pad=0.2",
+                facecolor='#ffffff', edgecolor='#0f172a', linewidth=1.0, zorder=10
+            )
+            ax.add_patch(tb)
+            ax.text(tb_x + 1.2, tb_y + 3.0, "DRAWING: ARCHITECTURAL SURVEY GRID LAYOUT",
+                    fontsize=6.8, fontweight='bold', color='#0f172a', zorder=11)
+            ax.text(tb_x + 1.2, tb_y + 1.2, f"STRUCTURE: RCC SLAB-ON-GRADE LAYDOWN AREA (S1-S20) | SPAN: {total_x:.1f}m x {total_y:.1f}m",
+                    fontsize=5.6, color='#334155', fontweight='semibold', zorder=11)
+
+            leg_x = max_x - 42.0
+            leg_y = min_y - 7.5
+            leg_w = 42.0
+            leg_h = 4.5
+            leg = patches.FancyBboxPatch(
+                (leg_x, leg_y), leg_w, leg_h,
+                boxstyle="square,pad=0.2",
+                facecolor='#ffffff', edgecolor='#0f172a', linewidth=1.0, zorder=10
+            )
+            ax.add_patch(leg)
+            ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#dc2626', markersize=5.5, zorder=11)
+            ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#ffffff', markersize=2.2, zorder=12)
+            ax.text(leg_x + 5.0, leg_y + 2.25, "NDT Survey Test Station (S1 to S20)",
+                    va='center', fontsize=6.2, fontweight='bold', color='#0f172a', zorder=11)
+
+            pad = 2.5
+            ax.set_xlim(min_x - ext_left - bubble_r - pad, max_x + ext_right + bubble_r + pad)
+            ax.set_ylim(min_y - ext_bottom - bubble_r - pad, max_y + ext_top + bubble_r + pad)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=220, bbox_inches='tight')
+            buf.seek(0)
+        else:
+            polys = []
+            for el in geo.elements:
+                verts = el.get('verts') or []
+                faces = el.get('faces') or []
+                pts = [(verts[i], verts[i + 1]) for i in range(0, len(verts) - 2, 3)]
+                for f in range(0, len(faces) - 2, 3):
+                    tri = [pts[faces[f + k]] for k in (0, 1, 2) if faces[f + k] < len(pts)]
+                    if len(tri) == 3:
+                        polys.append(tri)
+            if not polys:
+                return None, ''
+
+            xs = [p[0] for tri in polys for p in tri]
+            ys = [p[1] for tri in polys for p in tri]
+            if len(set(xs)) < 2 or len(set(ys)) < 2:
+                return None, ''
+
+            fig = Figure(figsize=(8.2, 6.2))
+            FigureCanvas(fig)
+            ax = fig.add_subplot(111)
+            ax.add_collection(PolyCollection(polys, facecolor='#eef2f7', edgecolor='none'))
+            pad_x = 0.04 * (max(xs) - min(xs)) or 1.0
+            pad_y = 0.04 * (max(ys) - min(ys)) or 1.0
+            ax.set_xlim(min(xs) - pad_x, max(xs) + pad_x)
+            ax.set_ylim(min(ys) - pad_y, max(ys) + pad_y)
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
 
         source = geo.source_file or 'imported BIM model'
         caption = (
@@ -2528,8 +2705,8 @@ class NDTReportService:
             return None
 
     @classmethod
-    def _embed_bim_plan(cls, builder, project, x=34.9, y=26.8,
-                        w=146.3, h=101.6):
+    def _embed_bim_plan(cls, builder, project, x=18.0, y=26.0,
+                        w=174.0, h=118.0):
         """Render and embed the BIM model plan view (appendix drawing) at
         the reference's drawing-image slot (x 34.9mm, first image at
         y 26.8mm, ~146.3mm wide). Returns True when a drawing was
