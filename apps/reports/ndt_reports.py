@@ -762,7 +762,7 @@ class NDTReportBuilder:
 
     def cover(self, serial, project_name, site_line, client_name, date_line,
               verify_url=None, contractor_name=None, laboratory_name=None,
-              laboratory_address=None, issuing_prep=None):
+              laboratory_address=None, issuing_prep=None, project_type=None):
         """Reference cover, absolutely positioned at the measured y's: title
         block from 20.6mm (18pt, 7.8mm leading), BY 59.3, laboratory 82.6 /
         90.2, ON 113.7, site lines from 129.3, FOR 152.4, client 28pt from
@@ -873,6 +873,14 @@ class NDTReportBuilder:
             pdf.set_xy(pdf.l_margin, y + 1.0)
             pdf.cell(0, 7.0, _latin1(f'CONTRACTOR: {contractor_str.upper()}'), align='C')
             y += 8.0
+
+        p_type_str = (project_type or '').strip()
+        if p_type_str and p_type_str.upper() != 'NOT PROVIDED':
+            pdf.set_font('Times', 'B', 13)
+            pdf.set_xy(pdf.l_margin, y + 1.0)
+            pdf.cell(0, 7.0, _latin1(f'PROJECT TYPE: {p_type_str.upper()}'), align='C')
+            y += 8.0
+
 
         pdf.set_font('Times', 'B', 18)
         if site_line:
@@ -3721,6 +3729,7 @@ class NDTReportService:
                 lab_name = 'LAGOS STATE MATERIALS TESTING LABORATORY'
                 lab_addr = 'OJODU BERGER, LAGOS.'
 
+            p_type_val = getattr(project, 'project_type', None) or 'Commercial'
             builder.cover(serial, project.name,
                           ', '.join(site_parts), effective_client,
                           _cover_date(date_max),
@@ -3730,7 +3739,8 @@ class NDTReportService:
                           contractor_name=contractor_val,
                           laboratory_name=lab_name,
                           laboratory_address=lab_addr,
-                          issuing_prep=issuing_prep)
+                          issuing_prep=issuing_prep,
+                          project_type=p_type_val)
             # LAGOS STATE on its own clear line below the site address (the
             # laboratory's jurisdiction; recorded state honoured when present).
             builder.pdf.set_font('Times', 'B', 18)

@@ -90,6 +90,7 @@ project.corner_coordinates = {
         {'label': 'Corner 4 (SW)', 'lat': 6.423908, 'lng': 3.385934, 'easting': 542677.26, 'northing': 710080.73, 'utmZone': '31N'},
     ]
 }
+project.project_type = 'Commercial'
 project.save()
 print(f"Project: ID={project.id}, Name='{project.name}', Client='{project.client_name}', Contractor='{project.developer_organization}', Address='{project.site_address}'")
 print(f"Boundary mapping coordinates configured: 4 corners, {project.corner_coordinates['footprintAreaSqm']} sqm, system {project.corner_coordinates['system']}")
