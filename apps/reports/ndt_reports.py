@@ -6066,7 +6066,7 @@ class NDTReportService:
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
             pdf.set_xy(pdf.l_margin, 16.9)
-            stn_labels = [str(e.get('structural_element') or '').strip() for e in pulse_tests if getattr(e, 'structural_element', None)]
+            stn_labels = [str(getattr(e, 'structural_element', '') or '').strip() for e in pulse_tests if getattr(e, 'structural_element', None)]
             if stn_labels:
                 stn_range_hdr = f"{stn_labels[0]}–{stn_labels[-1]}" if len(stn_labels) > 1 else stn_labels[0]
             else:
