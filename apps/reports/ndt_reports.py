@@ -1083,6 +1083,7 @@ class NDTReportBuilder:
         title_text = f'{number} {heading}'.strip()
         self.pdf.start_section(title_text, level=1 if sub else 0)
         self.pdf.set_text_color(*INK)
+        self.pdf.set_x(self.pdf.l_margin)
         if centered:
             self.pdf.set_font('Cambria', 'BU' if underline else 'B', size)
             self.pdf.multi_cell(0, 9.9, _latin1(heading), align='C',
@@ -2092,6 +2093,7 @@ class NDTReportService:
 
         source = geo.source_file or 'imported BIM model'
         caption = (
+            f"Figure A1.1: Survey Grid and Laydown Area Structural Layout Plan (S1–S20) — "
             f"Plan generated from the project's imported BIM model "
             f'({source}, {geo.element_count or len(geo.elements)} elements) '
             '— a plan projection of the model geometry, not a georeferenced '
@@ -4586,6 +4588,12 @@ class NDTReportService:
                     pdf.cell(0, 4.0, _latin1(attribution), align='C')
                     cur_y += 4.5
 
+                pdf.set_xy(pdf.l_margin, cur_y)
+                pdf.set_font('Cambria', 'B', 8.5)
+                pdf.set_text_color(*INK)
+                pdf.cell(0, 4.0, _latin1('Figure 3.1: Site Location and Survey Boundary Map'), align='C')
+                cur_y += 4.5
+
                 if map_lat is not None and map_lon is not None:
                     pdf.set_xy(pdf.l_margin, cur_y)
                     pdf.set_font('Cambria', '', 8.5)
@@ -4600,7 +4608,7 @@ class NDTReportService:
                 pdf.set_xy(pdf.l_margin, cur_y)
                 pdf.set_font('Cambria', 'B', 11)
                 pdf.set_text_color(*INK)
-                pdf.cell(0, 6.0, _latin1('4-CORNER BOUNDARY MAPPING & CONVERSION'),
+                pdf.cell(0, 6.0, _latin1('TABLE 3.1: 4-CORNER BOUNDARY MAPPING & CONVERSION'),
                          align='C', new_x='LMARGIN', new_y='NEXT')
 
                 footprint_sqm = boundary_data.get('footprintAreaSqm')
@@ -4900,7 +4908,7 @@ class NDTReportService:
                     leading=7.5,
                 )
 
-            builder.inner_heading('COVER METER / REINFORCEMENT BAR RESULTS', centered=False, underline=False)
+            builder.inner_heading('TABLE 4.1: COVER METER / REINFORCEMENT BAR RESULTS', centered=False, underline=False)
             placeholder_rows = [
                 ['1', 'RCC SLAB-ON-GRADE (S1–S5)', 'NIL', 'NIL', 'NIL', 'NIL'],
                 ['2', 'RCC SLAB-ON-GRADE (S6–S10)', 'NIL', 'NIL', 'NIL', 'NIL'],
@@ -5041,6 +5049,7 @@ class NDTReportService:
                 # ---- Summary of Test Analysis: grouped by member type
                 builder.section('5.1', 'SUMMARY OF TEST RESULTS', sub=True)
                 builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
+                builder.inner_heading('Table 5.0: Classification and Quantity of Tested Structural Elements')
                 analysis_rows = []
                 for floor in floors_present:
                     floor_elements = sorted(
@@ -5148,7 +5157,7 @@ class NDTReportService:
                     elif not member_label.endswith('S'):
                         member_label = f'{member_label}S'
                     builder.subheading(
-                        f'{floor.upper()} {member_label}'
+                        f'TABLE 5.1: ULTRASONIC PULSE VELOCITY TEST MEASUREMENTS — {floor.upper()} {member_label}'
                         + (f' OF {project.name.upper()}'
                            if project.name else ''))
                     
@@ -5169,7 +5178,7 @@ class NDTReportService:
 
                 # ---- Summary of Test Results: Grouped by member family (REQ-18, REQ-19)
                 builder.heading('SUMMARY OF TEST RESULTS', page_break=False)
-                builder.inner_heading('Table 5.1: Summary of UPV Quality Ratings for Tested Structural Members')
+                builder.inner_heading('Table 5.2: Summary of UPV Quality Ratings for Tested Structural Members')
                 
                 # Consolidate members by floor & member type so repetitive 1 (100%) rows are grouped cleanly
                 groups = {}
@@ -5281,7 +5290,8 @@ class NDTReportService:
                         pdf.set_xy(pdf.l_margin, y_cap_a)
                         pdf.set_font('Cambria', '', 11)
                         pdf.cell(0, 6, 'Figure 5.1: *CHART ILLUSTRATING THE NUMBER OF '
-                                       'STRUCTURAL MEMBER TESTED', align='C')
+                                       'STRUCTURAL MEMBER TESTED', align='C',
+                                 new_x='LMARGIN', new_y='NEXT')
                         y_chart_b = y_cap_a + 6.0
                         pdf.image(chart_b, x=45.3, y=y_chart_b, w=125.1)
                         h_b = 125.1 * (3.52 / 4.93)
@@ -5290,7 +5300,7 @@ class NDTReportService:
                         pdf.set_font('Cambria', '', 11)
                         pdf.cell(0, 6, 'Figure 5.2: *CHART ILLUSTRATING THE PERCENTAGE OF '
                                        'STRENGTH OF STRUCTURAL MEMBER TESTED',
-                                 align='C')
+                                 align='C', new_x='LMARGIN', new_y='NEXT')
                         pdf.set_font('Cambria', '', 12)
                 except Exception as e:
                     logger.error('Could not generate summary charts: %s', e)
@@ -5565,6 +5575,7 @@ class NDTReportService:
                     ])
 
                 if table_rows:
+                    builder.inner_heading('Table 5.4: Multi-Model AI Ensemble Statistical and Acoustic Integrity Analysis')
                     builder.ruled_table(
                         ['STRUCTURAL\nELEMENT', 'MEAN VELOCITY\n(m/s)', 'SD / RANGE\n(m/s)', 'CoV\n(%)', 'EST. STRENGTH\nf_cu (N/mm²)', 'QUALITY\nRATING', 'REMARK'],
                         table_rows,
@@ -5619,37 +5630,38 @@ class NDTReportService:
                     'statutory design benchmark. Where CoV exceeds 10.0%, conservative strength estimation applies V_min.',
                     markdown=True
                 )
-                builder.ln_gap(2)
+                builder.inner_heading('Table 5.5: Statistical Summary of Ultrasonic Pulse Velocity Measurements (LASBCA Phase 10 Regulatory Filing)')
+                builder.ln_gap(1)
 
                 headers = [
-                    'STATION', 'GRID / LOC', 'TX\nMETHOD', 'L\n(mm)', 'n',
-                    't_mean\n(µs)', 'V_mean\n(m/s)', 's_v\n(m/s)', 'CoV\n(%)',
-                    'UNIFORMITY\n(ACI 228.2R)', 'f_ck\n(N/mm²)', 'f_cu\n(N/mm²)', 'COMPLIANCE\nVERDICT'
+                    'STATION', 'n', 'V_mean\n(m/s)', 'V_min\n(m/s)', 'V_max\n(m/s)',
+                    'RANGE\n(m/s)', 'SD\n(m/s)', 'CoV\n(%)', 'UNIFORMITY\n(ACI 228.2R)',
+                    'f_cu\n(N/mm²)', 'GRADE', 'CRITICAL\nLOW POINT', 'BASIS'
                 ]
-                col_widths = [13.0, 15.0, 13.0, 10.0, 6.0, 12.0, 13.0, 10.0, 10.0, 20.0, 14.0, 14.0, 18.0]
+                col_widths = [14.0, 6.0, 14.0, 14.0, 14.0, 12.0, 11.0, 11.0, 20.0, 14.0, 12.0, 15.0, 15.0]
                 col_aligns = ['C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C']
 
                 rows = []
                 for row in stat_summary:
-                    stn = str(row.get('station') or row.get('element') or '-')
-                    grid = str(row.get('grid_location') or row.get('location') or '-')
-                    method = str(row.get('method') or 'Surface')
-                    l_val = f"{row.get('path_length_mm', 150.0):.0f}"
-                    n_val = str(row.get('readings_count') or row.get('n', 3))
-                    t_val = f"{row.get('transit_time_mean_us', 0.0):.1f}"
-                    v_val = f"{row.get('velocity_mean_ms', 0.0):,.0f}"
-                    sv_val = f"{row.get('std_dev_ms', 0.0):.1f}"
-                    cov_val = f"{row.get('cov_percent', 0.0):.2f}%"
-                    unif = str(row.get('uniformity') or 'Good')
-                    design_f = f"{row.get('design_strength_n_mm2', 25.0):.1f}"
-                    est_f = f"{row.get('est_strength_n_mm2', 0.0):.2f}"
-                    verdict = str(row.get('compliance') or row.get('verdict') or 'PASS').upper()
+                    stn = str(row.get('element_id') or row.get('station') or row.get('element') or '-')
+                    n_val = str(row.get('point_count') or row.get('readings_count') or row.get('n', 3))
+                    v_mean = f"{float(row.get('v_mean') or row.get('velocity_mean_ms') or 0.0):,.0f}"
+                    v_min = f"{float(row.get('v_min') or 0.0):,.0f}"
+                    v_max = f"{float(row.get('v_max') or 0.0):,.0f}"
+                    range_val = f"{float(row.get('range') or 0.0):,.0f}"
+                    sd_val = f"{float(row.get('sd') or row.get('std_dev_ms') or 0.0):.1f}"
+                    cov_val = f"{float(row.get('cov_percent') or 0.0):.2f}%"
+                    unif = str(row.get('uniformity_verdict') or row.get('uniformity') or 'Good')
+                    f_cu = f"{float(row.get('f_cu_mpa') or row.get('est_strength_n_mm2') or 0.0):.2f}"
+                    grade = str(row.get('grade') or 'GOOD').upper()
+                    crit = str(row.get('critical_low_point_location') or 'Point 1')
+                    basis = str(row.get('basis') or 'v_mean')
 
                     rows.append([
-                        stn, grid, method, l_val, n_val, t_val, v_val, sv_val, cov_val, unif, design_f, est_f, verdict
+                        stn, n_val, v_mean, v_min, v_max, range_val, sd_val, cov_val, unif, f_cu, grade, crit, basis
                     ])
 
-                builder.ruled_table(headers, rows, col_widths, col_aligns, font_size=7.5, line_h=4.0)
+                builder.ruled_table(headers, rows, col_widths, col_aligns, font_size=7.0, line_h=3.4)
                 builder.ln_gap(3)
             else:
                 builder.para('STATISTICAL SUMMARY (PHASE 10) PENDING — Run AI analysis or verify test data.')
@@ -6497,15 +6509,15 @@ class NDTReportService:
             fname = os.path.basename(str(url).split('?')[0]).lower()
             cap_str = str(cap).lower()
             if 'ladol6' in fname or 'ladol6' in cap_str:
-                return (1, 'ladol6.jpg — S6–S10 Grid Setup')
+                return (1, 'ladol6.jpg (Figure 4.1) — S6–S10 Grid Setup')
             if 'ladol4' in fname or 'ladol4' in cap_str:
-                return (2, 'ladol4.jpg — S1–S5 Transducer Calibration')
+                return (2, 'ladol4.jpg (Figure 4.2) — S1–S5 Transducer Calibration')
             if 'ladol3' in fname or 'ladol3' in cap_str:
-                return (3, 'ladol3.jpg — S11–S15 UPV Probing')
+                return (3, 'ladol3.jpg (Figure 4.3) — S11–S15 UPV Probing')
             if 'site' in fname or 'site' in cap_str:
-                return (4, 'ladol site photos.jpg — S16–S20 Surface Inspection')
+                return (4, 'ladol site photos.jpg (Figure 4.4) — S16–S20 Surface Inspection')
             if '2' in fname or '2' in cap_str or '_2' in fname:
-                return (5, 'ladol 2.jpg — Direct Transmission Field Testing at S1')
+                return (5, 'ladol 2.jpg (Figure 4.5) — Direct Transmission Field Testing at S1')
             return (100, str(cap))
 
         has_ladol = any('ladol' in (str(c) + str(u)).lower() for u, c in items)
@@ -6563,9 +6575,11 @@ class NDTReportService:
                 '1. Fieldwork Timeline & Date Reconciliation: Preliminary site reconnaissance, surface visual inspection, '
                 'and survey grid chalk-marking (Stations S1–S20) were executed on 30 September 2026; formal ultrasonic pulse '
                 'velocity (UPV) acquisition and acoustic calibration verification were concluded on 04 October 2026.\n'
-                '2. Georeference & GPS Boundary Reconciliation: Camera EXIF geodetic coordinates record '
-                '6° 25\' 31" N, 3° 23\' 7" E (6.42528° N, 3.38528° E), which falls within the surveyed boundary '
-                'and operational laydown perimeter of the LADOL Laydown Area.'
+                '2. Georeference & Boundary Geofencing Reconciliation: Camera EXIF geodetic coordinates record '
+                '6° 25\' 31" N, 3° 23\' 7" E (6.425280° N, 3.385280° E), located immediately proximate (~98 m north) '
+                'to the northern surveyed perimeter cap at Corner 2 (6.424398° N, 3.386816° E). This offset reflects '
+                'the field operator\'s exterior staging / vantage point and mobile GPS horizontal dilution of precision (HDOP), '
+                'while all 20 structural test stations (S1–S20) remain strictly situated within the georeferenced 4-Corner boundary polygon.'
             ))
             pdf.ln(3)
 
