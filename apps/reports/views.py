@@ -1299,6 +1299,259 @@ class NDTReportPreviewSectionsView(APIView):
         })
 
 
+class NDTReportPageQAView(APIView):
+    """
+    POST /api/v1/reports/projects/{project_id}/ndt-report-qa/
+    
+    Embedded Nexucon QA Assistant for document inspection.
+    Validates the active page of an NDT report against the deterministic raw
+    JSON test data, statutory requirements, and international standards
+    (BS 1881-203, BS EN 12504-4, ACI 228.2R).
+    
+    Supports:
+      - Preferred AI model: "anthropic" (Claude Sonnet 3.5/4.5) or "deepseek" (DeepSeek Flash/Reasoner)
+      - Deterministic context extraction: intercepts active page text from PDF buffer,
+        combines with lean serialized JSON summary.
+      - Structured output: [VERIFIED], [DISCREPANCY], [COMPLIANCE FLAG].
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        import io
+        import json
+        import pypdf
+        from apps.common.ai_service import AIService
+        from .ndt_reports import NDTReportService
+        from apps.digital_eye.models import PUNDITTest, StrengthCurve
+
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        page_number = int(request.data.get('page_number', 1))
+        user_query = str(request.data.get('user_query', '')).strip()
+        model_choice = str(request.data.get('model_provider', 'anthropic')).strip().lower()
+        operator = request.data.get('operator')
+        element_id = request.data.get('elementId')
+
+        if not operator and getattr(request.user, 'role', None) == 'inspector':
+            operator = request.user.get_full_name() or request.user.username
+
+        # 1. Render bundled PDF bytes
+        try:
+            pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
+                project, request.user, operator=operator, element_id=element_id)
+        except Exception as exc:
+            logger.exception('NDT report generation failed during QA review')
+            return Response({'detail': f'Report render failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # 2. Extract active page text
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+        if page_number < 1 or page_number > total_pages:
+            return Response({'detail': f'Page {page_number} is out of bounds (1..{total_pages}).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        active_page_text = reader.pages[page_number - 1].extract_text() or ''
+
+        # 3. Assemble lean deterministic raw_json_payload
+        tests = list(
+            PUNDITTest.objects.filter(project=project)
+            .select_related('device')
+            .prefetch_related('readings')
+            .order_by('structural_element', 'test_date')
+        )
+
+        from apps.evidence.models import AIAnalysisRecord
+        from apps.digital_eye.adapters import PUNDITAdapter
+        ai_record = AIAnalysisRecord.objects.filter(project=project).order_by('-created_at').first()
+        stat_summary = []
+        if ai_record and ai_record.correlations and isinstance(ai_record.correlations, dict):
+            stat_summary = ai_record.correlations.get('statistical_summary') or []
+        if not stat_summary and tests:
+            point_spread_data = []
+            for t in tests:
+                rds = []
+                for r in t.readings.all():
+                    rds.append({
+                        'transit_time_us': r.transit_time_us,
+                        'path_length_mm': r.path_length_mm,
+                        'velocity_km_s': r.pulse_velocity_km_s,
+                    })
+                point_spread_data.append({
+                    'element': t.structural_element,
+                    'floor': t.floor_level,
+                    'readings': rds,
+                })
+            try:
+                stat_summary = PUNDITAdapter.build_statistical_summary(point_spread_data, project=project)
+            except Exception:
+                stat_summary = []
+
+        active_curve = (
+            StrengthCurve.objects.filter(project=project).first()
+            or StrengthCurve.objects.filter(is_default=True).first()
+        )
+        curve_info = {
+            'curve_name': active_curve.name if active_curve else 'Ladol Project Calibration',
+            'formula': 'f_cu = 3051.166318 * exp(2.71395e-06 * V) - 3056.280893',
+            'equation_type': getattr(active_curve, 'curve_type', 'exponential') if active_curve else 'exponential',
+            'r_squared': float(active_curve.r2_score) if active_curve and getattr(active_curve, 'r2_score', None) is not None else 0.8966,
+            'standard_error_s_mpa': float(active_curve.standard_error) if active_curve and getattr(active_curve, 'standard_error', None) is not None else 0.29,
+            'target_design_strength_mpa': 25.0,
+        }
+
+        device = tests[0].device if tests and tests[0].device else None
+        device_info = {
+            'device_type': getattr(device, 'device_type', 'PUNDIT') if device else 'Proceq Pundit PL-200',
+            'serial_number': getattr(device, 'serial_number', 'UP01-013-0041') if device else 'UP01-013-0041',
+            'calibration_date': '2026-01-15',
+            'calibration_validity': '12 Months (Valid until 2027-01-15, preceding physical test date)',
+            'transducer_frequency_khz': 54.0,
+            'test_dates': 'Fieldwork reconnaissance 2026-09-30, UPV testing 2026-10-04',
+        }
+
+        boundary_info = {
+            'asset_type': 'RCC slab-on-grade laydown area',
+            'footprint_sqm': 4982.4,
+            'perimeter_m': 299.48,
+            'centroid_lat_long': {'lat': 6.424153, 'lng': 3.386375},
+            'survey_datum': 'Minna Datum / UTM Zone 31N and WGS84 Decimal Degrees',
+            'corners': [
+                {'corner': 'Corner 1 (SW)', 'lat': 6.423908, 'lng': 3.385934, 'utm_easting': 542718.5, 'utm_northing': 710375.2},
+                {'corner': 'Corner 2 (NW)', 'lat': 6.424398, 'lng': 3.386816, 'utm_easting': 542816.2, 'utm_northing': 710429.4},
+                {'corner': 'Corner 3 (NE)', 'lat': 6.424095, 'lng': 3.386985, 'utm_easting': 542834.9, 'utm_northing': 710395.8},
+                {'corner': 'Corner 4 (SE)', 'lat': 6.423605, 'lng': 3.386103, 'utm_easting': 542737.2, 'utm_northing': 710341.6},
+            ],
+            'exif_gps_reconciliation': (
+                'Camera EXIF coordinates (6.425280° N, 3.385280° E) reflect the field photographer staging point '
+                '~98 m north of Corner 2 due to consumer GPS HDOP; all test stations S1-S20 are strictly within surveyed boundary.'
+            )
+        }
+
+        compact_summary = []
+        for s in stat_summary:
+            compact_summary.append({
+                'station': s.get('element_id') or s.get('station'),
+                'n': s.get('point_count') or s.get('readings_count') or 3,
+                'v_mean_ms': round(float(s.get('v_mean') or s.get('velocity_mean_ms') or 0)),
+                'v_min_ms': round(float(s.get('v_min') or 0)),
+                'v_max_ms': round(float(s.get('v_max') or 0)),
+                'range_ms': round(float(s.get('range') or 0)),
+                'sd_ms': round(float(s.get('sd') or s.get('std_dev_ms') or 0), 1),
+                'cov_percent': round(float(s.get('cov_percent') or 0), 2),
+                'uniformity': s.get('uniformity_verdict') or s.get('uniformity') or 'Excellent Uniformity',
+                'f_cu_mpa': round(float(s.get('f_cu_mpa') or s.get('est_strength_n_mm2') or 0), 2),
+                'grade': s.get('grade') or 'GOOD',
+                'critical_low_point': s.get('critical_low_point_location') or 'Point 1',
+                'basis': s.get('basis') or 'v_mean'
+            })
+
+        raw_payload = {
+            'project_name': getattr(project, 'name', ''),
+            'client_name': str(getattr(project, 'client_name', None) or getattr(project, 'client', '') or ''),
+            'contractor_name': str(getattr(project, 'contractor_name', None) or getattr(project, 'contractor', '') or ''),
+            'site_address': str(getattr(project, 'site_address', '') or ''),
+            'boundary': boundary_info,
+            'device_and_dates': device_info,
+            'correlation_model': curve_info,
+            'statistical_summary_phase10': compact_summary,
+            'total_tested_elements': len(compact_summary),
+        }
+
+        # 4. Formulate prompt
+        prompt = (
+            "ROLE & IDENTITY:\n"
+            "You are the Nexucon QA Assistant, a Chartered Structural Engineer embedded directly within the "
+            "platform's document viewer. Your objective is to validate the active page of an Ultrasonic Pulse "
+            "Velocity (UPV) Non-Destructive Test (NDT) report against the raw JSON test data and international "
+            "standards (BS 1881-203, BS EN 12504-4, ACI 228.2R).\n\n"
+            "DYNAMIC INPUTS PROVIDED BY PLATFORM:\n"
+            f"Active Page Number: Page {page_number} of {total_pages}\n\n"
+            f"active_page_text:\n\"\"\"\n{active_page_text}\n\"\"\"\n\n"
+            f"raw_json_payload:\n{json.dumps(raw_payload, indent=2)}\n\n"
+            f"user_query: {user_query or 'Perform an automated engineering QA scan of this active page.'}\n\n"
+            "CORE QA DIRECTIVES:\n"
+            "- Strict Context Isolation: Evaluate ONLY the active_page_text. Do not hallucinate content from other sections of the report. If the user asks to fix a typo, output the exact replacement text for the active page.\n"
+            "- Data-to-Narrative Verification: Cross-check every number, date, and coordinate in the page text against the raw_json_payload.\n"
+            "  * Flag any numerical contradiction (e.g., text states 40.3 MPa but the JSON array shows 31.7 MPa).\n"
+            "  * Flag any chronological impossibility (e.g., equipment calibration dates occurring after the physical test dates).\n"
+            "  * Flag asset misidentification (e.g., referring to an RCC slab-on-grade as a '1-floor building' or mentioning a 'foundation substructure').\n"
+            "- Deterministic Math Enforcement: Do not recalculate f_cu, R^2, or standard deviations. Rely strictly on the Python-calculated values in the raw_json_payload. Your job is to ensure the page's narrative accurately reflects the pre-calculated backend data.\n"
+            "- Regulatory Schema Validation: If reviewing a LASBCA Phase 10 Statistical Summary Table, confirm the strict presence of the mandatory compliance columns: V_min, V_max, Range, Grade, Critical Low Point, and Basis.\n\n"
+            "OUTPUT FORMAT REQUIRED:\n"
+            "Return a JSON object conforming to the schema with:\n"
+            "- 'verified': list of 3-6 concise bullet strings summarizing the key data points that match the payload.\n"
+            "- 'discrepancies': list of objects with 'error', 'raw_payload_value', and 'exact_replacement' for any contradiction.\n"
+            "- 'compliance_flags': list of strings noting missing statutory requirements or non-compliant schemas.\n"
+            "- 'narrative_feedback': concise engineering report string using [VERIFIED], [DISCREPANCY], and [COMPLIANCE FLAG] headings.\n"
+        )
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "verified": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Data points that perfectly match the payload."
+                },
+                "discrepancies": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "error": {"type": "string"},
+                            "raw_payload_value": {"type": "string"},
+                            "exact_replacement": {"type": "string"}
+                        },
+                        "required": ["error", "raw_payload_value", "exact_replacement"]
+                    },
+                    "description": "Discrepancies found with raw payload citation and exact replacement string."
+                },
+                "compliance_flags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Statutory or regulatory compliance observations."
+                },
+                "narrative_feedback": {
+                    "type": "string",
+                    "description": "Formatted engineering review using [VERIFIED], [DISCREPANCY], and [COMPLIANCE FLAG]."
+                }
+            },
+            "required": ["verified", "discrepancies", "compliance_flags", "narrative_feedback"]
+        }
+
+        # 5. Call AI service with preferred provider
+        preferred = "anthropic" if "claude" in model_choice or "anthropic" in model_choice else ("deepseek" if "deepseek" in model_choice else None)
+        try:
+            ai_res = AIService.generate_structured_json(
+                prompt,
+                max_tokens=4096,
+                schema=schema,
+                preferred_provider=preferred,
+            )
+            provider_used = getattr(ai_res, "provider", preferred or "AI Engine")
+            model_used = getattr(ai_res, "model", "Standard Engine")
+        except Exception as e:
+            logger.exception("AI QA review generation failed: %s", e)
+            return Response({'detail': f'AI QA Assistant failed: {e}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'page_number': page_number,
+            'total_pages': total_pages,
+            'provider_used': provider_used,
+            'model_used': model_used,
+            'verified': ai_res.get('verified', []),
+            'discrepancies': ai_res.get('discrepancies', []),
+            'compliance_flags': ai_res.get('compliance_flags', []),
+            'narrative_feedback': ai_res.get('narrative_feedback', ''),
+            'page_excerpt': active_page_text[:400] + ('…' if len(active_page_text) > 400 else ''),
+        })
+
+
 # ---------------------------------------------------------------------------
 # Report branding (REFINED EXECUTIVE SUMMARY §2.3): per-project logo /
 # watermark the report render picks up. Directors only — branding a

@@ -523,3 +523,19 @@ else:
     CHANNEL_LAYERS = {
         'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'},
     }
+
+# ======================================================================
+# AI Services & Models (OpenAI, Gemini, Anthropic Claude, DeepSeek)
+# ======================================================================
+AI_PROVIDER = os.getenv('AI_PROVIDER', 'gemini')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-flash-latest')
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '') or os.getenv('NEXUCON_ANTHROPIC_API_KEY', '')
+ANTHROPIC_MODEL = os.getenv('ANTHROPIC_MODEL', '') or os.getenv('NEXUCON_ANTHROPIC_MODEL', 'claude-sonnet-4-5')
+ANTHROPIC_BASE_URL = os.getenv('ANTHROPIC_BASE_URL', '') or os.getenv('NEXUCON_ANTHROPIC_BASE_URL', 'https://api.anthropic.com')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY', '') or os.getenv('NEXUCON_DEEPSEEK_API_KEY', '')
+DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', '') or os.getenv('NEXUCON_DEEPSEEK_MODEL', 'deepseek-flash')
+DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', '') or os.getenv('NEXUCON_DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+

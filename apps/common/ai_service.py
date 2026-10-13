@@ -228,41 +228,53 @@ class AIService:
 
     @staticmethod
     def _get_anthropic_key():
-        return getattr(settings, "ANTHROPIC_API_KEY", AIService._env("ANTHROPIC_API_KEY"))
+        return (
+            getattr(settings, "ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_API_KEY", "")
+            or AIService._env("ANTHROPIC_API_KEY")
+        )
 
     @staticmethod
     def _get_anthropic_model():
         # Claude Sonnet — advanced multi-modal vision and reasoning.
-        # Read at call time: can be overridden via `NEXUCON_ANTHROPIC_MODEL` in .env.
-        return getattr(settings, "ANTHROPIC_MODEL",
-                       AIService._env("ANTHROPIC_MODEL", "claude-sonnet-4-5"))
+        # Read at call time: can be overridden via `NEXUCON_ANTHROPIC_MODEL` or `ANTHROPIC_MODEL` in .env.
+        return (
+            getattr(settings, "ANTHROPIC_MODEL", "")
+            or os.environ.get("ANTHROPIC_MODEL", "")
+            or AIService._env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+        )
 
     @staticmethod
     def _get_anthropic_base_url():
-        return getattr(settings, "ANTHROPIC_BASE_URL",
-                       AIService._env("ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
+        return (
+            getattr(settings, "ANTHROPIC_BASE_URL", "")
+            or os.environ.get("ANTHROPIC_BASE_URL", "")
+            or AIService._env("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        )
 
     @staticmethod
     def _get_deepseek_key():
-        return getattr(settings, "DEEPSEEK_API_KEY", AIService._env("DEEPSEEK_API_KEY"))
+        return (
+            getattr(settings, "DEEPSEEK_API_KEY", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
+            or AIService._env("DEEPSEEK_API_KEY")
+        )
 
     @staticmethod
     def _get_deepseek_model():
-        # `deepseek-flash` is DeepSeek's cheapest model and one of only two
-        # IDs their pricing page still documents — the previous default,
-        # `deepseek-chat`, no longer appears there at all, so it was a stale
-        # ID rather than merely an expensive one. Both documented models
-        # (flash and v4-pro) list JSON Output as supported, which this
-        # service needs: the runner below sends `{"type": "json_object"}`.
-        return getattr(settings, "DEEPSEEK_MODEL",
-                       AIService._env("DEEPSEEK_MODEL", "deepseek-flash"))
+        return (
+            getattr(settings, "DEEPSEEK_MODEL", "")
+            or os.environ.get("DEEPSEEK_MODEL", "")
+            or AIService._env("DEEPSEEK_MODEL", "deepseek-flash")
+        )
 
     @staticmethod
     def _get_deepseek_base_url():
-        # DeepSeek is OpenAI-compatible, so it reuses the installed `openai`
-        # SDK against this base URL rather than adding another dependency.
-        return getattr(settings, "DEEPSEEK_BASE_URL",
-                       AIService._env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+        return (
+            getattr(settings, "DEEPSEEK_BASE_URL", "")
+            or os.environ.get("DEEPSEEK_BASE_URL", "")
+            or AIService._env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        )
 
     @staticmethod
     def _get_max_retries():
@@ -359,16 +371,12 @@ class AIService:
         return bool(getattr(cls, getter)())
 
     @classmethod
-    def _provider_order(cls, available):
+    def _provider_order(cls, available, preferred=None):
         """Deterministic provider order for one call.
 
-        The configured provider goes first, so an explicit AI_PROVIDER choice
-        is honoured exactly as it was before the chain existed. The rest
-        follow `AI_PROVIDER_ORDER` when set, else `_CANONICAL_ORDER`.
-
-        A provider with no key is SKIPPED, not attempted and failed. There is
-        no key to fail with, and attempting it would cost a request's worth of
-        latency to produce a misleading error.
+        When a preferred provider is specified, it goes first. Otherwise,
+        the configured provider goes first, followed by AI_PROVIDER_ORDER
+        when set, else _CANONICAL_ORDER.
         """
         override = getattr(settings, "AI_PROVIDER_ORDER",
                            os.environ.get("AI_PROVIDER_ORDER", ""))
@@ -376,7 +384,8 @@ class AIService:
             override = [part.strip().lower() for part in override.split(",") if part.strip()]
         override = [str(part).strip().lower() for part in (override or [])]
 
-        candidates = [cls._get_provider()] + override + list(_CANONICAL_ORDER)
+        pref_list = [str(preferred).strip().lower()] if preferred else []
+        candidates = pref_list + [cls._get_provider()] + override + list(_CANONICAL_ORDER)
         order = []
         for name in candidates:
             if name in order or name not in available:
@@ -404,7 +413,7 @@ class AIService:
         }
 
     @classmethod
-    def _with_failover(cls, runners, on_total_failure, capability="call"):
+    def _with_failover(cls, runners, on_total_failure, capability="call", preferred=None):
         """Try every configured capable provider; return (result, provider).
 
         Each attempt is isolated: any exception — missing key, HTTP failure,
@@ -412,18 +421,8 @@ class AIService:
         Nothing aborts the chain early, because the whole point of running
         several providers together is that one breaking does not take the
         others with it.
-
-        `on_total_failure` is the method's honest-state policy, and it belongs
-        to the method rather than the caller:
-          * a callable -> returned as the result (vision returns [], which is
-            a valid finding: "I looked and saw nothing");
-          * None       -> raise, for calls with no honest empty value.
-
-        Raises AIProviderUnavailable when nothing is *configured* (a distinct
-        state from "everything was tried and failed"), and AIServiceError
-        carrying `.attempts` when everything failed.
         """
-        order = cls._provider_order(set(runners))
+        order = cls._provider_order(set(runners), preferred=preferred)
         attempts = []
 
         if not order:
@@ -1248,7 +1247,7 @@ class AIService:
     # ========================================================
 
     @classmethod
-    def generate_structured_json(cls, prompt: str, max_tokens: int = None, schema: dict = None):
+    def generate_structured_json(cls, prompt: str, max_tokens: int = None, schema: dict = None, preferred_provider: str = None):
         """
         Generic contextual-synthesis entry point for the AI Evidence
         Intelligence Layer (correlation narratives, executive briefings,
@@ -1282,6 +1281,7 @@ class AIService:
             # deterministic alternative built from real data.
             on_total_failure=None,
             capability="text",
+            preferred=preferred_provider,
         )
         return StructuredResult(
             data if isinstance(data, dict) else {"result": data},
