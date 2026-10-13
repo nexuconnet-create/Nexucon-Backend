@@ -410,7 +410,7 @@ val_checks = [
     ("Sequential Section 5.1 and 5.2 present in body and TOC", "5.1 summary of test results" in norm_text.lower() and "5.2 graphical analysis" in norm_text.lower()),
     ("Section 5.3 Discussion of Results present in TOC and report", "5.3 discussion of results" in norm_text.lower() or "discussion of results" in norm_text.lower()),
     ("Section 5.5 Statistical Summary Table rendered with S1-S20 and in TOC", "5.5 statistical summary table" in norm_text.lower() and "s1" in norm_text.lower() and "s20" in norm_text.lower()),
-    ("Figure 5.1, Figure 5.2, and Figure 5.3 present", "figure 5.1" in norm_text.lower() and "figure 5.2" in norm_text.lower() and "figure 5.3" in norm_text.lower()),
+    ("Figure 5.1 and Figure 5.2 present (Figure 5.3 / Chart C removed)", "figure 5.1" in norm_text.lower() and "figure 5.2" in norm_text.lower() and "figure 5.3" not in norm_text.lower()),
     ("Appendix Floor Layout cites PROPOSED STACKING AREA_IFC.rvt with 80 elements", "proposed stacking area_ifc.rvt" in norm_text.lower() and "80 elements" in norm_text.lower()),
     ("SHA-256 cryptographic provenance incorporates Phase 10 table", "cryptographic sha-256 hash" in norm_text.lower() and "phase 10" in norm_text.lower()),
     ("Project Name correctly spelled 'Ladol Exxon Laydown Area'", "ladol exxon laydown area" in norm_text.lower() and "ladol exon" not in norm_text.lower()),

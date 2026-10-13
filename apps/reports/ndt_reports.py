@@ -1710,49 +1710,16 @@ class NDTReportService:
         ax.set_yticks(range(0, 101, 10))
         ax.set_yticklabels([f'{v}%' for v in range(0, 101, 10)])
         ax.tick_params(labelsize=9)
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.35), ncol=2,
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.30), ncol=2,
                   frameon=False, fontsize=9)
         for spine in ax.spines.values():
             spine.set_linewidth(0.75)
-        fig.subplots_adjust(top=0.86, bottom=0.26, left=0.16, right=0.97)
+        fig.subplots_adjust(top=0.86, bottom=0.28, left=0.16, right=0.97)
         buf_b = io.BytesIO()
         fig.savefig(buf_b, format='png', dpi=150)
         buf_b.seek(0)
 
-        # Chart C — Mean Velocity by Element (S1-S20) with 3,500 m/s threshold (QA Items #16, #17)
-        fig_c = Figure(figsize=(7.5, 3.8))
-        FigureCanvas(fig_c)
-        ax_c = fig_c.add_subplot(111)
-
-        sorted_elems = sorted(
-            element_data,
-            key=lambda item: _natural_sort_key(item.get('element') or '')
-        )
-        elem_labels = [e.get('element') or f"E{idx+1}" for idx, e in enumerate(sorted_elems)]
-        elem_vels = [
-            (e.get('mean_velocity_km_s') * 1000.0) if e.get('mean_velocity_km_s') is not None else 0.0
-            for e in sorted_elems
-        ]
-        ax_c.bar(elem_labels, elem_vels, width=0.55, color='#4a90e2', edgecolor='#2c3e50', linewidth=0.5)
-        ax_c.axhline(3500.0, color='#d9534f', linestyle='--', linewidth=1.5,
-                     label='Good Quality Threshold (3,500 m/s per BS 1881-203 / BS EN 12504-4)')
-
-        ax_c.set_title('BAR CHART C: MEAN PULSE VELOCITY BY ELEMENT (S1–S20)', fontsize=12, fontweight='bold', pad=10)
-        ax_c.set_ylabel('MEAN PULSE VELOCITY (m/s)', fontsize=9, fontweight='bold')
-        ax_c.set_xlabel('SURVEY STATIONS / ELEMENTS', fontsize=9, fontweight='bold')
-        ax_c.set_ylim(3000, 5000)
-        ax_c.tick_params(axis='x', rotation=45, labelsize=8)
-        ax_c.tick_params(axis='y', labelsize=8)
-        ax_c.grid(axis='y', linestyle=':', alpha=0.5, color='#95a5a6')
-        ax_c.legend(loc='lower right', frameon=True, fontsize=8)
-        for spine in ax_c.spines.values():
-            spine.set_linewidth(0.75)
-        fig_c.subplots_adjust(top=0.88, bottom=0.25, left=0.12, right=0.96)
-        buf_c = io.BytesIO()
-        fig_c.savefig(buf_c, format='png', dpi=150)
-        buf_c.seek(0)
-
-        return buf_a, buf_b, buf_c
+        return buf_a, buf_b
 
     @staticmethod
     def _generate_bim_plan_view(project):
@@ -5300,7 +5267,6 @@ class NDTReportService:
                 try:
                     charts = cls._generate_charts(element_data)
                     chart_a, chart_b = charts[0], charts[1]
-                    chart_c = charts[2] if len(charts) > 2 else None
                     if chart_a and chart_b:
                         pdf = builder.pdf
                         pdf.add_page()
@@ -5316,34 +5282,16 @@ class NDTReportService:
                         pdf.set_font('Cambria', '', 11)
                         pdf.cell(0, 6, 'Figure 5.1: *CHART ILLUSTRATING THE NUMBER OF '
                                        'STRUCTURAL MEMBER TESTED', align='C')
-                        y_chart_b = y_cap_a + 8.0
+                        y_chart_b = y_cap_a + 6.0
                         pdf.image(chart_b, x=45.3, y=y_chart_b, w=125.1)
                         h_b = 125.1 * (3.52 / 4.93)
-                        y_cap_b = y_chart_b + h_b + 1.0
+                        y_cap_b = y_chart_b + h_b + 3.0
                         pdf.set_xy(pdf.l_margin, y_cap_b)
                         pdf.set_font('Cambria', '', 11)
                         pdf.cell(0, 6, 'Figure 5.2: *CHART ILLUSTRATING THE PERCENTAGE OF '
                                        'STRENGTH OF STRUCTURAL MEMBER TESTED',
                                  align='C')
-                        if chart_c:
-                            pdf.add_page()
-                            builder.heading('BAR CHART SHOWING MEAN VELOCITY BY ELEMENT (S1–S20)', page_break=False)
-                            pdf.image(chart_c, x=25.0, y=42.0, w=160.0)
-                            pdf.set_xy(pdf.l_margin, 138.0)
-                            pdf.set_font('Cambria', '', 11)
-                            pdf.cell(0, 6, 'Figure 5.3: *CHART ILLUSTRATING MEAN PULSE VELOCITY '
-                                           'BY ELEMENT (S1–S20) WITH 3,500 m/s ACCEPTANCE THRESHOLD',
-                                     align='C')
-                            pdf.set_xy(pdf.l_margin, 147.0)
-                            pdf.set_font('Cambria', '', 10)
-                            pdf.multi_cell(0, 5, _latin1(
-                                'Figure 5.3 illustrates mean ultrasonic pulse velocity across all 20 individual '
-                                'stations (S1–S20). All measured stations exceed the statutory 3,500 m/s threshold '
-                                'for GOOD concrete quality per BS 1881-203 / BS EN 12504-4, confirming homogeneous '
-                                'compaction and dense acoustic velocity throughout the RCC slab-on-grade laydown area.'
-                            ), align='C')
                         pdf.set_font('Cambria', '', 12)
-                        pdf.set_xy(pdf.l_margin, 220)
                 except Exception as e:
                     logger.error('Could not generate summary charts: %s', e)
 
@@ -5400,6 +5348,7 @@ class NDTReportService:
                     ai_record.save()
 
             if ai_record and ai_record.observations:
+                builder.pdf.add_page()
                 builder.section('5.3', 'DISCUSSION OF RESULTS', sub=True)
                 builder.record_section('5.3', 'Discussion of Results')
                 conf_pct = ('not scored' if ai_record.confidence is None
