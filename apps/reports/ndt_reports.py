@@ -5022,18 +5022,26 @@ class NDTReportService:
                     chart_a, chart_b = charts[0], charts[1]
                     chart_c = charts[2] if len(charts) > 2 else None
                     if chart_a and chart_b:
+                        pdf = builder.pdf
+                        pdf.add_page()
                         builder.section(
                             '5.2', 'GRAPHICAL ANALYSIS OF RESULTS',
                             sub=True)
                         builder.subheading('BAR CHART SHOWING SUMMARY OF TEST RESULTS')
-                        pdf = builder.pdf
-                        pdf.image(chart_a, x=45.3, y=35.6, w=125.1)
-                        pdf.set_xy(pdf.l_margin, 112.3)
+                        y_chart_a = pdf.get_y() + 2.0
+                        pdf.image(chart_a, x=45.3, y=y_chart_a, w=125.1)
+                        h_a = 125.1 * (3.0 / 4.93)
+                        y_cap_a = y_chart_a + h_a + 1.0
+                        pdf.set_xy(pdf.l_margin, y_cap_a)
                         pdf.set_font('Cambria', '', 11)
                         pdf.cell(0, 6, 'Figure 5.1: *CHART ILLUSTRATING THE NUMBER OF '
                                        'STRUCTURAL MEMBER TESTED', align='C')
-                        pdf.image(chart_b, x=45.3, y=121.9, w=125.1)
-                        pdf.set_xy(pdf.l_margin, 211.8)
+                        y_chart_b = y_cap_a + 8.0
+                        pdf.image(chart_b, x=45.3, y=y_chart_b, w=125.1)
+                        h_b = 125.1 * (3.52 / 4.93)
+                        y_cap_b = y_chart_b + h_b + 1.0
+                        pdf.set_xy(pdf.l_margin, y_cap_b)
+                        pdf.set_font('Cambria', '', 11)
                         pdf.cell(0, 6, 'Figure 5.2: *CHART ILLUSTRATING THE PERCENTAGE OF '
                                        'STRENGTH OF STRUCTURAL MEMBER TESTED',
                                  align='C')
