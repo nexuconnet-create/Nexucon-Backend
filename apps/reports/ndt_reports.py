@@ -4647,9 +4647,6 @@ class NDTReportService:
 
             # ------------------------------------------------------- 4.3 REBAR
             builder.section('4.3', 'REINFORCING BAR (REBAR) ASSESSMENT', sub=True)
-            # Generated-content CMS section (11 Sep): the rebar statement
-            # pre-fills from the recorded survey; without a survey the honest
-            # "Not Applicable" wording stays fixed (no override can invent one).
             rebar_body, rebar_src = get_cms_text(project, 'rebar_statement',
                                                  computed=cms)
             if rebar_body is not None:
@@ -4662,6 +4659,29 @@ class NDTReportService:
                     'Sections 4.1 and 5.0.',
                     leading=7.5,
                 )
+
+            builder.inner_heading('COVER METER / REINFORCEMENT BAR RESULTS', centered=False, underline=False)
+            placeholder_rows = [
+                ['1', 'RCC SLAB-ON-GRADE (S1–S5)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                ['2', 'RCC SLAB-ON-GRADE (S6–S10)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                ['3', 'RCC SLAB-ON-GRADE (S11–S15)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                ['4', 'RCC SLAB-ON-GRADE (S16–S20)', 'NIL', 'NIL', 'NIL', 'NIL'],
+            ]
+            builder.ruled_table(
+                ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
+                 'SPACING (MM)', 'COVER DEPTH (MM)'],
+                placeholder_rows,
+                [12, 60, 27, 27, 27, 27],
+                ['C', 'L', 'C', 'C', 'C', 'C'],
+                font_size=8.5,
+                line_h=4.0
+            )
+            builder.para(
+                'Cover Meter / Reinforcement Bar Results placeholder table populated with NIL values to accommodate potential future data injections.',
+                leading=7.5
+            )
+            builder.para('NOTE: This assessment does not cover for the '
+                         'construction reinforcement design.', leading=7.5)
 
             # ------------------------------------------------------ 4.4 EQUIPMENT
             builder.section('4.4', 'EQUIPMENT/REBAR ASSESSMENT TABLE', sub=True)
@@ -4692,29 +4712,6 @@ class NDTReportService:
                     [12, 48, 30, 30, 30, 30],
                     ['C', 'L', 'C', 'C', 'C', 'C'],
                 )
-            else:
-                builder.inner_heading('COVER METER / REINFORCEMENT BAR RESULTS', centered=False, underline=False)
-                placeholder_rows = [
-                    ['1', 'RCC SLAB-ON-GRADE (S1–S5)', 'NIL', 'NIL', 'NIL', 'NIL'],
-                    ['2', 'RCC SLAB-ON-GRADE (S6–S10)', 'NIL', 'NIL', 'NIL', 'NIL'],
-                    ['3', 'RCC SLAB-ON-GRADE (S11–S15)', 'NIL', 'NIL', 'NIL', 'NIL'],
-                    ['4', 'RCC SLAB-ON-GRADE (S16–S20)', 'NIL', 'NIL', 'NIL', 'NIL'],
-                ]
-                builder.ruled_table(
-                    ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
-                     'SPACING (MM)', 'COVER DEPTH (MM)'],
-                    placeholder_rows,
-                    [12, 60, 27, 27, 27, 27],
-                    ['C', 'L', 'C', 'C', 'C', 'C'],
-                    font_size=8.5,
-                    line_h=4.0
-                )
-                builder.para(
-                    'Cover Meter / Reinforcement Bar Results placeholder table populated with NIL values to accommodate potential future data injections.',
-                    leading=7.5
-                )
-            builder.para('NOTE: This assessment does not cover for the '
-                         'construction reinforcement design.', leading=7.5)
 
             if crack_tests:
                 builder.para('Crack depth measurements are tabulated in '
