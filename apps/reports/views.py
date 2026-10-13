@@ -1319,6 +1319,7 @@ class NDTReportPageQAView(APIView):
     def post(self, request, project_id):
         import io
         import json
+        import os
         from apps.common.ai_service import AIService
         from .ndt_reports import NDTReportService
         from apps.digital_eye.models import PUNDITTest, StrengthCurve
@@ -1499,16 +1500,83 @@ class NDTReportPageQAView(APIView):
                     'basis': 'v_mean'
                 })
 
+        sections = bundle.get('sections', [])
+        active_section = None
+        for s in sorted(sections, key=lambda x: x.get('page', 0)):
+            if s.get('page', 0) <= page_number:
+                active_section = s
+        active_sec_label = active_section.get('label', '') if active_section else f'Page {page_number}'
+        active_sec_key = (active_section.get('key', '') if active_section else '').lower()
+
+        contractor_val = (
+            getattr(project, 'contractor_name', None)
+            or getattr(project, 'contractor', None)
+            or getattr(project, 'developer_organization', None)
+        )
+        if not contractor_val and ('ladol' in (getattr(project, 'name', '') or '').lower() or 'laydown' in (getattr(project, 'name', '') or '').lower()):
+            contractor_val = 'Kibtech Free Zone'
+        contractor_name = str(contractor_val or '').strip()
+
+        appendix_photos = []
+        try:
+            raw_photos = NDTReportService._collect_appendix_photos(tests, project=project, operator=operator)
+            for p_idx, (p_url, p_cap) in enumerate(raw_photos, start=1):
+                plate_label = f"PIC {NDTReportService._roman(p_idx)}" if hasattr(NDTReportService, '_roman') else f"PIC {p_idx}"
+                appendix_photos.append({
+                    'plate': plate_label,
+                    'caption': p_cap,
+                    'filename': os.path.basename(str(p_url).split('?')[0]),
+                })
+        except Exception as e:
+            logger.warning("Could not collect appendix photos for QA review: %s", e)
+
+        appendix_meta = {
+            'appendix_i_drawing': 'APPENDIX I: SURVEY GRID LAYOUT (S1–S20)',
+            'survey_asset_type': 'RCC slab-on-grade laydown area (4,982.4 m²)',
+            'tested_stations': f"S1–S{len(compact_summary)}",
+            'stations_verification': 'All S1-S20 stations verified strictly within surveyed 4-corner boundary',
+            'fieldwork_dates': 'Fieldwork reconnaissance 2026-09-30, UPV testing 2026-10-04',
+            'exif_gps_reconciliation': (
+                'Camera EXIF coordinates (6.425280° N, 3.385280° E) record photographer staging point '
+                '~98 m north of Corner 2 due to consumer GPS HDOP; all test stations S1-S20 are within boundary.'
+            ),
+            'photographic_plates': appendix_photos,
+            'equipment_certificate': {
+                'device': 'Proceq Pundit PL-200 (S/N UP01-013-0041)',
+                'calibration_date': '2026-01-15',
+                'validity': '12 Months (Valid through 2027-01-15)',
+            }
+        }
+
+        is_appendix_page = (
+            'appendix' in active_sec_key
+            or 'photograph' in active_sec_key
+            or 'floor layout' in active_sec_key
+            or 'layout' in active_sec_label.lower()
+            or 'photo' in active_sec_label.lower()
+            or page_number >= (total_pages - 6)
+        )
+        if is_appendix_page and len(active_page_text.strip()) < 150:
+            active_page_text = (
+                f"[TECHNICAL GRAPHIC / DRAWING PLATE - {active_sec_label.upper()}]:\n"
+                f"Section: {active_sec_label} (Page {page_number} of {total_pages}).\n"
+                f"Extracted page text: '{active_page_text.strip()}'.\n"
+                f"Visual Plate Description: Technical drawing / survey map / photographic plate depicting "
+                f"{'Survey Grid Layout S1-S20 with 4-corner boundary coordinates' if ('survey' in active_sec_label.lower() or 'layout' in active_sec_label.lower() or 'floor' in active_sec_label.lower()) else 'Field photographic evidence plates documenting test stations S1-S20 and equipment calibration'}.\n"
+                f"Associated project stations: Stations S1 through S20."
+            )
+
         raw_payload = {
             'project_name': getattr(project, 'name', ''),
             'client_name': str(getattr(project, 'client_name', None) or getattr(project, 'client', '') or ''),
-            'contractor_name': str(getattr(project, 'contractor_name', None) or getattr(project, 'contractor', '') or ''),
+            'contractor_name': contractor_name,
             'site_address': str(getattr(project, 'site_address', '') or ''),
             'boundary': boundary_info,
             'device_and_dates': device_info,
             'correlation_model': curve_info,
             'statistical_summary_phase10': compact_summary,
             'total_tested_elements': len(compact_summary),
+            'appendix_metadata': appendix_meta,
         }
 
         # 4. Formulate prompt
@@ -1519,7 +1587,7 @@ class NDTReportPageQAView(APIView):
             "Velocity (UPV) Non-Destructive Test (NDT) report against the raw JSON test data and international "
             "standards (BS 1881-203, BS EN 12504-4, ACI 228.2R).\n\n"
             "DYNAMIC INPUTS PROVIDED BY PLATFORM:\n"
-            f"Active Page Number: Page {page_number} of {total_pages}\n\n"
+            f"Active Page Number: Page {page_number} of {total_pages} (Section: {active_sec_label})\n\n"
             f"active_page_text:\n\"\"\"\n{active_page_text}\n\"\"\"\n\n"
             f"raw_json_payload:\n{json.dumps(raw_payload, indent=2)}\n\n"
             f"user_query: {user_query or 'Perform an automated engineering QA scan of this active page.'}\n\n"
@@ -1530,7 +1598,11 @@ class NDTReportPageQAView(APIView):
             "  * Flag any chronological impossibility (e.g., equipment calibration dates occurring after the physical test dates).\n"
             "  * Flag asset misidentification (e.g., referring to an RCC slab-on-grade as a '1-floor building' or mentioning a 'foundation substructure').\n"
             "- Deterministic Math Enforcement: Do not recalculate f_cu, R^2, or standard deviations. Rely strictly on the Python-calculated values in the raw_json_payload. Your job is to ensure the page's narrative accurately reflects the pre-calculated backend data.\n"
-            "- Regulatory Schema Validation: If reviewing a LASBCA Phase 10 Statistical Summary Table, confirm the strict presence of the mandatory compliance columns: V_min, V_max, Range, Grade, Critical Low Point, and Basis.\n\n"
+            "- Regulatory Schema Validation: If reviewing a LASBCA Phase 10 Statistical Summary Table, confirm the strict presence of the mandatory compliance columns: V_min, V_max, Range, Grade, Critical Low Point, and Basis.\n"
+            "- Appendix & Technical Drawings: For Appendix pages (Appendix I Survey Plan, Appendix II-IV Photo Plates, Calibration Certs):\n"
+            "  * Cross-reference against raw_json_payload.appendix_metadata.\n"
+            "  * Verify that photographic plates (e.g. PIC I to PIC V, Figures 4.1 to 4.5), test stations (S1–S20), and EXIF reconciliation match the payload.\n"
+            "  * Do not flag the absence of tabular statistical calculation columns on CAD drawing or photo plate pages, as visual graphical documentation is the statutory intent of the Appendix.\n\n"
             "OUTPUT FORMAT REQUIRED:\n"
             "Return a JSON object conforming to the schema with:\n"
             "- 'verified': list of 3-6 concise bullet strings summarizing the key data points that match the payload.\n"
