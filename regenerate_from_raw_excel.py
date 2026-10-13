@@ -413,6 +413,9 @@ val_checks = [
     ("Project Name correctly spelled 'Ladol Exxon Laydown Area'", "ladol exxon laydown area" in norm_text.lower() and "ladol exon" not in norm_text.lower()),
     ("Cover Meter / Reinforcement Bar Results placeholder table with NIL values", "cover meter / reinforcement bar results" in norm_text.lower() and "nil" in norm_text.lower()),
     ("Table 5.2 Remark column with detailed explanatory classifications", "excellent uniformity: concrete is highly dense and homogenous" in norm_text.lower()),
+    ("Section 5.4 unified 4-column table without OBS. NO. or RECORDED SITE OBSERVATIONS", "field assessment scope" in norm_text.lower() and "remarks / required action" in norm_text.lower() and "recorded site observations" not in norm_text.lower() and "obs. no." not in norm_text.lower()),
+    ("Section 6.0 Recommendation using official project title and exact prompt text", "20 of the 20 structural members tested in the ladol exxon laydown area / rcc slab-on-grade laydown area were good in strength" in norm_text.lower()),
+    ("Section 7.0 Conclusion formatted with point 3 and no separate Note block", "3. the test assumed 25 n/mm2 as the characteristic design compressive strength for the structural elements" in norm_text.lower() and "note: the test assumed" not in norm_text.lower()),
 ]
 
 all_ok = True
