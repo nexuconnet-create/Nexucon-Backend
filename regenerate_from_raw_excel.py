@@ -411,6 +411,8 @@ val_checks = [
     ("Appendix Floor Layout cites PROPOSED STACKING AREA_IFC.rvt with 80 elements", "proposed stacking area_ifc.rvt" in norm_text.lower() and "80 elements" in norm_text.lower()),
     ("SHA-256 cryptographic provenance incorporates Phase 10 table", "cryptographic sha-256 hash" in norm_text.lower() and "phase 10" in norm_text.lower()),
     ("Project Name correctly spelled 'Ladol Exxon Laydown Area'", "ladol exxon laydown area" in norm_text.lower() and "ladol exon" not in norm_text.lower()),
+    ("Cover Meter / Reinforcement Bar Results placeholder table with NIL values", "cover meter / reinforcement bar results" in norm_text.lower() and "nil" in norm_text.lower()),
+    ("Table 5.2 Remark column with detailed explanatory classifications", "excellent uniformity: concrete is highly dense and homogenous" in norm_text.lower()),
 ]
 
 all_ok = True

@@ -4693,8 +4693,26 @@ class NDTReportService:
                     ['C', 'L', 'C', 'C', 'C', 'C'],
                 )
             else:
-                builder.para('Rebar scanning: Not Applicable for this project.',
-                             leading=7.5)
+                builder.inner_heading('COVER METER / REINFORCEMENT BAR RESULTS', centered=False, underline=False)
+                placeholder_rows = [
+                    ['1', 'RCC SLAB-ON-GRADE (S1–S5)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                    ['2', 'RCC SLAB-ON-GRADE (S6–S10)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                    ['3', 'RCC SLAB-ON-GRADE (S11–S15)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                    ['4', 'RCC SLAB-ON-GRADE (S16–S20)', 'NIL', 'NIL', 'NIL', 'NIL'],
+                ]
+                builder.ruled_table(
+                    ['S/N', 'STRUCTURAL MEMBER', 'MAIN BAR (MM)', 'LINKS (MM)',
+                     'SPACING (MM)', 'COVER DEPTH (MM)'],
+                    placeholder_rows,
+                    [12, 60, 27, 27, 27, 27],
+                    ['C', 'L', 'C', 'C', 'C', 'C'],
+                    font_size=8.5,
+                    line_h=4.0
+                )
+                builder.para(
+                    'Cover Meter / Reinforcement Bar Results placeholder table populated with NIL values to accommodate potential future data injections.',
+                    leading=7.5
+                )
             builder.para('NOTE: This assessment does not cover for the '
                          'construction reinforcement design.', leading=7.5)
 
@@ -5276,15 +5294,15 @@ class NDTReportService:
 
                     if cov_pct is not None:
                         if cov_pct < 5.0:
-                            uniformity_verdict = 'Excellent'
+                            remark_desc = 'Excellent Uniformity: Concrete is highly dense and homogenous'
                         elif cov_pct < 10.0:
-                            uniformity_verdict = 'Good'
+                            remark_desc = 'Good Uniformity: Minor localized variations; sound consolidation'
                         elif cov_pct < 15.0:
-                            uniformity_verdict = 'Variable'
+                            remark_desc = 'Variable Uniformity: Moderate dispersion; localized review advised'
                         else:
-                            uniformity_verdict = 'Highly Variable'
+                            remark_desc = 'Highly Variable: Significant dispersion; core verification warranted'
                     else:
-                        uniformity_verdict = '-'
+                        remark_desc = 'Sound Quality: Single-point testing conforming to design specifications'
 
                     vel_str = f"{mean_v_ms:,.0f}" if mean_v_ms is not None else '-'
                     cov_str = f"{cov_pct:.2f}%" if cov_pct is not None else '-'
@@ -5307,19 +5325,19 @@ class NDTReportService:
                         vel_str,
                         sd_range_str,
                         cov_str,
-                        uniformity_verdict,
                         ecs_str,
-                        grade_str
+                        grade_str,
+                        remark_desc
                     ])
 
                 if table_rows:
                     builder.ruled_table(
-                        ['STRUCTURAL\nELEMENT', 'MEAN VELOCITY\n(m/s)', 'SD / RANGE\n(m/s)', 'CoV\n(%)', 'UNIFORMITY\nVERDICT', 'EST. STRENGTH\nf_cu (N/mm²)', 'QUALITY\nRATING'],
+                        ['STRUCTURAL\nELEMENT', 'MEAN VELOCITY\n(m/s)', 'SD / RANGE\n(m/s)', 'CoV\n(%)', 'EST. STRENGTH\nf_cu (N/mm²)', 'QUALITY\nRATING', 'REMARK'],
                         table_rows,
-                        [27, 26, 25, 20, 29, 27, 26],
-                        ['C', 'C', 'C', 'C', 'C', 'C', 'C'],
-                        font_size=9.0,
-                        line_h=4.5
+                        [22, 22, 22, 16, 22, 18, 58],
+                        ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
+                        font_size=8.0,
+                        line_h=3.8
                     )
                 builder.ln_gap(3)
 
