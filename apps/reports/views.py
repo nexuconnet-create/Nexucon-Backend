@@ -1319,7 +1319,6 @@ class NDTReportPageQAView(APIView):
     def post(self, request, project_id):
         import io
         import json
-        import pypdf
         from apps.common.ai_service import AIService
         from .ndt_reports import NDTReportService
         from apps.digital_eye.models import PUNDITTest, StrengthCurve
@@ -1347,14 +1346,36 @@ class NDTReportPageQAView(APIView):
             return Response({'detail': f'Report render failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # 2. Extract active page text
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        total_pages = len(reader.pages)
+        # 2. Extract active page text (resilient engine)
+        total_pages = 1
+        active_page_text = ""
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            total_pages = len(reader.pages)
+            if 1 <= page_number <= total_pages:
+                active_page_text = reader.pages[page_number - 1].extract_text() or ''
+        except ImportError:
+            try:
+                import PyPDF2
+                reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+                total_pages = len(reader.pages)
+                if 1 <= page_number <= total_pages:
+                    active_page_text = reader.pages[page_number - 1].extract_text() or ''
+            except ImportError:
+                try:
+                    import fitz  # PyMuPDF
+                    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    total_pages = len(doc)
+                    if 1 <= page_number <= total_pages:
+                        active_page_text = doc[page_number - 1].get_text() or ''
+                except ImportError:
+                    return Response({'detail': 'No PDF parser installed (pypdf/fitz).'},
+                                    status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
         if page_number < 1 or page_number > total_pages:
             return Response({'detail': f'Page {page_number} is out of bounds (1..{total_pages}).'},
                             status=status.HTTP_400_BAD_REQUEST)
-
-        active_page_text = reader.pages[page_number - 1].extract_text() or ''
 
         # 3. Assemble lean deterministic raw_json_payload
         tests = list(
