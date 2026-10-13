@@ -508,7 +508,7 @@ class TelemetrySessionStatusView(APIView):
             update_fields['weather_condition'] = str(cfg['weather_condition']).strip()
 
         if update_fields:
-            promoted_tests = (session.promoted or {}).get('tests', [])
+            promoted_tests = (session.data_payload or {}).get('tests', [])
             test_ids = [t['test_id'] for t in promoted_tests if isinstance(t, dict) and 'test_id' in t]
             if test_ids:
                 PUNDITTest.objects.filter(id__in=test_ids).update(**update_fields)
