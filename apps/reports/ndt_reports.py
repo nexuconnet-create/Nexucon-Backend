@@ -1780,9 +1780,44 @@ class NDTReportService:
                         })
 
         if len(slabs) >= 2:
+            # Query the project's actual PUNDIT test station labels to ensure 100% strict alignment
+            from apps.digital_eye.models import PUNDITTest
+            tested_labels = [
+                str(t.structural_element).strip()
+                for t in PUNDITTest.objects.filter(project=project)
+                if getattr(t, 'structural_element', None)
+            ]
+            tested_labels = sorted(set(tested_labels), key=_natural_sort_key)
+
             # Build full architectural / structural grid drawing with Grids 1-11 & A-C
             upper_slabs = sorted([s for s in slabs if s['cy'] > -10.0], key=lambda s: s['cx'])
             lower_slabs = sorted([s for s in slabs if s['cy'] <= -10.0], key=lambda s: s['cx'])
+
+            # Map station labels (e.g. S1-S10 on upper row, S11-S20 on lower row)
+            if upper_slabs and lower_slabs:
+                n_up = len(upper_slabs)
+                n_low = len(lower_slabs)
+                if tested_labels and len(tested_labels) == (n_up + n_low):
+                    for i, s in enumerate(upper_slabs):
+                        s['tag'] = tested_labels[i]
+                    for j, s in enumerate(lower_slabs):
+                        s['tag'] = tested_labels[n_up + j]
+                else:
+                    for i, s in enumerate(upper_slabs, 1):
+                        if s['tag'].isdigit() or not s['tag'].startswith('S'):
+                            s['tag'] = f"S{i}"
+                    for j, s in enumerate(lower_slabs, n_up + 1):
+                        if s['tag'].isdigit() or not s['tag'].startswith('S'):
+                            s['tag'] = f"S{j}"
+            else:
+                sorted_slabs = sorted(slabs, key=lambda s: (-round(s['cy'], 1), s['cx']))
+                if tested_labels and len(tested_labels) == len(sorted_slabs):
+                    for i, s in enumerate(sorted_slabs):
+                        s['tag'] = tested_labels[i]
+                else:
+                    for i, s in enumerate(sorted_slabs, 1):
+                        if s['tag'].isdigit() or not s['tag'].startswith('S'):
+                            s['tag'] = f"S{i}"
 
             # Determine X grid lines (Grid 1 to 11)
             ref_row = upper_slabs if upper_slabs else slabs
@@ -2056,7 +2091,8 @@ class NDTReportService:
             ax.add_patch(leg)
             ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#dc2626', markersize=5.5, zorder=11)
             ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#ffffff', markersize=2.2, zorder=12)
-            stn_range_str = f"{slabs[0]['tag']}–{slabs[-1]['tag']}" if slabs else f"1–{len(slabs)}"
+            all_tags = sorted([s['tag'] for s in slabs], key=_natural_sort_key)
+            stn_range_str = f"{all_tags[0]}–{all_tags[-1]}" if all_tags else f"1–{len(slabs)}"
             ax.text(leg_x + 4.8, leg_y + 2.25, f"NDT Test Station ({stn_range_str})",
                     va='center', fontsize=5.8, fontweight='bold', color='#0f172a', zorder=11)
             ax.plot(leg_x + 26.5, leg_y + 2.25, 'o', color='#1d4ed8', markersize=6.5, zorder=11)
@@ -2107,7 +2143,8 @@ class NDTReportService:
             buf.seek(0)
 
         source = geo.source_file or 'imported BIM model'
-        stn_range_cap = f"{slabs[0]['tag']}–{slabs[-1]['tag']}" if slabs else "Structural Grid"
+        all_tags = sorted([s['tag'] for s in slabs], key=_natural_sort_key)
+        stn_range_cap = f"{all_tags[0]}–{all_tags[-1]}" if all_tags else "Structural Grid"
         caption = (
             f"Figure A1.1: Survey Grid and Structural Layout Plan ({stn_range_cap}) — "
             f"Plan generated from the project's imported BIM model "
@@ -3351,14 +3388,24 @@ class NDTReportService:
                     'The visual inspection did not record any structural '
                     'defects')
             if is_sog:
-                vels = [e['mean_velocity_km_s'] * 1000 for e in element_data if e.get('mean_velocity_km_s')]
-                strengths = [e['mean_ecs_n_mm2'] for e in element_data if e.get('mean_ecs_n_mm2')]
+                vels = [
+                    (e['mean_v'] * 1000 if e.get('mean_v') is not None else (e['mean_velocity_km_s'] * 1000 if e.get('mean_velocity_km_s') else None))
+                    for e in element_data
+                    if e.get('mean_v') is not None or e.get('mean_velocity_km_s') is not None
+                ]
+                vels = [v for v in vels if v is not None]
+                strengths = [
+                    (e['mean_ecs'] if e.get('mean_ecs') is not None else e.get('mean_ecs_n_mm2'))
+                    for e in element_data
+                    if e.get('mean_ecs') is not None or e.get('mean_ecs_n_mm2') is not None
+                ]
+                strengths = [s for s in strengths if s is not None]
                 v_min = min(vels) if vels else 0.0
                 v_max = max(vels) if vels else 0.0
                 v_mean = sum(vels) / len(vels) if vels else 0.0
                 f_min = min(strengths) if strengths else 0.0
                 f_max = max(strengths) if strengths else 0.0
-                total_discrete = sum(len(e.get('readings', [])) for e in element_data)
+                total_discrete = sum(len(e.get('rows', []) or e.get('readings', [])) for e in element_data)
                 analysis_sentence = (
                     f'and the Non-Destructive test analysis shows that all {len(good_members)} of the '
                     f'{len(element_data)} structural stations tested achieved GOOD quality ratings under BS 1881-203 / '
@@ -5364,8 +5411,18 @@ class NDTReportService:
                         "**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, **ASTM C597-22**, **ACI 228.2R-13**, and **LASBCA Regulations**. All **20 tested stations (100.0%)** satisfy characteristic compressive strength requirements under the site-calibrated exponential model. **Recommendation:** Formal quality assurance acceptance of the RCC slab-on-grade laydown area for heavy industrial container and equipment operations, maintaining standard surface joint sealing and periodic operational monitoring."
                     ]
                 elif element_data:
-                    vels = [e['mean_velocity_km_s'] * 1000 for e in element_data if e.get('mean_velocity_km_s')]
-                    strengths = [e['mean_ecs_n_mm2'] for e in element_data if e.get('mean_ecs_n_mm2')]
+                    vels = [
+                        (e['mean_v'] * 1000 if e.get('mean_v') is not None else (e['mean_velocity_km_s'] * 1000 if e.get('mean_velocity_km_s') else None))
+                        for e in element_data
+                        if e.get('mean_v') is not None or e.get('mean_velocity_km_s') is not None
+                    ]
+                    vels = [v for v in vels if v is not None]
+                    strengths = [
+                        (e['mean_ecs'] if e.get('mean_ecs') is not None else e.get('mean_ecs_n_mm2'))
+                        for e in element_data
+                        if e.get('mean_ecs') is not None or e.get('mean_ecs_n_mm2') is not None
+                    ]
+                    strengths = [s for s in strengths if s is not None]
                     v_min = min(vels) if vels else 0.0
                     v_max = max(vels) if vels else 0.0
                     v_mean = sum(vels) / len(vels) if vels else 0.0
@@ -5373,7 +5430,7 @@ class NDTReportService:
                     f_max = max(strengths) if strengths else 0.0
                     total_cnt = len(element_data)
                     good_cnt = len(good_members)
-                    total_discrete = sum(len(e.get('readings', [])) for e in element_data)
+                    total_discrete = sum(len(e.get('rows', []) or e.get('readings', [])) for e in element_data)
                     curve_r2 = getattr(active_curve, 'r2_score', 0.8966) or 0.8966
                     curve_se = getattr(active_curve, 'standard_error', 0.29) or 0.29
                     p_name_str = project.name or 'Structural Survey Project'
