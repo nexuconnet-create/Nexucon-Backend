@@ -1819,11 +1819,11 @@ class NDTReportService:
 
             ext_top = 15.0
             ext_bottom = 12.0
-            ext_left = 18.0
-            ext_right = 13.0
+            ext_left = 22.0
+            ext_right = 20.0
             bubble_r = 1.45
 
-            fig = Figure(figsize=(12.5, 7.8), dpi=220)
+            fig = Figure(figsize=(13.2, 8.0), dpi=220)
             FigureCanvas(fig)
             ax = fig.add_subplot(111)
             fig.patch.set_facecolor('#ffffff')
@@ -1963,39 +1963,40 @@ class NDTReportService:
                         arrowprops=dict(facecolor='#0f172a', edgecolor='#0f172a', width=2.0, headwidth=6.0, headlength=7.0),
                         ha='center', va='bottom', fontsize=11, fontweight='bold', color='#0f172a', zorder=8)
 
-            # 7. Physical Orientation Corners 1 to 4 (Matching Page 5 Satellite Map)
+            # 7. Physical Orientation Corners 1 to 4 (Matching Page 5 Satellite Map) - Outside Layout
+            bw, bh = 14.5, 4.4
             corners_config = [
                 {
                     'tag': 'Corner 1 (NW)',
                     'sub': 'Grid 1 / A',
                     'x': min_x, 'y': max_y,
-                    'badge_x': min_x + 0.6, 'badge_y': max_y - 0.6,
-                    'ha': 'left', 'va': 'top',
-                    'box_w': 16.5, 'box_h': 4.8
+                    'box_x': min_x - 17.5, 'box_y': max_y + 1.8,
+                    'ptr_from': (min_x - 3.0, max_y + 2.0),
+                    'ptr_to': (min_x - 0.4, max_y + 0.4)
                 },
                 {
                     'tag': 'Corner 2 (NE)',
                     'sub': 'Grid 11 / A',
                     'x': max_x, 'y': max_y,
-                    'badge_x': max_x - 0.6, 'badge_y': max_y - 0.6,
-                    'ha': 'right', 'va': 'top',
-                    'box_w': 16.5, 'box_h': 4.8
+                    'box_x': max_x + 2.5, 'box_y': max_y + 1.8,
+                    'ptr_from': (max_x + 2.5, max_y + 2.0),
+                    'ptr_to': (max_x + 0.4, max_y + 0.4)
                 },
                 {
                     'tag': 'Corner 3 (SE)',
                     'sub': 'Grid 11 / C',
                     'x': max_x, 'y': min_y,
-                    'badge_x': max_x - 0.6, 'badge_y': min_y + 0.6,
-                    'ha': 'right', 'va': 'bottom',
-                    'box_w': 16.5, 'box_h': 4.8
+                    'box_x': max_x + 2.5, 'box_y': min_y - 6.2,
+                    'ptr_from': (max_x + 2.5, min_y - 2.0),
+                    'ptr_to': (max_x + 0.4, min_y - 0.4)
                 },
                 {
                     'tag': 'Corner 4 (SW)',
                     'sub': 'Grid 1 / C',
                     'x': min_x, 'y': min_y,
-                    'badge_x': min_x + 0.6, 'badge_y': min_y + 0.6,
-                    'ha': 'left', 'va': 'bottom',
-                    'box_w': 16.5, 'box_h': 4.8
+                    'box_x': min_x - 17.5, 'box_y': min_y - 6.2,
+                    'ptr_from': (min_x - 3.0, min_y - 2.0),
+                    'ptr_to': (min_x - 0.4, min_y - 0.4)
                 },
             ]
 
@@ -2004,9 +2005,13 @@ class NDTReportService:
                 ax.plot(c['x'], c['y'], 'o', color='#ffffff', markersize=4.0, zorder=13)
                 ax.plot(c['x'], c['y'], '+', color='#1d4ed8', markersize=7.0, markeredgewidth=1.2, zorder=14)
 
-                bw, bh = c['box_w'], c['box_h']
-                bx = c['badge_x'] if c['ha'] == 'left' else (c['badge_x'] - bw)
-                by = (c['badge_y'] - bh) if c['va'] == 'top' else c['badge_y']
+                bx, by = c['box_x'], c['box_y']
+
+                ax.annotate(
+                    '', xy=c['ptr_to'], xytext=c['ptr_from'],
+                    arrowprops=dict(arrowstyle='->', color='#1d4ed8', lw=1.3, mutation_scale=10),
+                    zorder=11
+                )
 
                 c_badge = patches.FancyBboxPatch(
                     (bx, by), bw, bh,
@@ -2020,9 +2025,9 @@ class NDTReportService:
                         fontsize=5.4, fontweight='semibold', color='#93c5fd', zorder=13)
 
             # 8. Physical Access Path Annotation (Between Corner 1 and Corner 4 along West Perimeter)
-            ap_x = min_x - 13.5
+            ap_x = min_x - 15.0
             ax.annotate(
-                '', xy=(ap_x, min_y + 3.0), xytext=(ap_x, max_y - 3.0),
+                '', xy=(ap_x, min_y + 1.0), xytext=(ap_x, max_y - 1.0),
                 arrowprops=dict(arrowstyle='<->', color='#1d4ed8', lw=1.6, mutation_scale=12),
                 zorder=10
             )
