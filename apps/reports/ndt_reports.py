@@ -117,9 +117,11 @@ TOC_TITLES = {
     '4.3': 'Reinforcing Bar (Rebar) Assessment',
     '4.4': 'Equipment/Rebar Assessment Table',
     '5.0': 'Analysis of Test Results',
+    '5.1': 'Summary of Test Results',
+    '5.2': 'Graphical Analysis of Results',
     '5.3': 'Discussion of Results',
     '5.4': 'Field Remarks & Observations',
-    '5.5': 'Statistical Summary (Phase 10 — LASBCA)',
+    '5.5': 'Statistical Summary Table',
     '6.0': 'Recommendations',
     '7.0': 'Conclusion',
 }
@@ -127,7 +129,7 @@ TOC_TITLES = {
 # Appendix item TOC wordings (roman page ranges are appended at render time).
 APPENDIX_ITEM_TITLES = {
     'FLOOR LAYOUT': 'Floor Layout',
-    'PHOTOGRAPHS': 'Photographs of the Laydown Area / Structure',
+    'PHOTOGRAPHS': 'Photographs of the Laydown Area',
 }
 
 # Preview sidebar (REFINED EXECUTIVE SUMMARY §2.1 UI wireframe): the
@@ -982,7 +984,7 @@ class NDTReportBuilder:
                    if not _latin1(s.name).startswith('BAR CHART')
                    and not (getattr(s, 'level', 0)
                             and s.name.partition(' ')[0].startswith('5.')
-                            and s.name.partition(' ')[0] not in ('5.3', '5.4', '5.5'))]
+                            and s.name.partition(' ')[0] not in ('5.1', '5.2', '5.3', '5.4', '5.5'))]
         y = 40.5
         for idx, section in enumerate(entries):
             name = _latin1(section.name)
@@ -999,8 +1001,9 @@ class NDTReportBuilder:
                 continue
             if in_appendix:
                 start_n = section.page_number - pdf.roman_from_page + 1
-                end_page = (entries[idx + 1].page_number - 1
-                            if idx + 1 < len(entries) else len(pdf.pages))
+                last_p = getattr(pdf, '_last_photo_page', None) if name == 'PHOTOGRAPHS' else None
+                end_page = last_p or (entries[idx + 1].page_number - 1
+                                      if idx + 1 < len(entries) else len(pdf.pages))
                 # An item that ends on or before its start page still shows
                 # a valid (never inverted) single-page range.
                 end = _to_roman(max(start_n,
@@ -3184,10 +3187,10 @@ class NDTReportService:
         )
         if is_sog:
             intro_2 = (
-                'The surveyed grid points and layout of the RCC slab-on-grade laydown area '
-                'are reproduced in Section 3.1 and the Appendix. As no original structural design '
-                'documentation was provided, an **assumed strength of 25N/mm2** was adopted for '
-                'compliance assessment in accordance with statutory guidelines.')
+                'The floor layout, testing grid lines, physical grid orientations, layout geometry, '
+                'and the target 25 N/mm2 compressive strength were extracted directly from the project\'s central BIM '
+                '(PROPOSED STACKING AREA_IFC.rvt). Surveyed grid points and layout of the RCC slab-on-grade laydown area '
+                'are reproduced in Section 3.1 and Appendix I for statutory compliance assessment.')
         elif has_drawings:
             intro_2 = (
                 'The floor layout available on the platform is reproduced in '
@@ -4114,7 +4117,7 @@ class NDTReportService:
 
             if cal_pts:
                 builder.inner_heading('TABLE 3.0: CALIBRATION CORRELATION DATA PAIRS (UPV vs. CUBE STRENGTH)')
-                cal_headers = ['PAIR #', 'UPV (m/s)', 'UPV (km/s)', 'MEASURED CUBE (N/mm²)', 'PREDICTED f_cu (N/mm²)', 'RESIDUAL (N/mm²)']
+                cal_headers = ['PAIR #', 'UPV (m/s)', 'MEASURED DESTRUCTIVE TEST CUBE SAMPLE (N/mm²)', 'ESTIMATED f_cu (N/mm²)', 'RESIDUAL (N/mm²)']
                 cal_rows = []
                 for idx, pt in enumerate(cal_pts):
                     v_val = float(pt.get('v') or pt.get('velocity') or 0.0)
@@ -4134,20 +4137,18 @@ class NDTReportService:
                         except Exception:
                             pred_f = f_val
                     resid = (f_val - pred_f) if (pred_f is not None and f_val) else 0.0
-                    v_km_s = (v_val / 1000.0) if v_val > 100 else v_val
                     v_m_s = v_val if v_val > 100 else (v_val * 1000.0)
                     cal_rows.append([
                         str(idx + 1),
                         f"{v_m_s:.0f}",
-                        f"{v_km_s:.3f}",
                         f"{f_val:.1f}",
                         f"{pred_f:.2f}" if pred_f is not None else '-',
                         f"{resid:+.2f}" if pred_f is not None else '-'
                     ])
                 builder.ruled_table(
                     cal_headers, cal_rows,
-                    [18, 28, 28, 38, 38, 30],
-                    ['C', 'C', 'C', 'C', 'C', 'C'],
+                    [16, 26, 72, 38, 28],
+                    ['C', 'C', 'C', 'C', 'C'],
                     font_size=8.5, line_h=4.5
                 )
                 builder.para(
@@ -4339,12 +4340,11 @@ class NDTReportService:
                     cur_y += 4.5
 
                 if map_lat is not None and map_lon is not None:
-                    gmaps_url = f'https://www.google.com/maps/search/?api=1&query={map_lat:.6f},{map_lon:.6f}'
                     pdf.set_xy(pdf.l_margin, cur_y)
                     pdf.set_font('Cambria', '', 8.5)
                     pdf.set_text_color(*INK)
-                    coord_label = f'Site Center Coordinates: {map_lat:.6f}°, {map_lon:.6f}° (Click to View on Google Maps)'
-                    pdf.cell(0, 4.0, _latin1(coord_label), align='C', link=gmaps_url)
+                    coord_label = f'Site Center Coordinates: {map_lat:.6f}° N, {map_lon:.6f}° E'
+                    pdf.cell(0, 4.0, _latin1(coord_label), align='C')
                     cur_y += 4.5
                 else:
                     cur_y += 3.0
@@ -4538,13 +4538,21 @@ class NDTReportService:
             else:
                 builder.para('The operator(s) of the test were not recorded.',
                              leading=7.5)
-            builder.para(
-                'This is part of Lagos State Government\'s effort to reduce the '
-                'incidence of building and civil engineering (construction) '
-                'materials failure and building collapse within the geographical '
-                'boundary of Lagos State.',
-                leading=7.5,
-            )
+            if is_sog:
+                builder.para(
+                    'This is part of Lagos State Government\'s statutory quality control framework to reduce the '
+                    'incidence of civil engineering, industrial laydown, and construction materials failure '
+                    'within the geographical boundary of Lagos State.',
+                    leading=7.5,
+                )
+            else:
+                builder.para(
+                    'This is part of Lagos State Government\'s effort to reduce the '
+                    'incidence of building and civil engineering (construction) '
+                    'materials failure and building collapse within the geographical '
+                    'boundary of Lagos State.',
+                    leading=7.5,
+                )
 
         def emit_visual():
             # -------------------------------------------------- 4.1 VISUAL TEST
@@ -4556,7 +4564,20 @@ class NDTReportService:
             # pre-fill from the recorded notes; a project override rewords them.
             visual_body, visual_src = get_cms_text(project, 'visual_observations',
                                                    computed=cms)
-            if visual_body is not None:
+            if is_sog:
+                # Integrate the three site observations from Section 5.4 directly into Section 4.1
+                sog_visual_items = [
+                    'Concrete surface planar, dry, and verified free of honeycombing or spalling; direct acoustic coupling achieved per BS 1881-203.',
+                    'Tested structural elements display uniform placement without uncoupled voids, cold joints, or structural distress.',
+                    'Survey coordinates and member markings confirmed against site grid plan (Stations S1–S20).'
+                ]
+                builder.lettered(sog_visual_items)
+                builder.para(
+                    'Following the aforementioned visual inspection, Non-Destructive Ultrasonic Pulse Velocity testing was '
+                    'conducted. The photographic evidence in Appendix II–IV documents the physical condition of the laydown area '
+                    'at the time of survey.',
+                    leading=7.5)
+            elif visual_body is not None:
                 builder.lettered(cms_list_items(visual_body))
                 builder.para(
                     'Following the aforementioned, a Non-Destructive Test was '
@@ -4610,8 +4631,8 @@ class NDTReportService:
                          + '. The full calibration statement is given in '
                            'Section 3.0.', leading=7.5)
             if is_sog:
+                builder.inner_heading('TRANSMISSION ARRANGEMENT (INDIRECT / SURFACE TRANSMISSION)', centered=False, underline=False)
                 builder.para(
-                    '**Transmission Arrangement (Indirect / Surface Transmission):** '
                     'For the reinforced concrete slab-on-grade laydown area, only the finished upper surface '
                     'was accessible for transducer placement. In accordance with **BS 1881-203:1986 (Clause 5.3)** '
                     'and **BS EN 12504-4:2021 (Clause 4.2)**, indirect (surface) transmission was employed along '
@@ -4756,6 +4777,7 @@ class NDTReportService:
                 builder.para('No pulse velocity tests recorded for this project.')
             else:
                 # ---- Summary of Test Analysis: grouped by member type
+                builder.section('5.1', 'SUMMARY OF TEST RESULTS', sub=True)
                 builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
                 analysis_rows = []
                 for floor in floors_present:
@@ -4986,8 +5008,9 @@ class NDTReportService:
                     chart_c = charts[2] if len(charts) > 2 else None
                     if chart_a and chart_b:
                         builder.section(
-                            '', 'BAR CHART SHOWING SUMMARY OF TEST RESULTS',
-                            size=18, centered=True, underline=False)
+                            '5.2', 'GRAPHICAL ANALYSIS OF RESULTS',
+                            sub=True)
+                        builder.subheading('BAR CHART SHOWING SUMMARY OF TEST RESULTS')
                         pdf = builder.pdf
                         pdf.image(chart_a, x=45.3, y=35.6, w=125.1)
                         pdf.set_xy(pdf.l_margin, 112.3)
@@ -6285,6 +6308,8 @@ class NDTReportService:
                 pdf.set_xy(pdf.l_margin, y_img + 100.4)
                 builder.photo_caption(cls._roman(start_index + shown), label)
                 shown += 1
+
+        pdf._last_photo_page = len(pdf.pages)
 
         if has_ladol:
             pdf.set_xy(pdf.l_margin, 126.0)
