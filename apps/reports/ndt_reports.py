@@ -1819,11 +1819,11 @@ class NDTReportService:
 
             ext_top = 15.0
             ext_bottom = 12.0
-            ext_left = 16.0
-            ext_right = 11.0
+            ext_left = 18.0
+            ext_right = 13.0
             bubble_r = 1.45
 
-            fig = Figure(figsize=(12, 7.8), dpi=220)
+            fig = Figure(figsize=(12.5, 7.8), dpi=220)
             FigureCanvas(fig)
             ax = fig.add_subplot(111)
             fig.patch.set_facecolor('#ffffff')
@@ -1963,10 +1963,77 @@ class NDTReportService:
                         arrowprops=dict(facecolor='#0f172a', edgecolor='#0f172a', width=2.0, headwidth=6.0, headlength=7.0),
                         ha='center', va='bottom', fontsize=11, fontweight='bold', color='#0f172a', zorder=8)
 
-            # 7. Title Block & Legend at bottom
+            # 7. Physical Orientation Corners 1 to 4 (Matching Page 5 Satellite Map)
+            corners_config = [
+                {
+                    'tag': 'Corner 1 (NW)',
+                    'sub': 'Grid 1 / A',
+                    'x': min_x, 'y': max_y,
+                    'badge_x': min_x + 0.6, 'badge_y': max_y - 0.6,
+                    'ha': 'left', 'va': 'top',
+                    'box_w': 16.5, 'box_h': 4.8
+                },
+                {
+                    'tag': 'Corner 2 (NE)',
+                    'sub': 'Grid 11 / A',
+                    'x': max_x, 'y': max_y,
+                    'badge_x': max_x - 0.6, 'badge_y': max_y - 0.6,
+                    'ha': 'right', 'va': 'top',
+                    'box_w': 16.5, 'box_h': 4.8
+                },
+                {
+                    'tag': 'Corner 3 (SE)',
+                    'sub': 'Grid 11 / C',
+                    'x': max_x, 'y': min_y,
+                    'badge_x': max_x - 0.6, 'badge_y': min_y + 0.6,
+                    'ha': 'right', 'va': 'bottom',
+                    'box_w': 16.5, 'box_h': 4.8
+                },
+                {
+                    'tag': 'Corner 4 (SW)',
+                    'sub': 'Grid 1 / C',
+                    'x': min_x, 'y': min_y,
+                    'badge_x': min_x + 0.6, 'badge_y': min_y + 0.6,
+                    'ha': 'left', 'va': 'bottom',
+                    'box_w': 16.5, 'box_h': 4.8
+                },
+            ]
+
+            for c in corners_config:
+                ax.plot(c['x'], c['y'], 'o', color='#1d4ed8', markersize=9.0, zorder=12)
+                ax.plot(c['x'], c['y'], 'o', color='#ffffff', markersize=4.0, zorder=13)
+                ax.plot(c['x'], c['y'], '+', color='#1d4ed8', markersize=7.0, markeredgewidth=1.2, zorder=14)
+
+                bw, bh = c['box_w'], c['box_h']
+                bx = c['badge_x'] if c['ha'] == 'left' else (c['badge_x'] - bw)
+                by = (c['badge_y'] - bh) if c['va'] == 'top' else c['badge_y']
+
+                c_badge = patches.FancyBboxPatch(
+                    (bx, by), bw, bh,
+                    boxstyle="round,pad=0.2,rounding_size=0.6",
+                    facecolor='#1e3a8a', edgecolor='#ffffff', linewidth=1.2, zorder=12
+                )
+                ax.add_patch(c_badge)
+                ax.text(bx + bw / 2.0, by + bh * 0.62, c['tag'], ha='center', va='center',
+                        fontsize=6.8, fontweight='bold', color='#ffffff', zorder=13)
+                ax.text(bx + bw / 2.0, by + bh * 0.25, f"[{c['sub']}]", ha='center', va='center',
+                        fontsize=5.4, fontweight='semibold', color='#93c5fd', zorder=13)
+
+            # 8. Physical Access Path Annotation (Between Corner 1 and Corner 4 along West Perimeter)
+            ap_x = min_x - 13.5
+            ax.annotate(
+                '', xy=(ap_x, min_y + 3.0), xytext=(ap_x, max_y - 3.0),
+                arrowprops=dict(arrowstyle='<->', color='#1d4ed8', lw=1.6, mutation_scale=12),
+                zorder=10
+            )
+            ax.text(ap_x - 1.2, (min_y + max_y) / 2.0, "PRIMARY SITE ACCESS & HAULAGE PATH (CORNER 1 <--> CORNER 4)",
+                    ha='center', va='center', fontsize=6.2, fontweight='bold', color='#1e3a8a', rotation=90, zorder=11,
+                    bbox=dict(boxstyle='square,pad=0.3', facecolor='#eff6ff', edgecolor='#93c5fd', linewidth=0.8))
+
+            # 9. Title Block & Legend at bottom
             tb_x = min_x
             tb_y = min_y - 7.5
-            tb_w = 54.0
+            tb_w = 58.0
             tb_h = 4.5
             tb = patches.FancyBboxPatch(
                 (tb_x, tb_y), tb_w, tb_h,
@@ -1974,14 +2041,14 @@ class NDTReportService:
                 facecolor='#ffffff', edgecolor='#0f172a', linewidth=1.0, zorder=10
             )
             ax.add_patch(tb)
-            ax.text(tb_x + 1.2, tb_y + 3.0, "DRAWING: ARCHITECTURAL SURVEY GRID LAYOUT",
+            ax.text(tb_x + 1.2, tb_y + 3.0, "DRAWING: ARCHITECTURAL SURVEY GRID & ORIENTATION LAYOUT",
                     fontsize=6.8, fontweight='bold', color='#0f172a', zorder=11)
             ax.text(tb_x + 1.2, tb_y + 1.2, f"STRUCTURE: RCC SLAB-ON-GRADE LAYDOWN AREA (S1-S20) | SPAN: {total_x:.1f}m x {total_y:.1f}m",
                     fontsize=5.6, color='#334155', fontweight='semibold', zorder=11)
 
-            leg_x = max_x - 42.0
+            leg_x = max_x - 48.0
             leg_y = min_y - 7.5
-            leg_w = 42.0
+            leg_w = 48.0
             leg_h = 4.5
             leg = patches.FancyBboxPatch(
                 (leg_x, leg_y), leg_w, leg_h,
@@ -1991,8 +2058,12 @@ class NDTReportService:
             ax.add_patch(leg)
             ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#dc2626', markersize=5.5, zorder=11)
             ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#ffffff', markersize=2.2, zorder=12)
-            ax.text(leg_x + 5.0, leg_y + 2.25, "NDT Survey Test Station (S1 to S20)",
-                    va='center', fontsize=6.2, fontweight='bold', color='#0f172a', zorder=11)
+            ax.text(leg_x + 4.8, leg_y + 2.25, "NDT Test Station (S1-S20)",
+                    va='center', fontsize=5.8, fontweight='bold', color='#0f172a', zorder=11)
+            ax.plot(leg_x + 26.5, leg_y + 2.25, 'o', color='#1d4ed8', markersize=6.5, zorder=11)
+            ax.plot(leg_x + 26.5, leg_y + 2.25, 'o', color='#ffffff', markersize=2.5, zorder=12)
+            ax.text(leg_x + 29.0, leg_y + 2.25, "Survey Corner 1-4 (Pg 5 Map)",
+                    va='center', fontsize=5.8, fontweight='bold', color='#1e3a8a', zorder=11)
 
             pad = 2.5
             ax.set_xlim(min_x - ext_left - bubble_r - pad, max_x + ext_right + bubble_r + pad)
@@ -5833,11 +5904,12 @@ class NDTReportService:
             builder.section('6.0', 'RECOMMENDATION')
             if is_sog:
                 proj_title = project.name if (project and project.name) else 'Ladol Exxon Laydown Area'
+                ptype = (project.project_type or 'COMMERCIAL').upper() if (project and project.project_type) else 'COMMERCIAL'
                 reco_text = (
                     f"**Based on the purpose of investigation, the outcome of the Visual and Non-Destructive Test carried out on the "
                     f"structural elements which shows the present integrity of the tested members as described in the field records, "
                     f"statistical evaluations and technical charts, the test analysis revealed that {len(element_data)} of the {len(element_data)} "
-                    f"structural members tested in the {proj_title} / RCC slab-on-grade laydown area were good in strength at the time of test. "
+                    f"structural members tested in the {proj_title} / RCC slab-on-grade laydown area (PROJECT TYPE: {ptype}) were good in strength at the time of test. "
                     f"No visual or structural defects were observed during the investigation. The platform's stored analysis records add the "
                     f"following recommendations: [ROUTINE] Continue routine monitoring; all tested elements fall within acceptable velocity bands.**"
                 )
