@@ -153,12 +153,17 @@ def preview_section_map(section_pages):
     Custom sections ('custom:<hex>' keys, recorded with their titles) pass
     through with their own labels."""
     out = []
+    seen = set()
     for entry in section_pages:
         key = entry['key']
+        if key in seen:
+            continue
         if key in PREVIEW_SECTION_LABELS:
+            seen.add(key)
             out.append({'key': key, 'label': PREVIEW_SECTION_LABELS[key],
                         'page': entry['page']})
         elif key.startswith('custom:'):
+            seen.add(key)
             out.append({'key': key, 'label': entry['label'],
                         'page': entry['page']})
     return out
@@ -5360,7 +5365,6 @@ class NDTReportService:
             if ai_record and ai_record.observations:
                 builder.pdf.add_page()
                 builder.section('5.3', 'DISCUSSION OF RESULTS', sub=True)
-                builder.record_section('5.3', 'Discussion of Results')
                 conf_pct = ('not scored' if ai_record.confidence is None
                             else f'{round(ai_record.confidence * 100)}%')
                 builder.para(
