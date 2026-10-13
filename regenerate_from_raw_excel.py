@@ -69,7 +69,7 @@ project = Project.objects.filter(name__icontains='ladol').first()
 if not project:
     project = Project.objects.first()
 
-project.name = "Ladol Exon Laydown Area"
+project.name = "Ladol Exxon Laydown Area"
 project.client_name = "LADOL / ExxonMobil"
 project.developer_organization = "Kibtech Free Zone"
 project.site_address = "Ladol, Apapa, Lagos"
@@ -113,7 +113,7 @@ else:
     device.save()
 print(f"FieldDevice: {device.name} (ID: {device.device_id}), Calibration: {device.calibration_date} (Valid 12 Months)")
 
-# 3. Configure Calibration Curve (Exponential Model R^2 = 0.8966)
+# 3. Configure Calibration Curve (Exponential Model R^2 = 0.8966, s = 0.29 MPa)
 curve = StrengthCurve.objects.filter(project=project, curve_type='exponential').first()
 if not curve:
     curve = StrengthCurve.objects.create(
@@ -124,6 +124,8 @@ if not curve:
         valid_range_min_ms=2000.0,
         valid_range_max_ms=5000.0,
         standard='BS 1881-203 / BS EN 12504-4',
+        r2_score=0.8966,
+        standard_error=0.29,
         data_points=[
             {'v': 3200.0, 'f': 21.3}, {'v': 3400.0, 'f': 23.4},
             {'v': 3600.0, 'f': 24.6}, {'v': 3800.0, 'f': 26.8},
@@ -140,6 +142,8 @@ else:
         {'v': 4400.0, 'f': 31.3}, {'v': 4600.0, 'f': 33.5},
         {'v': 4800.0, 'f': 34.7}, {'v': 5000.0, 'f': 36.6}
     ]
+    curve.r2_score = 0.8966
+    curve.standard_error = 0.29
     curve.save()
 setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
 setting.active_curve = curve
@@ -247,7 +251,7 @@ if s13_row:
 
 # 6. Configure AIAnalysisRecord with complete V3 Consolidated System Prompt analysis
 v3_prompt_observations = [
-    "Executive Summary: This isolated scan batch for project 'Ladol Exon Laydown Area' comprises 20 No. RC elements (designation family S1–S20) tested by Ultrasonic Pulse Velocity. All 20 elements graded GOOD under BS 1881-203 / BS EN 12504-4 quality ratings: mean velocities span 4,134.54–4,491.20 m/s against a batch mean of 4,349.0 m/s, and derived equivalent cube strengths span 29.3–32.3 N/mm² against the 25.0 MPa statutory design target under the project-calibrated exponential model (R² = 0.8966, s = 0.29 MPa). Uniformity is Excellent on 19 of 20 elements and Good on 1 (S13), with CoV of 0.28–5.20 percent across the batch; no element produced a Wide Spread / One Low Outlier signature and no element crossed the CoV greater than 10 percent conservative-strength threshold. Zero elements were flagged for conservative strength, zero fell outside the physically possible range of 2000–5000 m/s, and zero were excluded from statistical treatment. The critical single measurement in the batch is S17 Point 3 at 4,000.00 m/s, which still returns an estimated f_cu of 29.3 N/mm² (exceeding the 25.0 MPa target); every individual point reading in the batch returns a derived f_cu of at least 29.3 N/mm². Structural acceptance of this batch is supported on the UPV evidence. Recommendation: accept the batch for quality assurance purposes; concrete quality is fit for heavy industrial laydown operations.",
+    "Executive Summary: This isolated scan batch for project 'Ladol Exxon Laydown Area' comprises 20 No. RC elements (designation family S1–S20) tested by Ultrasonic Pulse Velocity. All 20 elements graded GOOD under BS 1881-203 / BS EN 12504-4 quality ratings: mean velocities span 4,134.54–4,491.20 m/s against a batch mean of 4,349.0 m/s, and derived equivalent cube strengths span 29.3–32.3 N/mm² against the 25.0 MPa statutory design target under the project-calibrated exponential model (R² = 0.8966, s = 0.29 MPa). Uniformity is Excellent on 19 of 20 elements and Good on 1 (S13), with CoV of 0.28–5.20 percent across the batch; no element produced a Wide Spread / One Low Outlier signature and no element crossed the CoV greater than 10 percent conservative-strength threshold. Zero elements were flagged for conservative strength, zero fell outside the physically possible range of 2000–5000 m/s, and zero were excluded from statistical treatment. The critical single measurement in the batch is S17 Point 3 at 4,000.00 m/s, which still returns an estimated f_cu of 29.3 N/mm² (exceeding the 25.0 MPa target); every individual point reading in the batch returns a derived f_cu of at least 29.3 N/mm². Structural acceptance of this batch is supported on the UPV evidence. Recommendation: accept the batch for quality assurance purposes; concrete quality is fit for heavy industrial laydown operations.",
     "Scope: This isolated scan batch comprises 20 No. RC elements. Floors covered: Ground Floor (all 20 elements). Count reconciliation: verified_element_count = 20, ndt_results_summary.total_elements = 20, counts.graded = 20, counts.good_or_better = 20, counts.below_good = 0, and 20 element records parsed - all consistent, no count discrepancy. Element designation family is 'S' (S1–S20); structural element type is RCC slab-on-grade laydown area. Test types present: UPV (Ultrasonic Pulse Velocity) in m/s, at a point density of 3 readings per element for 19 elements and 2 readings for 1 element (S11), giving 59 discrete velocity measurements in total. The mean_ecs_n_mm2 field present on each element is a derived equivalent cube strength computed from the payload's own exponential UPV correlation, not an independent test result. No Rebound Hammer readings, no Cover Meter readings, and no other discrete test types are present in this batch.",
     "Group A - Ground Floor, element family 'S', high velocity band (4331–4491 m/s) (GOOD per BS 1881-203 / BS EN 12504-4 (3500–4500 m/s band). 13 elements. Average CoV 2.02 percent - Excellent Uniformity.): Tight Spread across all 13 elements (S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S14, S15, S18). Mean velocity is highly reliable for strength estimation; concrete consolidation is dense and homogeneous.",
     "Group B - Ground Floor, element family 'S', mid velocity band (4252–4295 m/s) (GOOD per BS 1881-203 / BS EN 12504-4 (3500–4500 m/s band). 6 elements. Average CoV 3.26 percent - Excellent to Good Uniformity.): Contains the batch watch item S13 (CoV 5.20 percent, normalized range 10.28 percent, low point 4054.05 m/s at Point 2 deriving 30.3 N/mm²). Contains S11 with only 2 point readings assessed per ACI 228.2R.",
@@ -383,20 +387,25 @@ val_checks = [
     ("Esri satellite imagery attribution present", "satellite imagery" in norm_text.lower() and "esri" in norm_text.lower()),
     ("Boundary Footprint 4,982.4 sqm and Perimeter 299.48 m present", "4,982.4 sqm footprint" in norm_text.lower() and "299.48 m" in norm_text.lower()),
     ("Surveyed UTM Easting & Northing present in Table", "542,675.01" in norm_text and "710,130.59" in norm_text and "542,774.75" in norm_text),
-    ("Google Maps coordinate view link present", "google.com/maps/search/?api=1&query=6.424153,3.386375" in norm_text.lower()),
+    ("Click to View on Google Maps coordinate anchor present", "click to view on google maps" in norm_text.lower() and "6.424153" in norm_text),
+    ("Environmental condition banner present under Section 3.1", "surface temp: 28.0°c" in norm_text.lower() and "moisture condition: dry" in norm_text.lower()),
     ("S11 2-point statistical note present", "2-point basis" in norm_text.lower() or "bs en 12504-4 recommends" in norm_text.lower()),
-    ("Appendix PIC I: ladol6.jpg present", "pic i: ladol6.jpg" in norm_text.lower()),
-    ("Appendix PIC II: ladol4.jpg present", "pic ii: ladol4.jpg" in norm_text.lower()),
-    ("Appendix PIC III: ladol3.jpg present", "pic iii: ladol3.jpg" in norm_text.lower()),
-    ("Appendix PIC IV: ladol site photos.jpg present", "pic iv: ladol site photos.jpg" in norm_text.lower()),
-    ("Appendix PIC V: ladol 2.jpg present", "pic v: ladol 2.jpg" in norm_text.lower()),
+    ("TOC updated with Photographs of the Laydown Area / Structure", "photographs of the laydown area / structure" in norm_text.lower()),
+    ("Appendix PIC I: ladol6.jpg tagged with S6-S10 Grid Setup", "pic i: ladol6.jpg" in norm_text.lower() and ("s6-s10" in norm_text.lower() or "s6–s10" in norm_text.lower())),
+    ("Appendix PIC II: ladol4.jpg tagged with S1-S5 Calibration", "pic ii: ladol4.jpg" in norm_text.lower() and ("s1-s5" in norm_text.lower() or "s1–s5" in norm_text.lower())),
+    ("Appendix PIC III: ladol3.jpg tagged with S11-S15 Probing", "pic iii: ladol3.jpg" in norm_text.lower() and ("s11-s15" in norm_text.lower() or "s11–s15" in norm_text.lower())),
+    ("Appendix PIC IV: ladol site photos.jpg tagged with S16-S20", "pic iv: ladol site photos.jpg" in norm_text.lower() and ("s16-s20" in norm_text.lower() or "s16–s20" in norm_text.lower())),
+    ("Appendix PIC V: ladol 2.jpg tagged with Direct Transmission S1", "pic v: ladol 2.jpg" in norm_text.lower() and "direct transmission" in norm_text.lower()),
+    ("Photographic Evidence & Survey Reconciliation Notes present", "photographic evidence & survey reconciliation notes" in norm_text.lower() and ("30 sep" in norm_text.lower() or "30 september" in norm_text.lower())),
     ("Generated by Admin User instead of unauthenticated", "generated by admin user" in norm_text.lower() and "unauthenticated" not in norm_text.lower()),
-    ("Standards cited (BS EN 12504-4, BS 1881-203, ASTM C597-22, ACI 228.2R)", "bs en 12504-4" in norm_text.lower() and "aci 228.2r" in norm_text.lower()),
-    ("Table 3.0 Calibration Pairs Table present with R^2 = 0.8966", "table 3.0" in norm_text.lower() and "0.8966" in norm_text),
-    ("Section 5.3 AI-Assisted Interpretation present in TOC and report", "5.3 ai-assisted interpretation" in norm_text.lower()),
-    ("Section 5.5 Statistical Summary Table rendered with S1-S20", "5.5 statistical summary table" in norm_text.lower() and "s1" in norm_text.lower() and "s20" in norm_text.lower()),
+    ("Standards cited (BS EN 12504-4, BS 1881-203, ASTM C597-22, ACI 228.2R)", "bs en 12504-4" in norm_text.lower() and "astm c597-22" in norm_text.lower() and "aci 228.2r" in norm_text.lower()),
+    ("Table 3.0 Calibration Pairs Table present with R^2 = 0.8966 and s = 0.29", "table 3.0" in norm_text.lower() and "0.8966" in norm_text and "0.29" in norm_text),
+    ("Section 5.3 Discussion of Results present in TOC and report", "5.3 discussion of results" in norm_text.lower() or "discussion of results" in norm_text.lower()),
+    ("Section 5.5 Statistical Summary Table rendered with S1-S20 and in TOC", "5.5 statistical summary table" in norm_text.lower() and "s1" in norm_text.lower() and "s20" in norm_text.lower()),
+    ("Figure 5.1, Figure 5.2, and Figure 5.3 present", "figure 5.1" in norm_text.lower() and "figure 5.2" in norm_text.lower() and "figure 5.3" in norm_text.lower()),
     ("Appendix Floor Layout cites PROPOSED STACKING AREA_IFC.rvt with 80 elements", "proposed stacking area_ifc.rvt" in norm_text.lower() and "80 elements" in norm_text.lower()),
-    ("SHA-256 cryptographic provenance clarification", "cryptographic sha-256 hash" in norm_text.lower()),
+    ("SHA-256 cryptographic provenance incorporates Phase 10 table", "cryptographic sha-256 hash" in norm_text.lower() and "phase 10" in norm_text.lower()),
+    ("Project Name correctly spelled 'Ladol Exxon Laydown Area'", "ladol exxon laydown area" in norm_text.lower() and "ladol exon" not in norm_text.lower()),
 ]
 
 all_ok = True
