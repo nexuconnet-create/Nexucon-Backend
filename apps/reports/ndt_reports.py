@@ -3430,9 +3430,10 @@ class NDTReportService:
         client_name = cls._effective_client_name(project)
         is_sog = cls._is_slab_on_grade(project, element_data)
         asset_desc = "the RCC slab-on-grade laydown area" if is_sog else f'the project "{project.name or "-"}"'
+        jurisdiction = f"{project.state} Government" if project.state else "statutory building authorities"
         intro_1 = (
             'In compliance with the Mandatory Non-Destructive Test '
-            'requirement of the Lagos State Government, a Non-Destructive '
+            f'requirement of the {jurisdiction}, a Non-Destructive '
             'compressive strength test (Structural Integrity Test) was '
             f'conducted on {asset_desc}'
             + (f' for {client_name}' if client_name else '')
@@ -4807,19 +4808,21 @@ class NDTReportService:
             else:
                 builder.para('The operator(s) of the test were not recorded.',
                              leading=7.5)
+            state_val = project.state.strip() if project.state else None
+            state_ctx = f"{state_val} Government's" if state_val else "statutory"
+            bound_ctx = f"the geographical boundary of {state_val}" if state_val else "the operational site territory"
             if is_sog:
                 builder.para(
-                    'This is part of Lagos State Government\'s statutory quality control framework to reduce the '
-                    'incidence of civil engineering, industrial laydown, and construction materials failure '
-                    'within the geographical boundary of Lagos State.',
+                    f'This is part of {state_ctx} statutory quality control framework to reduce the '
+                    f'incidence of civil engineering, industrial laydown, and construction materials failure '
+                    f'within {bound_ctx}.',
                     leading=7.5,
                 )
             else:
                 builder.para(
-                    'This is part of Lagos State Government\'s effort to reduce the '
-                    'incidence of building and civil engineering (construction) '
-                    'materials failure and building collapse within the geographical '
-                    'boundary of Lagos State.',
+                    f'This is part of {state_ctx} effort to reduce the '
+                    f'incidence of building and civil engineering (construction) '
+                    f'materials failure and building collapse within {bound_ctx}.',
                     leading=7.5,
                 )
 
@@ -5664,15 +5667,17 @@ class NDTReportService:
                 stat_summary = PUNDITAdapter.build_statistical_summary(point_spread_data, project=project)
 
             if stat_summary:
+                reg_name = project.regulatory_authority or (f"{project.state} Building Control" if project.state else "statutory regulatory filing")
+                table_title_ctx = project.name or project.building_control_reference or "Regulatory Compliance Filing"
                 builder.para(
-                    'This statistical summary table synthesises ultrasonic pulse velocity (UPV) measurements '
-                    'across test stations for Lagos State Building Control Agency (LASBCA) regulatory filing. '
+                    f'This statistical summary table synthesises ultrasonic pulse velocity (UPV) measurements '
+                    f'across test stations for {reg_name} compliance filing. '
                     'Uniformity ratings conform to **ACI 228.2R-13** and **BS 1881-203**. Estimated compressive '
                     'strengths (f_cu) are derived from the project-specific calibration curve against the 25.0 N/mm² '
                     'statutory design benchmark. Where CoV exceeds 10.0%, conservative strength estimation applies V_min.',
                     markdown=True
                 )
-                builder.inner_heading('Table 5.5: Statistical Summary of Ultrasonic Pulse Velocity Measurements (LASBCA Phase 10 Regulatory Filing)')
+                builder.inner_heading(f'Table 5.5: Statistical Summary of Ultrasonic Pulse Velocity Measurements ({table_title_ctx})')
                 builder.ln_gap(1)
 
                 headers = [
