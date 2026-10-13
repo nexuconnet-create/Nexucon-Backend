@@ -799,12 +799,17 @@ class NDTReportBuilder:
 
         pdf.set_font('Times', 'B', 18)
         y = 20.6
+        title_line_h = 7.8
         p_name_lower = (project_name or '').lower()
         if 'laydown' in p_name_lower or 'slab' in p_name_lower or 'exxon' in p_name_lower or 'ladol' in p_name_lower:
+            pdf.set_font('Times', 'B', 15)
+            title_line_h = 6.8
+            y = 19.2
             cover_title_lines = [
                 'REPORT ON AN IN-SITU INTEGRITY TEST',
-                '(NON-DESTRUCTIVE) OF COMPRESSIVE STRENGTH OF AN EXISTING',
-                'REINFORCED CONCRETE (RCC) FLOOR SLAB ON GRADE / LAYDOWN AREA',
+                '(NON-DESTRUCTIVE) OF COMPRESSIVE STRENGTH',
+                'OF AN EXISTING REINFORCED CONCRETE (RCC)',
+                'FLOOR SLAB ON GRADE / LAYDOWN AREA',
             ]
         else:
             cover_title_lines = [
@@ -812,10 +817,19 @@ class NDTReportBuilder:
                 '(NON-DESTRUCTIVE) OF COMPRESSIVE',
                 'STRENGTH OF STRUCTURAL ELEMENTS',
             ]
+
+        # Ensure no title line exceeds page margins
+        final_title_lines = []
         for line in cover_title_lines:
+            if pdf.get_string_width(line) > (avail - 4):
+                final_title_lines.extend(_wrap_lines(pdf, line, avail - 4))
+            else:
+                final_title_lines.append(line)
+
+        for line in final_title_lines:
             pdf.set_xy(pdf.l_margin, y)
-            pdf.cell(0, 7.8, line, align='C')
-            y += 7.8
+            pdf.cell(0, title_line_h, line, align='C')
+            y += title_line_h
 
         pdf.set_xy(pdf.l_margin, 59.3)
         prep = issuing_prep or 'BY'
