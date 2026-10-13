@@ -292,7 +292,7 @@ class NDTWordExporter:
 
         def emit_cover():
             # ------------------------------------------------------------ cover
-            _add_para(doc, 'LAGOS STATE MATERIALS TESTING LABORATORY',
+            _add_para(doc, 'VIA\nNEXUCON PLATFORM\nNEXUCON TECHNOLOGIES LIMITED',
                       bold=True, size=16, align=WD_ALIGN_PARAGRAPH.CENTER,
                       space_after=18)
             _add_para(doc, 'IN-SITU INTEGRITY TEST (NON-DESTRUCTIVE) OF '

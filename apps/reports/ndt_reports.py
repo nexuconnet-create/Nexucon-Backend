@@ -843,13 +843,13 @@ class NDTReportBuilder:
             y += title_line_h
 
         pdf.set_xy(pdf.l_margin, 59.3)
-        prep = issuing_prep or 'BY'
+        prep = issuing_prep or 'VIA'
         pdf.cell(0, 7.8, prep, align='C')
         pdf.set_xy(pdf.l_margin, 82.6)
-        lab_name = laboratory_name or 'LAGOS STATE MATERIALS TESTING LABORATORY'
+        lab_name = laboratory_name or 'NEXUCON PLATFORM'
         pdf.cell(0, 7.8, _latin1(lab_name), align='C')
         pdf.set_xy(pdf.l_margin, 90.2)
-        lab_addr = laboratory_address if laboratory_address is not None else 'OJODU BERGER, LAGOS.'
+        lab_addr = laboratory_address if laboratory_address is not None else 'NEXUCON TECHNOLOGIES LIMITED'
         if lab_addr:
             pdf.cell(0, 7.8, _latin1(lab_addr), align='C')
 
@@ -4089,18 +4089,9 @@ class NDTReportService:
             firm = (signoff.firm_name if signoff else '').strip()
             p_name_lower = (project.name or '').lower()
 
-            if 'nexucon' in firm.lower() or 'ladol' in p_name_lower:
-                issuing_prep = 'VIA'
-                lab_name = 'NEXUCON PLATFORM'
-                lab_addr = 'NEXUCON TECHNOLOGIES LIMITED'
-            elif firm:
-                issuing_prep = 'BY'
-                lab_name = firm.upper()
-                lab_addr = (signoff.firm_address if signoff and getattr(signoff, 'firm_address', None) else '').strip()
-            else:
-                issuing_prep = 'BY'
-                lab_name = 'LAGOS STATE MATERIALS TESTING LABORATORY'
-                lab_addr = 'OJODU BERGER, LAGOS.'
+            issuing_prep = 'VIA'
+            lab_name = 'NEXUCON PLATFORM'
+            lab_addr = 'NEXUCON TECHNOLOGIES LIMITED'
 
             owner_phone_val = (
                 getattr(project, 'developer_phone', None)
