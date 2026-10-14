@@ -205,7 +205,16 @@ def convert_four_corners(system: str, corners_data: List[Dict[str, Any]]) -> Dic
     lng_list = []
 
     for index, corner in enumerate(corners_data):
-        label = corner.get('label') or f"Corner {index + 1}"
+        point_number = str(
+            corner.get('point_number')
+            or corner.get('pointNumber')
+            or corner.get('corner_number')
+            or corner.get('id')
+            or (index + 1)
+        ).strip()
+        label = corner.get('label')
+        if not label:
+            label = f"Corner {point_number}" if point_number.isdigit() else point_number
         lat = 0.0
         lng = 0.0
         easting = 0.0
@@ -263,6 +272,7 @@ def convert_four_corners(system: str, corners_data: List[Dict[str, Any]]) -> Dic
 
         converted_corners.append({
             'id': corner.get('id', index + 1),
+            'point_number': point_number,
             'label': label,
             'lat': round(lat, 6),
             'lng': round(lng, 6),

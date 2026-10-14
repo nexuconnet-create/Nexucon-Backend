@@ -401,6 +401,26 @@ class CoordinateConversionTestCase(APITestCase):
         self.assertIn('footprintAreaSqm', res.data)
         self.assertAlmostEqual(res.data['footprintAreaSqm'], 2500.0, places=0)
 
+    def test_convert_corners_with_point_numbers_lagos_sample(self):
+        url = '/api/v1/projects/convert-coordinates/'
+        data = {
+            'system': 'WGS84_DD',
+            'corners': [
+                {'id': 1, 'point_number': '1', 'label': 'Corner 1 (NW)', 'lat': 6.424359, 'lng': 3.385914},
+                {'id': 2, 'point_number': '2', 'label': 'Corner 2 (NE)', 'lat': 6.424398, 'lng': 3.386816},
+                {'id': 3, 'point_number': '3', 'label': 'Corner 3 (SE)', 'lat': 6.423947, 'lng': 3.386836},
+                {'id': 4, 'point_number': '4', 'label': 'Corner 4 (SW)', 'lat': 6.423908, 'lng': 3.385934},
+            ]
+        }
+        res = self.client.post(url, data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['corners'][0]['point_number'], '1')
+        self.assertEqual(res.data['corners'][0]['label'], 'Corner 1 (NW)')
+        self.assertAlmostEqual(res.data['center']['lat'], 6.424153, places=4)
+        self.assertAlmostEqual(res.data['center']['lng'], 3.386375, places=4)
+        self.assertAlmostEqual(res.data['footprintAreaSqm'], 4982.4, delta=50)
+        self.assertAlmostEqual(res.data['perimeterMeters'], 299.48, delta=5)
+
     def test_create_project_with_corner_coordinates(self):
         user = User.objects.create_superuser(username='coordadmin', email='coordadmin@test.com', password='password123')
         token = str(RefreshToken.for_user(user).access_token)

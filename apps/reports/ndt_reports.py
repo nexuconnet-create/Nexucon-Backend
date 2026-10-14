@@ -2308,7 +2308,10 @@ class NDTReportService:
             corners = []
             utm_points = []
             for idx, c in enumerate(cc['corners']):
-                label = c.get('label') or f'Corner {idx + 1}'
+                point_number = str(c.get('point_number') or c.get('pointNumber') or c.get('corner_number') or c.get('id') or (idx + 1)).strip()
+                label = c.get('label')
+                if not label:
+                    label = f"Corner {point_number}" if point_number.isdigit() else point_number
                 lat = float(c['lat']) if c.get('lat') is not None else None
                 lng = float(c['lng']) if c.get('lng') is not None else None
                 easting = float(c['easting']) if c.get('easting') is not None else None
@@ -2322,6 +2325,8 @@ class NDTReportService:
                 if easting is not None and northing is not None:
                     utm_points.append({'easting': easting, 'northing': northing})
                 corners.append({
+                    'id': c.get('id', idx + 1),
+                    'point_number': point_number,
                     'label': label,
                     'lat': lat,
                     'lng': lng,
@@ -2518,7 +2523,8 @@ class NDTReportService:
                         draw.ellipse([px - r, py - r, px + r, py + r],
                                      fill=(255, 193, 7), outline=(0, 44, 79), width=2)
                         draw.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(0, 44, 79))
-                        lbl = f"Corner {idx + 1}"
+                        c_item = corners[idx] if idx < len(corners) else {}
+                        lbl = c_item.get('label') or f"Corner {c_item.get('point_number', idx + 1)}"
                         tx, ty = int(px + 7), int(py - 7)
                         try:
                             bbox = draw.textbbox((tx, ty), lbl)
