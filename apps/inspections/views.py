@@ -48,7 +48,7 @@ class InspectionViewSet(viewsets.ModelViewSet):
         if self.request.user.is_authenticated and not self.request.user.is_superuser:
             queryset = queryset.filter(project__in=scoped_projects(self.request.user))
         status_param = self.request.query_params.get('status')
-        project_param = self.request.query_params.get('project')
+        project_param = self.request.query_params.get('project') or self.request.query_params.get('project_id')
         inspector_param = self.request.query_params.get('inspector')
         priority_param = self.request.query_params.get('priority')
         type_param = self.request.query_params.get('type')

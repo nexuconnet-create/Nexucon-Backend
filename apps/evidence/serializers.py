@@ -71,11 +71,21 @@ class EvidenceRecordSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'evidence_reference', 'evidence_hash', 'created_at', 'updated_at']
 
     def get_photo_url(self, obj):
+        if hasattr(obj, 'file') and obj.file and obj.source_type == 'photo':
+            try:
+                return obj.file.file.url
+            except Exception:
+                pass
         if not obj.payload or not isinstance(obj.payload, dict):
             return None
         return obj.payload.get('photo_url') or obj.payload.get('url') or obj.payload.get('file_url') or None
 
     def get_audio_url(self, obj):
+        if hasattr(obj, 'file') and obj.file and obj.source_type == 'voice_note':
+            try:
+                return obj.file.file.url
+            except Exception:
+                pass
         if not obj.payload or not isinstance(obj.payload, dict):
             return None
         return obj.payload.get('audio_url') or obj.payload.get('voice_note_url') or None

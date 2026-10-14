@@ -54,13 +54,14 @@ import django_filters
 
 class EvidenceRecordFilter(django_filters.FilterSet):
     project = django_filters.CharFilter(method='filter_project')
+    project_id = django_filters.CharFilter(method='filter_project')
     source_type = django_filters.CharFilter(method='filter_source_type')
     structural_element_id = django_filters.CharFilter(lookup_expr='icontains')
     bim_guid = django_filters.CharFilter(lookup_expr='iexact')
 
     class Meta:
         model = EvidenceRecord
-        fields = ['project', 'source_type', 'structural_element_id', 'bim_guid']
+        fields = ['project', 'project_id', 'source_type', 'structural_element_id', 'bim_guid']
 
     def filter_project(self, queryset, name, value):
         if not value:
@@ -380,9 +381,20 @@ class EvidenceRecordViewSet(ScopedEvidenceMixin, viewsets.ReadOnlyModelViewSet):
     ordering_fields = ['created_at', 'captured_at']
 
     def get_queryset(self):
-        qs = EvidenceRecord.objects.select_related('project', 'file').all()
+        qs = EvidenceRecord.objects.select_related('project', 'file').prefetch_related('file').all()
         allowed = scoped_projects(self.request.user)
-        return qs.filter(project__in=allowed)
+        qs = qs.filter(project__in=allowed)
+
+        project_param = self.request.query_params.get('project') or self.request.query_params.get('project_id')
+        if project_param:
+            try:
+                import uuid
+                val_uuid = uuid.UUID(str(project_param))
+                qs = qs.filter(project_id=val_uuid)
+            except (ValueError, TypeError):
+                qs = qs.filter(project__name__icontains=str(project_param))
+
+        return qs
 
     @action(detail=False, methods=['post'], url_path='upload-photo', parser_classes=[MultiPartParser, FormParser])
     def upload_photo(self, request):
