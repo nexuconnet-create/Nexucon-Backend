@@ -717,28 +717,58 @@ class PUNDITTest(models.Model):
         return [row]
 
     def element_mean_velocity_km_s(self):
-        """Mean pulse velocity over this test's readings (the element verdict
-        basis per A1); None when no reading is computable."""
-        velocities = [row['velocity_km_s'] for row in self.reading_rows()
-                      if row['velocity_km_s'] is not None]
-        return (sum(velocities) / len(velocities)) if velocities else None
+        """Mean pulse velocity over this test's valid readings (the element verdict
+        basis per A1); excludes anomalous/failed readings. None when no valid reading is computable."""
+        rows = self.reading_rows()
+        valid_vs = [
+            row['velocity_km_s'] for row in rows
+            if row.get('velocity_km_s') is not None
+            and 0 < row['velocity_km_s'] <= 5.0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('ecs_mpa') is None or row['ecs_mpa'] > 0)
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        if valid_vs:
+            return sum(valid_vs) / len(valid_vs)
+        # Fall back to any computable velocity if no strictly filtered points
+        all_vs = [row['velocity_km_s'] for row in rows if row.get('velocity_km_s') is not None]
+        return (sum(all_vs) / len(all_vs)) if all_vs else None
+
+    def element_mean_compressive_strength_mpa(self):
+        """Arithmetic mean of valid individual test points per station (excluding 0 MPa and anomalous readings)."""
+        rows = self.reading_rows()
+        valid_strengths = [
+            row['ecs_mpa'] for row in rows
+            if row.get('ecs_mpa') is not None
+            and row['ecs_mpa'] > 0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('velocity_km_s') is None or (0 < row['velocity_km_s'] <= 5.0))
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        if valid_strengths:
+            return round(sum(valid_strengths) / len(valid_strengths), 2)
+        return self.estimated_compressive_strength_mpa
 
     def element_point_count(self):
         """
-        How many test points contributed a computable velocity to this
+        How many test points contributed a valid velocity to this
         element's mean — the n in the curve's s/sqrt(n) confidence-margin
         divisor (15 Sep 2026: "three test points averaged", with the
         standard error factored into the post-velocity calculation).
-
-        The element verdict is the mean of these points, so its confidence
-        margin narrows as sqrt(n) of them — BS EN 13791 logic, where more
-        readings buy a tighter confidence on the in-situ estimate. A legacy
-        single-reading test, or one whose points yielded no velocity,
-        honestly counts as 1: the figure is then a single reading and earns
-        no averaging benefit.
         """
-        return max(1, len([row for row in self.reading_rows()
-                           if row['velocity_km_s'] is not None]))
+        rows = self.reading_rows()
+        valid_rows = [
+            row for row in rows
+            if row.get('velocity_km_s') is not None
+            and 0 < row['velocity_km_s'] <= 5.0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('ecs_mpa') is None or row['ecs_mpa'] > 0)
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        if valid_rows:
+            return len(valid_rows)
+        all_valid = [row for row in rows if row.get('velocity_km_s') is not None]
+        return max(1, len(all_valid))
 
     def element_mean_crack_depth_mm(self):
         """Mean crack depth over this test's readings (the element verdict
@@ -975,18 +1005,35 @@ class PUNDITReading(models.Model):
             self.velocity_km_s = self.path_length_mm / self.transit_time_us
         else:
             self.velocity_km_s = None
+        is_anomalous = (
+            (self.notes and 'anomalous' in self.notes.lower())
+            or (self.velocity_km_s is not None and self.velocity_km_s > 5.0)
+            or (self.transit_time_us is not None and self.transit_time_us <= 0)
+        )
+        if is_anomalous and not self.notes:
+            self.notes = 'Anomalous/failed reading - excluded from averages'
+
         test = self.test
         # SonReb combination curves need a rebound number: this point's own
         # reading, else the element-level reading on the test.
         rebound = self.rebound_number
         if rebound is None and test is not None:
             rebound = test.rebound_number
-        self.ecs_mpa, self.strength_curve_snapshot = apply_active_curve(
-            test.project if test is not None and test.project_id else None,
-            self.velocity_km_s,
-            rebound_number=rebound,
-            temperature_c=test.surface_temperature_c if test is not None else None,
-            moisture_condition=test.moisture_condition if test is not None else None)
+
+        if not is_anomalous:
+            curve_ecs, snapshot = apply_active_curve(
+                test.project if test is not None and test.project_id else None,
+                self.velocity_km_s,
+                rebound_number=rebound,
+                temperature_c=test.surface_temperature_c if test is not None else None,
+                moisture_condition=test.moisture_condition if test is not None else None)
+            if self.ecs_mpa is None or self.ecs_mpa <= 0:
+                self.ecs_mpa = curve_ecs
+            if snapshot:
+                self.strength_curve_snapshot = snapshot
+        else:
+            self.strength_curve_snapshot = None
+
         self.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
             self.path_length_mm, self.transit_time_us,
             self.uncracked_transit_time_us)

@@ -1328,23 +1328,35 @@ class PUNDITAdapter:
             # Compressive strength from calibrated model if provided, else active curve
             mean_ecs = None
             ecs_snapshot = None
-            if velocity is not None:
-                if curve_profile:
+            if curve_profile:
+                valid_point_strengths = []
+                for r in rows:
+                    rv = r.get('velocity_km_s')
+                    if rv and 0 < rv <= 5.0 and ('anomalous' not in (r.get('notes') or '').lower()):
+                        recs = cls.compute_profile_ecs(rv, curve_profile, rebound_number=test.rebound_number)
+                        if recs and recs > 0:
+                            valid_point_strengths.append(recs)
+                if valid_point_strengths:
+                    mean_ecs = round(sum(valid_point_strengths) / len(valid_point_strengths), 1)
+                elif velocity is not None:
                     mean_ecs = cls.compute_profile_ecs(velocity, curve_profile, rebound_number=test.rebound_number)
-                    from apps.digital_eye.strength_curves import formula_display
-                    ecs_snapshot = {
-                        'curve_type': curve_profile.get('curve_type', 'exponential'),
-                        'formula_params': curve_profile.get('params', {}),
-                        'formula': formula_display(curve_profile.get('curve_type', 'exponential'), curve_profile.get('params', {})),
-                        'provenance_source': f"Calibrated {curve_profile.get('curve_type', 'exponential')} model",
-                    }
-                else:
-                    mean_ecs, ecs_snapshot = _ecs_with_provenance(
-                        velocity, project=project,
-                        rebound_number=test.rebound_number,
-                        temperature_c=test.surface_temperature_c,
-                        moisture_condition=getattr(test, 'moisture_condition', None),
-                        n_points=max(1, len(point_velocities)))
+                from apps.digital_eye.strength_curves import formula_display
+                ecs_snapshot = {
+                    'curve_type': curve_profile.get('curve_type', 'exponential'),
+                    'formula_params': curve_profile.get('params', {}),
+                    'formula': formula_display(curve_profile.get('curve_type', 'exponential'), curve_profile.get('params', {})),
+                    'provenance_source': f"Calibrated {curve_profile.get('curve_type', 'exponential')} model",
+                }
+            elif test.estimated_compressive_strength_mpa is not None and test.estimated_compressive_strength_mpa > 0:
+                mean_ecs = test.estimated_compressive_strength_mpa
+                ecs_snapshot = test.strength_curve_snapshot
+            elif velocity is not None:
+                mean_ecs, ecs_snapshot = _ecs_with_provenance(
+                    velocity, project=project,
+                    rebound_number=test.rebound_number,
+                    temperature_c=test.surface_temperature_c,
+                    moisture_condition=getattr(test, 'moisture_condition', None),
+                    n_points=max(1, len(point_velocities)))
             mtype = ('RCC slab-on-grade laydown area panel'
                      if ('laydown' in (project.name or '').lower()
                          or 'slab' in (test.test_location or '').lower()
@@ -1471,7 +1483,7 @@ class PUNDITAdapter:
                 ', '.join(_element_floors) if _element_floors else 'Unspecified level'
             )
 
-        ecs_values = [s['mean_ecs_n_mm2'] for s in element_summaries if s.get('mean_ecs_n_mm2') is not None]
+        ecs_values = [s['mean_ecs_n_mm2'] for s in element_summaries if s.get('mean_ecs_n_mm2') is not None and s.get('mean_ecs_n_mm2') > 0]
         min_ecs = min(ecs_values) if ecs_values else None
         max_ecs = max(ecs_values) if ecs_values else None
         avg_ecs = round(sum(ecs_values) / len(ecs_values), 1) if ecs_values else None

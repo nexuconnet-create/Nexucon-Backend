@@ -478,23 +478,20 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         mean_v = test.element_mean_velocity_km_s()
         test.velocity_km_s = mean_v
         test.pulse_velocity_ms = round(mean_v * 1000.0, 1) if mean_v is not None else None
-        # The element verdict's E.C.S flows through the project's active
-        # Nexucon Link curve, with the curve provenance snapshotted (8 Sep
-        # meeting — f_cu is the reason the Neural Link exists).
-        mean_ecs, curve_snap = apply_active_curve(
-            test.project, mean_v,
-            rebound_number=test.rebound_number,
-            temperature_c=test.surface_temperature_c,
-            moisture_condition=test.moisture_condition,
-            # mean_v is the mean of the points that yielded a velocity, so the
-            # divisor is that same set — the readings are computed above, so
-            # the count is now accurate. Not len(readings_data): a submitted
-            # point missing its path length or transit time stores a row but
-            # contributes nothing to mean_v, and counting it would claim a
-            # tighter margin than the averaged data supports.
-            n_points=test.element_point_count())
+        
+        # Display the correct arithmetic mean of valid individual test points per station
+        mean_ecs = test.element_mean_compressive_strength_mpa()
+        curve_snap = None
+        if mean_ecs is None and mean_v is not None:
+            mean_ecs, curve_snap = apply_active_curve(
+                test.project, mean_v,
+                rebound_number=test.rebound_number,
+                temperature_c=test.surface_temperature_c,
+                moisture_condition=test.moisture_condition,
+                n_points=test.element_point_count())
         test.estimated_compressive_strength_mpa = mean_ecs
-        test.strength_curve_snapshot = curve_snap
+        if curve_snap:
+            test.strength_curve_snapshot = curve_snap
         test.quality_grade = PUNDITAdapter.grade_quality(mean_v)
         if test.test_type == 'crack_depth':
             mean_d = test.element_mean_crack_depth_mm()

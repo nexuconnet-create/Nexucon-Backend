@@ -631,6 +631,26 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                             'structural_element', 'device', 'date_from',
                             'date_to', 'operator', 'curve', 'search')
 
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True)
+
+        def _elem_sort_key(item):
+            name = (
+                item.get('structural_element')
+                or item.get('structural_element_name')
+                or item.get('test_location')
+                or ''
+            )
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(name))]
+
+        sorted_data = sorted(serializer.data, key=_elem_sort_key)
+        return Response(sorted_data)
+
     def perform_create(self, serializer):
         # Store test in RAW state under assigned scan batch. DO NOT auto-trigger analysis.
         batch_id = self.request.data.get('batch') or self.request.data.get('batch_id')
@@ -821,13 +841,36 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
 
         # Update each test's compressive strength based on chosen curve
         for t in tests:
-            v_mean = t.element_mean_velocity_km_s()
-            if v_mean is not None:
-                new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
-                if new_ecs is not None:
-                    t.estimated_compressive_strength_mpa = new_ecs
+            readings = list(t.readings.all())
+            if readings:
+                for r in readings:
+                    if r.transit_time_us and r.transit_time_us > 0 and r.path_length_mm and r.path_length_mm > 0:
+                        v = r.path_length_mm / r.transit_time_us
+                        if v <= 5.0 and ('anomalous' not in (r.notes or '').lower()):
+                            r.velocity_km_s = v
+                            new_r_ecs = PUNDITAdapter.compute_profile_ecs(v, curve_profile, rebound_number=r.rebound_number or t.rebound_number)
+                            if new_r_ecs is not None and new_r_ecs > 0:
+                                r.ecs_mpa = new_r_ecs
+                                r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
+                                r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
+                v_mean = t.element_mean_velocity_km_s()
+                mean_ecs = t.element_mean_compressive_strength_mpa()
+                if v_mean is not None:
+                    t.velocity_km_s = v_mean
+                    t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
+                if mean_ecs is not None:
+                    t.estimated_compressive_strength_mpa = mean_ecs
+                if strength_curve:
                     t.strength_curve_snapshot = strength_curve.snapshot()
-                    t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                t.save(update_fields=['velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+            else:
+                v_mean = t.element_mean_velocity_km_s()
+                if v_mean is not None:
+                    new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
+                    if new_ecs is not None:
+                        t.estimated_compressive_strength_mpa = new_ecs
+                        t.strength_curve_snapshot = strength_curve.snapshot()
+                        t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
 
         records = []
         for test in tests:
@@ -1839,9 +1882,20 @@ class PunditTestViewSet(viewsets.ReadOnlyModelViewSet):
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
+
+        def _elem_sort_key(item):
+            name = (
+                item.get('structural_element')
+                or item.get('structural_element_name')
+                or item.get('test_location')
+                or ''
+            )
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(name))]
+
+        sorted_data = sorted(serializer.data, key=_elem_sort_key)
         return StandardResponse.success(
             message="Pundit UPV tests retrieved successfully",
-            data=serializer.data
+            data=sorted_data
         )
 
 
@@ -3115,13 +3169,36 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
             'design_strength_mpa': design_strength_mpa,
         }
         for t in batch_tests:
-            v_mean = t.element_mean_velocity_km_s()
-            if v_mean is not None:
-                new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
-                if new_ecs is not None:
-                    t.estimated_compressive_strength_mpa = new_ecs
+            readings = list(t.readings.all())
+            if readings:
+                for r in readings:
+                    if r.transit_time_us and r.transit_time_us > 0 and r.path_length_mm and r.path_length_mm > 0:
+                        v = r.path_length_mm / r.transit_time_us
+                        if v <= 5.0 and ('anomalous' not in (r.notes or '').lower()):
+                            r.velocity_km_s = v
+                            new_r_ecs = PUNDITAdapter.compute_profile_ecs(v, curve_profile, rebound_number=r.rebound_number or t.rebound_number)
+                            if new_r_ecs is not None and new_r_ecs > 0:
+                                r.ecs_mpa = new_r_ecs
+                                r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
+                                r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
+                v_mean = t.element_mean_velocity_km_s()
+                mean_ecs = t.element_mean_compressive_strength_mpa()
+                if v_mean is not None:
+                    t.velocity_km_s = v_mean
+                    t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
+                if mean_ecs is not None:
+                    t.estimated_compressive_strength_mpa = mean_ecs
+                if strength_curve:
                     t.strength_curve_snapshot = strength_curve.snapshot()
-                    t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                t.save(update_fields=['velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+            else:
+                v_mean = t.element_mean_velocity_km_s()
+                if v_mean is not None:
+                    new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
+                    if new_ecs is not None:
+                        t.estimated_compressive_strength_mpa = new_ecs
+                        t.strength_curve_snapshot = strength_curve.snapshot()
+                        t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
 
         batch.status = 'CALIBRATED'
         batch.save(update_fields=['status', 'updated_at'])
