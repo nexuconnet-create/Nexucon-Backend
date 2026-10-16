@@ -169,6 +169,9 @@ def _apply(folded, raw_key):
       two would let an unaccounted column through.
     """
     key = normalise_key(raw_key)
+    if key not in folded:
+        if key in ('compressive_strength', 'strength', 'compr_strength', 'measured_strength', 'f_cu', 'fc'):
+            return ('compressive_strength_mpa', 1.0)
     return folded.get(key, (key, 1.0))
 
 
@@ -612,6 +615,25 @@ def _read_xlsx(content: bytes, folded=None):
                             data['rebound_number'] = float(val)
                         except (ValueError, TypeError):
                             pass
+                elif 'result' in kl or 'compr' in kl or 'strength' in kl or 'f_cu' in kl or 'fc' in kl:
+                    if 'unit' in kl or 'curve' in kl or 'type' in kl:
+                        continue
+                    if val is not None and str(val).strip() not in ('', '--', 'n/a', 'none'):
+                        if isinstance(val, (int, float)) and not isinstance(val, bool):
+                            if 0 < float(val) <= 200.0:
+                                data['compressive_strength_mpa'] = round(float(val), 2)
+                        elif isinstance(val, str):
+                            val_str = val.strip()
+                            is_vel = any(u in val_str.lower() for u in ('m/s', 'km/s', 'm / s'))
+                            if not is_vel:
+                                try:
+                                    import re
+                                    clean_str = re.sub(r'(?i)\s*(n/mm[²2]?|mpa|kpa)\b', '', val_str).replace('²', '').strip()
+                                    parsed_f = float(clean_str)
+                                    if 0 < parsed_f <= 200.0:
+                                        data['compressive_strength_mpa'] = round(parsed_f, 2)
+                                except (ValueError, TypeError):
+                                    pass
 
             data.setdefault('test_type', 'pulse_velocity')
             data.setdefault('floor', 'Ground Floor')

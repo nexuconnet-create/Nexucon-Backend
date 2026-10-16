@@ -76,7 +76,11 @@ def _number(value, label):
     if isinstance(value, bool):
         return None, f'{label} must be a number, not a yes/no value.'
     try:
-        return float(str(value).strip()), None
+        import re
+        text = str(value).strip()
+        text = re.sub(r'(?i)\s*(n/mm[²2]?|mpa|kpa|µs|us|ms|mm|m|km/s|m/s)\b', '', text)
+        text = text.replace('²', '').strip()
+        return float(text), None
     except (TypeError, ValueError):
         return None, f'{label} must be a number — the file has {value!r}.'
 
