@@ -13,6 +13,7 @@ element-level means are persisted exactly as they are from the form.
 Nothing is committed unless every row validates (all-or-nothing): a statutory
 registry is never partially populated from a batch file.
 """
+import re
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
@@ -75,8 +76,12 @@ def _number(value, row, header, errors):
         return None
     if isinstance(value, (int, float)):
         return float(value)
+    clean_val = str(value).strip()
+    # Strip common engineering unit suffixes (e.g. '29 N/mm²', '35 MPa', '150 mm', '33.9 µs')
+    clean_val = re.sub(r'(?i)\s*(n/mm[²2]|mpa|kpa|µs|us|ms|mm|m|km/s|m/s)\b', '', clean_val)
+    clean_val = clean_val.replace('²', '').strip()
     try:
-        return float(str(value).strip())
+        return float(clean_val)
     except ValueError:
         errors.append({'row': row,
                        'message': f'{header} must be a number — got {value!r}.'})
@@ -190,9 +195,14 @@ def parse_readings_workbook(file_obj):
                 'compressive_strength_mpa': _number(
                     cell(row_number, 'COMPRESSIVE STRENGTH (MPA)')
                     or cell(row_number, 'COMPRESSIVE STRENGTH')
-                    or cell(row_number, 'E.C.S (MPA)')
                     or cell(row_number, 'MEASURED STRENGTH (MPA)')
-                    or cell(row_number, 'MEASURED STRENGTH'),
+                    or cell(row_number, 'MEASURED STRENGTH')
+                    or cell(row_number, 'RESULT')
+                    or cell(row_number, 'RESULT (N/MM²)')
+                    or cell(row_number, 'RESULT (MPA)')
+                    or cell(row_number, 'COMPR. STRENGTH')
+                    or cell(row_number, 'E.C.S (MPA)')
+                    or cell(row_number, 'STRENGTH'),
                     row_number, 'COMPRESSIVE STRENGTH', errors),
                 'notes': (_text(cell(row_number, 'NOTES'))
                           or _text(cell(row_number, 'REMARK'))

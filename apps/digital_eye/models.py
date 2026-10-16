@@ -919,11 +919,18 @@ class PUNDITTest(models.Model):
                 (max(point_velocities) - min(point_velocities))
                 / mean_v * 100, 1)
 
-        # Legacy single-reading tests persist their element verdict here
-        # (the multi-reading serializer path already did): the same
-        # active-curve computation the report and serializer use, with the
-        # curve provenance snapshotted. Velocities outside the calibrated
-        # range keep a None strength — never extrapolated.
+        # The element verdict: two-tier in the order minuted by the team:
+        # 1. When the scan data carried measured strength and the project prefers
+        #    measured strength (default True), the element reports the direct arithmetic
+        #    mean of the raw readings ("Without Calibration").
+        # 2. Otherwise, the project's active curve is applied to the element's mean velocity.
+        if self.prefers_measured_strength():
+            measured = self.element_mean_measured_strength_mpa()
+            if measured is not None:
+                self.estimated_compressive_strength_mpa = measured
+        elif self.element_correlated_strength_mpa() is not None:
+            self.estimated_compressive_strength_mpa = self.element_correlated_strength_mpa()
+
         if self.estimated_compressive_strength_mpa is None and mean_v is not None:
             from .strength_curves import apply_active_curve
             self.estimated_compressive_strength_mpa, snapshot = apply_active_curve(
