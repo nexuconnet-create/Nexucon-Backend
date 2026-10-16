@@ -616,11 +616,14 @@ class TelemetrySessionDetailView(APIView):
                                     status=status.HTTP_400_BAD_REQUEST)
                 session.session_reference = new_ref
 
-        if data.get('project'):
-            from apps.projects.access import scoped_projects
-            proj = scoped_projects(request.user).filter(pk=data['project']).first()
-            if proj:
-                session.project = proj
+        if 'project' in data:
+            proj_val = data.get('project')
+            if proj_val and str(proj_val).strip():
+                proj = scoped_projects(request.user).filter(pk=proj_val).first()
+                if proj:
+                    session.project = proj
+            elif proj_val == '':
+                session.project = None
 
         CONTEXT_FIELDS = [
             'structural_element', 'floor', 'test_location', 'location_address',
