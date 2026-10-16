@@ -1138,11 +1138,11 @@ class PUNDITAdapter:
         else:
             point_spread_results = point_spread_data or []
 
-        # Default LASBCA / laboratory calibration if not provided:
-        # a = 3051.166318, b = 2.71395e-06, c = -3056.280893 (m/s domain)
-        cal_a = 3051.166318
-        cal_b = 2.71395e-06
-        cal_c = -3056.280893
+        # Default laboratory calibration if not provided:
+        # Standard Mix (ACI 228.2R): a = 1.20, b = 0.00085, c = 0.0 (m/s domain)
+        cal_a = 1.20
+        cal_b = 0.00085
+        cal_c = 0.0
         if isinstance(calibration, dict) and calibration.get('a') is not None and calibration.get('b') is not None:
             cal_a = float(calibration['a'])
             cal_b = float(calibration['b'])
@@ -1679,7 +1679,7 @@ class PUNDITAdapter:
                 )
             import json
             spread_stats = cls._calculate_point_spread(element_summaries)
-            cal_dict = {'a': 3051.166318, 'b': 2.71395e-06, 'c': -3056.280893}
+            cal_dict = {'a': 1.20, 'b': 0.00085, 'c': 0.0}
             if curve_profile and curve_profile.get('params'):
                 cal_dict = curve_profile['params']
             stat_summary = cls.build_statistical_summary(spread_stats, calibration=cal_dict, project=project)

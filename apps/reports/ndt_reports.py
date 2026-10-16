@@ -4630,7 +4630,7 @@ class NDTReportService:
                         try:
                             import math
                             v_m_s = v_val if v_val > 100 else v_val * 1000.0
-                            pred_f = 3051.166318 * math.exp(2.71395e-06 * v_m_s) - 3056.280893
+                            pred_f = 1.20 * math.exp(0.00085 * v_m_s)
                         except Exception:
                             pred_f = f_val
                     resid = (f_val - pred_f) if (pred_f is not None and f_val) else 0.0

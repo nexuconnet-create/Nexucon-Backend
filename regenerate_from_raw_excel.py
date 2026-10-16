@@ -119,9 +119,9 @@ curve = StrengthCurve.objects.filter(project=project, curve_type='exponential').
 if not curve:
     curve = StrengthCurve.objects.create(
         project=project,
-        name="LADOL Project In-Situ Calibration",
+        name="Standard Mix (Laboratory Default)",
         curve_type='exponential',
-        formula_params={'a': 3051.166318, 'b': 2.71395e-06, 'c': -3056.280893},
+        formula_params={'a': 1.20, 'b': 0.00085, 'c': 0.0},
         valid_range_min_ms=2000.0,
         valid_range_max_ms=5000.0,
         standard='BS 1881-203 / BS EN 12504-4',
