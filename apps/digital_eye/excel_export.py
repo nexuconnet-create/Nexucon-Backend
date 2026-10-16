@@ -20,6 +20,8 @@ RESULT_COLUMNS = [
     'STRUCTURAL ELEMENT', 'FLOOR', 'POINT', 'PATH LENGTH (MM)',
     'TRANSIT TIME (µS)', 'PULSE VELOCITY (M/S)', 'E.C.S (MPA)',
     'AVERAGE COMPRESSIVE STRENGTH (MPA)', 'REMARK',
+    'MEASURED E.C.S (MPA)', 'CORRELATED E.C.S (MPA)',
+    'MEAN MEASURED (MPA)', 'MEAN CORRELATED (MPA)',
 ]
 
 CRACK_COLUMNS = [
@@ -33,6 +35,8 @@ _COLUMN_WIDTHS = {
     'PATH LENGTH (MM)': 16, 'TRANSIT TIME (µS)': 16,
     'PULSE VELOCITY (M/S)': 18, 'E.C.S (MPA)': 12,
     'AVERAGE COMPRESSIVE STRENGTH (MPA)': 32, 'REMARK': 14,
+    'MEASURED E.C.S (MPA)': 22, 'CORRELATED E.C.S (MPA)': 22,
+    'MEAN MEASURED (MPA)': 22, 'MEAN CORRELATED (MPA)': 22,
     'SPACING L (MM)': 14, 'T CRACKED (µS)': 14, 'T UNCRACKED (µS)': 15,
     'CRACK DEPTH (MM)': 15, 'MEAN DEPTH (MM)': 14,
 }
@@ -142,6 +146,18 @@ def build_results_workbook(project):
                            value=None if e['mean_ecs'] is None
                            else round(e['mean_ecs'], 1))
                 sheet.cell(row=row, column=9, value=remark)
+                sheet.cell(row=row, column=10,
+                           value=None if r.get('measured_ecs') is None
+                           else round(r['measured_ecs'], 1))
+                sheet.cell(row=row, column=11,
+                           value=None if r.get('correlated_ecs') is None
+                           else round(r['correlated_ecs'], 1))
+                sheet.cell(row=row, column=12,
+                           value=None if (i != 0 or e.get('mean_measured_ecs') is None)
+                           else round(e['mean_measured_ecs'], 1))
+                sheet.cell(row=row, column=13,
+                           value=None if (i != 0 or e.get('mean_correlated_ecs') is None)
+                           else round(e['mean_correlated_ecs'], 1))
                 row += 1
 
     if crack_tests:

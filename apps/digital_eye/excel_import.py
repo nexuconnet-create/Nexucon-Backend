@@ -33,6 +33,7 @@ TEMPLATE_COLUMNS = [
     'TRANSDUCER TYPE',
     'TEST LOCATION',
     'WEATHER CONDITION',
+    'COMPRESSIVE STRENGTH (MPA)',
     'NOTES',
 ]
 REQUIRED_COLUMNS = [
@@ -44,6 +45,7 @@ COLUMN_WIDTHS = {
     'PATH LENGTH L (MM)': 14, 'TRANSIT TIME T (US)': 14, 'T UNCRACKED (US)': 14,
     'SURFACE CONDITION': 30, 'TRANSDUCER FREQUENCY (KHZ)': 14,
     'TRANSDUCER TYPE': 16, 'TEST LOCATION': 24, 'WEATHER CONDITION': 20,
+    'COMPRESSIVE STRENGTH (MPA)': 26,
     'NOTES': 30,
 }
 
@@ -185,6 +187,13 @@ def parse_readings_workbook(file_obj):
                 'transducer_type': _transducer_type(cell(row_number, 'TRANSDUCER TYPE')),
                 'test_location': _text(cell(row_number, 'TEST LOCATION')) or '',
                 'weather_condition': _text(cell(row_number, 'WEATHER CONDITION')) or '',
+                'compressive_strength_mpa': _number(
+                    cell(row_number, 'COMPRESSIVE STRENGTH (MPA)')
+                    or cell(row_number, 'COMPRESSIVE STRENGTH')
+                    or cell(row_number, 'E.C.S (MPA)')
+                    or cell(row_number, 'MEASURED STRENGTH (MPA)')
+                    or cell(row_number, 'MEASURED STRENGTH'),
+                    row_number, 'COMPRESSIVE STRENGTH', errors),
                 'notes': (_text(cell(row_number, 'NOTES'))
                           or _text(cell(row_number, 'REMARK'))
                           or _text(cell(row_number, 'REMARKS'))
@@ -273,6 +282,8 @@ def parse_readings_workbook(file_obj):
                 reading['uncracked_transit_time_us'] = row['uncracked_transit_time_us']
             else:
                 reading['surface_condition'] = row['surface_condition']
+            if row.get('compressive_strength_mpa') is not None:
+                reading['ecs_mpa'] = row['compressive_strength_mpa']
             if row['notes']:
                 reading['notes'] = row['notes']
             readings.append(reading)

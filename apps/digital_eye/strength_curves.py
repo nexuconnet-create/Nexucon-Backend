@@ -289,6 +289,70 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_cond
 
 
 # ---------------------------------------------------------------------------
+# Default Exponential Models Library (Review meeting item: 24:02, 26:18)
+# Enables projects without provided compressive strength to select the most
+# appropriate default exponential model: Standard Mix, Jones Equation, or
+# Aggregate Mix based on regional materials.
+# ---------------------------------------------------------------------------
+
+DEFAULT_EXPONENTIAL_MODELS = {
+    'standard_mix': {
+        'key': 'standard_mix',
+        'name': 'Standard Mix (Laboratory Default)',
+        'curve_type': 'exponential',
+        'standard': 'BS 1881-203 / ACI 228.2R',
+        'formula_params': {'a': 1.20, 'b': 0.00085, 'c': 0.0},
+        'valid_range_min_ms': 2000.0,
+        'valid_range_max_ms': 5000.0,
+        'description': 'Standard Portland cement normal-weight concrete mix baseline correlation without location-specific calibration.',
+    },
+    'jones_equation': {
+        'key': 'jones_equation',
+        'name': 'Jones Equation (Normal-Weight Structural Concrete)',
+        'curve_type': 'exponential',
+        'standard': 'Jones (1962) / BS EN 12504-4',
+        'formula_params': {'a': 0.07, 'b': 0.00140, 'c': 0.0},
+        'valid_range_min_ms': 2000.0,
+        'valid_range_max_ms': 5000.0,
+        'description': 'Classic empirical exponential relationship for normal-weight structural concrete mixes.',
+    },
+    'aggregate_mix': {
+        'key': 'aggregate_mix',
+        'name': 'Aggregate Mix (Dense / Crushed Granite Aggregates)',
+        'curve_type': 'exponential',
+        'standard': 'BS 1881-203 Section 11',
+        'formula_params': {'a': 1.65, 'b': 0.00078, 'c': 0.0},
+        'valid_range_min_ms': 2000.0,
+        'valid_range_max_ms': 5000.0,
+        'description': 'Dense crushed rock / granite aggregate mix correlation with elevated elastic modulus.',
+    },
+}
+
+
+def seed_default_exponential_models():
+    """Ensure Standard Mix, Jones Equation, and Aggregate Mix curves exist in the platform library."""
+    from .models import StrengthCurve
+    created_or_updated = []
+    for key, model_def in DEFAULT_EXPONENTIAL_MODELS.items():
+        is_default = (key == 'standard_mix')
+        curve, _ = StrengthCurve.objects.update_or_create(
+            name=model_def['name'],
+            project=None,
+            defaults={
+                'curve_type': model_def['curve_type'],
+                'standard': model_def['standard'],
+                'formula_params': model_def['formula_params'],
+                'valid_range_min_ms': model_def['valid_range_min_ms'],
+                'valid_range_max_ms': model_def['valid_range_max_ms'],
+                'is_default': is_default,
+                'provenance': {'model_key': key, 'description': model_def['description']},
+            }
+        )
+        created_or_updated.append(curve)
+    return created_or_updated
+
+
+# ---------------------------------------------------------------------------
 # Temperature correction (client spec, ACI 228.2R-2018 reference): applied
 # only outside the 5-30 degC band, to the velocity used for the STRENGTH
 # computation. The stored/displayed velocity always stays the raw measured

@@ -3000,9 +3000,17 @@ class NDTReportService:
         pulse_tests = sorted(pulse_tests, key=lambda t: _natural_sort_key(t.structural_element))
         for t in pulse_tests:
             rows = t.reading_rows()
+            mean_v = t.element_mean_velocity_km_s() if hasattr(t, 'element_mean_velocity_km_s') else None
             velocities = [r['velocity_km_s'] for r in rows
-                          if r['velocity_km_s'] is not None]
-            mean_v = (sum(velocities) / len(velocities)) if velocities else None
+                          if r.get('velocity_km_s') is not None
+                          and 0 < r['velocity_km_s'] <= 5.0
+                          and ('anomalous' not in (r.get('notes') or '').lower())]
+            if mean_v is None and velocities:
+                mean_v = sum(velocities) / len(velocities)
+            elif not velocities and rows:
+                velocities = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
+                if mean_v is None and velocities:
+                    mean_v = sum(velocities) / len(velocities)
             # Nexucon Link (8 Sep meeting): the E.C.S flows through the
             # project's active calibration curve — never a single fixed
             # formula. Same path the platform computes every E.C.S with.
@@ -3023,28 +3031,42 @@ class NDTReportService:
                          <= mean_v
                          <= PUNDIT_PLAUSIBLE_VELOCITY_KM_S[1]))
             if mean_v is None or implausible:
-                mean_ecs = None
+                mean_correlated_ecs = None
                 curve_snapshot = None
             else:
-                mean_ecs, curve_snapshot = apply_active_curve(
+                mean_correlated_ecs, curve_snapshot = apply_active_curve(
                     t.project, mean_v,
                     rebound_number=t.rebound_number,
                     temperature_c=t.surface_temperature_c,
                     moisture_condition=getattr(t, 'moisture_condition', None),
                     # mean_v is the element mean of these points: the
                     # curve's confidence margin narrows as sqrt(n) of them.
-                    n_points=len(velocities))
-            # Keep per-reading ecs_mpa in sync with active curve
+                    n_points=t.element_point_count() if hasattr(t, 'element_point_count') else len(velocities))
+
+            # Raw measured compressive strength from individual test points (Tier 1)
+            mean_measured_ecs = t.element_mean_measured_strength_mpa() if hasattr(t, 'element_mean_measured_strength_mpa') else None
+
+            # Effective station strength: measured if present (Tier 1), otherwise correlated (Tier 2)
+            if mean_measured_ecs is not None and mean_measured_ecs > 0:
+                mean_ecs = mean_measured_ecs
+            else:
+                mean_ecs = mean_correlated_ecs
+
+            # Maintain both measured and correlated strength per reading
             for r in rows:
-                if r.get('velocity_km_s') is not None:
+                r['measured_ecs'] = r.get('ecs_mpa')
+                if r.get('velocity_km_s') is not None and 0 < r['velocity_km_s'] <= 5.0:
                     recomputed_ecs, _ = apply_active_curve(
                         t.project, r['velocity_km_s'],
                         rebound_number=t.rebound_number,
                         temperature_c=t.surface_temperature_c,
                         moisture_condition=getattr(t, 'moisture_condition', None)
                     )
-                    if recomputed_ecs is not None:
+                    r['correlated_ecs'] = recomputed_ecs
+                    if r.get('ecs_mpa') is None or r['ecs_mpa'] <= 0:
                         r['ecs_mpa'] = recomputed_ecs
+                else:
+                    r['correlated_ecs'] = None
             # The figure the curve arithmetic itself yields, before any
             # standard-error policy moved it. The worked example prints THIS
             # as the result of "f_cu = m x V + c" so the printed equation is
@@ -3090,6 +3112,8 @@ class NDTReportService:
                 'rows': rows,
                 'mean_v': mean_v,
                 'mean_ecs': mean_ecs,
+                'mean_measured_ecs': mean_measured_ecs,
+                'mean_correlated_ecs': mean_correlated_ecs,
                 # The curve's own arithmetic result (pre-policy), so the
                 # worked example can print a true equation.
                 'mean_ecs_unadjusted': mean_ecs_unadjusted,

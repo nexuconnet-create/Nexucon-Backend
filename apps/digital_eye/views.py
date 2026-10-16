@@ -2227,6 +2227,49 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             else builtin_curve_snapshot(),
         })
 
+    @action(detail=False, methods=['get', 'post'], url_path='preset-models')
+    def preset_models(self, request):
+        """
+        List or activate platform-wide standard default exponential models:
+        Standard Mix, Jones Equation, and Aggregate Mix (Review meeting min 24:02, 26:18).
+        GET: returns list of preset models.
+        POST: activates a preset for a project (Body: {"project": id, "model_key": "standard_mix"|"jones_equation"|"aggregate_mix"}).
+        """
+        from .strength_curves import DEFAULT_EXPONENTIAL_MODELS, seed_default_exponential_models
+        seed_default_exponential_models()
+        if request.method == 'GET':
+            curves = StrengthCurve.objects.filter(project__isnull=True).order_by('name')
+            return Response({
+                'presets': DEFAULT_EXPONENTIAL_MODELS,
+                'curves': StrengthCurveSerializer(curves, many=True).data,
+            })
+        project_id = request.data.get('project')
+        model_key = request.data.get('model_key')
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if model_key not in DEFAULT_EXPONENTIAL_MODELS:
+            return Response({'detail': f'Unknown model_key {model_key!r}. Choose from: {list(DEFAULT_EXPONENTIAL_MODELS.keys())}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        target_name = DEFAULT_EXPONENTIAL_MODELS[model_key]['name']
+        curve = StrengthCurve.objects.filter(name=target_name, project__isnull=True).first()
+        if not curve:
+            return Response({'detail': 'Preset curve could not be found.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+        setting.active_curve = curve
+        setting.updated_by = request.user
+        setting.save(update_fields=['active_curve', 'updated_by', 'updated_at'])
+        _record_audit(request.user, 'digital_eye.strength_curve.activate_preset',
+                      'Project', project.id,
+                      {'model_key': model_key, 'curve': curve.name, 'curve_id': str(curve.id)})
+        return Response({
+            'project': str(project.id),
+            'model_key': model_key,
+            'active_curve': curve.name,
+            'curve_snapshot': curve.snapshot(),
+        })
+
     @action(detail=False, methods=['post'])
     def calibrate(self, request):
         """

@@ -315,15 +315,19 @@ class PUNDITReadingSerializer(serializers.ModelSerializer):
     point_label = serializers.CharField(
         max_length=10, required=False, allow_blank=True, allow_null=True, default='',
     )
+    ecs_mpa = serializers.FloatField(required=False, allow_null=True)
+    measured_ecs_mpa = serializers.SerializerMethodField()
+    correlated_ecs_mpa = serializers.SerializerMethodField()
 
     class Meta:
         model = PUNDITReading
         fields = ['id', 'point_label', 'path_length_mm', 'transit_time_us',
                   'uncracked_transit_time_us', 'surface_condition',
                   'rebound_number', 'velocity_km_s', 'ecs_mpa',
+                  'measured_ecs_mpa', 'correlated_ecs_mpa',
                   'strength_curve_snapshot', 'crack_depth_mm',
                   'notes', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'velocity_km_s', 'ecs_mpa',
+        read_only_fields = ['id', 'velocity_km_s',
                             'strength_curve_snapshot', 'crack_depth_mm',
                             'created_at', 'updated_at']
         extra_kwargs = {
@@ -331,6 +335,23 @@ class PUNDITReadingSerializer(serializers.ModelSerializer):
             # test_type — enforced there, not here.
             'transit_time_us': {'required': False, 'allow_null': True},
         }
+
+    def get_measured_ecs_mpa(self, obj):
+        return obj.ecs_mpa
+
+    def get_correlated_ecs_mpa(self, obj):
+        if obj.velocity_km_s is None or obj.velocity_km_s <= 0 or obj.velocity_km_s > 5.0:
+            return None
+        from apps.digital_eye.strength_curves import apply_active_curve
+        test = obj.test
+        fcu, _ = apply_active_curve(
+            test.project if test else None,
+            obj.velocity_km_s,
+            rebound_number=obj.rebound_number or (test.rebound_number if test else None),
+            temperature_c=test.surface_temperature_c if test else None,
+            moisture_condition=getattr(test, 'moisture_condition', None) if test else None
+        )
+        return round(fcu, 2) if fcu is not None else None
 
     def validate_transit_time_us(self, value):
         if value is not None and value <= 0:
@@ -391,7 +412,15 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             n_points=obj.element_point_count())
         return strength
 
+    def get_measured_compressive_strength_mpa(self, obj):
+        return obj.element_mean_measured_strength_mpa()
+
+    def get_correlated_compressive_strength_mpa(self, obj):
+        return obj.element_correlated_strength_mpa()
+
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
+    measured_compressive_strength_mpa = serializers.SerializerMethodField()
+    correlated_compressive_strength_mpa = serializers.SerializerMethodField()
 
     def get_file_count(self, obj):
         return obj.files.count()
@@ -412,6 +441,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'location_address',
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
+            'measured_compressive_strength_mpa', 'correlated_compressive_strength_mpa',
             'strength_curve_snapshot',
             'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
             'ai_data_quality', 'ai_reasoning_traces',

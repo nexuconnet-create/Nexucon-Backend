@@ -749,6 +749,35 @@ class PUNDITTest(models.Model):
             return round(sum(valid_strengths) / len(valid_strengths), 2)
         return self.estimated_compressive_strength_mpa
 
+    def element_mean_measured_strength_mpa(self):
+        """Arithmetic mean of raw measured compressive strengths from test points, or None if missing."""
+        rows = self.reading_rows()
+        valid_measured = [
+            row['ecs_mpa'] for row in rows
+            if row.get('ecs_mpa') is not None
+            and row['ecs_mpa'] > 0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('velocity_km_s') is None or (0 < row['velocity_km_s'] <= 5.0))
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        return round(sum(valid_measured) / len(valid_measured), 2) if valid_measured else None
+
+    def element_correlated_strength_mpa(self):
+        """Strength derived from the active calibration curve and station mean velocity."""
+        from apps.digital_eye.strength_curves import apply_active_curve
+        mean_v = self.element_mean_velocity_km_s()
+        if mean_v is None or not (1.0 <= mean_v <= 6.0):
+            return None
+        fcu, _ = apply_active_curve(
+            self.project, mean_v,
+            rebound_number=self.rebound_number,
+            temperature_c=self.surface_temperature_c,
+            moisture_condition=getattr(self, 'moisture_condition', None),
+            n_points=self.element_point_count()
+        )
+        return round(fcu, 2) if fcu is not None else None
+
+
     def element_point_count(self):
         """
         How many test points contributed a valid velocity to this
