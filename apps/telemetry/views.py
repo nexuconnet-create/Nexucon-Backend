@@ -24,6 +24,7 @@ the same all-or-nothing `/end/`.
 import logging
 
 from drf_spectacular.utils import extend_schema
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -522,6 +523,305 @@ class TelemetrySessionStatusView(APIView):
             'data': SessionStatusSerializer(session).data
         })
 
+
+class TelemetrySessionDetailView(APIView):
+    """`GET`, `PATCH`, `DELETE` telemetry/session/<uuid:session_id>/
+
+    DELETE: Deletes the telemetry session and its packets, with optional cleanup of promoted test records.
+    PATCH: Updates session inputs, parameters, and supports replacing / re-importing the scan file.
+    GET: Retrieves the telemetry session details.
+    """
+    authentication_classes = TELEMETRY_AUTH
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @extend_schema(responses={200: TelemetrySessionSerializer})
+    def get(self, request, session_id):
+        session = _get_session(request, session_id)
+        if not session:
+            return Response({'detail': 'Telemetry session not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(TelemetrySessionSerializer(session).data)
+
+    def delete(self, request, session_id):
+        session = _get_session(request, session_id)
+        if not session:
+            return Response({'detail': 'Telemetry session not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        delete_promoted = request.query_params.get('delete_promoted', 'true').lower() in ('true', '1', 'yes')
+        if request.data and isinstance(request.data, dict) and 'delete_promoted' in request.data:
+            delete_promoted = bool(request.data.get('delete_promoted'))
+
+        session_ref = session.session_reference
+        proj_id = session.project_id
+
+        with transaction.atomic():
+            if delete_promoted and proj_id:
+                from apps.digital_eye.models import PUNDITTest, GPRSurvey
+                promoted_info = (session.data_payload or {}).get('promoted') or (session.data_payload or {})
+                test_ids = []
+                if isinstance(promoted_info, dict):
+                    if 'tests' in promoted_info and isinstance(promoted_info['tests'], list):
+                        for t in promoted_info['tests']:
+                            if isinstance(t, dict) and 'test_id' in t:
+                                test_ids.append(t['test_id'])
+                            elif isinstance(t, str):
+                                test_ids.append(t)
+                    if 'survey_id' in promoted_info:
+                        GPRSurvey.objects.filter(id=promoted_info['survey_id']).delete()
+
+                if test_ids:
+                    PUNDITTest.objects.filter(id__in=test_ids).delete()
+                else:
+                    folder_name = (session.session_config or {}).get('folder_name') or (session.session_config or {}).get('test_location')
+                    clean_qs = PUNDITTest.objects.filter(project_id=proj_id)
+                    filters = Q(structural_element=f'Telemetry capture {session_ref}')
+                    if folder_name:
+                        filters |= Q(test_location=folder_name)
+                    clean_qs.filter(filters).delete()
+
+            if session.source_file_storage_name:
+                try:
+                    from django.core.files.storage import default_storage
+                    default_storage.delete(session.source_file_storage_name)
+                except Exception:
+                    pass
+
+            session.delete()
+
+        _record_audit(request.user, 'telemetry.session.delete', session_id, {
+            'session_reference': session_ref,
+            'delete_promoted': delete_promoted,
+        })
+        return Response({
+            'detail': f'Session {session_ref} deleted successfully.',
+            'session_reference': session_ref,
+        }, status=status.HTTP_200_OK)
+
+    def patch(self, request, session_id):
+        session = _get_session(request, session_id)
+        if not session:
+            return Response({'detail': 'Telemetry session not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data
+        config = dict(session.session_config or {})
+
+        if data.get('session_reference') and str(data['session_reference']).strip():
+            new_ref = str(data['session_reference']).strip()
+            if new_ref != session.session_reference:
+                if TelemetrySession.objects.filter(session_reference=new_ref).exclude(pk=session.pk).exists():
+                    return Response({'detail': f'Folder name "{new_ref}" is already in use.'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                session.session_reference = new_ref
+
+        if data.get('project'):
+            from apps.projects.access import scoped_projects
+            proj = scoped_projects(request.user).filter(pk=data['project']).first()
+            if proj:
+                session.project = proj
+
+        CONTEXT_FIELDS = [
+            'structural_element', 'floor', 'test_location', 'location_address',
+            'weather_condition', 'transducer_type', 'transducer_frequency_khz',
+            'visual_observation', 'attendance_log', 'folder_name', 'injection_strategy',
+            'surface_temperature_c', 'moisture_condition', 'weather'
+        ]
+        for field in CONTEXT_FIELDS:
+            if field in data:
+                val = data.get(field)
+                if val is not None and str(val).strip() != '':
+                    config[field] = val
+                elif field in config and val == '':
+                    config[field] = ''
+
+        for coord_field in ['latitude', 'longitude', 'coordinate_system']:
+            if coord_field in data:
+                val = data.get(coord_field)
+                if val is not None and str(val).strip() != '':
+                    try:
+                        config[coord_field] = float(val) if coord_field in ('latitude', 'longitude') else str(val).strip()
+                    except (ValueError, TypeError):
+                        pass
+
+        corner_coords = data.get('corner_coordinates')
+        if isinstance(corner_coords, str):
+            try:
+                import json
+                corner_coords = json.loads(corner_coords)
+            except Exception:
+                pass
+        if corner_coords:
+            config['corner_coordinates'] = corner_coords
+
+        uploaded_photos = request.FILES.getlist('photos')
+        if uploaded_photos:
+            from apps.digital_eye.models import SensorDataFile
+            import hashlib
+            saved_photo_ids = list(config.get('photo_ids') or [])
+            saved_photo_urls = list(config.get('photos') or [])
+            for p in uploaded_photos:
+                digest = hashlib.sha256()
+                for chunk in p.chunks():
+                    digest.update(chunk)
+                sdf = SensorDataFile.objects.create(
+                    file=p,
+                    file_type='photo',
+                    file_name=getattr(p, 'name', 'photo.jpg')[:255],
+                    file_size_bytes=getattr(p, 'size', 0),
+                    sha256_checksum=digest.hexdigest(),
+                    description=f"Visual observation photo for {session.device.name}",
+                    project=session.project,
+                    uploaded_by=request.user if (request.user and request.user.is_authenticated) else None,
+                )
+                saved_photo_ids.append(str(sdf.id))
+                try:
+                    saved_photo_urls.append(sdf.file.url)
+                except Exception:
+                    pass
+            config['photos'] = saved_photo_urls
+            config['photo_ids'] = saved_photo_ids
+
+        session.session_config = config
+
+        new_file = request.FILES.get('file')
+        re_imported = False
+        if new_file:
+            from apps.telemetry.export_import import SessionFromFileService
+            from apps.data_import.readers import detect_import_type, read_rows
+            from apps.data_import.registry import REGISTRY, group_upv_rows, UPV_CONTEXT_KEYS, RowError
+            from apps.telemetry.services import TelemetryService, _BuildContext
+            from apps.evidence.files import safe_file_name
+
+            content = SessionFromFileService._read_upload(new_file)
+            name = safe_file_name(getattr(new_file, 'name', ''))
+            digest = SessionFromFileService._digest(content)
+            import_type = detect_import_type(content)
+
+            try:
+                rows, skipped = read_rows(content, import_type, header_map=session.device.column_mapping or None)
+            except Exception as exc:
+                return Response({'detail': f'Error reading scan file: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not rows:
+                return Response({'detail': 'The replacement file held no readable rows.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                SessionFromFileService._assert_known_columns(rows, name, session.device.column_mapping)
+            except Exception as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            merged = SessionFromFileService._merge_context(rows, config)
+            groups, grouping_error = group_upv_rows(merged)
+            if grouping_error:
+                return Response({'detail': f'{name}: {grouping_error}'}, status=status.HTTP_400_BAD_REQUEST)
+
+            packets = []
+            shared = None
+            for _key, group_rows in groups:
+                try:
+                    payload, _ = REGISTRY['UPV'].build(group_rows, _BuildContext(session.project))
+                except RowError as exc:
+                    return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+                readings = payload.pop('readings', [])
+                context = {key: value for key, value in payload.items() if key in UPV_CONTEXT_KEYS}
+                shared = context if shared is None else {
+                    key: value for key, value in shared.items() if context.get(key) == value
+                }
+                for reading in readings:
+                    packets.append({**context, **reading})
+
+            if not packets:
+                return Response({'detail': 'No readings could be extracted from the replacement file.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            config.update(shared or {})
+            session.session_config = config
+            stored_name, digest = SessionFromFileService._store(content, name)
+
+            was_synced = session.sync_status == TelemetrySession.SYNC_SYNCED
+
+            with transaction.atomic():
+                if was_synced and session.project_id:
+                    from apps.digital_eye.models import PUNDITTest
+                    promoted_info = (session.data_payload or {}).get('promoted') or (session.data_payload or {})
+                    test_ids = []
+                    if isinstance(promoted_info, dict) and 'tests' in promoted_info:
+                        for t in promoted_info['tests']:
+                            if isinstance(t, dict) and 'test_id' in t:
+                                test_ids.append(t['test_id'])
+                    if test_ids:
+                        PUNDITTest.objects.filter(id__in=test_ids).delete()
+                    else:
+                        PUNDITTest.objects.filter(
+                            project_id=session.project_id,
+                            structural_element=f'Telemetry capture {session.session_reference}'
+                        ).delete()
+
+                session.packets.all().delete()
+                session.packet_count = len(packets)
+                session.source_file_name = name
+                session.source_file_sha256 = digest
+                session.source_file_storage_name = stored_name
+                session.status = TelemetrySession.STATUS_ENDED
+                session.sync_status = TelemetrySession.SYNC_PENDING
+                session.sync_error = ''
+                session.save()
+
+                for index, packet in enumerate(packets, start=1):
+                    TelemetryService.append_packet(session, packet, sequence=index)
+
+                session.refresh_from_db()
+
+                if was_synced:
+                    promoted = TelemetryService.end_session(session, request)
+                    re_imported = True
+
+        else:
+            session.save(update_fields=['session_reference', 'project', 'session_config', 'updated_at'])
+
+            if session.sync_status == TelemetrySession.SYNC_SYNCED and session.project_id:
+                from apps.digital_eye.models import PUNDITTest
+                promoted_info = (session.data_payload or {}).get('promoted') or (session.data_payload or {})
+                test_ids = []
+                if isinstance(promoted_info, dict) and 'tests' in promoted_info:
+                    for t in promoted_info['tests']:
+                        if isinstance(t, dict) and 'test_id' in t:
+                            test_ids.append(t['test_id'])
+
+                update_fields = {}
+                if config.get('structural_element'):
+                    update_fields['structural_element'] = config['structural_element']
+                if config.get('floor'):
+                    update_fields['floor'] = config['floor']
+                if config.get('test_location'):
+                    update_fields['test_location'] = config['test_location']
+                if config.get('location_address'):
+                    update_fields['location_address'] = config['location_address']
+                if config.get('weather_condition'):
+                    update_fields['weather_condition'] = config['weather_condition']
+                if config.get('latitude') is not None:
+                    update_fields['latitude'] = config['latitude']
+                if config.get('longitude') is not None:
+                    update_fields['longitude'] = config['longitude']
+
+                if update_fields:
+                    qs = PUNDITTest.objects.filter(id__in=test_ids) if test_ids else PUNDITTest.objects.filter(
+                        project_id=session.project_id,
+                        structural_element=f'Telemetry capture {session.session_reference}'
+                    )
+                    qs.update(**update_fields)
+
+        session.refresh_from_db()
+        _record_audit(request.user, 'telemetry.session.update', session.id, {
+            'session_reference': session.session_reference,
+            'file_replaced': bool(new_file),
+            're_imported': re_imported,
+        })
+        payload = TelemetrySessionSerializer(session).data
+        payload['re_imported'] = re_imported
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class TelemetrySessionListView(APIView):
