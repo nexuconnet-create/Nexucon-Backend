@@ -240,6 +240,26 @@ def strength_plausibility_error(f_mpa):
     return None
 
 
+def curve_output_is_plausible(value):
+    """Whether a curve's own output can be a concrete strength at all.
+
+    The same ceiling the calibration-pair guard uses, applied to the other end
+    of the same pipe: a curve is only ever allowed to produce a number a
+    concrete can have. A default or badly-conditioned parameter set that
+    evaluates to a negative, zero or absurd figure (a degree-2 polynomial with
+    fabricated coefficients yields -181 N/mm2 at 4.0 km/s) returns nothing
+    rather than printing that figure as a measured strength. None and
+    non-finite values are already "no strength".
+    """
+    if value is None:
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and 0.0 < number <= PLAUSIBLE_STRENGTH_MAX_MPA
+
+
 # ---------------------------------------------------------------------------
 # Built-in default (the laboratory's documented fixed curve — see
 # apps/reports/ndt_reports.py ECS_CALIBRATION_SOURCE for its provenance).
@@ -428,9 +448,10 @@ def apply_curve_params(curve_type, params, velocity_km_s,
             c = params.get('c', params.get('b', -7.97))
             v_ms = velocity_km_s * 1000.0
             if abs(m) > 1.0:
-                return m * velocity_km_s + c
-            return m * v_ms + c
-        if curve_type == 'polynomial':
+                value = m * velocity_km_s + c
+            else:
+                value = m * v_ms + c
+        elif curve_type == 'polynomial':
             coeffs = params.get('coeffs')
             if not coeffs and 'a' in params and 'b' in params and 'c' in params:
                 coeffs = [params['a'], params['b'], params['c']]
@@ -442,24 +463,27 @@ def apply_curve_params(curve_type, params, velocity_km_s,
             else:
                 v_use = v_ms
             value = sum(float(co) * (v_use ** i) for i, co in enumerate(coeffs))
-            return value if math.isfinite(value) else None
-        if curve_type == 'exponential':
+        elif curve_type == 'exponential':
             a = params.get('a', 1.20)
             b = params.get('b', 0.85)
             c = params.get('c', 0.0) or 0.0
             exp_arg = b * (velocity_km_s * 1000.0) if abs(b) < 0.01 else b * velocity_km_s
             value = a * math.exp(exp_arg) + c
-            return value if math.isfinite(value) else None
-        if curve_type == 'sonreb':
-            r = rebound_number if (rebound_number is not None and rebound_number > 0) else 32.0
+        elif curve_type == 'sonreb':
+            # SonReb needs both non-destructive readings. Without a rebound
+            # number there is no curve to apply — substituting a made-up
+            # rebound value would invent a strength, so return None instead.
+            if rebound_number is None or rebound_number <= 0:
+                return None
             a = params.get('a', 0.0286)
             b = params.get('b', 0.84)
             c = params.get('c', 0.35)
+            # The fitter (run_regression) fits and evaluates SonReb with V in
+            # m/s, and formula_display prints it that way. Evaluate in the same
+            # domain here, or a fitted curve would not reproduce its own fit.
             v_ms = velocity_km_s * 1000.0
-            v_use = v_ms if a < 0.1 else velocity_km_s
-            value = (a * (v_use ** b) * (r ** c))
-            return value if math.isfinite(value) else None
-        if curve_type == 'lookup':
+            value = (a * (v_ms ** b) * (rebound_number ** c))
+        elif curve_type == 'lookup':
             points = sorted(params['points'], key=lambda p: p['v'])
             if len(points) < 2:
                 return None
@@ -467,14 +491,23 @@ def apply_curve_params(curve_type, params, velocity_km_s,
             if v_ms < points[0]['v'] or v_ms > points[-1]['v']:
                 # Outside the table's span: no extrapolation, ever.
                 return None
+            value = None
             for i in range(len(points) - 1):
                 p1, p2 = points[i], points[i + 1]
                 if p1['v'] <= v_ms <= p2['v']:
                     if p2['v'] == p1['v']:
-                        return p1['f']
-                    return (p1['f'] + (p2['f'] - p1['f'])
-                            * (v_ms - p1['v']) / (p2['v'] - p1['v']))
-            return points[-1]['f']
+                        value = p1['f']
+                    else:
+                        value = (p1['f'] + (p2['f'] - p1['f'])
+                                 * (v_ms - p1['v']) / (p2['v'] - p1['v']))
+                    break
+            if value is None:
+                value = points[-1]['f']
+        else:
+            return None
+        # One gate for every curve type: a curve may only ever produce a
+        # number a concrete can have. Nothing is extrapolated past it.
+        return value if curve_output_is_plausible(value) else None
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
         return None
     return None
@@ -742,26 +775,51 @@ def resolve_active_curve(project):
     return StrengthCurve.objects.filter(is_default=True).first()
 
 
-# The documented laboratory coefficients for each curve type. These are the
-# published fallbacks, applied when a project has NO calibration curve of its
-# own — never a substitute for a curve the project has fitted.
+# The documented laboratory coefficients, applied when a project has NO
+# calibration curve of its own — never a substitute for a curve the project
+# has fitted (see ``resolve_analysis_curve``).
+#
+# Only two entries are honest. Both are the laboratory's own documented
+# curves, cited in report section 3.0 and in ``ndt_reports.ECS_CALIBRATION_SOURCE``:
+#
+#   exponential  f_cu = 1.20 x exp(0.85 x V_km_s)   (the ACI 228.2R form the
+#                client designated as the default curve type)
+#   linear       f_cu = 8.961 x V_km_s - 7.97       (the fixed curve the
+#                platform used before Nexucon Link existed)
+#
+# Polynomial and SonReb previously carried coefficients here that no source
+# documents — a degree-2 polynomial of [-12.5, 4.2, 1.8] evaluated to
+# -181.4 N/mm2 at 4.0 km/s, a tensile-magnitude number printed as a concrete
+# strength. This module's own honesty rule (see the module docstring) is that
+# no fabricated default parameters are invented for a curve type. A request
+# for a polynomial or SonReb curve with no fitted coefficients of its own is
+# therefore answered with the documented exponential, and the substitution is
+# reported in the snapshot's provenance rather than hidden.
 DOCUMENTED_DEFAULT_PARAMS = {
     'exponential': {'a': 1.20, 'b': 0.85, 'c': 0.0},
     'linear': {'m': 8.961, 'c': -7.97},
-    'polynomial': {'coeffs': [-12.5, 4.2, 1.8],
-                   'a': -12.5, 'b': 4.2, 'c': 1.8},
-    'sonreb': {'a': 0.0286, 'b': 0.84, 'c': 0.35},
 }
+
+# Curve types with no documented fallback of their own: they need real fitted
+# coefficients, and a bare request for one is served by the exponential.
+CURVE_TYPES_WITHOUT_DOCUMENTED_DEFAULT = ('polynomial', 'sonreb', 'lookup')
 
 
 def documented_default_params(curve_type):
-    """A copy of the published default coefficients for ``curve_type``.
+    """The documented coefficients for ``curve_type``, or the documented
+    exponential when that type has no documented fallback.
 
-    Read-only fallback: a project that has fitted its own curve must never be
-    handed these numbers instead of it (see ``resolve_analysis_curve``).
+    Read-only: a project that has fitted its own curve must never be handed
+    these numbers instead of it (see ``resolve_analysis_curve``).
     """
     return dict(DOCUMENTED_DEFAULT_PARAMS.get(curve_type)
                 or DOCUMENTED_DEFAULT_PARAMS['exponential'])
+
+
+def documented_default_is_a_substitute(curve_type):
+    """True when a bare request for ``curve_type`` is served by a different
+    documented model, so the caller can disclose the substitution."""
+    return curve_type in CURVE_TYPES_WITHOUT_DOCUMENTED_DEFAULT
 
 
 def resolve_analysis_curve(project, requested_type=None, requested_params=None,
@@ -788,8 +846,12 @@ def resolve_analysis_curve(project, requested_type=None, requested_params=None,
     yields 34.5.
 
     ``source`` is one of 'request', 'project_curve', 'calibration_profile',
-    'documented_default'; only 'request' authorises writing to the stored
-    curve.
+    'documented_default', 'documented_default_substituted'; only 'request'
+    authorises writing to the stored curve. The last value means the caller
+    asked for a curve type that has no documented fallback of its own
+    (polynomial / SonReb / lookup) and no fitted coefficients exist for it, so
+    the documented exponential answered instead — the substitution is named
+    rather than passed off as the requested model.
     """
     if isinstance(requested_params, dict) and requested_params:
         return (str(requested_type or 'exponential'), dict(requested_params),
@@ -813,6 +875,9 @@ def resolve_analysis_curve(project, requested_type=None, requested_params=None,
         return curve_type, dict(curve.formula_params), 'project_curve', False
     if (calibration_type == curve_type and getattr(calibration, 'params', None)):
         return curve_type, dict(calibration.params), 'calibration_profile', False
+    if documented_default_is_a_substitute(curve_type):
+        return ('exponential', documented_default_params('exponential'),
+                'documented_default_substituted', False)
     return curve_type, documented_default_params(curve_type), \
         'documented_default', False
 

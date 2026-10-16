@@ -33,17 +33,72 @@ NO_PROVIDER_KEYS = dict(
     DEEPSEEK_API_KEY="",
 )
 
+#: The provider settings beyond the keys: a model or base URL left over from a
+#: developer's `.env` decides who answers and where the request (carrying an API
+#: key) is sent, so a test that means "nothing is configured" must clear these
+#: too. `ANTHROPIC_MAX_TOKENS` and `AI_PROVIDER` are deliberately absent —
+#: clearing either changes how the value is parsed rather than disabling a
+#: provider.
+NO_PROVIDER_SETTINGS = dict(
+    NO_PROVIDER_KEYS,
+    ANTHROPIC_MODEL="", ANTHROPIC_BASE_URL="",
+    DEEPSEEK_MODEL="", DEEPSEEK_BASE_URL="",
+)
+
+#: The namespaced variables `AIService._env` falls back to. `override_settings`
+#: cannot reach these — they are read from `os.environ` directly — so they are
+#: removed for the whole module. Without this, a machine whose `.env` configures
+#: the provider chain would give these tests a live, unmocked provider.
+_NAMESPACED_PROVIDER_ENV = tuple(
+    f"NEXUCON_{name}"
+    for name in (
+        "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_MAX_TOKENS",
+        "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL",
+    )
+)
+
+#: Bare names unrelated tooling exports for its own routing (the Claude Code CLI
+#: sets both). The service does not read them — the `NEXUCON_` prefix exists so
+#: it cannot — and these tests hold it to that.
+_AMBIENT_TOOLING_ENV = (
+    "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY",
+    "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY",
+)
+
+#: name -> value, for every variable setUpModule removed. Restored on teardown so
+#: a later module still sees the developer's own environment.
+_removed_env = {}
+
+
+def setUpModule():
+    """Make the provider chain hermetic for this module's tests.
+
+    The variables are REMOVED rather than set to "": an empty string is a value,
+    so it would satisfy the `os.environ.get(key, default)` lookups and suppress
+    the very defaults these tests assert.
+    """
+    for key in _NAMESPACED_PROVIDER_ENV + _AMBIENT_TOOLING_ENV:
+        if key in os.environ:
+            _removed_env[key] = os.environ.pop(key)
+
+
+def tearDownModule():
+    os.environ.update(_removed_env)
+    _removed_env.clear()
+
 
 def _provider_settings(**configured):
     """`override_settings` kwargs for a test that exercises the provider chain.
 
-    Every provider key starts empty, then `configured` is layered on top, so a
-    test names only the providers it actually means to configure and cannot
-    inherit a live key from the environment by accident. The merge happens in
-    a dict because `override_settings(**NO_PROVIDER_KEYS, OPENAI_API_KEY=...)`
-    is a TypeError — the same keyword arrives twice.
+    Every provider key AND every provider model/base URL starts empty, then
+    `configured` is layered on top, so a test names only the providers it
+    actually means to configure and cannot inherit a live key — or a live
+    endpoint — from the environment by accident. The merge happens in a dict
+    because `override_settings(**NO_PROVIDER_KEYS, OPENAI_API_KEY=...)` is a
+    TypeError — the same keyword arrives twice.
     """
-    return dict(NO_PROVIDER_KEYS, **configured)
+    return dict(NO_PROVIDER_SETTINGS, **configured)
 
 
 def _png_bytes(color=(255, 0, 0), size=(10, 10), mode="RGB"):
@@ -136,8 +191,19 @@ class AIServiceConfigTests(TestCase):
             self.assertEqual(AIService._get_provider(), "gemini")
 
     def test_provider_read_from_environment(self):
+        """`AI_PROVIDER` reaches the service through the Django setting.
+
+        `config.settings.base` fills the setting from the environment at load
+        time, and the service reads the setting first — so the variable is
+        honoured, but as configuration rather than as a live lookup a later
+        change to `os.environ` could redirect a request through.
+        """
         with mock.patch.dict("os.environ", {"AI_PROVIDER": "OpenAI"}):
-            # Provider name is normalised to lowercase.
+            # The setting (from .env at import) still wins, and the value is
+            # normalised to lowercase either way.
+            self.assertEqual(AIService._get_provider(),
+                             settings.AI_PROVIDER.lower())
+        with override_settings(AI_PROVIDER="OpenAI"):
             self.assertEqual(AIService._get_provider(), "openai")
 
     @override_settings(AI_PROVIDER="openai", OPENAI_MODEL="gpt-4o-mini",
@@ -1197,6 +1263,7 @@ class AnthropicTransportTests(TestCase):
         self.assertEqual(AIService._media_type_for("https://x/asset"), "image/jpeg")
 
 
+@override_settings(**_provider_settings())
 class ProviderEnvironmentIsolationTests(TestCase):
     """Provider configuration must not be readable from the ambient environment.
 
@@ -1206,6 +1273,10 @@ class ProviderEnvironmentIsolationTests(TestCase):
     Reading them bare would point this service's outbound requests, carrying
     its API key, at whatever host the ambient environment happens to name.
     These tests fail if that isolation is ever removed.
+
+    The class-level override clears every provider setting, so what is asserted
+    is the service's own behaviour rather than what this machine's `.env`
+    happens to configure.
     """
 
     def test_ambient_anthropic_variables_are_ignored(self):

@@ -34,7 +34,7 @@ from .models import (
     CalibrationProfile, CoreSample, DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding,
     EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan, GPRSurvey,
     GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
-    PunditScanBatch, PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
+    PunditScanBatch, PUNDITReading, PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
     PunditWeatherCondition,
     SiteAttendanceRecord, StrengthCurve, TrimbleConnection, TrimbleProject,
     VisualObservation, VisualObservationPhoto,
@@ -854,7 +854,19 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                                 r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
                                 r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
                 v_mean = t.element_mean_velocity_km_s()
-                mean_ecs = t.element_mean_compressive_strength_mpa()
+                # Two-tier element verdict, the same rule the report and the
+                # serializer use: a MEASURED strength that arrived with the
+                # data is reported as-is and never recalculated; otherwise the
+                # profile curve this run applies answers, from the element MEAN
+                # velocity — the basis the standard-error margin is computed
+                # on. The run's profile is used rather than the project's
+                # stored curve because applying that profile is what this run
+                # is for.
+                mean_ecs = (t.element_mean_measured_strength_mpa()
+                            if t.prefers_measured_strength() else None)
+                if mean_ecs is None and v_mean is not None:
+                    mean_ecs = PUNDITAdapter.compute_profile_ecs(
+                        v_mean, curve_profile, rebound_number=t.rebound_number)
                 if v_mean is not None:
                     t.velocity_km_s = v_mean
                     t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
@@ -983,7 +995,12 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                     # Canonical storage is km/s; the report's unit is m/s.
                     'velocity_ms': (round(velocity_km_s * 1000)
                                     if velocity_km_s is not None else None),
+                    # Two separate figures, each named for its basis:
+                    # `estimated_strength_mpa` is the CURVE's per-point output,
+                    # `measured_strength_mpa` is the strength that arrived with
+                    # the data, if any. Neither overwrites the other.
                     'estimated_strength_mpa': reading.ecs_mpa,
+                    'measured_strength_mpa': reading.measured_strength_mpa,
                     'rebound_number': reading.rebound_number,
                     'crack_depth_mm': reading.crack_depth_mm,
                     'curve_id': (snapshot or {}).get('curve_id'),
@@ -1034,8 +1051,13 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                     'with no recorded operator, or with no test date, cannot '
                     'match an operator or date-range filter and is absent here.'),
                 'unit_note': 'velocity_ms is metres per second; '
-                             'estimated_strength_mpa is null when no curve '
-                             'applied or the velocity fell outside the curve range.',
+                             'estimated_strength_mpa is the figure the project '
+                             'curve produced for that point and is null when no '
+                             'curve applied or the velocity fell outside the '
+                             'curve range; measured_strength_mpa is the strength '
+                             'that arrived with the point\'s data, reported '
+                             'exactly as supplied, and is null when the data '
+                             'carried none.',
                 'provenance_note': (
                     f'The provenance log holds the newest {len(provenance_log)} of '
                     f'{event_count} recorded audit event(s) for the exported tests.'
@@ -2060,6 +2082,30 @@ class DeviceReportViewSet(viewsets.ModelViewSet):
 # Nexucon Link — calibration curves (8 Sep 2026 review meeting)
 # ======================================================================
 
+# The two strength bases a project can report on (15 Oct 2026 meeting).
+# Both figures stay on record whichever one is selected; this only decides
+# which of them the tables, the results sheet and the map print.
+_STRENGTH_BASIS_OPTIONS = [
+    {
+        'key': 'measured',
+        'label': 'Measured (as supplied)',
+        'detail': ('Report the compressive strength that arrived with the '
+                   'injected data, reproduced exactly as measured and never '
+                   'recalculated. Only available on elements whose data '
+                   'carried one.'),
+        'tag': '(M)',
+    },
+    {
+        'key': 'correlated',
+        'label': 'Correlated (from the curve)',
+        'detail': ('Report the strength the project calibration curve derives '
+                   'from the element mean pulse velocity. Every measured value '
+                   'stays on record and is still shown in the results sheet.'),
+        'tag': '(C)',
+    },
+]
+
+
 class StrengthCurveViewSet(viewsets.ModelViewSet):
     """
     Nexucon Link calibration curves: the project-specific relationship
@@ -2079,8 +2125,17 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
     WRITE_ACTIONS = ('create', 'update', 'partial_update', 'destroy',
                      'activate', 'use_platform_default')
 
+    #: Actions that answer GET and POST on the same route. The read is a
+    #: legitimate one for any authenticated user — it is what the settings
+    #: page renders — while the write changes a project's calibration and
+    #: stays Director-only, like every other write here. Gating the whole
+    #: action would have hidden the read from the people who need it.
+    METHOD_GATED_ACTIONS = ('strength_basis', 'preset_models')
+
     def get_permissions(self):
-        if self.action in self.WRITE_ACTIONS:
+        if self.action in self.WRITE_ACTIONS or (
+                self.action in self.METHOD_GATED_ACTIONS
+                and self.request.method == 'POST'):
             return [IsDirector()]
         return super().get_permissions()
 
@@ -2216,7 +2271,9 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         from .strength_curves import builtin_curve_snapshot, resolve_active_curve
+        from .models import ProjectCurveSetting
         curve = resolve_active_curve(project)
+        setting = ProjectCurveSetting.objects.filter(project=project).first()
         return Response({
             'project': str(project.id),
             'source': ('project_setting' if curve is not None and curve.project_id
@@ -2225,6 +2282,76 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             'curve': StrengthCurveSerializer(curve).data if curve else None,
             'curve_snapshot': curve.snapshot() if curve is not None
             else builtin_curve_snapshot(),
+            # Which of the two strengths an element is reported by when the
+            # injected data carried a measured one (15 Oct 2026 meeting).
+            # A project with no setting recorded keeps the default: measured.
+            'prefer_measured_strength': (
+                True if setting is None else bool(setting.prefer_measured_strength)),
+            'strength_basis_options': _STRENGTH_BASIS_OPTIONS,
+        })
+
+    @action(detail=False, methods=['get', 'post'], url_path='strength-basis')
+    def strength_basis(self, request):
+        """
+        Read or set which strength a project REPORTS: the measured value the
+        injected data carried, or the figure the calibration curve derives
+        from the mean pulse velocity (15 Oct 2026 meeting: "users should
+        choose which value to print or analyze").
+
+        GET  ?project=<id> -> the current choice and what it means.
+        POST {"project": id, "prefer_measured_strength": bool} -> set it.
+
+        Neither basis is ever destroyed by the choice: the measured value
+        stays on every reading and the correlated value stays on every test,
+        so switching only changes which one the tables print.
+        """
+        project_id = (request.query_params.get('project')
+                      or request.data.get('project'))
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        from .models import ProjectCurveSetting
+        setting = ProjectCurveSetting.objects.filter(project=project).first()
+        current = True if setting is None else bool(setting.prefer_measured_strength)
+
+        if request.method == 'POST':
+            raw = request.data.get('prefer_measured_strength')
+            if raw is None:
+                return Response(
+                    {'detail': 'prefer_measured_strength is required.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            if isinstance(raw, str):
+                lowered = raw.strip().lower()
+                if lowered not in ('true', 'false', '1', '0', 'yes', 'no'):
+                    return Response(
+                        {'detail': 'prefer_measured_strength must be a boolean.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+                prefer = lowered in ('true', '1', 'yes')
+            else:
+                prefer = bool(raw)
+
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            setting.prefer_measured_strength = prefer
+            setting.updated_by = request.user
+            setting.save(update_fields=['prefer_measured_strength', 'updated_by',
+                                        'updated_at'])
+            _record_audit(request.user, 'digital_eye.strength_basis.set',
+                          'Project', project.id,
+                          {'prefer_measured_strength': prefer})
+            current = prefer
+
+        test_ids = project.pundit_tests.values_list('id', flat=True)
+        measured_points = PUNDITReading.objects.filter(
+            test_id__in=list(test_ids),
+            measured_strength_mpa__isnull=False).count()
+        return Response({
+            'project': str(project.id),
+            'prefer_measured_strength': current,
+            'reported_basis': 'measured' if current else 'correlated',
+            'measured_points_on_record': measured_points,
+            'options': _STRENGTH_BASIS_OPTIONS,
         })
 
     @action(detail=False, methods=['get', 'post'], url_path='preset-models')
@@ -3225,7 +3352,19 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
                                 r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
                                 r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
                 v_mean = t.element_mean_velocity_km_s()
-                mean_ecs = t.element_mean_compressive_strength_mpa()
+                # Two-tier element verdict, the same rule the report and the
+                # serializer use: a MEASURED strength that arrived with the
+                # data is reported as-is and never recalculated; otherwise the
+                # profile curve this run applies answers, from the element MEAN
+                # velocity — the basis the standard-error margin is computed
+                # on. The run's profile is used rather than the project's
+                # stored curve because applying that profile is what this run
+                # is for.
+                mean_ecs = (t.element_mean_measured_strength_mpa()
+                            if t.prefers_measured_strength() else None)
+                if mean_ecs is None and v_mean is not None:
+                    mean_ecs = PUNDITAdapter.compute_profile_ecs(
+                        v_mean, curve_profile, rebound_number=t.rebound_number)
                 if v_mean is not None:
                     t.velocity_km_s = v_mean
                     t.pulse_velocity_ms = round(v_mean * 1000.0, 1)

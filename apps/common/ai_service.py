@@ -228,19 +228,23 @@ class AIService:
 
     @staticmethod
     def _get_anthropic_key():
+        # The Django setting first (which `config.settings.base` already fills
+        # from the environment, bare name preferred, at load time), then the
+        # NEXUCON_-namespaced variable. Never the bare name read live: that is
+        # what `_env` above exists to avoid.
         return (
             getattr(settings, "ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_API_KEY", "")
             or AIService._env("ANTHROPIC_API_KEY")
         )
 
     @staticmethod
     def _get_anthropic_model():
         # Claude Sonnet — advanced multi-modal vision and reasoning.
-        # Read at call time: can be overridden via `NEXUCON_ANTHROPIC_MODEL` or `ANTHROPIC_MODEL` in .env.
+        # Read at call time: can be overridden via `NEXUCON_ANTHROPIC_MODEL` in
+        # the environment, or `ANTHROPIC_MODEL` in .env (which the setting
+        # picks up at load time).
         return (
             getattr(settings, "ANTHROPIC_MODEL", "")
-            or os.environ.get("ANTHROPIC_MODEL", "")
             or AIService._env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
         )
 
@@ -248,7 +252,6 @@ class AIService:
     def _get_anthropic_base_url():
         return (
             getattr(settings, "ANTHROPIC_BASE_URL", "")
-            or os.environ.get("ANTHROPIC_BASE_URL", "")
             or AIService._env("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
         )
 
@@ -256,7 +259,6 @@ class AIService:
     def _get_deepseek_key():
         return (
             getattr(settings, "DEEPSEEK_API_KEY", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
             or AIService._env("DEEPSEEK_API_KEY")
         )
 
@@ -264,7 +266,6 @@ class AIService:
     def _get_deepseek_model():
         return (
             getattr(settings, "DEEPSEEK_MODEL", "")
-            or os.environ.get("DEEPSEEK_MODEL", "")
             or AIService._env("DEEPSEEK_MODEL", "deepseek-flash")
         )
 
@@ -272,7 +273,6 @@ class AIService:
     def _get_deepseek_base_url():
         return (
             getattr(settings, "DEEPSEEK_BASE_URL", "")
-            or os.environ.get("DEEPSEEK_BASE_URL", "")
             or AIService._env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
         )
 

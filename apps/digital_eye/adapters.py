@@ -884,6 +884,9 @@ class PUNDITAdapter:
                     moisture_condition=getattr(test, 'moisture_condition', None),
                     n_points=n_velocity_points)
             if velocity is not None else None)
+        measured_mean = (
+            test.element_mean_measured_strength_mpa()
+            if hasattr(test, 'element_mean_measured_strength_mpa') else None)
         pack = {
             'project': getattr(test.project, 'name', None),
             'element': test.structural_element or None,
@@ -905,6 +908,12 @@ class PUNDITAdapter:
                  'velocity_m_s': None if r['velocity_km_s'] is None
                  else round(r['velocity_km_s'] * 1000, 2),
                  'ecs_n_mm2': None if r['ecs_mpa'] is None else round(r['ecs_mpa'], 1),
+                 # The measured twin, present only when the point's data
+                 # arrived with a strength. Kept beside the curve's figure so
+                 # the narrative can tell a measured value from a derived one.
+                 'measured_strength_n_mm2': (
+                     None if r.get('measured_strength_mpa') is None
+                     else round(r['measured_strength_mpa'], 1)),
                  'crack_depth_mm': None if (getattr(test, 'test_type', None) != 'crack_depth' or r['crack_depth_mm'] is None) else round(r['crack_depth_mm'], 1),
                  'surface_condition': r['surface_condition'] or None}
                 for r in rows
@@ -912,6 +921,11 @@ class PUNDITAdapter:
             'element_mean_velocity_m_s': None if velocity is None else round(velocity * 1000, 2),
             'element_mean_ecs_n_mm2': None if element_mean_ecs is None
             else round(element_mean_ecs, 1),
+            # The element's MEASURED strength, when the data arrived with one:
+            # the arithmetic mean of its points' measured values, reported
+            # as-is. Null when no point carried a measured strength.
+            'element_mean_measured_n_mm2': (
+                None if measured_mean is None else round(measured_mean, 1)),
             'field_notes': test.notes or None,
             'attachments': [
                 {'name': f.file_name, 'description': f.description or None}
@@ -999,18 +1013,23 @@ class PUNDITAdapter:
         """
         if velocity_km_s is None or velocity_km_s <= 0:
             return None
-        from apps.digital_eye.strength_curves import apply_curve_params
+        from apps.digital_eye.strength_curves import (
+            DOCUMENTED_DEFAULT_PARAMS,
+            apply_curve_params,
+            documented_default_params,
+        )
         ctype = (curve_profile or {}).get('curve_type', 'exponential')
         params = (curve_profile or {}).get('params')
         if not params:
-            if ctype == 'linear':
-                params = {'m': 8.961, 'c': -7.97}
-            elif ctype == 'polynomial':
-                params = {'coeffs': [-12.5, 4.2, 1.8], 'a': -12.5, 'b': 4.2, 'c': 1.8}
-            elif ctype == 'sonreb':
-                params = {'a': 0.0286, 'b': 0.84, 'c': 0.35}
-            else:
-                params = {'a': 1.20, 'b': 0.85, 'c': 0.0}
+            # One documented-default source for the whole platform. A curve
+            # type the documentation does not cover answers with the documented
+            # exponential — the same substitution ``resolve_analysis_curve``
+            # applies — instead of an invented coefficient set. (The polynomial
+            # default that used to live here evaluated to -181.4 N/mm2 at
+            # 4.0 km/s and is gone for that reason.)
+            if ctype not in DOCUMENTED_DEFAULT_PARAMS:
+                ctype = 'exponential'
+            params = documented_default_params(ctype)
 
         val = apply_curve_params(ctype, params, velocity_km_s, rebound_number=rebound_number)
         if val is not None:
@@ -1329,15 +1348,22 @@ class PUNDITAdapter:
             mean_ecs = None
             ecs_snapshot = None
             if curve_profile:
-                valid_point_strengths = []
-                for r in rows:
-                    rv = r.get('velocity_km_s')
-                    if rv and 0 < rv <= 5.0 and ('anomalous' not in (r.get('notes') or '').lower()):
-                        recs = cls.compute_profile_ecs(rv, curve_profile, rebound_number=test.rebound_number)
-                        if recs and recs > 0:
-                            valid_point_strengths.append(recs)
-                if valid_point_strengths:
-                    mean_ecs = round(sum(valid_point_strengths) / len(valid_point_strengths), 1)
+                # The element's correlated strength is the curve applied ONCE to
+                # the element mean velocity — the platform's one-number-one-
+                # provenance rule, and what the report and the registry print.
+                # Averaging per-point curve outputs instead yields a different
+                # number for the same element, so the narrative would describe a
+                # strength the tables do not show. Points the field notes call
+                # anomalous stay out of the mean, as before.
+                valid_point_velocities = [
+                    r['velocity_km_s'] for r in rows
+                    if r.get('velocity_km_s') and 0 < r['velocity_km_s'] <= 5.0
+                    and 'anomalous' not in (r.get('notes') or '').lower()
+                ]
+                if valid_point_velocities:
+                    mean_ecs = cls.compute_profile_ecs(
+                        sum(valid_point_velocities) / len(valid_point_velocities),
+                        curve_profile, rebound_number=test.rebound_number)
                 elif velocity is not None:
                     mean_ecs = cls.compute_profile_ecs(velocity, curve_profile, rebound_number=test.rebound_number)
                 from apps.digital_eye.strength_curves import formula_display

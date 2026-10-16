@@ -508,6 +508,66 @@ def _wrap_lines(pdf, text, width, base_bold=False, size=None):
     return final_out or ['-']
 
 
+TOC_ENTRY_LINE_H = 7.5      # the reference's ToC line height
+TOC_ENTRY_GAP = 2.4         # the reference's gap under each ToC entry
+TOC_MIN_LINE_H = 6.5        # never squeeze the entries tighter than this
+TOC_FIRST_ENTRY_Y = 40.5    # first entry's baseline, per the reference
+TOC_PAGE_SAFETY = 1.0       # keep the last entry clear of the break trigger
+TOC_APPENDIX_GAP = 2.5      # APPENDIX prints one blank line deeper
+
+
+def _toc_entry_lines(pdf, section):
+    """Lines one ToC entry needs, measured in the font it prints in.
+
+    APPENDIX counts as two: it prints one blank line above its own row.
+    """
+    name = _latin1(section.name)
+    num, _, title = name.partition(' ')
+    level = getattr(section, 'level', 0)
+    if name == 'APPENDIX':
+        return 2
+    if (pdf.roman_from_page is not None
+            and section.page_number >= pdf.roman_from_page):
+        return 1
+    avail = (pdf.w - pdf.r_margin - 26) - (pdf.l_margin + 25.4)
+    pdf.set_font('Cambria', 'B', 12)
+    if not level and not re.match(r'^\d+\.\d+$', num):
+        return len(_wrap_lines(pdf, name.upper(), avail))
+    return len(_wrap_lines(
+        pdf, (TOC_TITLES.get(num) or (title or name)).upper(), avail,
+        base_bold=True))
+
+
+def _toc_line_height(pdf, entries):
+    """Line height keeping every entry inside the one reserved ToC page.
+
+    Returns ``(line_height, fits)``. The entry set is longer than the one in
+    the reference report, so the height is tightened to what the set needs;
+    the reference's 7.5mm is kept whenever it already fits. ``fits`` is False
+    only when even the tightest legible height overflows, in which case the
+    caller draws the ToC anyway instead of letting ``output()`` fail.
+    """
+    if not entries:
+        return TOC_ENTRY_LINE_H, True
+    counts = [_toc_entry_lines(pdf, s) for s in entries]
+    appendix = sum(1 for s in entries if _latin1(s.name) == 'APPENDIX')
+    # fpdf breaks when a cell drawn at y would end below page_break_trigger,
+    # so the LAST entry's own height has to fit too, not just the advances.
+    room = (pdf.page_break_trigger - TOC_FIRST_ENTRY_Y
+            - TOC_ENTRY_GAP * (len(entries) + appendix)
+            - TOC_APPENDIX_GAP * appendix
+            + TOC_ENTRY_GAP - TOC_PAGE_SAFETY)
+    lines = sum(counts)
+    if not lines:
+        return TOC_ENTRY_LINE_H, True
+    fitted = room / lines
+    if fitted >= TOC_ENTRY_LINE_H:
+        return TOC_ENTRY_LINE_H, True
+    if fitted >= TOC_MIN_LINE_H:
+        return fitted, True
+    return TOC_MIN_LINE_H, False
+
+
 def _draw_markup_line(pdf, x, y, width, line, align, line_h, size=11,
                       base_bold=False):
     """Draw one table-cell line, honouring the ``**bold**`` markup.
@@ -1001,7 +1061,15 @@ class NDTReportBuilder:
                    and not (getattr(s, 'level', 0)
                             and s.name.partition(' ')[0].startswith('5.')
                             and s.name.partition(' ')[0] not in ('5.1', '5.2', '5.3', '5.4', '5.5'))]
-        y = 40.5
+        # This page is reserved for the ToC alone and fpdf raises when the
+        # renderer spills onto a second one. The entry set carries the 5.x
+        # subsections and the appendix items the reference ToC does not, so
+        # the line height is measured against the page and tightened as far
+        # as it must be — the reference's 7.5mm whenever that already fits.
+        line_h, fits = _toc_line_height(pdf, entries)
+        if not fits:
+            pdf.set_auto_page_break(auto=False)
+        y = TOC_FIRST_ENTRY_Y
         for idx, section in enumerate(entries):
             name = _latin1(section.name)
             num, _, title = name.partition(' ')
@@ -1009,11 +1077,12 @@ class NDTReportBuilder:
             in_appendix = (pdf.roman_from_page is not None
                            and section.page_number >= pdf.roman_from_page)
             if name == 'APPENDIX':
-                y += 9.9          # one blank advance before APPENDIX
+                # one blank advance before APPENDIX
+                y += line_h + TOC_ENTRY_GAP
                 pdf.set_font('Cambria', 'U', 12)
                 pdf.set_xy(pdf.l_margin, y)
-                pdf.cell(0, 7.5, 'APPENDIX')
-                y += 12.4
+                pdf.cell(0, line_h, 'APPENDIX')
+                y += line_h + TOC_ENTRY_GAP + TOC_APPENDIX_GAP
                 continue
             if in_appendix:
                 start_n = section.page_number - pdf.roman_from_page + 1
@@ -1027,8 +1096,8 @@ class NDTReportBuilder:
                 disp = APPENDIX_ITEM_TITLES.get(name, name).upper()
                 pdf.set_font('Cambria', 'B', 12)
                 pdf.set_xy(pdf.l_margin, y)
-                pdf.cell(0, 7.5, f'{disp} ({_to_roman(start_n)}-{end})')
-                y += 9.9
+                pdf.cell(0, line_h, f'{disp} ({_to_roman(start_n)}-{end})')
+                y += line_h + TOC_ENTRY_GAP
                 continue
             if (not level and name != 'APPENDIX'
                     and not re.match(r'^\d+\.\d+$', num)):
@@ -1041,11 +1110,11 @@ class NDTReportBuilder:
                 pdf.set_xy(pdf.l_margin, y)
                 lines = _wrap_lines(pdf, toc_title, avail)
                 pdf.set_xy(title_x, y)
-                pdf.multi_cell(avail, 7.5, _latin1(toc_title))
+                pdf.multi_cell(avail, line_h, _latin1(toc_title))
                 pdf.set_xy(172.2, y)
-                pdf.cell(15, 7.5, str(section.page_number - offset),
+                pdf.cell(15, line_h, str(section.page_number - offset),
                          align='R')
-                y += 9.9 if len(lines) == 1 else len(lines) * 7.5 + 2.4
+                y += len(lines) * line_h + TOC_ENTRY_GAP
                 continue
             indent = 12.7 if level else 0
             title_x = pdf.l_margin + 25.4
@@ -1053,13 +1122,13 @@ class NDTReportBuilder:
             toc_title = (TOC_TITLES.get(num) or (title or name)).upper()
             pdf.set_font('Cambria', 'B', 12)
             pdf.set_xy(pdf.l_margin + indent, y)
-            pdf.cell(25.4 - indent, 7.5, f'{num}.' if not level else num)
+            pdf.cell(25.4 - indent, line_h, f'{num}.' if not level else num)
             lines = _wrap_lines(pdf, toc_title, avail, base_bold=True)
             pdf.set_xy(title_x, y)
-            pdf.multi_cell(avail, 7.5, _latin1(toc_title))
+            pdf.multi_cell(avail, line_h, _latin1(toc_title))
             pdf.set_xy(172.2, y)
-            pdf.cell(15, 7.5, str(section.page_number - offset), align='R')
-            y += 9.9 if len(lines) == 1 else len(lines) * 7.5 + 2.4
+            pdf.cell(15, line_h, str(section.page_number - offset), align='R')
+            y += len(lines) * line_h + TOC_ENTRY_GAP
         pdf.set_xy(pdf.l_margin, pdf.t_margin)
 
     # ------------------------------------------------------------- sections
@@ -1590,8 +1659,29 @@ class NDTReportBuilder:
 
 
 # ---------------------------------------------------------------------------
-# Service
+# Strength basis disclosure
 # ---------------------------------------------------------------------------
+# Every table that prints a strength prints it under one of two bases, and
+# says which. (M) is a compressive strength that arrived with the injected
+# data and is reported exactly as measured; (C) is a figure the project's
+# calibration model produced from the mean pulse velocity. The 15 Oct meeting
+# asked for the two to stay separable for audit, so a reader must never have
+# to guess which one a column carries.
+STRENGTH_SOURCE_TAGS = {'measured': '(M)', 'correlated': '(C)'}
+STRENGTH_SOURCE_LEGEND = (
+    'Strength basis: **(M)** marks a strength that arrived with the injected '
+    'data and is reproduced exactly as measured; **(C)** marks a strength '
+    'derived by the project calibration model from the mean pulse velocity.'
+)
+
+
+def strength_source_tag(element):
+    """``(M)``/``(C)`` for an ``_element_data`` block, ``''`` when unknown."""
+    if not isinstance(element, dict):
+        return ''
+    return STRENGTH_SOURCE_TAGS.get(element.get('strength_source'), '')
+
+
 class NDTReportService:
     """Streams the MTL-style NDT report for a project and archives the exact
     generated bytes for the statutory audit trail (ArchivedReport)."""
@@ -3043,18 +3133,35 @@ class NDTReportService:
                     # curve's confidence margin narrows as sqrt(n) of them.
                     n_points=t.element_point_count() if hasattr(t, 'element_point_count') else len(velocities))
 
-            # Raw measured compressive strength from individual test points (Tier 1)
-            mean_measured_ecs = t.element_mean_measured_strength_mpa() if hasattr(t, 'element_mean_measured_strength_mpa') else None
+            # The MEASURED strengths the element's points arrived with — an
+            # imported COMPRESSIVE STRENGTH column, never the platform's own
+            # conversion. Before this the curve's stored figure was read as
+            # "measured", so a correlated number sat in the measured column,
+            # beat the curve, and could not move when the project was
+            # recalibrated.
+            mean_measured_ecs = (
+                t.element_mean_measured_strength_mpa()
+                if hasattr(t, 'element_mean_measured_strength_mpa') else None)
+            reports_measured = (
+                mean_measured_ecs is not None
+                and (t.prefers_measured_strength()
+                     if hasattr(t, 'prefers_measured_strength') else True))
 
-            # Effective station strength: measured if present (Tier 1), otherwise correlated (Tier 2)
-            if mean_measured_ecs is not None and mean_measured_ecs > 0:
-                mean_ecs = mean_measured_ecs
+            # The element verdict, one convention for the whole platform:
+            # measured as-is when the data carried one, otherwise the curve.
+            if reports_measured:
+                mean_ecs, strength_source = mean_measured_ecs, 'measured'
             else:
                 mean_ecs = mean_correlated_ecs
+                strength_source = ('correlated'
+                                   if mean_correlated_ecs is not None else None)
 
-            # Maintain both measured and correlated strength per reading
+            # Per point: the measured figure and the curve's figure stay in
+            # separate columns, and `ecs_mpa` carries whichever one this report
+            # reports — so the sheet a reader audits shows the same number the
+            # table does, with its twin beside it.
             for r in rows:
-                r['measured_ecs'] = r.get('ecs_mpa')
+                r['measured_ecs'] = r.get('measured_strength_mpa')
                 if r.get('velocity_km_s') is not None and 0 < r['velocity_km_s'] <= 5.0:
                     recomputed_ecs, _ = apply_active_curve(
                         t.project, r['velocity_km_s'],
@@ -3063,10 +3170,12 @@ class NDTReportService:
                         moisture_condition=getattr(t, 'moisture_condition', None)
                     )
                     r['correlated_ecs'] = recomputed_ecs
-                    if r.get('ecs_mpa') is None or r['ecs_mpa'] <= 0:
-                        r['ecs_mpa'] = recomputed_ecs
+                    r['ecs_mpa'] = (r['measured_ecs']
+                                    if (r['measured_ecs'] is not None and reports_measured)
+                                    else recomputed_ecs)
                 else:
                     r['correlated_ecs'] = None
+                    r['ecs_mpa'] = r['measured_ecs'] if reports_measured else None
             # The figure the curve arithmetic itself yields, before any
             # standard-error policy moved it. The worked example prints THIS
             # as the result of "f_cu = m x V + c" so the printed equation is
@@ -3114,6 +3223,11 @@ class NDTReportService:
                 'mean_ecs': mean_ecs,
                 'mean_measured_ecs': mean_measured_ecs,
                 'mean_correlated_ecs': mean_correlated_ecs,
+                # 'measured' or 'correlated' — which of the two figures above
+                # this element is reported by, so every table can label the
+                # strength instead of presenting a derived value as a test
+                # result.
+                'strength_source': strength_source,
                 # The curve's own arithmetic result (pre-policy), so the
                 # worked example can print a true equation.
                 'mean_ecs_unadjusted': mean_ecs_unadjusted,
@@ -3174,10 +3288,21 @@ class NDTReportService:
                 # "f_cu = 0.01 x 4000 - 20 = 19.42", which does not compute
                 # — exactly the hand-recomputability the 7 Sep review asked
                 # every figure to have.
+                #
+                # The basis is the CURVE's own output, never the reported
+                # figure: when the injected data carried a measured strength
+                # the element is reported by that, and driving this equation
+                # from it would print arithmetic the curve never performed.
                 arithmetic_ecs = e0.get('mean_ecs_unadjusted')
                 if arithmetic_ecs is None:
-                    arithmetic_ecs = e0['mean_ecs']
-                if active_curve is not None and active_curve.curve_type == 'linear':
+                    arithmetic_ecs = e0.get('mean_correlated_ecs')
+                if arithmetic_ecs is None:
+                    example += (" The element's reported compressive strength is the "
+                                f"measured mean, {e0['mean_ecs']:.2f} N/mm2; the "
+                                "project's curve could not be evaluated on this "
+                                "element because no usable pulse velocity was "
+                                "recorded for it.")
+                elif active_curve is not None and active_curve.curve_type == 'linear':
                     p = active_curve.formula_params or {}
                     m_val = p.get('m', p.get('a', 8.961))
                     c_val = p.get('c', p.get('b', -7.97))
@@ -3241,9 +3366,27 @@ class NDTReportService:
                         and (disclosure.get('applied')
                              or (disclosure.get('method') or 'none') != 'none')
                         and disclosure.get('detail')):
-                    example += (f" {disclosure['detail']} The element's "
-                                f"reported strength is therefore "
-                                f"{e0['mean_ecs']:.2f} N/mm2.")
+                    curve_ecs = e0.get('mean_correlated_ecs')
+                    if curve_ecs is None:
+                        curve_ecs = e0['mean_ecs']
+                    example += (f" {disclosure['detail']} The curve's element "
+                                f"strength is therefore "
+                                f"{curve_ecs:.2f} N/mm2.")
+                # Which of the two figures this element is reported by. The
+                # 15 Oct meeting asked for measured and correlated strength to
+                # stay visibly apart for audit; a report that prints only one
+                # of them leaves the reader unable to tell which they have.
+                if e0.get('strength_source') == 'measured':
+                    n_pts = len(pts)
+                    example += (f" The element's REPORTED strength is the MEASURED "
+                                f"mean of its {n_pts} point value"
+                                f"{'s' if n_pts != 1 else ''}, "
+                                f"{e0['mean_ecs']:.2f} N/mm2, taken as it arrived "
+                                "with the data and not recalculated"
+                                + (f"; the curve's own figure for the same "
+                                   f"element is {e0['mean_correlated_ecs']:.2f} "
+                                   "N/mm2." if e0.get('mean_correlated_ecs')
+                                   is not None else "."))
         return example
 
     @classmethod
@@ -3436,11 +3579,24 @@ class NDTReportService:
                 f_min = min(strengths) if strengths else 0.0
                 f_max = max(strengths) if strengths else 0.0
                 total_discrete = sum(len(e.get('rows', []) or e.get('readings', [])) for e in element_data)
+                # Name the basis: a range of MEASURED strengths is not the same
+                # claim as a range of curve-derived ones, and several projects
+                # carry both.
+                _measured_cnt = sum(1 for e in element_data
+                                    if e.get('strength_source') == 'measured')
+                if element_data and _measured_cnt == len(element_data):
+                    strength_phrase = (
+                        f'measured compressive strengths supplied with the data '
+                        f'spanning {f_min:.1f}–{f_max:.1f} N/mm² ')
+                else:
+                    strength_phrase = (
+                        f'derived equivalent cube strengths spanning '
+                        f'{f_min:.1f}–{f_max:.1f} N/mm² ')
                 analysis_sentence = (
                     f'and the Non-Destructive test analysis shows that all {len(good_members)} of the '
                     f'{len(element_data)} structural stations tested achieved GOOD quality ratings under BS 1881-203 / '
                     f'BS EN 12504-4, with a batch mean pulse velocity of {v_mean:.1f} m/s (velocity range '
-                    f'{v_min:.2f}–{v_max:.2f} m/s), derived equivalent cube strengths spanning {f_min:.1f}–{f_max:.1f} N/mm² '
+                    f'{v_min:.2f}–{v_max:.2f} m/s), {strength_phrase}'
                     f'(statutory benchmark 25.0 N/mm²), and a point density of {total_discrete} discrete '
                     f'readings across the {len(element_data)} surveyed stations at the time of test.'
                 )
@@ -5238,7 +5394,9 @@ class NDTReportService:
                                     cls._f1(r['transit_us']),
                                     cls._fms(r['velocity_km_s']),
                                     spread_str if i == mid else '-',
-                                    cls._f1(e['mean_ecs']) if i == mid else '-',
+                                    (f"{cls._f1(e['mean_ecs'])} "
+                                     f"{strength_source_tag(e)}".strip()
+                                     if i == mid else '-'),
                                     remark if i == mid else '-',
                                 ])
 
@@ -5259,7 +5417,7 @@ class NDTReportService:
                         ['STRUCTURAL\nELEMENT', 'PATH LENGTH\n(mm)',
                          'TRANSIT TIME\n(µs)', 'PULSE VELOCITY\n(m/s)',
                          'POINT SPREAD\n(%)',
-                         'AVG. STRENGTH\n(N/mm²)',
+                         'AVG. STRENGTH\n(N/mm²)\n(M)/(C)',
                          'REMARKS'],
                         all_floor_rows,
                         [26, 21, 21, 25, 20, 24, 43],
@@ -5267,6 +5425,8 @@ class NDTReportService:
                         font_size=9.5,
                         line_h=5.0
                     )
+                    if any(strength_source_tag(e) for e in floor_elements):
+                        builder.para(STRENGTH_SOURCE_LEGEND, markdown=True)
                     builder.ln_gap(3)
 
 
@@ -5425,6 +5585,13 @@ class NDTReportService:
                 logger.error('Could not load AI analysis record: %s', e)
                 ai_record = None
 
+            # Section 5.3's table prints the correlation rows stored on the
+            # analysis record. Regenerating the narrative below can move it
+            # onto a different record, so the rows are read from whichever
+            # record actually carries them — an archived report's stored
+            # figures are never dropped for want of a newer narrative.
+            corr_record = ai_record
+
             # Synthesis of observations from recorded tests if missing or degenerate
             if not ai_record or not ai_record.observations or len(ai_record.observations) <= 1:
                 p_name_lower = (getattr(project, 'name', '') or '').lower()
@@ -5461,16 +5628,57 @@ class NDTReportService:
                     total_cnt = len(element_data)
                     good_cnt = len(good_members)
                     total_discrete = sum(len(e.get('rows', []) or e.get('readings', [])) for e in element_data)
-                    curve_r2 = getattr(active_curve, 'r2_score', 0.8966) or 0.8966
-                    curve_se = getattr(active_curve, 'standard_error', 0.29) or 0.29
+                    # Only figures the curve actually carries are cited. A
+                    # default R² or standard error printed as if measured would
+                    # be a number nobody computed.
+                    curve_r2 = getattr(active_curve, 'r2_score', None)
+                    curve_se = getattr(active_curve, 'standard_error', None)
+                    if curve_r2 is not None and curve_se is not None:
+                        model_clause = (f"Under the project strength correlation model "
+                                        f"(R² = {curve_r2:.4f}, s = {curve_se:.2f} MPa), ")
+                    elif curve_r2 is not None:
+                        model_clause = (f"Under the project strength correlation model "
+                                        f"(R² = {curve_r2:.4f}), ")
+                    elif active_curve is not None:
+                        model_clause = "Under the project strength correlation model, "
+                    else:
+                        model_clause = "Using the documented default correlation, "
                     p_name_str = project.name or 'Structural Survey Project'
+
+                    # Some or all of the reported strengths may be measured
+                    # values that arrived with the data rather than the curve's
+                    # output; say which, so the range cannot be read as one
+                    # basis when it is two.
+                    measured_cnt = sum(
+                        1 for e in element_data
+                        if e.get('strength_source') == 'measured')
+                    if total_cnt and measured_cnt == total_cnt:
+                        strength_clause = (
+                            "The reported compressive strengths are the MEASURED "
+                            "strengths supplied with the data and are reproduced "
+                            f"exactly as measured, spanning **{f_min:.2f} MPa to "
+                            f"{f_max:.2f} MPa** against the statutory design "
+                            "benchmark of **25.0 MPa**.")
+                    else:
+                        basis_note = ''
+                        if measured_cnt and measured_cnt < total_cnt:
+                            basis_note = (
+                                f" {measured_cnt} of the {total_cnt} elements are "
+                                "reported on their MEASURED strength, as supplied "
+                                "with the data; the rest are derived figures and "
+                                "are marked as such in the tables.")
+                        strength_clause = (
+                            f"{model_clause}derived equivalent cube compressive "
+                            f"strengths (f_cu) span **{f_min:.2f} MPa to "
+                            f"{f_max:.2f} MPa** against the statutory design "
+                            f"benchmark of **25.0 MPa**.{basis_note}")
 
                     stn_labels = [str(e.get('station_label') or e.get('element_name') or f"S{i}") for i, e in enumerate(element_data, 1)]
                     stn_range = f"{stn_labels[0]}–{stn_labels[-1]}" if len(stn_labels) > 1 else (stn_labels[0] if stn_labels else "Survey Stations")
                     asset_type_str = "RCC slab-on-grade laydown area" if is_sog else (getattr(project, 'project_type', None) or "structural frame")
 
                     v3_obs = [
-                        f"**Executive Summary:** An in-situ ultrasonic pulse velocity (**UPV**) investigation was performed across all **{total_cnt} No. RC elements ({stn_range})** of the **'{p_name_str}'** facility ({asset_type_str}). Analysis reveals that **{good_cnt} of {total_cnt} elements ({round(good_cnt*100/total_cnt, 1)}%)** achieved a **'GOOD'** concrete quality rating in accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **{v_min:.2f} m/s to {v_max:.2f} m/s** against an overall batch mean of **{v_mean:.1f} m/s**. Under the project strength correlation model (R² = {curve_r2:.4f}, s = {curve_se:.2f} MPa), derived equivalent cube compressive strengths (f_cu) span **{f_min:.2f} MPa to {f_max:.2f} MPa** against the statutory design benchmark of **25.0 MPa**.",
+                        f"**Executive Summary:** An in-situ ultrasonic pulse velocity (**UPV**) investigation was performed across all **{total_cnt} No. RC elements ({stn_range})** of the **'{p_name_str}'** facility ({asset_type_str}). Analysis reveals that **{good_cnt} of {total_cnt} elements ({round(good_cnt*100/total_cnt, 1)}%)** achieved a **'GOOD'** concrete quality rating in accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **{v_min:.2f} m/s to {v_max:.2f} m/s** against an overall batch mean of **{v_mean:.1f} m/s**. {strength_clause}",
                         f"**Scope & Survey Verification:** Testing comprised **{total_discrete} discrete pulse velocity measurements** across all surveyed structural elements ({stn_range}). Transit times and transmission path lengths were verified per **BS 1881-203** with zero physical dimension anomalies and sound acoustic transmission integrity.",
                         f"**Batch-Level Homogeneity & Acoustic Integrity:** Statistical evaluation across all {total_cnt} tested elements demonstrates coherent structural compaction and acoustic continuity across the surveyed sections.",
                         f"**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, and **LASBCA Regulations**. Structural concrete across tested stations demonstrates sound compressive capacity. **Recommendation:** Formal quality assurance acceptance of verified structural elements, maintaining standard periodic operational monitoring."
@@ -5489,6 +5697,8 @@ class NDTReportService:
                     ai_record.model_provider = 'gemini-flash-latest'
                     ai_record.confidence = 0.95
                     ai_record.save()
+                    if not corr_record or not corr_record.correlations:
+                        corr_record = ai_record
 
             if ai_record and ai_record.observations:
                 builder.pdf.add_page()
@@ -5607,7 +5817,8 @@ class NDTReportService:
                     key = _row_key(floor_val, e['element'])
                     live_by_key.setdefault(key, e)
 
-                corr_list = [m for m in (ai_record.correlations or []) if isinstance(m, dict) and 'mean_ecs_n_mm2' in m]
+                corr_list = [m for m in ((corr_record.correlations if corr_record else None) or [])
+                             if isinstance(m, dict) and 'mean_ecs_n_mm2' in m]
 
                 items_to_render = []
                 seen_keys = set()
@@ -5654,6 +5865,7 @@ class NDTReportService:
                             range_ms = None
 
                         ecs_val = live.get('mean_ecs')
+                        source_tag = strength_source_tag(live)
                         ci = cm.strength_confidence_interval(ecs_val, se_active) if (ecs_val is not None and se_active is not None) else None
                         grade_str = live.get('remark', 'GOOD')
                     else:
@@ -5664,6 +5876,9 @@ class NDTReportService:
                         cov_pct = corr.get('point_spread_pct') * 100.0 if corr.get('point_spread_pct') is not None else None
                         range_ms = None
                         ecs_val = corr.get('mean_ecs_n_mm2')
+                        # The archived AI record does not say which basis its
+                        # strength was computed on, so no tag is claimed for it.
+                        source_tag = ''
                         ci = corr.get('confidence_interval_n_mm2')
                         grade_str = 'GOOD'
 
@@ -5688,6 +5903,8 @@ class NDTReportService:
                             ecs_str = f"{ecs_val:.1f}\n({ci[0]:.1f} - {ci[1]:.1f})"
                         else:
                             ecs_str = f"{ecs_val:.1f}"
+                        if source_tag:
+                            ecs_str += f" {source_tag}"
                     else:
                         ecs_str = 'Unverified'
 
@@ -5710,13 +5927,16 @@ class NDTReportService:
                         builder.pdf.add_page()
                     builder.inner_heading('Table 5.3: Multi-Model AI Ensemble Statistical and Acoustic Integrity Analysis')
                     builder.ruled_table(
-                        ['STRUCTURAL\nELEMENT', 'MEAN VELOCITY\n(m/s)', 'SD / RANGE\n(m/s)', 'CoV\n(%)', 'EST. STRENGTH\nf_cu (N/mm²)', 'QUALITY\nRATING', 'REMARK'],
+                        ['STRUCTURAL\nELEMENT', 'MEAN VELOCITY\n(m/s)', 'SD / RANGE\n(m/s)', 'CoV\n(%)', 'EST. STRENGTH\nf_cu (N/mm²)\n(M)/(C)', 'QUALITY\nRATING', 'REMARK'],
                         table_rows,
                         [22, 22, 22, 16, 22, 18, 58],
                         ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
                         font_size=8.0,
                         line_h=3.8
                     )
+                    if any(strength_source_tag(item['live'])
+                           for item in items_to_render if item.get('live')):
+                        builder.para(STRENGTH_SOURCE_LEGEND, markdown=True)
                 builder.ln_gap(3)
 
         def emit_stat_summary():
@@ -5777,26 +5997,89 @@ class NDTReportService:
                 col_aligns = ['C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C']
 
                 rows = []
+                # This table is the regulatory filing. Nothing in it is
+                # defaulted to a plausible-looking value: a field the engine
+                # did not produce prints '-' rather than an invented rating,
+                # point count or 0.00 N/mm2 strength.
+                live_by_name = {}
+                for e in element_data:
+                    live_by_name.setdefault(
+                        str(e.get('element') or '').strip().lower(), e)
+
+                def _num(*candidates):
+                    for value in candidates:
+                        if value in (None, ''):
+                            continue
+                        try:
+                            return float(value)
+                        except (TypeError, ValueError):
+                            continue
+                    return None
+
+                any_tag = False
                 for row in stat_summary:
                     stn = str(row.get('element_id') or row.get('station') or row.get('element') or '-')
-                    n_val = str(row.get('point_count') or row.get('readings_count') or row.get('n', 3))
-                    v_mean = f"{float(row.get('v_mean') or row.get('velocity_mean_ms') or 0.0):,.0f}"
-                    v_min = f"{float(row.get('v_min') or 0.0):,.0f}"
-                    v_max = f"{float(row.get('v_max') or 0.0):,.0f}"
-                    range_val = f"{float(row.get('range') or 0.0):,.0f}"
-                    sd_val = f"{float(row.get('sd') or row.get('std_dev_ms') or 0.0):.1f}"
-                    cov_val = f"{float(row.get('cov_percent') or 0.0):.2f}%"
-                    unif = str(row.get('uniformity_verdict') or row.get('uniformity') or 'Good')
-                    f_cu = f"{float(row.get('f_cu_mpa') or row.get('est_strength_n_mm2') or 0.0):.2f}"
-                    grade = str(row.get('grade') or 'GOOD').upper()
-                    crit = str(row.get('critical_low_point_location') or 'Point 1')
-                    basis = str(row.get('basis') or 'v_mean')
+                    live = live_by_name.get(stn.strip().lower())
+
+                    n_raw = (row.get('point_count') or row.get('readings_count')
+                             or row.get('n'))
+                    if n_raw is None and live is not None:
+                        n_raw = live.get('n_points')
+                    n_val = str(n_raw) if n_raw is not None else '-'
+
+                    def _fmt(value, spec):
+                        return format(value, spec) if value is not None else '-'
+
+                    v_mean_ms = _num(row.get('v_mean'), row.get('velocity_mean_ms'))
+                    v_min_ms = _num(row.get('v_min'))
+                    v_max_ms = _num(row.get('v_max'))
+                    range_ms = _num(row.get('range'))
+                    sd_ms = _num(row.get('sd'), row.get('std_dev_ms'))
+                    cov = _num(row.get('cov_percent'))
+                    f_cu_mpa = _num(row.get('f_cu_mpa'),
+                                    row.get('est_strength_n_mm2'))
+                    if f_cu_mpa is None and live is not None:
+                        # Same figure the Section 5.1 and 5.3 tables print, so
+                        # one element cannot carry two strengths in one report.
+                        f_cu_mpa = live.get('mean_ecs')
+
+                    tag = strength_source_tag(live) if live is not None else ''
+                    any_tag = any_tag or bool(tag)
+
+                    unif = row.get('uniformity_verdict') or row.get('uniformity')
+                    if not unif and cov is not None:
+                        if cov < 5.0:
+                            unif = 'Excellent Uniformity'
+                        elif cov < 10.0:
+                            unif = 'Good Uniformity'
+                        elif cov < 15.0:
+                            unif = 'Variable / Suspect Uniformity'
+                        else:
+                            unif = 'Highly Variable'
+                    grade = row.get('grade')
+                    if not grade and live is not None:
+                        grade = live.get('remark')
 
                     rows.append([
-                        stn, n_val, v_mean, v_min, v_max, range_val, sd_val, cov_val, unif, f_cu, grade, crit, basis
+                        stn,
+                        n_val,
+                        _fmt(v_mean_ms, ',.0f'),
+                        _fmt(v_min_ms, ',.0f'),
+                        _fmt(v_max_ms, ',.0f'),
+                        _fmt(range_ms, ',.0f'),
+                        _fmt(sd_ms, '.1f'),
+                        (f"{cov:.2f}%" if cov is not None else '-'),
+                        str(unif) if unif else '-',
+                        (f"{f_cu_mpa:.2f} {tag}".strip()
+                         if f_cu_mpa is not None else '-'),
+                        str(grade).upper() if grade else '-',
+                        str(row.get('critical_low_point_location') or '-'),
+                        str(row.get('basis') or '-'),
                     ])
 
                 builder.ruled_table(headers, rows, col_widths, col_aligns, font_size=7.0, line_h=3.4)
+                if any_tag:
+                    builder.para(STRENGTH_SOURCE_LEGEND, markdown=True)
                 builder.ln_gap(3)
             else:
                 builder.para('STATISTICAL SUMMARY (PHASE 10) PENDING — Run AI analysis or verify test data.')

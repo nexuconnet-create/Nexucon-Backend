@@ -11,6 +11,8 @@ Everything here is computed from real recorded readings on a real curve;
 nothing is mocked and no figure is asserted that the maths does not produce.
 """
 
+import re
+
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
@@ -32,6 +34,18 @@ CALIBRATION = [
 
 # The client's own averaging case: 120 mm at 30 / 29 / 33.3 us.
 AVERAGED_TRANSITS = [30.0, 29.0, 33.3]
+
+# The running footer the report prints on every page. pypdf emits it in
+# reading order, which can land it in the middle of a sentence that spans a
+# page break, so it is removed before any phrase is asserted.
+_PAGE_FOOTER = re.compile(r'\b\d+\s+MTL/NDT/\d+\s+\d+\b')
+
+
+def _flat_pdf_text(pdf_bytes):
+    from apps.reports.tests import _pdf_text
+    flat = ' '.join(_pdf_text(pdf_bytes).split())
+    out = ' '.join(_PAGE_FOOTER.sub(' ', flat).split())
+    return out
 
 
 class PointCountTestBase(APITestCase):
@@ -433,8 +447,12 @@ class WorkedExampleStaysHandRecomputableTestCase(PointCountTestBase):
         example, row = self._example(element, curve)
         self.assertIn('Confidence margin applied', example)
         self.assertIn('3 test points averaged', example)
+        # The curve's own figure closes the working; when the element's
+        # REPORTED strength is a measured one, the sentence below says so
+        # separately instead of claiming the curve produced it.
         self.assertIn(
-            f"reported strength is therefore {row['mean_ecs']:.2f} N/mm2",
+            f"The curve's element strength is therefore "
+            f"{row['mean_ecs']:.2f} N/mm2",
             example)
 
     def test_a_curve_with_no_policy_prints_only_the_equation(self):
@@ -442,7 +460,7 @@ class WorkedExampleStaysHandRecomputableTestCase(PointCountTestBase):
         element = self.make_element(AVERAGED_TRANSITS)
         example, row = self._example(element, None)
         self.assertIn('Worked example', example)
-        self.assertNotIn('reported strength is therefore', example)
+        self.assertNotIn("The curve's element strength is therefore", example)
         # Unadjusted equals adjusted when nothing is applied.
         self.assertAlmostEqual(row['mean_ecs_unadjusted'], row['mean_ecs'],
                                places=2)
@@ -465,9 +483,8 @@ class GeneratedPdfTextStaysHandRecomputableTestCase(PointCountTestBase):
 
     def _pdf_flat(self):
         from apps.reports.ndt_reports import NDTReportService
-        from apps.reports.tests import _pdf_text
         pdf = NDTReportService.generate_ndt_report(self.project)
-        return ' '.join(_pdf_text(pdf).split())
+        return _flat_pdf_text(pdf)
 
     def _device(self):
         from apps.digital_eye.models import FieldDevice
@@ -524,7 +541,8 @@ class GeneratedPdfTextStaysHandRecomputableTestCase(PointCountTestBase):
         rows = NDTReportService._element_data([element])
         example = NDTReportService._worked_example(self.project, rows)
         self.assertIn(
-            f"reported strength is therefore {rows[0]['mean_ecs']:.2f} N/mm2",
+            f"The curve's element strength is therefore "
+            f"{rows[0]['mean_ecs']:.2f} N/mm2",
             example)
 
     def test_a_no_policy_project_pdf_carries_no_policy_claim(self):

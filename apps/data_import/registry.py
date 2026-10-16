@@ -181,7 +181,8 @@ UPV_COLUMNS = (
     'STRUCTURAL ELEMENT', 'FLOOR', 'TEST TYPE', 'POINT',
     'PATH LENGTH L (MM)', 'TRANSIT TIME T (US)', 'T UNCRACKED (US)',
     'SURFACE CONDITION', 'TRANSDUCER FREQUENCY (KHZ)', 'TRANSDUCER TYPE',
-    'TEST LOCATION', 'WEATHER CONDITION', 'REBOUND NUMBER', 'NOTES',
+    'TEST LOCATION', 'WEATHER CONDITION', 'REBOUND NUMBER',
+    'COMPRESSIVE STRENGTH (MPA)', 'NOTES',
 )
 UPV_REQUIRED = ('STRUCTURAL ELEMENT', 'TEST TYPE')
 
@@ -201,7 +202,8 @@ UPV_REQUIRED = ('STRUCTURAL ELEMENT', 'TEST TYPE')
 #: one importer that happened to need it first.
 UPV_MEASUREMENT_KEYS = frozenset({
     'point', 'path_length_l_mm', 'transit_time_t_us', 't_uncracked_us',
-    'surface_condition', 'rebound_number', 'notes',
+    'surface_condition', 'rebound_number', 'compressive_strength_mpa',
+    'notes',
 })
 UPV_CONTEXT_KEYS = frozenset({
     'structural_element', 'floor', 'test_type', 'test_location',
@@ -284,6 +286,17 @@ def _build_upv(rows, ctx):
             raise RowError(f'Row {row.row_number}: {error}')
         if rebound is not None:
             reading['rebound_number'] = rebound
+        # A strength that arrived with the data is a MEASURED figure: it goes
+        # into its own field and is reported exactly as supplied, never
+        # recomputed and never overwritten by a recalibration. Left blank, the
+        # point reads on the project's curve instead. Before this column
+        # existed the wizard dropped a supplied strength without saying so.
+        strength, error = _number(data.get('compressive_strength_mpa'),
+                                  'COMPRESSIVE STRENGTH (MPA)')
+        if error:
+            raise RowError(f'Row {row.row_number}: {error}')
+        if strength is not None:
+            reading['measured_strength_mpa'] = strength
         notes = _text(data.get('notes'))
         if notes:
             reading['notes'] = notes

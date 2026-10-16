@@ -207,6 +207,87 @@ def _pdf_response(pdf_bytes, filename):
     return response
 
 
+def _statistical_summary_rows(project, tests):
+    """The platform's statistical-summary records for a project's tests.
+
+    Delegates to ``PUNDITAdapter.build_statistical_summary`` — the same engine
+    the published report's Section 5.5 table uses — so a preview page and the
+    report can never disagree about a mean velocity, a dispersion figure or a
+    derived strength.
+    """
+    from apps.digital_eye.adapters import PUNDITAdapter
+
+    point_spread_data = []
+    for t in tests:
+        readings = [
+            {
+                'transit_time_us': r.get('transit_us'),
+                'path_length_mm': r.get('path_mm'),
+                'velocity_km_s': r.get('velocity_km_s'),
+            }
+            for r in t.reading_rows()
+            if r.get('transit_us') is not None and r.get('path_mm') is not None
+        ]
+        point_spread_data.append({
+            'element': getattr(t, 'structural_element', None) or 'UNSPECIFIED',
+            'floor': getattr(t, 'floor', None),
+            'readings': readings,
+        })
+    return PUNDITAdapter.build_statistical_summary(point_spread_data,
+                                                   project=project)
+
+
+def _compact_stat_row(record):
+    """One preview-table row from a statistical-summary record.
+
+    Every field is read from the record as the engine produced it. A field the
+    engine did not produce stays ``None`` (or is derived from the record's own
+    CoV against the thresholds the report states) rather than being filled with
+    an invented rating, point count or strength.
+    """
+    def _num(*candidates):
+        for value in candidates:
+            if value in (None, ''):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    cov = _num(record.get('cov_percent'), record.get('cov'))
+    uniformity = (record.get('uniformity_verdict')
+                  or record.get('uniformity'))
+    if not uniformity and cov is not None:
+        if cov < 5.0:
+            uniformity = 'Excellent Uniformity'
+        elif cov < 10.0:
+            uniformity = 'Good Uniformity'
+        elif cov < 15.0:
+            uniformity = 'Variable / Suspect Uniformity'
+        else:
+            uniformity = 'Highly Variable'
+
+    return {
+        'station': (record.get('element_id') or record.get('station')
+                    or record.get('element')),
+        'n': (record.get('point_count') or record.get('readings_count')
+              or record.get('n')),
+        'v_mean_ms': _num(record.get('v_mean'), record.get('velocity_mean_ms')),
+        'v_min_ms': _num(record.get('v_min')),
+        'v_max_ms': _num(record.get('v_max')),
+        'range_ms': _num(record.get('range')),
+        'sd_ms': _num(record.get('sd'), record.get('std_dev_ms')),
+        'cov_percent': cov,
+        'uniformity': uniformity,
+        'f_cu_mpa': _num(record.get('f_cu_mpa'),
+                         record.get('est_strength_n_mm2')),
+        'grade': record.get('grade'),
+        'critical_low_point': record.get('critical_low_point_location'),
+        'basis': record.get('basis'),
+    }
+
+
 class ProjectIntelligenceReportView(APIView):
     """
     GET /api/v1/reports/projects/{project_id}/intelligence-report/
@@ -1484,49 +1565,17 @@ class NDTReportPageQAView(APIView):
             )
         }
 
-        compact_summary = []
-        for s in stat_summary:
-            compact_summary.append({
-                'station': s.get('element_id') or s.get('station'),
-                'n': s.get('point_count') or s.get('readings_count') or 3,
-                'v_mean_ms': round(float(s.get('v_mean') or s.get('velocity_mean_ms') or 0)),
-                'v_min_ms': round(float(s.get('v_min') or 0)),
-                'v_max_ms': round(float(s.get('v_max') or 0)),
-                'range_ms': round(float(s.get('range') or 0)),
-                'sd_ms': round(float(s.get('sd') or s.get('std_dev_ms') or 0), 1),
-                'cov_percent': round(float(s.get('cov_percent') or 0), 2),
-                'uniformity': s.get('uniformity_verdict') or s.get('uniformity') or 'Excellent Uniformity',
-                'f_cu_mpa': round(float(s.get('f_cu_mpa') or s.get('est_strength_n_mm2') or 0), 2),
-                'grade': s.get('grade') or 'GOOD',
-                'critical_low_point': s.get('critical_low_point_location') or 'Point 1',
-                'basis': s.get('basis') or 'v_mean'
-            })
+        compact_summary = [_compact_stat_row(s) for s in stat_summary]
 
         if not compact_summary and tests:
-            for idx, t in enumerate(tests, start=1):
-                rows = t.reading_rows()
-                vels = [round(r['velocity_km_s'] * 1000.0) for r in rows if r.get('velocity_km_s') is not None]
-                if not vels and t.pulse_time_us and t.path_length_mm:
-                    computed_v = round((t.path_length_mm / t.pulse_time_us) * 1000000.0)
-                    vels = [computed_v]
-                v_mean = round(sum(vels) / len(vels)) if vels else 4400
-                v_min = min(vels) if vels else v_mean
-                v_max = max(vels) if vels else v_mean
-                compact_summary.append({
-                    'station': getattr(t, 'structural_element', None) or f'S{idx}',
-                    'n': len(vels) or 3,
-                    'v_mean_ms': v_mean,
-                    'v_min_ms': v_min,
-                    'v_max_ms': v_max,
-                    'range_ms': v_max - v_min,
-                    'sd_ms': 50.0,
-                    'cov_percent': 1.15,
-                    'uniformity': 'Excellent Uniformity',
-                    'f_cu_mpa': getattr(t, 'estimated_compressive_strength_mpa', None) or 31.5,
-                    'grade': 'GOOD',
-                    'critical_low_point': 'Point 1',
-                    'basis': 'v_mean'
-                })
+            # The same engine the published report uses for its Section 5.5
+            # table, so this preview cannot show a figure the report does not.
+            # Nothing is defaulted to a plausible-looking value: a station the
+            # engine could not characterise is left out rather than described
+            # with an invented 4400 m/s mean, a 50.0 m/s standard deviation, an
+            # "Excellent Uniformity" verdict and a 31.5 N/mm2 strength.
+            for s in _statistical_summary_rows(project, tests):
+                compact_summary.append(_compact_stat_row(s))
 
         sections = bundle.get('sections', [])
         active_section = None

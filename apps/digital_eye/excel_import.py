@@ -283,7 +283,11 @@ def parse_readings_workbook(file_obj):
             else:
                 reading['surface_condition'] = row['surface_condition']
             if row.get('compressive_strength_mpa') is not None:
-                reading['ecs_mpa'] = row['compressive_strength_mpa']
+                # A strength that arrived WITH the data is a MEASURED value.
+                # It goes into its own field, never into ecs_mpa (the
+                # platform's curve-derived figure), so the two are never
+                # confused downstream and recalibration cannot overwrite it.
+                reading['measured_strength_mpa'] = row['compressive_strength_mpa']
             if row['notes']:
                 reading['notes'] = row['notes']
             readings.append(reading)
@@ -416,11 +420,19 @@ def build_template_bytes(sample_elements=None):
         ('TRANSDUCER FREQUENCY (KHZ) / TRANSDUCER TYPE — optional; DIRECT is', False),
         ('   assumed when the type is blank.', False),
         ('TEST LOCATION / WEATHER CONDITION / NOTES — optional context.', False),
+        ('COMPRESSIVE STRENGTH (MPA) — optional, and only when the strength was', False),
+        ('   MEASURED (a laboratory or core result that came with the data). It is', False),
+        ('   kept as a measured figure and reported exactly as supplied — the', False),
+        ('   platform never recomputes or overwrites it. Leave it blank to have the', False),
+        ('   strength derived from pulse velocity through the project\'s active', False),
+        ('   calibration model instead.', False),
         ('', False),
         ('The import is all-or-nothing: if any row is rejected the file is rejected', False),
         ('with the row numbers and reasons, and nothing is written to the registry.', False),
-        ('Velocity, quality grade, compressive strength and crack depth are always', False),
-        ('computed by the platform — never typed into the sheet.', False),
+        ('Velocity, quality grade, crack depth and the CORRELATED compressive', False),
+        ('strength (the figure the calibration model produces) are always computed', False),
+        ('by the platform — never typed into the sheet. The only strength column', False),
+        ('the sheet accepts is a measured one.', False),
     ]
     for row_number, (text, bold) in enumerate(lines, start=1):
         cell = instructions.cell(row=row_number, column=1, value=text)
