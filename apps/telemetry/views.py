@@ -691,10 +691,10 @@ class TelemetrySessionDetailView(APIView):
         new_file = request.FILES.get('file')
         re_imported = False
         if new_file:
-            from apps.telemetry.export_import import SessionFromFileService
+            from apps.telemetry.export_import import SessionFromFileService, _BuildContext
             from apps.data_import.readers import detect_import_type, read_rows
             from apps.data_import.registry import REGISTRY, group_upv_rows, UPV_CONTEXT_KEYS, RowError
-            from apps.telemetry.services import TelemetryService, _BuildContext
+            from apps.telemetry.services import TelemetryService
             from apps.evidence.files import safe_file_name
 
             content = SessionFromFileService._read_upload(new_file)
@@ -767,7 +767,7 @@ class TelemetrySessionDetailView(APIView):
                 session.source_file_name = name
                 session.source_file_sha256 = digest
                 session.source_file_storage_name = stored_name
-                session.status = TelemetrySession.STATUS_ENDED
+                session.status = TelemetrySession.STATUS_OPEN
                 session.sync_status = TelemetrySession.SYNC_PENDING
                 session.sync_error = ''
                 session.save()
@@ -775,6 +775,10 @@ class TelemetrySessionDetailView(APIView):
                 for index, packet in enumerate(packets, start=1):
                     TelemetryService.append_packet(session, packet, sequence=index)
 
+                from django.utils import timezone
+                session.status = TelemetrySession.STATUS_ENDED
+                session.session_end = timezone.now()
+                session.save(update_fields=['status', 'session_end', 'updated_at'])
                 session.refresh_from_db()
 
                 if was_synced:
