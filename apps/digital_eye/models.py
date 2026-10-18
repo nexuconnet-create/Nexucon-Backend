@@ -784,8 +784,31 @@ class PUNDITTest(models.Model):
         ]
         return round(sum(valid_measured) / len(valid_measured), 2) if valid_measured else None
 
+    def is_calibrated(self):
+        """
+        True if this test's correlation model has been calibrated by the government:
+        - via its scan batch status ('CALIBRATED' or 'ANALYSIS_COMPLETE')
+        - or via an active CalibrationProfile for its batch or project
+        """
+        if self.batch_id:
+            batch = self.batch
+            if batch.status in ('CALIBRATED', 'ANALYSIS_COMPLETE'):
+                return True
+            if hasattr(batch, 'calibration_profiles') and batch.calibration_profiles.filter(is_active=True).exists():
+                return True
+            return False
+        if self.project_id:
+            from .models import CalibrationProfile
+            if CalibrationProfile.objects.filter(project_id=self.project_id, is_active=True).exists():
+                return True
+        return False
+
     def element_correlated_strength_mpa(self):
-        """Strength derived from the active calibration curve and station mean velocity."""
+        """Strength derived from the active calibration curve and station mean velocity.
+        Only computed when the model has been calibrated by the government.
+        """
+        if not self.is_calibrated():
+            return None
         from apps.digital_eye.strength_curves import apply_active_curve
         mean_v = self.element_mean_velocity_km_s()
         if mean_v is None or not (1.0 <= mean_v <= 6.0):
@@ -801,21 +824,21 @@ class PUNDITTest(models.Model):
 
     def prefers_measured_strength(self):
         """Whether this element's figures report the measured strength when the
-        data carried one. The project's curve setting decides; a project with
-        no setting recorded keeps the default (measured wins)."""
+        data carried one. If the government has calibrated the model, the calibrated
+        formula governs across all government views."""
+        if self.is_calibrated():
+            return False
         setting = getattr(self.project, 'curve_setting', None)
         if setting is None:
             return True
         return bool(setting.prefer_measured_strength)
 
     def element_strength_source(self):
-        """'measured' when this element's points carried measured strengths,
-        'correlated' when its strength comes from the calibration curve, None
-        when neither exists yet.
-
-        One place decides it, so the report, the registry, the results sheet
-        and the map popup all label the same figure the same way.
+        """'correlated' when calibrated, 'measured' when this element's points
+        carried measured strengths and not calibrated, None when neither exists yet.
         """
+        if self.is_calibrated() and self.element_correlated_strength_mpa() is not None:
+            return 'correlated'
         if self.prefers_measured_strength() \
                 and self.element_mean_measured_strength_mpa() is not None:
             return 'measured'
@@ -826,22 +849,22 @@ class PUNDITTest(models.Model):
     def element_representative_strength(self):
         """The (value, source) an element is reported by.
 
-        Two-tier, in this order:
-
-        1. ``measured`` — the mean of the measured strengths supplied with the
-           element's points, displayed as-is with no recalculation. Data that
-           arrives already carrying a compressive strength is not re-derived.
-        2. ``correlated`` — the project's active curve applied to the element's
-           mean pulse velocity. Live: re-calibrating the project moves this
-           figure, because nothing stale is stored in its path.
-
-        Returns ``(None, None)`` when the element has neither, so callers print
-        an honest blank instead of a number nobody measured or derived.
+        When the government executes calibration, the active calibrated mathematical
+        curve takes absolute precedence. Pre-calibration raw scan file values are only
+        used as fallback prior to government calibration.
         """
+        if self.is_calibrated():
+            correlated = self.element_correlated_strength_mpa()
+            if correlated is not None:
+                return correlated, 'correlated'
+            if self.estimated_compressive_strength_mpa is not None and self.estimated_compressive_strength_mpa > 0:
+                return self.estimated_compressive_strength_mpa, 'correlated'
+
         if self.prefers_measured_strength():
             measured = self.element_mean_measured_strength_mpa()
             if measured is not None:
                 return measured, 'measured'
+
         correlated = self.element_correlated_strength_mpa()
         if correlated is not None:
             return correlated, 'correlated'
@@ -923,7 +946,7 @@ class PUNDITTest(models.Model):
         # 1. When the scan data carried measured strength and the project prefers
         #    measured strength (default True), the element reports the direct arithmetic
         #    mean of the raw readings ("Without Calibration").
-        # 2. Otherwise, the project's active curve is applied to the element's mean velocity.
+        # 2. Otherwise, the project's active curve is applied to the element's mean velocity ONLY if calibrated by government.
         if self.prefers_measured_strength():
             measured = self.element_mean_measured_strength_mpa()
             if measured is not None:
@@ -931,7 +954,7 @@ class PUNDITTest(models.Model):
         elif self.element_correlated_strength_mpa() is not None:
             self.estimated_compressive_strength_mpa = self.element_correlated_strength_mpa()
 
-        if self.estimated_compressive_strength_mpa is None and mean_v is not None:
+        if self.estimated_compressive_strength_mpa is None and mean_v is not None and self.is_calibrated():
             from .strength_curves import apply_active_curve
             self.estimated_compressive_strength_mpa, snapshot = apply_active_curve(
                 self.project, mean_v,
@@ -942,6 +965,8 @@ class PUNDITTest(models.Model):
                 n_points=len(point_velocities))
             if not isinstance(self.strength_curve_snapshot, dict):
                 self.strength_curve_snapshot = snapshot
+        elif not self.is_calibrated() and self.element_mean_measured_strength_mpa() is None:
+            self.estimated_compressive_strength_mpa = None
 
         # Standard error: prefer the provenance snapshot of the curve that
         # produced this value; fall back to the project's active curve

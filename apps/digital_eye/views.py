@@ -3328,6 +3328,7 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
         )
         setting, _ = ProjectCurveSetting.objects.get_or_create(project=batch.project)
         setting.active_curve = strength_curve
+        setting.prefer_measured_strength = False
         setting.updated_by = request.user if request.user.is_authenticated else None
         setting.save()
 
@@ -3352,19 +3353,13 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
                                 r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
                                 r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
                 v_mean = t.element_mean_velocity_km_s()
-                # Two-tier element verdict, the same rule the report and the
-                # serializer use: a MEASURED strength that arrived with the
-                # data is reported as-is and never recalculated; otherwise the
-                # profile curve this run applies answers, from the element MEAN
-                # velocity — the basis the standard-error margin is computed
-                # on. The run's profile is used rather than the project's
-                # stored curve because applying that profile is what this run
-                # is for.
-                mean_ecs = (t.element_mean_measured_strength_mpa()
-                            if t.prefers_measured_strength() else None)
-                if mean_ecs is None and v_mean is not None:
+                # On calibration: calibrated mathematical model answers from element MEAN velocity
+                mean_ecs = None
+                if v_mean is not None:
                     mean_ecs = PUNDITAdapter.compute_profile_ecs(
                         v_mean, curve_profile, rebound_number=t.rebound_number)
+                if mean_ecs is None:
+                    mean_ecs = t.element_mean_measured_strength_mpa()
                 if v_mean is not None:
                     t.velocity_km_s = v_mean
                     t.pulse_velocity_ms = round(v_mean * 1000.0, 1)

@@ -421,19 +421,25 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     def get_estimated_compressive_strength_mpa(self, obj):
         """
-        Element compressive strength on the same two-tier basis the report
-        uses: the MEASURED strength when the data carried one, otherwise the
-        project's active curve applied to the element mean velocity.
-
-        Computed from the curve's CURRENT state rather than read back from the
-        stored column, so the registry, the report, the results sheet and the
-        map cannot drift apart after a recalibration. The stored figure is the
-        fallback only when nothing can produce a value now (legacy rows).
+        Element compressive strength:
+        When calibrated by the government, the calibrated model formula governs
+        and is returned live across all government views.
+        When uncalibrated, returns raw measured strength only if present, or
+        None so the UI renders an honest blank/dash.
         """
-        value, _source = obj.element_representative_strength()
-        if value is not None:
-            return value
-        return obj.estimated_compressive_strength_mpa
+        if obj.is_calibrated():
+            correlated = obj.element_correlated_strength_mpa()
+            if correlated is not None:
+                return correlated
+            value, _source = obj.element_representative_strength()
+            if value is not None:
+                return value
+            if obj.estimated_compressive_strength_mpa is not None and obj.estimated_compressive_strength_mpa > 0:
+                return obj.estimated_compressive_strength_mpa
+        measured = obj.element_mean_measured_strength_mpa()
+        if measured is not None and obj.prefers_measured_strength():
+            return measured
+        return None
 
     def get_measured_compressive_strength_mpa(self, obj):
         """The element's MEASURED strength — the mean of the strengths its
@@ -443,7 +449,9 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     def get_correlated_compressive_strength_mpa(self, obj):
         """The element's curve-derived strength for the current calibration."""
-        return obj.element_correlated_strength_mpa()
+        if obj.is_calibrated():
+            return obj.element_correlated_strength_mpa()
+        return None
 
     def get_strength_source(self, obj):
         """'measured' or 'correlated' — which of the two figures above the
@@ -451,10 +459,14 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         presenting a derived value as a test result."""
         return obj.element_strength_source()
 
+    def get_is_calibrated(self, obj):
+        return obj.is_calibrated()
+
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
     measured_compressive_strength_mpa = serializers.SerializerMethodField()
     correlated_compressive_strength_mpa = serializers.SerializerMethodField()
     strength_source = serializers.SerializerMethodField()
+    is_calibrated = serializers.SerializerMethodField()
 
     def get_file_count(self, obj):
         return obj.files.count()
@@ -476,7 +488,7 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
             'measured_compressive_strength_mpa', 'correlated_compressive_strength_mpa',
-            'strength_source',
+            'strength_source', 'is_calibrated',
             'strength_curve_snapshot',
             'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
             'ai_data_quality', 'ai_reasoning_traces',
@@ -748,9 +760,43 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
 class PunditTestSerializer(serializers.ModelSerializer):
     file_count = serializers.SerializerMethodField()
+    estimated_compressive_strength_mpa = serializers.SerializerMethodField()
+    measured_compressive_strength_mpa = serializers.SerializerMethodField()
+    correlated_compressive_strength_mpa = serializers.SerializerMethodField()
+    strength_source = serializers.SerializerMethodField()
+    is_calibrated = serializers.SerializerMethodField()
 
     def get_file_count(self, obj):
         return obj.files.count()
+
+    def get_estimated_compressive_strength_mpa(self, obj):
+        if obj.is_calibrated():
+            correlated = obj.element_correlated_strength_mpa()
+            if correlated is not None:
+                return correlated
+            value, _source = obj.element_representative_strength()
+            if value is not None:
+                return value
+            if obj.estimated_compressive_strength_mpa is not None and obj.estimated_compressive_strength_mpa > 0:
+                return obj.estimated_compressive_strength_mpa
+        measured = obj.element_mean_measured_strength_mpa()
+        if measured is not None and obj.prefers_measured_strength():
+            return measured
+        return None
+
+    def get_measured_compressive_strength_mpa(self, obj):
+        return obj.element_mean_measured_strength_mpa()
+
+    def get_correlated_compressive_strength_mpa(self, obj):
+        if obj.is_calibrated():
+            return obj.element_correlated_strength_mpa()
+        return None
+
+    def get_strength_source(self, obj):
+        return obj.element_strength_source()
+
+    def get_is_calibrated(self, obj):
+        return obj.is_calibrated()
 
     class Meta:
         model = PUNDITTest

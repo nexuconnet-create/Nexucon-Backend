@@ -1381,16 +1381,27 @@ class PUNDITAdapter:
                     'formula': formula_display(curve_profile.get('curve_type', 'exponential'), curve_profile.get('params', {})),
                     'provenance_source': f"Calibrated {curve_profile.get('curve_type', 'exponential')} model",
                 }
-            elif test.estimated_compressive_strength_mpa is not None and test.estimated_compressive_strength_mpa > 0:
-                mean_ecs = test.estimated_compressive_strength_mpa
-                ecs_snapshot = test.strength_curve_snapshot
-            elif velocity is not None:
-                mean_ecs, ecs_snapshot = _ecs_with_provenance(
-                    velocity, project=project,
-                    rebound_number=test.rebound_number,
-                    temperature_c=test.surface_temperature_c,
-                    moisture_condition=getattr(test, 'moisture_condition', None),
-                    n_points=max(1, len(point_velocities)))
+            elif test.is_calibrated():
+                correlated = test.element_correlated_strength_mpa()
+                if correlated is not None:
+                    mean_ecs = correlated
+                    ecs_snapshot = test.strength_curve_snapshot or {'provenance_source': 'Calibrated correlation model'}
+                elif test.estimated_compressive_strength_mpa is not None and test.estimated_compressive_strength_mpa > 0:
+                    mean_ecs = test.estimated_compressive_strength_mpa
+                    ecs_snapshot = test.strength_curve_snapshot
+                elif velocity is not None:
+                    mean_ecs, ecs_snapshot = _ecs_with_provenance(
+                        velocity, project=project,
+                        rebound_number=test.rebound_number,
+                        temperature_c=test.surface_temperature_c,
+                        moisture_condition=getattr(test, 'moisture_condition', None),
+                        n_points=max(1, len(point_velocities)))
+            elif test.element_mean_measured_strength_mpa() is not None and test.prefers_measured_strength():
+                mean_ecs = test.element_mean_measured_strength_mpa()
+                ecs_snapshot = {'provenance_source': 'Measured laboratory test'}
+            else:
+                mean_ecs = None
+                ecs_snapshot = None
 
             cs_str = f", compressive strength {mean_ecs:.2f} MPa" if mean_ecs is not None else ""
             steps.append(
