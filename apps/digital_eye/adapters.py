@@ -1283,8 +1283,21 @@ class PUNDITAdapter:
         if batch is not None:
             queryset = queryset.filter(batch=batch)
 
+        # Deduplicate tests by (floor, structural_element) so multiple scan batch imports collapse to unique elements
+        dedup_tests = {}
+        for t in list(queryset):
+            key = ((t.floor or '').strip().lower(), (t.structural_element or t.structural_element_name or '').strip().upper())
+            if key not in dedup_tests:
+                dedup_tests[key] = t
+            else:
+                existing = dedup_tests[key]
+                t_score = (t.readings.count() if hasattr(t, 'readings') else 0) + (10 if (t.estimated_compressive_strength_mpa or 0) > 0 else 0)
+                ex_score = (existing.readings.count() if hasattr(existing, 'readings') else 0) + (10 if (existing.estimated_compressive_strength_mpa or 0) > 0 else 0)
+                if t_score >= ex_score:
+                    dedup_tests[key] = t
+
         tests = sorted(
-            list(queryset),
+            list(dedup_tests.values()),
             key=lambda t: (_natural_sort_key(t.floor or ''), _natural_sort_key(t.structural_element or t.structural_element_name or ''))
         )
 
@@ -1325,12 +1338,7 @@ class PUNDITAdapter:
             risk_level, risk_score = PUNDIT_GRADE_RISK.get(grade, (None, None))
             if risk_level and rank.get(risk_level, 0) > rank.get(worst[0], 0):
                 worst = (risk_level, risk_score or 0.0)
-            steps.append(
-                f"{test.structural_element or 'element'}"
-                + (f" ({test.floor})" if test.floor else '')
-                + (f": mean velocity {velocity * 1000:.0f} m/s, grade '{grade}'."
-                   if velocity is not None else ": no computable velocity.")
-            )
+
             point_velocities = [r['velocity_km_s'] for r in rows
                                 if r['velocity_km_s'] is not None]
             spread_pct = None
@@ -1383,6 +1391,15 @@ class PUNDITAdapter:
                     temperature_c=test.surface_temperature_c,
                     moisture_condition=getattr(test, 'moisture_condition', None),
                     n_points=max(1, len(point_velocities)))
+
+            cs_str = f", compressive strength {mean_ecs:.2f} MPa" if mean_ecs is not None else ""
+            steps.append(
+                f"{test.structural_element or 'element'}"
+                + (f" ({test.floor})" if test.floor else '')
+                + (f": mean velocity {velocity * 1000:.0f} m/s{cs_str}, grade '{grade}'."
+                   if velocity is not None else ": no computable velocity.")
+            )
+
             mtype = ('RCC slab-on-grade laydown area panel'
                      if ('laydown' in (project.name or '').lower()
                          or 'slab' in (test.test_location or '').lower()
