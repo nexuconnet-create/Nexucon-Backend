@@ -792,11 +792,10 @@ class PUNDITTest(models.Model):
         """
         if self.batch_id:
             batch = self.batch
-            if batch.status in ('CALIBRATED', 'ANALYSIS_COMPLETE'):
+            if batch and batch.status in ('CALIBRATED', 'ANALYSIS_COMPLETE'):
                 return True
-            if hasattr(batch, 'calibration_profiles') and batch.calibration_profiles.filter(is_active=True).exists():
+            if batch and hasattr(batch, 'calibration_profiles') and batch.calibration_profiles.filter(is_active=True).exists():
                 return True
-            return False
         if self.project_id:
             from .models import CalibrationProfile
             if CalibrationProfile.objects.filter(project_id=self.project_id, is_active=True).exists():

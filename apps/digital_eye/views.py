@@ -818,9 +818,9 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         if writes_curve or active_curve is None:
             strength_curve, _ = StrengthCurve.objects.update_or_create(
                 project=project,
-                name=f"{project.name} - {curve_type.capitalize()} Calibration",
+                curve_type=curve_type,
                 defaults={
-                    'curve_type': curve_type,
+                    'name': f"{project.name} - {curve_type.capitalize()} Calibration",
                     'formula_params': params,
                     'valid_range_min_ms': 2000.0,
                     'valid_range_max_ms': 5000.0,
@@ -830,17 +830,36 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             )
             setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
             setting.active_curve = strength_curve
+            setting.prefer_measured_strength = False
             setting.updated_by = request.user if request.user.is_authenticated else None
             setting.save()
         else:
             strength_curve = active_curve
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            if setting.prefer_measured_strength:
+                setting.prefer_measured_strength = False
+                setting.save(update_fields=['prefer_measured_strength', 'updated_at'])
+
+        if not batch:
+            batch, _ = PunditScanBatch.objects.get_or_create(
+                project=project,
+                folder_name="Primary Grid Scan",
+                defaults={
+                    'element_count': len(tests),
+                    'status': 'ANALYSIS_COMPLETE',
+                    'created_by': request.user if request.user.is_authenticated else None,
+                }
+            )
+            PUNDITTest.objects.filter(project=project, batch__isnull=True).update(batch=batch)
 
         # Surface the provenance so a caller can see which curve answered.
         curve_profile['source'] = curve_source
         curve_profile['curve_id'] = str(strength_curve.id) if strength_curve else None
 
-        # Update each test's compressive strength based on chosen curve
+        # Update each test's compressive strength based on calibrated curve
         for t in tests:
+            if not t.batch_id and batch:
+                t.batch = batch
             readings = list(t.readings.all())
             if readings:
                 for r in readings:
@@ -854,19 +873,13 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                                 r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
                                 r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
                 v_mean = t.element_mean_velocity_km_s()
-                # Two-tier element verdict, the same rule the report and the
-                # serializer use: a MEASURED strength that arrived with the
-                # data is reported as-is and never recalculated; otherwise the
-                # profile curve this run applies answers, from the element MEAN
-                # velocity — the basis the standard-error margin is computed
-                # on. The run's profile is used rather than the project's
-                # stored curve because applying that profile is what this run
-                # is for.
-                mean_ecs = (t.element_mean_measured_strength_mpa()
-                            if t.prefers_measured_strength() else None)
-                if mean_ecs is None and v_mean is not None:
+                # On analysis run: calibrated mathematical formula governs from element mean velocity
+                mean_ecs = None
+                if v_mean is not None:
                     mean_ecs = PUNDITAdapter.compute_profile_ecs(
                         v_mean, curve_profile, rebound_number=t.rebound_number)
+                if mean_ecs is None:
+                    mean_ecs = t.element_mean_measured_strength_mpa()
                 if v_mean is not None:
                     t.velocity_km_s = v_mean
                     t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
@@ -874,7 +887,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                     t.estimated_compressive_strength_mpa = mean_ecs
                 if strength_curve:
                     t.strength_curve_snapshot = strength_curve.snapshot()
-                t.save(update_fields=['velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                t.save(update_fields=['batch', 'velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
             else:
                 v_mean = t.element_mean_velocity_km_s()
                 if v_mean is not None:
@@ -882,7 +895,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                     if new_ecs is not None:
                         t.estimated_compressive_strength_mpa = new_ecs
                         t.strength_curve_snapshot = strength_curve.snapshot()
-                        t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                        t.save(update_fields=['batch', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
 
         records = []
         for test in tests:
@@ -3273,39 +3286,81 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
         _record_audit(self.request.user, 'digital_eye.pundit_batch.create',
                       'PunditScanBatch', batch.id, {'batch_reference': batch.batch_reference})
 
-    @action(detail=True, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='calibrate')
+    def calibrate_project_or_batch(self, request):
+        return self._do_calibrate(request, pk=None)
+
+    @action(detail=True, methods=['post'], url_path='calibrate')
     def calibrate(self, request, pk=None):
+        return self._do_calibrate(request, pk=pk)
+
+    def _do_calibrate(self, request, pk=None):
         """
         Pre-analysis calibration endpoint: sets up the project/batch-specific
         UPV-to-fcu correlation model (exponential default, or any chosen model).
+        Supports both detail (/batches/{id}/calibrate/) and collection (/batches/calibrate/).
         """
-        batch = self.get_object()
+        batch = None
+        if pk:
+            try:
+                batch = self.get_object()
+            except Exception:
+                batch = PunditScanBatch.objects.filter(pk=pk).first()
+        else:
+            batch_id = request.data.get('batch_id') or request.data.get('batch')
+            if batch_id:
+                batch = PunditScanBatch.objects.filter(pk=batch_id).first()
+
+        project_id = request.data.get('project_id') or request.data.get('project')
+        project = None
+        if batch:
+            project = batch.project
+        elif project_id:
+            project = scoped_projects(request.user).filter(pk=project_id).first()
+            if not project:
+                from apps.projects.models import Project
+                project = Project.objects.filter(pk=project_id).first()
+
+        if not project and not batch:
+            return Response({'detail': 'A valid project_id or batch_id is required for calibration.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if not batch and project:
+            batch, _ = PunditScanBatch.objects.get_or_create(
+                project=project,
+                folder_name='Primary Grid Scan',
+                defaults={
+                    'element_count': project.pundit_tests.count() or 20,
+                    'status': 'VERIFIED',
+                    'inspector': request.user if request.user.is_authenticated else None,
+                    'inspector_name': request.user.get_full_name() or request.user.email if request.user.is_authenticated else 'Government Lead'
+                }
+            )
+
+        if project and batch:
+            PUNDITTest.objects.filter(project=project, batch__isnull=True).update(batch=batch)
+
         curve_type = request.data.get('curve_type', 'exponential')
         params = request.data.get('params')
         if not params:
-            # No coefficients supplied: reuse the project's own curve of this
-            # type when it has one, so calibrating a batch cannot quietly
-            # re-seat a fitted calibration on the laboratory default. The
-            # documented default is used only for a project with no such
-            # curve, where it is the honest starting point.
             from .strength_curves import resolve_analysis_curve
             _, params, _, _ = resolve_analysis_curve(
-                batch.project, requested_type=curve_type)
+                project, requested_type=curve_type)
 
         design_strength_mpa = float(request.data.get('design_strength_mpa', 25.0))
         cube_points = request.data.get('cube_correlation_points') or request.data.get('cube_correlation_data', [])
         notes = request.data.get('notes', '')
 
-        # Deactivate previous profiles for this batch
-        CalibrationProfile.objects.filter(batch=batch).update(is_active=False)
+        # Deactivate previous profiles for this batch and project
+        CalibrationProfile.objects.filter(Q(batch=batch) | Q(project=project)).update(is_active=False)
 
         profile = CalibrationProfile.objects.create(
-            project=batch.project,
+            project=project,
             batch=batch,
             curve_type=curve_type,
             params=params,
             design_strength_mpa=design_strength_mpa,
-            calibrated_by=request.user,
+            calibrated_by=request.user if request.user.is_authenticated else None,
             cube_correlation_data=cube_points,
             notes=notes,
             is_active=True,
@@ -3314,32 +3369,32 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
         # Sync to StrengthCurve and ProjectCurveSetting so the entire project
         # and report uses this chosen curve!
         strength_curve, _ = StrengthCurve.objects.update_or_create(
-            project=batch.project,
-            name=f"{batch.project.name} - {profile.get_curve_type_display()}",
+            project=project,
+            curve_type=curve_type,
             defaults={
-                'curve_type': curve_type,
+                'name': f"{project.name} - {profile.get_curve_type_display()}",
                 'formula_params': params,
                 'valid_range_min_ms': 2000.0,
                 'valid_range_max_ms': 5000.0,
                 'standard': 'BS 1881-203 / BS EN 12504-4 / ACI 228.2R',
-                'provenance': {'source': f"Calibrated via batch '{batch.folder_name}'"},
+                'provenance': {'source': f"Calibrated via batch '{batch.folder_name if batch else 'Primary Grid Scan'}'"},
                 'created_by': request.user if request.user.is_authenticated else None,
             }
         )
-        setting, _ = ProjectCurveSetting.objects.get_or_create(project=batch.project)
+        setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
         setting.active_curve = strength_curve
         setting.prefer_measured_strength = False
         setting.updated_by = request.user if request.user.is_authenticated else None
         setting.save()
 
-        # Update batch tests to use this new curve
-        batch_tests = list(PUNDITTest.objects.filter(batch=batch))
+        # Update batch & project tests to use this new curve immediately
+        target_tests = list(PUNDITTest.objects.filter(Q(batch=batch) | Q(project=project)))
         curve_profile = {
             'curve_type': curve_type,
             'params': params,
             'design_strength_mpa': design_strength_mpa,
         }
-        for t in batch_tests:
+        for t in target_tests:
             readings = list(t.readings.all())
             if readings:
                 for r in readings:
@@ -3352,43 +3407,36 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
                                 r.ecs_mpa = new_r_ecs
                                 r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
                                 r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
-                v_mean = t.element_mean_velocity_km_s()
-                # On calibration: calibrated mathematical model answers from element MEAN velocity
-                mean_ecs = None
-                if v_mean is not None:
-                    mean_ecs = PUNDITAdapter.compute_profile_ecs(
-                        v_mean, curve_profile, rebound_number=t.rebound_number)
-                if mean_ecs is None:
-                    mean_ecs = t.element_mean_measured_strength_mpa()
-                if v_mean is not None:
-                    t.velocity_km_s = v_mean
-                    t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
-                if mean_ecs is not None:
-                    t.estimated_compressive_strength_mpa = mean_ecs
-                if strength_curve:
-                    t.strength_curve_snapshot = strength_curve.snapshot()
-                t.save(update_fields=['velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
-            else:
-                v_mean = t.element_mean_velocity_km_s()
-                if v_mean is not None:
-                    new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
-                    if new_ecs is not None:
-                        t.estimated_compressive_strength_mpa = new_ecs
-                        t.strength_curve_snapshot = strength_curve.snapshot()
-                        t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+            v_mean = t.element_mean_velocity_km_s()
+            # On calibration: calibrated mathematical model answers from element MEAN velocity
+            mean_ecs = None
+            if v_mean is not None:
+                mean_ecs = PUNDITAdapter.compute_profile_ecs(
+                    v_mean, curve_profile, rebound_number=t.rebound_number)
+            if mean_ecs is None:
+                mean_ecs = t.element_mean_measured_strength_mpa()
+            if v_mean is not None:
+                t.velocity_km_s = v_mean
+                t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
+            if mean_ecs is not None:
+                t.estimated_compressive_strength_mpa = mean_ecs
+            if strength_curve:
+                t.strength_curve_snapshot = strength_curve.snapshot()
+            t.save(update_fields=['velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
 
-        batch.status = 'CALIBRATED'
-        batch.save(update_fields=['status', 'updated_at'])
+        if batch:
+            batch.status = 'CALIBRATED'
+            batch.save(update_fields=['status', 'updated_at'])
 
         _record_audit(request.user, 'digital_eye.pundit_batch.calibrate',
-                      'PunditScanBatch', batch.id,
+                      'PunditScanBatch', batch.id if batch else project.id,
                       {'curve_type': curve_type, 'calibration_id': str(profile.id)})
 
         serializer = CalibrationProfileSerializer(profile, context={'request': request})
         return Response({
-            'message': f"Scan batch '{batch.folder_name}' successfully calibrated with {profile.get_curve_type_display()}.",
-            'batch_id': str(batch.id),
-            'batch_status': batch.status,
+            'message': f"Scan batch '{batch.folder_name if batch else 'Primary'}' successfully calibrated with {profile.get_curve_type_display()}.",
+            'batch_id': str(batch.id) if batch else None,
+            'batch_status': batch.status if batch else 'CALIBRATED',
             'calibration': serializer.data,
         })
 

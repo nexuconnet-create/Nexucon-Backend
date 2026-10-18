@@ -800,36 +800,41 @@ def validate_curve_params(curve_type, params):
 def resolve_active_curve(project):
     """
     The curve a project's strength computations use:
-    the project's activated curve when set, else the active CalibrationProfile,
+    the active CalibrationProfile (when calibrated by government),
+    else the project's activated curve when set,
     else the platform default (exponential), else None.
     """
     if project is not None:
+        from .models import CalibrationProfile, StrengthCurve, ProjectCurveSetting
+        cal = CalibrationProfile.objects.filter(project=project, is_active=True).order_by('-created_at').first()
+        if cal is not None:
+            sc = StrengthCurve.objects.filter(project=project, curve_type=cal.curve_type).first()
+            if sc:
+                if cal.params and sc.formula_params != cal.params:
+                    sc.formula_params = cal.params
+                    sc.save(update_fields=['formula_params', 'updated_at'])
+            else:
+                sc = StrengthCurve.objects.create(
+                    project=project,
+                    name=f"{project.name} - {cal.get_curve_type_display()}",
+                    curve_type=cal.curve_type,
+                    formula_params=cal.params,
+                    valid_range_min_ms=2000.0,
+                    valid_range_max_ms=5000.0,
+                    standard='BS 1881-203 / BS EN 12504-4',
+                )
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            if setting.active_curve_id != sc.id or setting.prefer_measured_strength:
+                setting.active_curve = sc
+                setting.prefer_measured_strength = False
+                setting.save(update_fields=['active_curve', 'prefer_measured_strength', 'updated_at'])
+            return sc
+
         setting = getattr(project, 'curve_setting', None)
         if setting is not None and setting.active_curve_id:
             curve = setting.active_curve
             if curve is not None:
                 return curve
-
-        from .models import CalibrationProfile, StrengthCurve
-        cal = CalibrationProfile.objects.filter(project=project, is_active=True).first()
-        if cal is not None:
-            sc = StrengthCurve.objects.filter(project=project, curve_type=cal.curve_type).first()
-            if sc:
-                return sc
-            sc = StrengthCurve.objects.create(
-                project=project,
-                name=f"{project.name} - {cal.get_curve_type_display()}",
-                curve_type=cal.curve_type,
-                formula_params=cal.params,
-                valid_range_min_ms=2000.0,
-                valid_range_max_ms=5000.0,
-                standard='BS 1881-203 / BS EN 12504-4',
-            )
-            from .models import ProjectCurveSetting
-            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
-            setting.active_curve = sc
-            setting.save(update_fields=['active_curve', 'updated_at'])
-            return sc
 
     from .models import StrengthCurve
     return StrengthCurve.objects.filter(is_default=True).first()
