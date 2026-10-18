@@ -3091,8 +3091,24 @@ class NDTReportService:
         statutory 25 N/mm2 threshold.
         """
         out = []
-        pulse_tests = sorted(pulse_tests, key=lambda t: _natural_sort_key(t.structural_element))
+        # Defensive deduplication of pulse_tests by (floor, structural_element)
+        tests_by_elem = {}
         for t in pulse_tests:
+            el_name = str(getattr(t, 'structural_element', '') or '').strip().upper()
+            fl_name = str(getattr(t, 'floor', '') or '').strip().lower()
+            key = (fl_name, el_name)
+            if key not in tests_by_elem:
+                tests_by_elem[key] = t
+            else:
+                ex = tests_by_elem[key]
+                t_time = getattr(t, 'updated_at', None) or getattr(t, 'created_at', None)
+                ex_time = getattr(ex, 'updated_at', None) or getattr(ex, 'created_at', None)
+                if t_time and ex_time and t_time >= ex_time:
+                    tests_by_elem[key] = t
+                elif str(getattr(t, 'id', '')) > str(getattr(ex, 'id', '')):
+                    tests_by_elem[key] = t
+        deduped_pulse_tests = sorted(tests_by_elem.values(), key=lambda t: _natural_sort_key(getattr(t, 'structural_element', '') or ''))
+        for t in deduped_pulse_tests:
             rows = t.reading_rows()
             mean_v = t.element_mean_velocity_km_s() if hasattr(t, 'element_mean_velocity_km_s') else None
             velocities = [r['velocity_km_s'] for r in rows
@@ -4137,6 +4153,35 @@ class NDTReportService:
                 tests = lbl_matched if lbl_matched else all_tests
         else:
             tests = all_tests
+
+        # Deduplicate tests by (test_type, floor, structural_element) taking the latest test with valid readings
+        # to ensure that re-imported or re-uploaded data does not duplicate stations across the report
+        deduped_tests = []
+        tests_by_key = {}
+        for t in tests:
+            t_type = str(getattr(t, 'test_type', '') or '').strip().lower()
+            t_floor = str(getattr(t, 'floor', '') or '').strip().lower()
+            t_elem = str(getattr(t, 'structural_element', '') or '').strip().upper()
+            if not t_elem or t_elem in ('UNSPECIFIED', 'NONE', '-'):
+                deduped_tests.append(t)
+                continue
+            key = (t_type, t_floor, t_elem)
+            existing = tests_by_key.get(key)
+            if existing is None:
+                tests_by_key[key] = t
+            else:
+                ex_has = existing.readings.exists() if hasattr(existing, 'readings') else bool(existing.reading_rows())
+                t_has = t.readings.exists() if hasattr(t, 'readings') else bool(t.reading_rows())
+                if t_has and not ex_has:
+                    tests_by_key[key] = t
+                elif t_has == ex_has:
+                    t_time = getattr(t, 'updated_at', None) or getattr(t, 'created_at', None)
+                    ex_time = getattr(existing, 'updated_at', None) or getattr(existing, 'created_at', None)
+                    if t_time and ex_time and t_time >= ex_time:
+                        tests_by_key[key] = t
+                    elif str(getattr(t, 'id', '')) > str(getattr(existing, 'id', '')):
+                        tests_by_key[key] = t
+        tests = sorted(list(tests_by_key.values()) + deduped_tests, key=lambda x: _natural_sort_key(getattr(x, 'structural_element', '') or ''))
 
         # ---- Element scope (optional). The caller may narrow the report to
         # one structural element. An id that matches no recorded test is NOT
@@ -6108,7 +6153,7 @@ class NDTReportService:
                 return True
 
             # Query on-site visual observations and photo evidence from telemetry session and inspection
-            site_visual_obs = []
+            raw_obs_pool = []
             site_photos_count = 0
             gps_tags = []
             # The inspector's own description of the test location, if any
@@ -6129,10 +6174,7 @@ class NDTReportService:
                     cfg = s.session_config or {}
                     vis = (cfg.get('visual_observation') or '').strip()
                     if vis:
-                        for line in vis.splitlines():
-                            line = line.strip()
-                            if line and _is_substantive(line) and line not in site_visual_obs:
-                                site_visual_obs.append(line)
+                        raw_obs_pool.append(vis)
                     lat = cfg.get('latitude')
                     lon = cfg.get('longitude')
                     if lat is not None and lon is not None:
@@ -6148,12 +6190,8 @@ class NDTReportService:
             try:
                 from apps.inspections.models import Inspection
                 insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
-                if insp:
-                    if insp.visual_site_observations:
-                        for line in insp.visual_site_observations.splitlines():
-                            line = line.strip()
-                            if line and _is_substantive(line) and line not in site_visual_obs:
-                                site_visual_obs.append(line)
+                if insp and insp.visual_site_observations:
+                    raw_obs_pool.append(insp.visual_site_observations)
             except Exception as e:
                 logger.warning("Could not query inspection visual observations: %s", e)
 
@@ -6165,10 +6203,12 @@ class NDTReportService:
                     if not v_desc:
                         cat = vo.get_category_display() if hasattr(vo, 'get_category_display') else 'Visual observation'
                         v_desc = f"{cat} on {vo.structural_element or 'element'}"
-                    if v_desc and _is_substantive(v_desc) and v_desc not in site_visual_obs:
-                        site_visual_obs.append(v_desc)
+                    if v_desc:
+                        raw_obs_pool.append(v_desc)
             except Exception as e:
                 logger.warning("Could not query VisualObservation: %s", e)
+
+            site_visual_obs = cls._clean_and_deduplicate_observations(raw_obs_pool)
 
             appendix_photos = cls._collect_appendix_photos(
                 tests, project=project, operator=selected_operator_label
@@ -6588,6 +6628,75 @@ class NDTReportService:
     _PROVENANCE_STAMP_RE = re.compile(r'^\s*\[[^\]\n]*\]\s*')
 
     @classmethod
+    def _clean_and_deduplicate_observations(cls, lines):
+        """
+        Decomposes composite multi-sentence strings, filters out trivial/empty placeholders
+        (e.g. 'none', 'nil', 'n/a'), normalizes formatting, and removes redundant/duplicate
+        phrasings (e.g. 'no visual crack gotten' when formal crack observations exist).
+        """
+        if not lines:
+            return []
+
+        def _is_substantive(s):
+            if not s or not str(s).strip():
+                return False
+            low = str(s).strip().lower()
+            low = re.sub(r'\[manual_field_entry[^\]]*\]', '', low).strip()
+            if not low:
+                return False
+            if low in ('none', 'nil', 'n/a', 'na', 'null', 'nothing', 'no', '-', '--', 'none.', 'none recorded', 'no defects'):
+                return False
+            for synth in ('synthetic value', 'sample file', 'upload testing only',
+                          '[manual_field_entry', 'dummy', 'test data', 'placeholder',
+                          'lorem ipsum', 'not recorded', 'hardcoded', 'todo', 'fixme'):
+                if synth in low:
+                    return False
+            return True
+
+        def _normalize(text):
+            return re.sub(r'[^a-z0-9]', '', text.lower())
+
+        seen_norms = set()
+        cleaned = []
+
+        for entry in lines:
+            if not entry:
+                continue
+            # Split on newlines, bullet points, or sentence boundaries
+            sentences = [s.strip() for s in re.split(r'[\r\n]+|(?<=[.!?])\s+(?=[A-Z])', str(entry)) if s.strip()]
+            for s in sentences:
+                if not _is_substantive(s):
+                    continue
+                s_clean = s.rstrip(';.,').strip()
+                norm = _normalize(s_clean)
+                if len(norm) < 4:
+                    continue
+
+                # Check if this sentence is an informal variant of an existing crack observation
+                # (e.g. 'no visual crack gotten' or 'no visual crack seen')
+                is_crack_var = ('novisualcrack' in norm or 'novisiblecrack' in norm or 'nonoticeableorvisiblecracks' in norm)
+                is_dup = False
+                if is_crack_var:
+                    for ex in seen_norms:
+                        if 'novisualcrack' in ex or 'novisiblecrack' in ex or 'nonoticeableorvisiblecracks' in ex:
+                            is_dup = True
+                            break
+                if is_dup:
+                    continue
+
+                # Substring or duplicate check
+                for ex in seen_norms:
+                    if norm == ex or (len(norm) > 15 and (norm in ex or ex in norm)):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    seen_norms.add(norm)
+                    formatted = s_clean[0].upper() + s_clean[1:] + '.'
+                    cleaned.append(formatted)
+
+        return cleaned
+
+    @classmethod
     def _visual_observations(cls, tests, project=None, operator=None):
         """
         Reference-style §4.1 lettered observations: 'Tacky floor observed
@@ -6597,22 +6706,6 @@ class NDTReportService:
         appended as context. '(see pic N)' cross-references the appendix
         photograph when the test carries attached files.
         """
-        def _is_substantive(s):
-            if not s or not str(s).strip():
-                return False
-            low = str(s).lower()
-            # Strip any provenance stamps first
-            low = re.sub(r'\[manual_field_entry[^\]]*\]', '', low).strip()
-            if not low:
-                return False
-            for synth in ('synthetic value', 'sample file', 'upload testing only',
-                          '[manual_field_entry', 'dummy', 'test data', 'placeholder',
-                          'lorem ipsum', 'n/a', 'not applicable', 'not recorded',
-                          'hardcoded', 'todo', 'fixme'):
-                if synth in low:
-                    return False
-            return True
-
         # Appendix photograph numbering: same walk as _collect_appendix_photos
         pic_indices = {}
         seen_files = {}
@@ -6634,7 +6727,7 @@ class NDTReportService:
 
         # 1. On-site visual observation logs from telemetry sessions and inspections
         if project:
-            site_obs = []
+            raw_site_obs = []
             try:
                 from apps.telemetry.models import TelemetrySession
                 ts_qs = list(TelemetrySession.objects.filter(project=project))
@@ -6649,10 +6742,7 @@ class NDTReportService:
                     cfg = s.session_config or {}
                     vis = (cfg.get('visual_observation') or '').strip()
                     if vis:
-                        for line in vis.splitlines():
-                            line = line.strip()
-                            if line and _is_substantive(line) and line not in site_obs:
-                                site_obs.append(line)
+                        raw_site_obs.append(vis)
             except Exception:
                 pass
 
@@ -6660,18 +6750,14 @@ class NDTReportService:
                 from apps.inspections.models import Inspection
                 insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
                 if insp and insp.visual_site_observations:
-                    for line in insp.visual_site_observations.splitlines():
-                        line = line.strip()
-                        if line and _is_substantive(line) and line not in site_obs:
-                            site_obs.append(line)
+                    raw_site_obs.append(insp.visual_site_observations)
             except Exception:
                 pass
 
+            site_obs = cls._clean_and_deduplicate_observations(raw_site_obs)
             for vis in site_obs:
-                text = vis[0].upper() + vis[1:]
-                if text[-1:] not in ('.', '!', '?'):
-                    text += '.'
-                observations.append(f"On-site visual observation logged during survey: “{text[:-1]}”.")
+                text = vis[:-1] if vis.endswith('.') else vis
+                observations.append(f"On-site visual observation logged during survey: “{text}”.")
 
         # 2. Test surface conditions and notes (deduplicated & filtered)
         grouped_by_condition = {}
