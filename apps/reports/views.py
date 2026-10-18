@@ -1502,12 +1502,17 @@ class NDTReportPageQAView(APIView):
         )
         curve_name_val = active_curve.name if active_curve else 'Calibrated Correlation Model'
         curve_form_val = getattr(active_curve, 'formula', None) or 'f_cu = A * exp(B * V)'
+        has_cal_points = bool(active_curve and getattr(active_curve, 'data_points', None) and len(active_curve.data_points) > 0)
+        r2_val = float(active_curve.r2_score) if (active_curve and getattr(active_curve, 'r2_score', None) is not None and has_cal_points) else None
+        se_val = float(active_curve.standard_error) if (active_curve and getattr(active_curve, 'standard_error', None) is not None and has_cal_points) else None
+
         curve_info = {
             'curve_name': curve_name_val,
             'formula': curve_form_val,
             'equation_type': getattr(active_curve, 'curve_type', 'exponential') if active_curve else 'exponential',
-            'r_squared': float(active_curve.r2_score) if active_curve and getattr(active_curve, 'r2_score', None) is not None else 0.8966,
-            'standard_error_s_mpa': float(active_curve.standard_error) if active_curve and getattr(active_curve, 'standard_error', None) is not None else 0.29,
+            'r_squared': r2_val,
+            'standard_error_s_mpa': se_val,
+            'has_calibration_correlation': has_cal_points,
             'target_design_strength_mpa': float(getattr(project, 'target_design_strength_mpa', None) or 25.0),
         }
 

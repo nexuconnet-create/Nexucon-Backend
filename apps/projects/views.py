@@ -78,6 +78,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
         # have visibility into the initial regulatory mock projects during the testing period.
         user = getattr(self.request, 'user', None)
         if user and user.is_authenticated:
+            # Multi-district data access control: separate divisions/districts cannot
+            # view unauthorized project files; only the overall director (or State HQ / superuser)
+            # has full cross-district project visibility.
+            from common.permissions import scoped_projects, user_is_state_hq, user_is_agency_head
+            if not (user.is_superuser or user_is_state_hq(user) or user_is_agency_head(user)):
+                scoped_ids = scoped_projects(user).values_list('id', flat=True)
+                queryset = queryset.filter(id__in=scoped_ids)
+
             user_email = (user.email or '').strip().lower()
             is_siteiq = (user_email == 'siteiq@nexucon.net')
             has_gov = hasattr(user, 'government_profile') and user.government_profile

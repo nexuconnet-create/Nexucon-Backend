@@ -318,7 +318,7 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_cond
 DEFAULT_EXPONENTIAL_MODELS = {
     'standard_mix': {
         'key': 'standard_mix',
-        'name': 'Standard Mix (Laboratory Default)',
+        'name': 'Standard Mix (Laboratory Default — A=1.20, B=0.85)',
         'curve_type': 'exponential',
         'standard': 'BS 1881-203 / ACI 228.2R',
         'formula_params': {'a': 1.20, 'b': 0.00085, 'c': 0.0},
@@ -328,25 +328,85 @@ DEFAULT_EXPONENTIAL_MODELS = {
     },
     'jones_equation': {
         'key': 'jones_equation',
-        'name': 'Jones Equation (Normal-Weight Structural Concrete)',
+        'name': 'Jones Equation (Classic Baseline — A=2.8, B=0.53)',
         'curve_type': 'exponential',
         'standard': 'Jones (1962) / BS EN 12504-4',
-        'formula_params': {'a': 0.07, 'b': 0.00140, 'c': 0.0},
+        'formula_params': {'a': 2.8, 'b': 0.00053, 'c': 0.0},
         'valid_range_min_ms': 2000.0,
         'valid_range_max_ms': 5000.0,
-        'description': 'Classic empirical exponential relationship for normal-weight structural concrete mixes.',
+        'description': 'Classic empirical exponential relationship for normal-weight structural concrete mixes (Jones 1962). Baseline model safe generic choice up to ~27.2 MPa when project-specific calibration data is missing.',
     },
     'aggregate_mix': {
         'key': 'aggregate_mix',
-        'name': 'Aggregate Mix (Dense / Crushed Granite Aggregates)',
+        'name': 'High-Volume Aggregate Mix (A=1.39, B=0.78)',
         'curve_type': 'exponential',
         'standard': 'BS 1881-203 Section 11',
-        'formula_params': {'a': 1.65, 'b': 0.00078, 'c': 0.0},
+        'formula_params': {'a': 1.39, 'b': 0.00078, 'c': 0.0},
         'valid_range_min_ms': 2000.0,
         'valid_range_max_ms': 5000.0,
-        'description': 'Dense crushed rock / granite aggregate mix correlation with elevated elastic modulus.',
+        'description': 'Dense crushed rock / granite / large gravel aggregate mix model with elevated elastic modulus. Deployed when concrete contains high volumes of crushed dense stone.',
     },
 }
+
+
+def recognize_model_factors(a, b, c=0.0):
+    """
+    Recognize specific formula factors (such as Jones equation and High-Aggregate mix model)
+    automatically based on their ABC values per client review meeting specification:
+      - A = 2.8, B = 0.53 (or 0.00053 in m/s), C = 0: Classic Jones Equation (1962) global baseline
+      - A = 1.39, B = 0.78 (or 0.00078 in m/s), C = 0: High-Volume Aggregate Mix Model
+      - A = 1.20, B = 0.85 (or 0.00085 in m/s), C = 0: Standard Mix Laboratory Default
+      - Otherwise: Project-specific calibrated regression model
+    """
+    try:
+        a_val = float(a)
+        b_val = float(b)
+        c_val = float(c or 0.0)
+    except (TypeError, ValueError):
+        return {
+            'model_key': 'custom',
+            'model_name': 'Custom Mathematical Model',
+            'literature_note': 'User-configured or project-specific calibration curve.',
+            'is_default_empirical': False,
+        }
+
+    # Normalize b: if provided in km/s (e.g. 0.53), convert to m/s for comparison (0.00053)
+    b_ms = b_val if b_val < 0.01 else (b_val / 1000.0)
+    c_zero = abs(c_val) < 0.05
+
+    # Check Jones Equation: a ~ 2.8, b_ms ~ 0.00053, c ~ 0
+    if abs(a_val - 2.8) < 0.15 and abs(b_ms - 0.00053) < 0.0001 and c_zero:
+        return {
+            'model_key': 'jones_equation',
+            'model_name': 'Classic Jones Equation (1962)',
+            'literature_note': 'Global baseline model and safe generic choice in the absence of project-specific calibration data, capturing concrete relationships up to ~27.2 MPa.',
+            'is_default_empirical': True,
+        }
+
+    # Check High-Volume Aggregate Mix: a ~ 1.39, b_ms ~ 0.00078, c ~ 0
+    if abs(a_val - 1.39) < 0.15 and abs(b_ms - 0.00078) < 0.0001 and c_zero:
+        return {
+            'model_key': 'aggregate_mix',
+            'model_name': 'High-Volume Aggregate Mix Model',
+            'literature_note': 'Deployed when concrete contains high volumes of crushed dense stone or large gravel with elevated elastic modulus.',
+            'is_default_empirical': True,
+        }
+
+    # Check Standard Mix: a ~ 1.20, b_ms ~ 0.00085, c ~ 0
+    if abs(a_val - 1.20) < 0.15 and abs(b_ms - 0.00085) < 0.0001 and c_zero:
+        return {
+            'model_key': 'standard_mix',
+            'model_name': 'Standard Mix (Laboratory Default)',
+            'literature_note': 'Portland cement baseline empirical model per ACI 228.2R and BS 1881-203.',
+            'is_default_empirical': True,
+        }
+
+    return {
+        'model_key': 'calibrated_project',
+        'model_name': 'Project-Specific Calibrated Correlation Model',
+        'literature_note': 'Project-specific model established through site trial / core sample destructive and non-destructive regression analysis.',
+        'is_default_empirical': False,
+    }
 
 
 def seed_default_exponential_models():

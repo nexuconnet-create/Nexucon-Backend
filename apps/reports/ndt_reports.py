@@ -261,13 +261,17 @@ def ecs_report_disclosure(project):
             f"The curve was fitted from {n_points} real calibration pair(s) "
             "(cube/core tests against field pulse velocity measurements).")
     p_name = (getattr(project, 'name', '') or '').lower() if project else ''
-    r2_val = curve.r2_score if curve.r2_score is not None else (0.8966 if ('ladol' in p_name or 'laydown' in p_name) else None)
-    se_val = curve.standard_error if curve.standard_error is not None else (0.29 if ('ladol' in p_name or 'laydown' in p_name) else None)
-    if r2_val is not None:
+    r2_val = curve.r2_score if (curve.r2_score is not None and n_points > 0) else None
+    se_val = curve.standard_error if (curve.standard_error is not None and n_points > 0) else None
+    if n_points and r2_val is not None:
         parts.append(f"Coefficient of determination R² = {r2_val:.4f}.")
-    if se_val is not None:
+    if n_points and se_val is not None:
         parts.append(
             f"Standard error of estimate s = {se_val:.2f} N/mm2 ({se_val:.2f} MPa).")
+    elif not n_points:
+        parts.append(
+            "This analysis adopts the empirical baseline model without project-specific core calibration data. "
+            "No calibration correlation scatter data is claimed.")
     parts.extend(_se_adjustment_disclosure(curve))
     if curve.valid_range_min_ms is not None and curve.valid_range_max_ms is not None:
         parts.append(
