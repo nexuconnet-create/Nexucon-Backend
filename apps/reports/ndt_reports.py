@@ -38,7 +38,8 @@ MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(MODULE_DIR, 'assets')
 FONTS_DIR = os.path.join(MODULE_DIR, 'fonts')
 WATERMARK_IMAGE = os.path.join(ASSETS_DIR, 'lsmtl_watermark.png')
-COVER_LOGO_IMAGE = os.path.join(ASSETS_DIR, 'lagos_state_coat_of_arms.png')
+NEXUCON_LOGO_IMAGE = os.path.join(ASSETS_DIR, 'nexucon_logo.png')
+COVER_LOGO_IMAGE = NEXUCON_LOGO_IMAGE if os.path.exists(NEXUCON_LOGO_IMAGE) else os.path.join(ASSETS_DIR, 'lagos_state_coat_of_arms.png')
 
 
 def _cover_qr_png(url):
@@ -896,7 +897,7 @@ class NDTReportBuilder:
                 pdf.image(pdf.cover_logo, x=5.8, y=2.4, w=30)
                 pdf.cover_logo.seek(0)
             else:
-                pdf.image(COVER_LOGO_IMAGE, x=5.8, y=2.4, w=30)
+                pdf.image(COVER_LOGO_IMAGE, x=5.8, y=2.4, w=35)
         except Exception as exc:                # noqa: BLE001 — never break
             logger.error('cover logo embed failed: %s', exc)
         avail = pdf.w - pdf.l_margin - pdf.r_margin
