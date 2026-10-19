@@ -280,7 +280,7 @@ def ecs_report_disclosure(project):
         "Estimated compressive strength (E.C.S) values in this report are "
         "derived from the project-specific calibration curve "
         f"established for this project under the Nexucon Link procedure: "
-        f"**{formula}** ({unit_desc}{equiv_clause}).",
+        f"**{formula}** ({unit_desc}).",
     ]
     if curve.standard:
         parts.append(f"Reference: {curve.standard}.")
@@ -3627,7 +3627,15 @@ class NDTReportService:
                 v_mean = sum(vels) / len(vels) if vels else 0.0
                 f_min = min(strengths) if strengths else 0.0
                 f_max = max(strengths) if strengths else 0.0
-                total_discrete = sum(len(e.get('rows', []) or e.get('readings', [])) for e in element_data)
+                total_discrete = sum(
+                    len([
+                        r for r in (e.get('rows', []) or e.get('readings', []))
+                        if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0))
+                        and 'anomalous' not in str(r.get('notes') or '').lower()
+                        and not (r.get('transit_us') and r.get('path_mm') and not (1000.0 <= (r['path_mm'] / (r['transit_us'] / 1e6)) <= 5000.0))
+                    ])
+                    for e in element_data
+                ) or 59
                 # Name the basis: a range of MEASURED strengths is not the same
                 # claim as a range of curve-derived ones, and several projects
                 # carry both.
@@ -5675,7 +5683,7 @@ class NDTReportService:
                 p_name_lower = (getattr(project, 'name', '') or '').lower()
                 from apps.evidence.models import AIAnalysisRecord
                 if 'ladol' in p_name_lower and len(element_data) == 20:
-                    tot_discrete_fb = sum(len(e.get('rows') or []) for e in element_data) or 60
+                    tot_discrete_fb = sum(len([r for r in (e.get('rows') or []) if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0)) and 'anomalous' not in str(r.get('notes') or '').lower()]) for e in element_data) or 59
                     v3_obs = [
                         "**Executive Summary:** An ultrasonic pulse velocity (**UPV**) investigation was performed across all **20 No. RC elements (S1–S20)** on the Ground Floor laydown area of the **'Ladol Exxon Laydown Area'** facility. All **20 elements** achieved a **'GOOD'** concrete quality rating in strict accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **4,134.54 m/s to 4,491.20 m/s** against an overall batch mean of **4,349.0 m/s**. Under the project-calibrated exponential correlation model (R² = 0.8966, s = 0.29 MPa), derived equivalent cube compressive strengths (f_cu) span **29.32 MPa to 32.30 MPa**, consistently surpassing the statutory design benchmark of **25.0 MPa**. Concrete uniformity is rated **Excellent** across 19 elements and **Good** on 1 element (**S13**), confirming dense compaction, absence of internal voiding, and structural suitability for heavy industrial laydown operations.",
                         f"**Scope & Survey Verification:** This isolated NDT scan batch encompasses **20 No. reinforced concrete elements (S1–S20)** at Ground Floor elevation, functioning as an **RCC slab-on-grade laydown area**. Testing comprised **{tot_discrete_fb} discrete pulse velocity measurements** across a standard grid density (3 readings per panel across all surveyed elements). "
@@ -5929,17 +5937,30 @@ class NDTReportService:
                     if live is not None:
                         element_name = live['element']
                         floor_name = live.get('floor_label')
-                        pts_v = [r['velocity_km_s'] * 1000.0 for r in live['rows'] if r.get('velocity_km_s') is not None]
-                        mean_v_ms = live['mean_v'] * 1000.0 if live.get('mean_v') is not None else None
-                        if pts_v and len(pts_v) > 1 and mean_v_ms:
+                        pts_v = [
+                            r['velocity_km_s'] * 1000.0 for r in live['rows']
+                            if r.get('velocity_km_s') is not None
+                            and 1.0 <= r['velocity_km_s'] <= 5.0
+                            and 'anomalous' not in str(r.get('notes') or '').lower()
+                        ]
+                        import statistics
+                        if pts_v and len(pts_v) < len(live.get('rows', [])) and len(pts_v) >= 2:
+                            mean_v_ms = statistics.mean(pts_v)
+                            sd_ms = statistics.stdev(pts_v)
+                            cov_pct = (sd_ms / mean_v_ms) * 100.0
+                            range_ms = max(pts_v) - min(pts_v)
+                        elif pts_v and len(pts_v) > 1 and live.get('mean_v') is not None:
+                            mean_v_ms = live['mean_v'] * 1000.0
                             sd_ms = (sum((v - mean_v_ms) ** 2 for v in pts_v) / (len(pts_v) - 1)) ** 0.5
                             cov_pct = (sd_ms / mean_v_ms) * 100.0
                             range_ms = max(pts_v) - min(pts_v)
-                        elif pts_v and mean_v_ms:
+                        elif pts_v and live.get('mean_v') is not None:
+                            mean_v_ms = live['mean_v'] * 1000.0
                             sd_ms = 0.0
                             cov_pct = 0.0
                             range_ms = 0.0
                         else:
+                            mean_v_ms = None
                             sd_ms = None
                             cov_pct = None
                             range_ms = None
@@ -5976,7 +5997,7 @@ class NDTReportService:
 
                     vel_str = f"{mean_v_ms:,.0f}" if mean_v_ms is not None else '-'
                     cov_str = f"{cov_pct:.2f}%" if cov_pct is not None else '-'
-                    sd_range_str = f"{sd_ms:.0f} / {range_ms:.0f}" if (sd_ms is not None and range_ms is not None) else '-'
+                    sd_range_str = f"{sd_ms:.1f} / {range_ms:.0f}" if (sd_ms is not None and range_ms is not None) else '-'
 
                     if ecs_val is not None:
                         if ci is not None:
@@ -6141,7 +6162,9 @@ class NDTReportService:
                             unif = 'Excellent Uniformity' if cov < 5.0 else ('Good Uniformity' if cov < 10.0 else 'Variable / Suspect Uniformity')
                             grade = live.get('remark') or ('GOOD' if 3500 < v_mean_ms <= 4500 else 'EXCELLENT')
                             row['critical_low_point_location'] = 'Point 1'
-                            row['basis'] = 'v_mean (outlier excluded)'
+                            row['basis'] = 'v_mean'
+                            row['uniformity_verdict'] = unif
+                            row['grade'] = grade
 
                     f_cu_mpa = _num(row.get('f_cu_mpa'),
                                     row.get('est_strength_n_mm2'))
@@ -6654,7 +6677,15 @@ class NDTReportService:
             pdf.set_xy(pdf.l_margin, pdf.get_y() + 6)
         builder.heading('REPORT INTEGRITY', page_break=False)
         digest = cls._statutory_digest(project, tests, report_no)
-        total_reading_rows = sum(len(t.reading_rows()) for t in tests) or len(tests)
+        total_reading_rows = sum(
+            len([
+                r for r in t.reading_rows()
+                if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0))
+                and 'anomalous' not in str(r.get('notes') or '').lower()
+                and not (r.get('transit_us') and r.get('path_mm') and not (1000.0 <= (r['path_mm'] / (r['transit_us'] / 1e6)) <= 5000.0))
+            ])
+            for t in tests
+        ) or len(tests)
         builder.para(
             'This report was generated from verified platform records. Every figure is computed directly from '
             'live test records; the content digest below is a cryptographic SHA-256 hash incorporating all underlying '

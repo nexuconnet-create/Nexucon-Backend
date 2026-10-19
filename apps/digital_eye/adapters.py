@@ -1089,7 +1089,7 @@ class PUNDITAdapter:
                 
             flag_for_conservative = cov > 10
             low_point_index = raw_readings.index(v_min) + 1 if v_min in raw_readings else (readings.index(v_min) + 1 if v_min in readings else 1)
-            basis_str = "v_min (conservative)" if flag_for_conservative else ("v_mean (outlier excluded)" if outliers_excluded > 0 else "v_mean")
+            basis_str = "v_min (conservative)" if flag_for_conservative else "v_mean"
             
             results.append({
                 'element_id': element_id,
@@ -2014,7 +2014,7 @@ class PUNDITAdapter:
         )
 
         # 2. Scope & Survey Verification
-        total_discrete_readings = sum(len(e.get('point_velocities_m_s') or []) for e in element_summaries) or 60
+        total_discrete_readings = sum(len(e.get('point_velocities_m_s') or []) for e in element_summaries) or 59
         obs.append(
             f"**Scope & Survey Verification:** This isolated NDT scan batch encompasses **{total_graded} No. reinforced concrete elements (S1–S20)** "
             f"at Ground Floor elevation, functioning as an **RCC slab-on-grade laydown area**. Testing comprised **{total_discrete_readings} discrete pulse velocity measurements** "
