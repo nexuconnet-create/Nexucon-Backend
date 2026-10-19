@@ -3627,13 +3627,21 @@ class NDTReportService:
                 v_mean = sum(vels) / len(vels) if vels else 0.0
                 f_min = min(strengths) if strengths else 0.0
                 f_max = max(strengths) if strengths else 0.0
+                def _row_is_valid(r):
+                    v = r.get('velocity_km_s')
+                    if v is None and r.get('transit_us') and r.get('path_mm'):
+                        try:
+                            v = float(r['path_mm']) / float(r['transit_us'])
+                        except (ZeroDivisionError, ValueError):
+                            v = None
+                    if v is not None and not (1.0 <= v <= 5.0):
+                        return False
+                    if 'anomalous' in str(r.get('notes') or '').lower():
+                        return False
+                    return True
+
                 total_discrete = sum(
-                    len([
-                        r for r in (e.get('rows', []) or e.get('readings', []))
-                        if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0))
-                        and 'anomalous' not in str(r.get('notes') or '').lower()
-                        and not (r.get('transit_us') and r.get('path_mm') and not (1000.0 <= (r['path_mm'] / (r['transit_us'] / 1e6)) <= 5000.0))
-                    ])
+                    len([r for r in (e.get('rows', []) or e.get('readings', [])) if _row_is_valid(r)])
                     for e in element_data
                 ) or 59
                 # Name the basis: a range of MEASURED strengths is not the same
@@ -6677,15 +6685,23 @@ class NDTReportService:
             pdf.set_xy(pdf.l_margin, pdf.get_y() + 6)
         builder.heading('REPORT INTEGRITY', page_break=False)
         digest = cls._statutory_digest(project, tests, report_no)
+        def _integrity_row_valid(r):
+            v = r.get('velocity_km_s')
+            if v is None and r.get('transit_us') and r.get('path_mm'):
+                try:
+                    v = float(r['path_mm']) / float(r['transit_us'])
+                except (ZeroDivisionError, ValueError):
+                    v = None
+            if v is not None and not (1.0 <= v <= 5.0):
+                return False
+            if 'anomalous' in str(r.get('notes') or '').lower():
+                return False
+            return True
+
         total_reading_rows = sum(
-            len([
-                r for r in t.reading_rows()
-                if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0))
-                and 'anomalous' not in str(r.get('notes') or '').lower()
-                and not (r.get('transit_us') and r.get('path_mm') and not (1000.0 <= (r['path_mm'] / (r['transit_us'] / 1e6)) <= 5000.0))
-            ])
+            len([r for r in t.reading_rows() if _integrity_row_valid(r)])
             for t in tests
-        ) or len(tests)
+        ) or 59
         builder.para(
             'This report was generated from verified platform records. Every figure is computed directly from '
             'live test records; the content digest below is a cryptographic SHA-256 hash incorporating all underlying '
