@@ -809,18 +809,58 @@ def resolve_active_curve(project):
         cal = CalibrationProfile.objects.filter(project=project, is_active=True).order_by('-created_at').first()
         if cal is not None:
             sc = StrengthCurve.objects.filter(project=project, curve_type=cal.curve_type).first()
+            formatted_pts = []
+            if cal.cube_correlation_data:
+                for pt in cal.cube_correlation_data:
+                    if not isinstance(pt, dict):
+                        continue
+                    v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+                    if 0 < v < 100:
+                        v = v * 1000.0
+                    f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+                    r = pt.get('rebound') or pt.get('r')
+                    if v > 0 and f > 0:
+                        formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+            r2_val, se_val, aic_val = None, None, None
+            if len(formatted_pts) >= 2:
+                try:
+                    r2_val, se_val, aic_val = curve_fit_stats(cal.curve_type, cal.params or {}, formatted_pts)
+                except Exception:
+                    pass
+
+            v_vals = [p['v'] for p in formatted_pts]
+            v_min = min(v_vals) if v_vals else 2000.0
+            v_max = max(v_vals) if v_vals else 5000.0
+
             if sc:
+                need_save = False
+                update_fields = []
                 if cal.params and sc.formula_params != cal.params:
                     sc.formula_params = cal.params
-                    sc.save(update_fields=['formula_params', 'updated_at'])
+                    need_save = True
+                    update_fields.append('formula_params')
+                if formatted_pts and (not sc.data_points or len(sc.data_points) == 0):
+                    sc.data_points = formatted_pts
+                    sc.r2_score = r2_val
+                    sc.standard_error = se_val
+                    sc.aic = aic_val
+                    need_save = True
+                    update_fields.extend(['data_points', 'r2_score', 'standard_error', 'aic'])
+                if need_save:
+                    sc.save(update_fields=list(set(update_fields)))
             else:
                 sc = StrengthCurve.objects.create(
                     project=project,
                     name=f"{project.name} - {cal.get_curve_type_display()}",
                     curve_type=cal.curve_type,
                     formula_params=cal.params,
-                    valid_range_min_ms=2000.0,
-                    valid_range_max_ms=5000.0,
+                    data_points=formatted_pts,
+                    r2_score=r2_val,
+                    standard_error=se_val,
+                    aic=aic_val,
+                    valid_range_min_ms=v_min,
+                    valid_range_max_ms=v_max,
                     standard='BS 1881-203 / BS EN 12504-4',
                 )
             setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)

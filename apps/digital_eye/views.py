@@ -814,19 +814,75 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         # call used to upsert a StrengthCurve seeded with the laboratory
         # default, which is how a project's own 10-pair calibration could be
         # replaced by f_cu = 1.20 x exp(0.85 x V) without anyone asking.
-        from .models import StrengthCurve, ProjectCurveSetting
+        from .models import StrengthCurve, ProjectCurveSetting, CalibrationProfile
+        from .strength_curves import curve_fit_stats
+
+        # Extract cube correlation points if passed in request or if available on active profile/curve
+        raw_pts = request.data.get('cube_correlation_points') or request.data.get('data_points') or []
+        formatted_pts = []
+        for pt in raw_pts:
+            if not isinstance(pt, dict):
+                continue
+            v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+            if 0 < v < 100:
+                v = v * 1000.0
+            f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+            r = pt.get('rebound') or pt.get('r')
+            if r is not None:
+                try:
+                    r = float(r)
+                except (ValueError, TypeError):
+                    r = None
+            if v > 0 and f > 0:
+                formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+        # If not passed in request, look up existing data_points on active_curve or CalibrationProfile
+        if not formatted_pts and active_curve and getattr(active_curve, 'data_points', None):
+            formatted_pts = list(active_curve.data_points)
+        if not formatted_pts and project:
+            active_cal = CalibrationProfile.objects.filter(project=project, is_active=True).first()
+            if active_cal and getattr(active_cal, 'cube_correlation_data', None):
+                for pt in active_cal.cube_correlation_data:
+                    if not isinstance(pt, dict):
+                        continue
+                    v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+                    if 0 < v < 100:
+                        v = v * 1000.0
+                    f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+                    r = pt.get('rebound') or pt.get('r')
+                    if v > 0 and f > 0:
+                        formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+        r2_val, se_val, aic_val = None, None, None
+        if len(formatted_pts) >= 2:
+            try:
+                r2_val, se_val, aic_val = curve_fit_stats(curve_type, params, formatted_pts)
+            except Exception as e:
+                logger.warning("curve_fit_stats failed in analyze_project: %s", e)
+
+        v_vals = [p['v'] for p in formatted_pts]
+        v_min = min(v_vals) if v_vals else 2000.0
+        v_max = max(v_vals) if v_vals else 5000.0
+
         if writes_curve or active_curve is None:
+            curve_defaults = {
+                'name': f"{project.name} - {curve_type.capitalize()} Calibration",
+                'formula_params': params,
+                'valid_range_min_ms': v_min,
+                'valid_range_max_ms': v_max,
+                'standard': 'BS 1881-203 / BS EN 12504-4',
+                'created_by': request.user if request.user.is_authenticated else None,
+            }
+            if formatted_pts:
+                curve_defaults['data_points'] = formatted_pts
+                curve_defaults['r2_score'] = r2_val
+                curve_defaults['standard_error'] = se_val
+                curve_defaults['aic'] = aic_val
+
             strength_curve, _ = StrengthCurve.objects.update_or_create(
                 project=project,
                 curve_type=curve_type,
-                defaults={
-                    'name': f"{project.name} - {curve_type.capitalize()} Calibration",
-                    'formula_params': params,
-                    'valid_range_min_ms': 2000.0,
-                    'valid_range_max_ms': 5000.0,
-                    'standard': 'BS 1881-203 / BS EN 12504-4',
-                    'created_by': request.user if request.user.is_authenticated else None,
-                }
+                defaults=curve_defaults
             )
             setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
             setting.active_curve = strength_curve
@@ -835,6 +891,12 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             setting.save()
         else:
             strength_curve = active_curve
+            if formatted_pts and not getattr(strength_curve, 'data_points', None):
+                strength_curve.data_points = formatted_pts
+                strength_curve.r2_score = r2_val
+                strength_curve.standard_error = se_val
+                strength_curve.aic = aic_val
+                strength_curve.save(update_fields=['data_points', 'r2_score', 'standard_error', 'aic'])
             setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
             if setting.prefer_measured_strength:
                 setting.prefer_measured_strength = False
@@ -3915,26 +3977,103 @@ class PunditBatchCalibrateView(APIView):
         data = request.data or {}
         curve_type = data.get('curve_type', 'exponential')
         params = data.get('params', {'a': 1.2, 'b': 0.85, 'c': 0.0})
-        design_fcu = data.get('design_strength_mpa', 25.0)
-        project_id = data.get('project_id', '')
+        design_fcu = float(data.get('design_strength_mpa', 25.0) or 25.0)
+        project_id = data.get('project_id') or data.get('project') or ''
 
-        if project_id:
+        cube_pts = data.get('cube_correlation_points') or data.get('data_points') or []
+        formatted_pts = []
+        for pt in cube_pts:
+            if not isinstance(pt, dict):
+                continue
+            v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+            if 0 < v < 100:
+                v = v * 1000.0
+            f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+            r = pt.get('rebound') or pt.get('r')
+            if r is not None:
+                try:
+                    r = float(r)
+                except (ValueError, TypeError):
+                    r = None
+            if v > 0 and f > 0:
+                formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+        from .strength_curves import curve_fit_stats
+        r2_score, standard_error, aic = (None, None, None)
+        if len(formatted_pts) >= 2:
             try:
-                setting, _ = ProjectCurveSetting.objects.get_or_create(project_id=project_id)
+                r2_score, standard_error, aic = curve_fit_stats(curve_type, params, formatted_pts)
+            except Exception as e:
+                logger.warning("curve_fit_stats failed in PunditBatchCalibrateView: %s", e)
+
+        from apps.projects.models import Project
+        from .models import CalibrationProfile, StrengthCurve, ProjectCurveSetting, PunditScanBatch
+        project = Project.objects.filter(pk=project_id).first() if project_id else None
+        batch = None
+        if data.get('batch_id'):
+            batch = PunditScanBatch.objects.filter(pk=data.get('batch_id')).first()
+
+        cal_profile = None
+        if project:
+            try:
+                # Deactivate older profiles
+                CalibrationProfile.objects.filter(project=project, is_active=True).update(is_active=False)
+                cal_profile = CalibrationProfile.objects.create(
+                    project=project,
+                    batch=batch,
+                    curve_type=curve_type,
+                    params=params,
+                    design_strength_mpa=design_fcu,
+                    calibrated_by=request.user if request.user.is_authenticated else None,
+                    cube_correlation_data=formatted_pts,
+                    notes=data.get('notes', ''),
+                    is_active=True,
+                )
+
+                v_vals = [p['v'] for p in formatted_pts]
+                v_min = min(v_vals) if v_vals else 2000.0
+                v_max = max(v_vals) if v_vals else 5000.0
+
+                curve_defaults = {
+                    'name': f"{project.name} - {curve_type.capitalize()} Calibration",
+                    'formula_params': params,
+                    'valid_range_min_ms': v_min,
+                    'valid_range_max_ms': v_max,
+                    'standard': 'BS 1881-203 / BS EN 12504-4',
+                    'created_by': request.user if request.user.is_authenticated else None,
+                }
+                if formatted_pts:
+                    curve_defaults['data_points'] = formatted_pts
+                    curve_defaults['r2_score'] = r2_score
+                    curve_defaults['standard_error'] = standard_error
+                    curve_defaults['aic'] = aic
+
+                strength_curve, _ = StrengthCurve.objects.update_or_create(
+                    project=project,
+                    curve_type=curve_type,
+                    defaults=curve_defaults
+                )
+
+                setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
                 setting.preferred_curve_type = curve_type
+                setting.active_curve = strength_curve
+                setting.prefer_measured_strength = False
+                setting.updated_by = request.user if request.user.is_authenticated else None
                 setting.save()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.exception("Error saving CalibrationProfile/StrengthCurve: %s", exc)
 
         res = {
-            "id": f"cal-{uuid.uuid4()}",
-            "project_id": project_id,
+            "id": str(cal_profile.id) if cal_profile else f"cal-{uuid.uuid4()}",
+            "project_id": str(project.id) if project else project_id,
             "batch_id": data.get('batch_id'),
             "curve_type": curve_type,
             "params": params,
             "design_strength_mpa": design_fcu,
             "notes": data.get('notes', ''),
-            "cube_correlation_points": data.get('cube_correlation_points', []),
+            "cube_correlation_points": formatted_pts,
+            "r2_score": r2_score,
+            "standard_error": standard_error,
             "calibrated_by": request.user.get_full_name() or request.user.username,
             "created_at": timezone.now().isoformat(),
             "is_active": True,
