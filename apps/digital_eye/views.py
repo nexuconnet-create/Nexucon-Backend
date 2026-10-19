@@ -814,7 +814,6 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         # call used to upsert a StrengthCurve seeded with the laboratory
         # default, which is how a project's own 10-pair calibration could be
         # replaced by f_cu = 1.20 x exp(0.85 x V) without anyone asking.
-        from .models import StrengthCurve, ProjectCurveSetting, CalibrationProfile
         from .strength_curves import curve_fit_stats
 
         # Extract cube correlation points if passed in request or if available on active profile/curve
