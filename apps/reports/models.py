@@ -247,6 +247,10 @@ class ReportBranding(models.Model):
         upload_to='reports/branding/%Y/%m/', blank=True, default='',
         help_text='Optional additional watermark image centred behind the '
                   'page body at the chosen opacity')
+    watermark_hidden = models.BooleanField(
+        default=False,
+        help_text='When True no watermark is drawn at all — neither custom '
+                  'nor the default laboratory watermark')
     watermark_opacity_pct = models.PositiveIntegerField(
         default=50,
         help_text='Watermark opacity 0-100 (applied at render time)')

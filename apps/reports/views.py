@@ -1839,9 +1839,13 @@ class ReportBrandingView(APIView):
                 # below still wins when both arrive in one request).
                 if field == 'cover_logo':
                     row.cover_logo_hidden = False
+                elif field == 'watermark':
+                    row.watermark_hidden = False
             elif data.get(field) in ('', False, 'remove'):
                 getattr(row, field).delete(save=False)
                 setattr(row, field, '')
+                if field == 'watermark':
+                    row.watermark_hidden = True
         # Cover-logo visibility flag: uploading a cover image implies showing
         # it; an explicit false/true (or the string forms) toggles hiding the
         # cover logo entirely — including the statutory default.
@@ -1854,6 +1858,17 @@ class ReportBrandingView(APIView):
             if row.cover_logo_hidden:
                 row.cover_logo.delete(save=False)
                 row.cover_logo = ''
+        # Watermark visibility flag: an explicit false/true toggles hiding
+        # the watermark entirely — including the statutory default.
+        if 'watermark_hidden' in data:
+            raw = data['watermark_hidden']
+            if isinstance(raw, str):
+                row.watermark_hidden = raw.strip().lower() in ('true', '1', 'yes')
+            else:
+                row.watermark_hidden = bool(raw)
+            if row.watermark_hidden:
+                row.watermark.delete(save=False)
+                row.watermark = ''
         row.updated_by = (request.user
                           if getattr(request.user, 'is_authenticated', False)
                           else None)
@@ -1897,6 +1912,7 @@ class ReportBrandingView(APIView):
             'cover_logo_url': _url(row.cover_logo),
             'cover_logo_hidden': row.cover_logo_hidden,
             'watermark_url': _url(row.watermark),
+            'watermark_hidden': getattr(row, 'watermark_hidden', False),
             'watermark_opacity_pct': row.watermark_opacity_pct,
             'watermark_position': row.watermark_position,
             'updated_at': row.updated_at,

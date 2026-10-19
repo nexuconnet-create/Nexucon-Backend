@@ -730,6 +730,7 @@ class MTLReportPDF(FPDF):
         # ``.path`` raises NotImplementedError) render identically to disk.
         self.branding_logo = None      # (BytesIO, 'top-left'|..., width_mm)
         self.branding_watermark = None  # (BytesIO, opacity_pct 0-100)
+        self.watermark_hidden = False
         # Cover logo (12 Sep 2026): the Lagos State coat of arms is the
         # statutory default drawn top-left of the cover. A project may
         # replace it with its own image ('replace' bytes) or carry no cover
@@ -777,7 +778,7 @@ class MTLReportPDF(FPDF):
         default is skipped whenever one is configured — see header()).
         Rendering order in header() puts this first so body content stays
         on top."""
-        if not self.branding_watermark:
+        if getattr(self, 'watermark_hidden', False) or not self.branding_watermark:
             return
         buf, opacity_pct = self.branding_watermark
         try:
@@ -795,9 +796,9 @@ class MTLReportPDF(FPDF):
         serial, _, lab_ref = self.running_header.partition(' / ')
         self._apply_branding_watermark()
         # Reference: laboratory watermark centred on the page. A project's
-        # uploaded watermark REPLACES it (drawing both would stack the
-        # default on top at the same position and hide the upload).
-        if not self.branding_watermark:
+        # uploaded watermark REPLACES it. If watermark_hidden is set,
+        # neither custom nor the default laboratory watermark is drawn.
+        if not self.branding_watermark and not getattr(self, 'watermark_hidden', False):
             try:
                 self.image(WATERMARK_IMAGE, x=43.4, y=76.2, w=120.4)
             except Exception as exc:               # noqa: BLE001 — never break a
@@ -4302,7 +4303,9 @@ class NDTReportService:
                             branding.cover_logo.read())
                     finally:
                         branding.cover_logo.close()
-                if branding.watermark:
+                if getattr(branding, 'watermark_hidden', False):
+                    builder.pdf.watermark_hidden = True
+                elif branding.watermark:
                     branding.watermark.open('rb')
                     try:
                         builder.pdf.branding_watermark = (
