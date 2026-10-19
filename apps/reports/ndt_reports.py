@@ -3643,7 +3643,9 @@ class NDTReportService:
                 total_discrete = sum(
                     len([r for r in (e.get('rows', []) or e.get('readings', [])) if _row_is_valid(r)])
                     for e in element_data
-                ) or 59
+                )
+                if total_discrete == 0:
+                    total_discrete = sum(len(e.get('rows', []) or e.get('readings', [])) for e in element_data) or len(element_data)
                 # Name the basis: a range of MEASURED strengths is not the same
                 # claim as a range of curve-derived ones, and several projects
                 # carry both.
@@ -5691,7 +5693,9 @@ class NDTReportService:
                 p_name_lower = (getattr(project, 'name', '') or '').lower()
                 from apps.evidence.models import AIAnalysisRecord
                 if 'ladol' in p_name_lower and len(element_data) == 20:
-                    tot_discrete_fb = sum(len([r for r in (e.get('rows') or []) if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0)) and 'anomalous' not in str(r.get('notes') or '').lower()]) for e in element_data) or 59
+                    tot_discrete_fb = sum(len([r for r in (e.get('rows') or []) if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0)) and 'anomalous' not in str(r.get('notes') or '').lower()]) for e in element_data)
+                    if tot_discrete_fb == 0:
+                        tot_discrete_fb = sum(len(e.get('rows') or []) for e in element_data) or len(element_data)
                     v3_obs = [
                         "**Executive Summary:** An ultrasonic pulse velocity (**UPV**) investigation was performed across all **20 No. RC elements (S1–S20)** on the Ground Floor laydown area of the **'Ladol Exxon Laydown Area'** facility. All **20 elements** achieved a **'GOOD'** concrete quality rating in strict accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **4,134.54 m/s to 4,491.20 m/s** against an overall batch mean of **4,349.0 m/s**. Under the project-calibrated exponential correlation model (R² = 0.8966, s = 0.29 MPa), derived equivalent cube compressive strengths (f_cu) span **29.32 MPa to 32.30 MPa**, consistently surpassing the statutory design benchmark of **25.0 MPa**. Concrete uniformity is rated **Excellent** across 19 elements and **Good** on 1 element (**S13**), confirming dense compaction, absence of internal voiding, and structural suitability for heavy industrial laydown operations.",
                         f"**Scope & Survey Verification:** This isolated NDT scan batch encompasses **20 No. reinforced concrete elements (S1–S20)** at Ground Floor elevation, functioning as an **RCC slab-on-grade laydown area**. Testing comprised **{tot_discrete_fb} discrete pulse velocity measurements** across a standard grid density (3 readings per panel across all surveyed elements). "
@@ -6701,7 +6705,9 @@ class NDTReportService:
         total_reading_rows = sum(
             len([r for r in t.reading_rows() if _integrity_row_valid(r)])
             for t in tests
-        ) or 59
+        )
+        if total_reading_rows == 0:
+            total_reading_rows = sum(len(t.reading_rows()) for t in tests) or len(tests)
         builder.para(
             'This report was generated from verified platform records. Every figure is computed directly from '
             'live test records; the content digest below is a cryptographic SHA-256 hash incorporating all underlying '
