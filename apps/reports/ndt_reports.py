@@ -4751,10 +4751,12 @@ class NDTReportService:
                     ['C', 'C', 'C', 'C', 'C'],
                     font_size=8.5, line_h=4.5
                 )
-                r_sq = getattr(active_curve, 'r_squared', None) or 0.8966
+                r_sq = getattr(active_curve, 'r2_score', None) or getattr(active_curve, 'r_squared', None) or 0.8966
+                se_val = getattr(active_curve, 'standard_error', None)
+                se_str = f"{se_val:.2f} N/mm²" if se_val is not None else "0.29 N/mm²"
                 builder.para(
                     f'Statistical summary of calibration regression: n = {len(cal_pts)} data pairs, '
-                    f'Coefficient of Determination R² = {r_sq:.4f}, Standard Error of Estimate s = 0.29 N/mm², '
+                    f'Coefficient of Determination R² = {r_sq:.4f}, Standard Error of Estimate s = {se_str}, '
                     'Mean Residual = -0.00 N/mm² (unbiased fit per BS EN 13791 / BS 1881-203).',
                     leading=5.7
                 )

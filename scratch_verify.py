@@ -27,7 +27,7 @@ if not project:
 
 print(f"Project selected: ID={project.id}, Name='{project.name}', Address='{project.site_address}'")
 
-# Ensure active calibration curve is set
+# Ensure active calibration curve is set (Route 2: Empirical Baseline without destructive test data)
 curve = StrengthCurve.objects.filter(project=project, curve_type='exponential').first()
 if not curve:
     curve = StrengthCurve.objects.create(
@@ -38,14 +38,11 @@ if not curve:
         valid_range_min_ms=2000.0,
         valid_range_max_ms=5000.0,
         standard='BS 1881-203 / BS EN 12504-4',
-        data_points=[
-            {'v': 3200.0, 'f': 7.4}, {'v': 3400.0, 'f': 11.2},
-            {'v': 3600.0, 'f': 15.1}, {'v': 3800.0, 'f': 19.0},
-            {'v': 4000.0, 'f': 22.9}, {'v': 4200.0, 'f': 26.8},
-            {'v': 4400.0, 'f': 30.5}, {'v': 4600.0, 'f': 34.3},
-            {'v': 4800.0, 'f': 38.2}, {'v': 5000.0, 'f': 42.0}
-        ]
+        data_points=[]
     )
+else:
+    curve.data_points = []
+    curve.save()
 setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
 setting.active_curve = curve
 setting.save()

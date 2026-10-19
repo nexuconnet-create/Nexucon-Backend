@@ -125,26 +125,14 @@ if not curve:
         valid_range_min_ms=2000.0,
         valid_range_max_ms=5000.0,
         standard='BS 1881-203 / BS EN 12504-4',
-        r2_score=0.8966,
-        standard_error=0.29,
-        data_points=[
-            {'v': 3200.0, 'f': 21.3}, {'v': 3400.0, 'f': 23.4},
-            {'v': 3600.0, 'f': 24.6}, {'v': 3800.0, 'f': 26.8},
-            {'v': 4000.0, 'f': 28.0}, {'v': 4200.0, 'f': 30.1},
-            {'v': 4400.0, 'f': 31.3}, {'v': 4600.0, 'f': 33.5},
-            {'v': 4800.0, 'f': 34.7}, {'v': 5000.0, 'f': 36.6}
-        ]
+        r2_score=None,
+        standard_error=None,
+        data_points=[]
     )
 else:
-    curve.data_points = [
-        {'v': 3200.0, 'f': 21.3}, {'v': 3400.0, 'f': 23.4},
-        {'v': 3600.0, 'f': 24.6}, {'v': 3800.0, 'f': 26.8},
-        {'v': 4000.0, 'f': 28.0}, {'v': 4200.0, 'f': 30.1},
-        {'v': 4400.0, 'f': 31.3}, {'v': 4600.0, 'f': 33.5},
-        {'v': 4800.0, 'f': 34.7}, {'v': 5000.0, 'f': 36.6}
-    ]
-    curve.r2_score = 0.8966
-    curve.standard_error = 0.29
+    curve.data_points = []
+    curve.r2_score = None
+    curve.standard_error = None
     curve.save()
 setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
 setting.active_curve = curve
