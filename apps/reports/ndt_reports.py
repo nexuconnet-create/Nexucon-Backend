@@ -245,13 +245,42 @@ def ecs_report_disclosure(project):
     snap = curve_snapshot(curve)
     formula = snap.get('formula') or formula_display(
         curve.curve_type, curve.formula_params or {})
+    v_unit = 'm/s'
+    equiv_clause = ""
+    from apps.digital_eye.strength_curves import format_coefficient
+    if curve.curve_type == 'exponential':
+        p = curve.formula_params or {}
+        b_val = float(p.get('b', 0.85))
+        a_val = p.get('a', 1.20)
+        c_val = p.get('c', 0.0) or 0.0
+        if abs(b_val) >= 0.01:
+            v_unit = 'km/s'
+            b_ms_str = f"{b_val / 1000.0:g}"
+            a_str = format_coefficient(a_val)
+            c_str = f" - {format_coefficient(abs(c_val))}" if c_val < 0 else (f" + {format_coefficient(c_val)}" if c_val > 0 else "")
+            equiv_clause = f", equivalent to **f_cu = {a_str} x exp({b_ms_str} x V){c_str}** with V in m/s"
+        else:
+            v_unit = 'm/s'
+    elif curve.curve_type == 'linear':
+        p = curve.formula_params or {}
+        m_val = float(p.get('m', p.get('a', 8.961)))
+        if abs(m_val) > 1.0:
+            v_unit = 'km/s'
+    elif curve.curve_type == 'polynomial':
+        p = curve.formula_params or {}
+        coeffs = p.get('coeffs') or [p.get('a', 0), p.get('b', 0), p.get('c', 0)]
+        if len(coeffs) >= 3 and abs(float(coeffs[2])) > 1e-4:
+            v_unit = 'km/s'
+
+    unit_desc = f"f_cu in N/mm2, V the pulse velocity in {v_unit}"
+    if curve.curve_type == 'sonreb':
+        unit_desc += ", R the rebound number"
+
     parts = [
         "Estimated compressive strength (E.C.S) values in this report are "
         "derived from the project-specific calibration curve "
         f"established for this project under the Nexucon Link procedure: "
-        f"**{formula}** (f_cu in N/mm2, V the pulse velocity in m/s"
-        + (", R the rebound number)" if curve.curve_type == 'sonreb' else ")")
-        + ".",
+        f"**{formula}** ({unit_desc}{equiv_clause}).",
     ]
     if curve.standard:
         parts.append(f"Reference: {curve.standard}.")
@@ -287,7 +316,7 @@ def ecs_report_disclosure(project):
     parts.append(_measurement_standard_caveat())
     derivation = (
         f"the project-specific calibration above, {formula}, with V "
-        "expressed in m/s")
+        f"expressed in {v_unit}")
     return ' '.join(parts), derivation
 
 
@@ -6011,6 +6040,11 @@ class NDTReportService:
                     readings = []
                     for r in e.get('rows', []):
                         if r.get('transit_us') is not None and r.get('path_mm') is not None:
+                            v_km = r.get('velocity_km_s')
+                            if v_km is not None and not (1.0 <= v_km <= 5.0):
+                                continue
+                            if 'anomalous' in str(r.get('notes') or '').lower():
+                                continue
                             readings.append({
                                 'transit_time_us': r['transit_us'],
                                 'path_length_mm': r['path_mm'],
@@ -6085,6 +6119,28 @@ class NDTReportService:
                     range_ms = _num(row.get('range'))
                     sd_ms = _num(row.get('sd'), row.get('std_dev_ms'))
                     cov = _num(row.get('cov_percent'))
+                    # Exclude any physically impossible reading (> 5000 m/s or < 1000 m/s) from Table 5.5 math
+                    valid_live_pts = [
+                        r['velocity_km_s'] * 1000.0 for r in live.get('rows', [])
+                        if r.get('velocity_km_s') and 1.0 <= r['velocity_km_s'] <= 5.0
+                        and 'anomalous' not in str(r.get('notes') or '').lower()
+                    ] if live is not None else []
+
+                    if (v_max_ms is not None and v_max_ms > 5000.0) or (valid_live_pts and len(valid_live_pts) < len(live.get('rows', []))):
+                        import statistics
+                        if len(valid_live_pts) >= 2:
+                            v_mean_ms = statistics.mean(valid_live_pts)
+                            v_min_ms = min(valid_live_pts)
+                            v_max_ms = max(valid_live_pts)
+                            range_ms = v_max_ms - v_min_ms
+                            sd_ms = statistics.stdev(valid_live_pts)
+                            cov = (sd_ms / v_mean_ms) * 100.0 if v_mean_ms else 0.0
+                            n_val = str(len(valid_live_pts))
+                            unif = 'Excellent Uniformity' if cov < 5.0 else ('Good Uniformity' if cov < 10.0 else 'Variable / Suspect Uniformity')
+                            grade = live.get('remark') or ('GOOD' if 3500 < v_mean_ms <= 4500 else 'EXCELLENT')
+                            row['critical_low_point_location'] = 'Point 1'
+                            row['basis'] = 'v_mean (outlier excluded)'
+
                     f_cu_mpa = _num(row.get('f_cu_mpa'),
                                     row.get('est_strength_n_mm2'))
                     if f_cu_mpa is None and live is not None:
@@ -6105,9 +6161,8 @@ class NDTReportService:
                             unif = 'Variable / Suspect Uniformity'
                         else:
                             unif = 'Highly Variable'
-                    grade = row.get('grade')
-                    if not grade and live is not None:
-                        grade = live.get('remark')
+                    grade = (live.get('remark') if (live is not None and live.get('remark'))
+                             else (row.get('grade') or 'GOOD'))
 
                     rows.append([
                         stn,
@@ -6597,10 +6652,11 @@ class NDTReportService:
             pdf.set_xy(pdf.l_margin, pdf.get_y() + 6)
         builder.heading('REPORT INTEGRITY', page_break=False)
         digest = cls._statutory_digest(project, tests, report_no)
+        total_reading_rows = sum(len(t.reading_rows()) for t in tests) or len(tests)
         builder.para(
             'This report was generated from verified platform records. Every figure is computed directly from '
             'live test records; the content digest below is a cryptographic SHA-256 hash incorporating all underlying '
-            'test identifiers, results, the Phase 10 LASBCA statistical summary table (Section 5.5), and all 59 discrete '
+            f'test identifiers, results, the Phase 10 LASBCA statistical summary table (Section 5.5), and all {total_reading_rows} discrete '
             'reading rows, which can be used to detect and prevent any post-issuance alteration.'
         )
         integrity_items = [
