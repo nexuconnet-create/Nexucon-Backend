@@ -145,8 +145,9 @@ class ReportSectionOverride(models.Model):
     """
     Report CMS (8 Sep meeting H7 / 4 Sep C4): an editable override for
     one boilerplate prose section of the NDT report. ``project`` NULL
-    means the override applies platform-wide (every project without
-    its own override); a project FK scopes it to that project alone.
+    with ``agency`` set scopes the override to all projects of that
+    government agency; ``project`` and ``agency`` both NULL means platform-wide
+    fallback; a project FK scopes it to that project alone.
     Valid keys live in ``apps.reports.report_cms.CMS_SECTIONS`` — the
     registry, not this table, holds the defaults.
     """
@@ -154,6 +155,9 @@ class ReportSectionOverride(models.Model):
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE,
                                 null=True, blank=True,
                                 related_name='report_section_overrides')
+    agency = models.ForeignKey('government.Agency', on_delete=models.CASCADE,
+                               null=True, blank=True,
+                               related_name='report_section_overrides')
     section_key = models.CharField(max_length=60)
     body = models.TextField()
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
@@ -168,27 +172,39 @@ class ReportSectionOverride(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['section_key'],
-                condition=Q(project__isnull=True),
+                condition=Q(project__isnull=True, agency__isnull=True),
                 name='uniq_platform_report_section_override'),
+            models.UniqueConstraint(
+                fields=['agency', 'section_key'],
+                condition=Q(project__isnull=True, agency__isnull=False),
+                name='uniq_agency_report_section_override'),
             models.UniqueConstraint(
                 fields=['project', 'section_key'],
                 name='uniq_project_report_section_override'),
         ]
 
     def __str__(self):
-        scope = f'project {self.project_id}' if self.project_id else 'platform'
+        if self.project_id:
+            scope = f'project {self.project_id}'
+        elif self.agency_id:
+            scope = f'agency {self.agency_id}'
+        else:
+            scope = 'platform'
         return f'{self.section_key} ({scope})'
 
 
 class ReportCMSPassword(models.Model):
     """
-    Singleton credential guarding report-CMS edits (the password
-    protection the 8 Sep client review asked for). Only the hash is
-    stored — Django's make_password/check_password, same scheme as
-    user passwords. One row at most; the first row set wins until it
-    is changed through the API.
+    Credential guarding report-CMS edits (the password protection the 8 Sep
+    client review asked for). Scoped per government agency so each government
+    generates and manages its own password independently; an unassigned row
+    acts as the legacy platform fallback. Only the hash is stored.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agency = models.ForeignKey('government.Agency',
+                               on_delete=models.CASCADE,
+                               null=True, blank=True,
+                               related_name='report_cms_passwords')
     password_hash = models.CharField(max_length=128)
     set_by = models.ForeignKey(settings.AUTH_USER_MODEL,
                                on_delete=models.SET_NULL,
@@ -197,8 +213,16 @@ class ReportCMSPassword(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['agency'],
+                name='uniq_agency_report_cms_password'),
+        ]
+
     def __str__(self):
-        return 'Report CMS password'
+        ag = self.agency.code if self.agency else 'platform'
+        return f'Report CMS password ({ag})'
 
 
 class ReportBranding(models.Model):

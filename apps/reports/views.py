@@ -523,7 +523,7 @@ class ReportTemplateViewSet(viewsets.ModelViewSet):
 # ---------------------------------------------------------------------------
 from django.contrib.auth.hashers import check_password, make_password
 
-from common.permissions import IsDirector as IsCMSDirector
+from common.permissions import IsDirector as IsCMSDirector, user_agency
 
 from .models import ReportCMSPassword, ReportSectionOverride
 from .report_cms import CMS_SECTIONS, get_cms_text
@@ -533,11 +533,22 @@ def _cms_gate(request):
     """
     Director role + CMS password check for section edits. Returns a DRF
     Response when the request must be rejected, else None.
+    Guarded per government agency if the user belongs to an agency.
     """
-    credential = ReportCMSPassword.objects.first()
+    agency = user_agency(request.user)
+    credential = None
+    if agency is not None:
+        credential = ReportCMSPassword.objects.filter(agency=agency).first()
+        if credential is None:
+            # Fallback to legacy unassigned password if agency hasn't set one yet
+            credential = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+    else:
+        credential = ReportCMSPassword.objects.filter(agency__isnull=True).first() or ReportCMSPassword.objects.first()
+
     if credential is None:
+        agency_msg = f" for {agency.name}" if agency else ""
         return Response(
-            {'detail': 'No report-CMS password has been set yet. A Director '
+            {'detail': f'No report-CMS password has been set yet{agency_msg}. A Director '
                        'must set one via POST /api/v1/reports/cms/password/ '
                        'before template sections can be edited.'},
             status=status.HTTP_403_FORBIDDEN)
@@ -590,6 +601,14 @@ class ReportCMSSectionsView(APIView):
         if request.query_params.get('project') and project is None:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        agency = user_agency(request.user)
+        if agency is not None:
+            cred = ReportCMSPassword.objects.filter(agency=agency).first()
+            if cred is None:
+                cred = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+        else:
+            cred = ReportCMSPassword.objects.filter(agency__isnull=True).first() or ReportCMSPassword.objects.first()
+
         computed = {}
         if project is not None:
             from .ndt_reports import NDTReportService
@@ -600,7 +619,7 @@ class ReportCMSSectionsView(APIView):
                 computed = {}
         sections = []
         for key, meta in CMS_SECTIONS.items():
-            body, source = get_cms_text(project, key, computed=computed)
+            body, source = get_cms_text(project, key, computed=computed, agency=agency)
             sections.append({
                 'key': key,
                 'label': meta['label'],
@@ -626,7 +645,8 @@ class ReportCMSSectionsView(APIView):
             })
         return Response({
             'project': str(project.id) if project else None,
-            'password_set': ReportCMSPassword.objects.exists(),
+            'agency': agency.name if agency else None,
+            'password_set': cred is not None,
             'sections': sections,
         })
 
@@ -730,19 +750,33 @@ class ReportCMSSectionView(APIView):
                                'recorded" statement — it cannot be edited '
                                'until the underlying data exists.'},
                     status=status.HTTP_409_CONFLICT)
-        override, _created = ReportSectionOverride.objects.update_or_create(
-            project=project, section_key=key,
-            defaults={'body': str(body), 'updated_by': request.user})
+        agency = user_agency(request.user)
+        if project is not None:
+            override, _created = ReportSectionOverride.objects.update_or_create(
+                project=project, section_key=key,
+                defaults={'body': str(body), 'updated_by': request.user, 'agency': agency})
+            scope = 'project'
+        elif agency is not None:
+            override, _created = ReportSectionOverride.objects.update_or_create(
+                project__isnull=True, agency=agency, section_key=key,
+                defaults={'body': str(body), 'updated_by': request.user, 'agency': agency})
+            scope = f'agency:{agency.code}'
+        else:
+            override, _created = ReportSectionOverride.objects.update_or_create(
+                project__isnull=True, agency__isnull=True, section_key=key,
+                defaults={'body': str(body), 'updated_by': request.user})
+            scope = 'platform'
+
         from apps.evidence.review import record_audit
         record_audit(
             request.user, 'report_cms_section_saved', 'ReportSectionOverride',
             override.id,
             new_state={'section_key': key,
                        'project': str(project.id) if project else None,
+                       'agency': agency.code if agency else None,
                        'body_length': len(override.body)},
-            metadata={'section_key': key, 'scope': 'project' if project
-                      else 'platform'})
-        _, source = get_cms_text(project, key)
+            metadata={'section_key': key, 'scope': scope})
+        _, source = get_cms_text(project, key, agency=agency)
         return Response({'key': key, 'source': source, 'body': override.body})
 
     def delete(self, request, key):
@@ -768,59 +802,101 @@ class ReportCMSSectionView(APIView):
             project, rejected = self._project(request)
             if rejected:
                 return rejected
-        deleted, _ = ReportSectionOverride.objects.filter(
-            project=project, section_key=key).delete()
+        agency = user_agency(request.user)
+        if project is not None:
+            deleted, _ = ReportSectionOverride.objects.filter(
+                project=project, section_key=key).delete()
+            scope = 'project'
+        elif agency is not None:
+            deleted, _ = ReportSectionOverride.objects.filter(
+                project__isnull=True, agency=agency, section_key=key).delete()
+            scope = f'agency:{agency.code}'
+        else:
+            deleted, _ = ReportSectionOverride.objects.filter(
+                project__isnull=True, agency__isnull=True, section_key=key).delete()
+            scope = 'platform'
+
         from apps.evidence.review import record_audit
         record_audit(
             request.user, 'report_cms_section_reverted',
             'ReportSectionOverride', key,
             new_state={'section_key': key,
-                       'project': str(project.id) if project else None},
-            metadata={'section_key': key, 'scope': 'project' if project
-                      else 'platform'})
+                       'project': str(project.id) if project else None,
+                       'agency': agency.code if agency else None},
+            metadata={'section_key': key, 'scope': scope})
         computed = None
         if CMS_SECTIONS[key].get('computed') and project is not None:
             from .ndt_reports import NDTReportService
             computed = NDTReportService.computed_section_bodies(project)
-        body, source = get_cms_text(project, key, computed=computed)
+        body, source = get_cms_text(project, key, computed=computed, agency=agency)
         return Response({'key': key, 'source': source, 'body': body,
                          'reverted': bool(deleted)})
 
 
 class ReportCMSPasswordView(APIView):
     """
-    POST /api/v1/reports/cms/password/   {new_password, current_password?}
-    Set (or change) the password guarding report-CMS edits. Directors only.
-    Changing an existing password requires the current one.
+    GET  /api/v1/reports/cms/password/
+    POST /api/v1/reports/cms/password/   {new_password, current_password?, reset?}
+    Set, change, or reset (forgot password) the password guarding report-CMS edits.
+    Directors only. Guarded per government agency.
     """
     permission_classes = [IsCMSDirector]
 
+    def get(self, request):
+        agency = user_agency(request.user)
+        if agency is not None:
+            cred = ReportCMSPassword.objects.filter(agency=agency).first()
+            if cred is None:
+                cred = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+        else:
+            cred = ReportCMSPassword.objects.filter(agency__isnull=True).first() or ReportCMSPassword.objects.first()
+        return Response({
+            'password_set': cred is not None,
+            'agency': agency.name if agency else None,
+            'agency_code': agency.code if agency else None,
+        })
+
     def post(self, request):
-        new_password = (request.data or {}).get('new_password')
+        data = request.data or {}
+        new_password = data.get('new_password')
         if not new_password or len(str(new_password)) < 8:
             return Response({'detail': 'new_password is required and must be '
                                        'at least 8 characters.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        credential = ReportCMSPassword.objects.first()
-        if credential is not None:
-            current = (request.data or {}).get('current_password', '')
-            if not current or not check_password(str(current),
-                                                 credential.password_hash):
+        agency = user_agency(request.user)
+        is_reset = bool(data.get('reset') or data.get('forgot_password'))
+
+        if agency is not None:
+            credential = ReportCMSPassword.objects.filter(agency=agency).first()
+        else:
+            credential = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+
+        if credential is not None and not is_reset:
+            current = data.get('current_password', '')
+            if not current or not check_password(str(current), credential.password_hash):
                 return Response(
-                    {'detail': 'A report-CMS password already exists; the '
-                               'current password is required to change it.'},
+                    {'detail': 'A report-CMS password already exists; the current password is required to change it. (Use Reset if forgotten).'},
                     status=status.HTTP_403_FORBIDDEN)
             credential.password_hash = make_password(str(new_password))
             credential.set_by = request.user
             credential.save()
+            action = 'report_cms_password_changed'
+        elif credential is not None and is_reset:
+            credential.password_hash = make_password(str(new_password))
+            credential.set_by = request.user
+            credential.save()
+            action = 'report_cms_password_reset'
         else:
             credential = ReportCMSPassword.objects.create(
+                agency=agency,
                 password_hash=make_password(str(new_password)),
                 set_by=request.user)
+            action = 'report_cms_password_set'
+
         from apps.evidence.review import record_audit
-        record_audit(request.user, 'report_cms_password_set',
-                     'ReportCMSPassword', credential.id)
-        return Response({'detail': 'Report-CMS password saved.'})
+        record_audit(request.user, action, 'ReportCMSPassword', credential.id)
+        agency_label = f" for {agency.name}" if agency else ""
+        return Response({'detail': f'Report-CMS password saved{agency_label}.', 'password_set': True})
 
 
 # ---------------------------------------------------------------------------

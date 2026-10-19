@@ -7067,6 +7067,15 @@ class NDTReportService:
                 return ''
             return str(u).split('?')[0].strip().lower()
 
+        def _is_bim_or_cad_screenshot(url_or_path, caption='', desc=''):
+            blob = f"{url_or_path} {caption} {desc}".lower()
+            indicators = (
+                'bim 3d', 'bim_3d', '3d view', '_ifc', '.ifc', 'stacking area_ifc',
+                'bim model', 'bim snapshot', 'bim viewer', 'ifc view', 'bim capture',
+                'cad 3d', 'model preview', 'bim 3d view'
+            )
+            return any(ind in blob for ind in indicators)
+
         # 1. Photos attached directly to test records
         for t in tests:
             for f in t.files.all():
@@ -7084,6 +7093,9 @@ class NDTReportService:
                 except Exception:
                     url = getattr(f.file, 'url', '') or ''
                 if not url:
+                    continue
+
+                if _is_bim_or_cad_screenshot(url, getattr(f, 'file_name', ''), getattr(f, 'description', '')):
                     continue
 
                 k = _clean_key(url)
@@ -7118,6 +7130,8 @@ class NDTReportService:
                     except Exception:
                         url = getattr(sf.file, 'url', '') or ''
                     if not url:
+                        continue
+                    if _is_bim_or_cad_screenshot(url, getattr(sf, 'file_name', ''), getattr(sf, 'description', '')):
                         continue
                     k = _clean_key(url)
                     if k in seen:
@@ -7155,6 +7169,8 @@ class NDTReportService:
                     for p_url in raw_photos:
                         if not isinstance(p_url, str):
                             continue
+                        if _is_bim_or_cad_screenshot(p_url):
+                            continue
                         k = _clean_key(p_url)
                         if k and k not in seen:
                             seen.add(k)
@@ -7179,6 +7195,8 @@ class NDTReportService:
                             raw_photos = [u.strip() for u in raw_photos.split(',')] if ',' in raw_photos else [raw_photos]
                     for p_url in raw_photos:
                         if not isinstance(p_url, str):
+                            continue
+                        if _is_bim_or_cad_screenshot(p_url):
                             continue
                         k = _clean_key(p_url)
                         if k and k not in seen:
