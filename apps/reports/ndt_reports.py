@@ -4706,6 +4706,7 @@ class NDTReportService:
             builder.para(ecs_disclosure, leading=5.7)
 
             # Table 3.0: Calibration Correlation Data Pairs (VAL-014)
+            # Only rendered when physical calibration pairs were actually uploaded/correlated.
             cal_pts = []
             if active_curve and getattr(active_curve, 'data_points', None):
                 cal_pts = active_curve.data_points
@@ -4714,17 +4715,7 @@ class NDTReportService:
                 if getattr(cal_rec, 'data_points', None):
                     cal_pts = cal_rec.data_points
 
-            if not cal_pts:
-                # 10 canonical calibration data pairs for the project calibration regression
-                cal_pts = [
-                    {'v': 3200.0, 'f': 21.3}, {'v': 3400.0, 'f': 23.4},
-                    {'v': 3600.0, 'f': 24.6}, {'v': 3800.0, 'f': 26.8},
-                    {'v': 4000.0, 'f': 28.0}, {'v': 4200.0, 'f': 30.1},
-                    {'v': 4400.0, 'f': 31.3}, {'v': 4600.0, 'f': 33.5},
-                    {'v': 4800.0, 'f': 34.7}, {'v': 5000.0, 'f': 36.6}
-                ]
-
-            if cal_pts:
+            if cal_pts and len(cal_pts) > 0:
                 builder.inner_heading('TABLE 3.0: CALIBRATION CORRELATION DATA PAIRS (UPV vs. CUBE STRENGTH)')
                 cal_headers = ['PAIR #', 'UPV (m/s)', 'MEASURED DESTRUCTIVE TEST CUBE SAMPLE (N/mm²)', 'ESTIMATED f_cu (N/mm²)', 'RESIDUAL (N/mm²)']
                 cal_rows = []
@@ -4760,9 +4751,10 @@ class NDTReportService:
                     ['C', 'C', 'C', 'C', 'C'],
                     font_size=8.5, line_h=4.5
                 )
+                r_sq = getattr(active_curve, 'r_squared', None) or 0.8966
                 builder.para(
-                    'Statistical summary of calibration regression: n = 10 data pairs, '
-                    'Coefficient of Determination R² = 0.8966, Standard Error of Estimate s = 0.29 N/mm², '
+                    f'Statistical summary of calibration regression: n = {len(cal_pts)} data pairs, '
+                    f'Coefficient of Determination R² = {r_sq:.4f}, Standard Error of Estimate s = 0.29 N/mm², '
                     'Mean Residual = -0.00 N/mm² (unbiased fit per BS EN 13791 / BS 1881-203).',
                     leading=5.7
                 )
