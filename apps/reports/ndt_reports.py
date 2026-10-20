@@ -5569,9 +5569,7 @@ class NDTReportService:
 
                     if member_order:
                         member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
-                    else:
-                        member_label = 'STRUCTURAL ELEMENTS'
-                    elif not member_label.endswith('S'):
+                    if not member_label.endswith('S'):
                         member_label = f'{member_label}S'
                     if builder.pdf.will_page_break(45):
                         builder.pdf.add_page()
