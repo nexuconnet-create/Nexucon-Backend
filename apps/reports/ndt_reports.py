@@ -5024,8 +5024,9 @@ class NDTReportService:
                          align='C', new_x='LMARGIN', new_y='NEXT')
 
                 footprint_sqm = boundary_data.get('footprintAreaSqm')
-                perimeter_m = boundary_data.get('perimeterMeters')
                 coord_sys = boundary_data.get('system') or 'WGS84_DD'
+                if any(c.get('easting') for c in corners_list):
+                    coord_sys = 'UTM_31N_WGS84'
 
                 badge_parts = []
                 if footprint_sqm is not None:
@@ -5322,6 +5323,8 @@ class NDTReportService:
                     leading=7.5,
                 )
 
+            if builder.pdf.will_page_break(45):
+                builder.pdf.add_page()
             builder.inner_heading('TABLE 4.1: COVER METER / REINFORCEMENT BAR RESULTS', centered=False, underline=False)
             placeholder_rows = [
                 ['1', 'RCC SLAB-ON-GRADE (S1–S5)', 'NIL', 'NIL', 'NIL', 'NIL'],
@@ -5568,10 +5571,10 @@ class NDTReportService:
                         member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
                     else:
                         member_label = 'STRUCTURAL ELEMENTS'
-                    if member_label in ('STRUCTURAL ELEMENT', 'STRUCTURAL ELEMENTS'):
-                        member_label = 'STRUCTURAL ELEMENTS'
                     elif not member_label.endswith('S'):
                         member_label = f'{member_label}S'
+                    if builder.pdf.will_page_break(45):
+                        builder.pdf.add_page()
                     builder.subheading(
                         f'TABLE 5.1: ULTRASONIC PULSE VELOCITY TEST MEASUREMENTS — {floor.upper()} {member_label}'
                         + (f' OF {project.name.upper()}'
@@ -5707,7 +5710,7 @@ class NDTReportService:
                         y_cap_a = y_chart_a + h_a + 1.0
                         pdf.set_xy(pdf.l_margin, y_cap_a)
                         pdf.set_font('Cambria', '', 11)
-                        pdf.cell(0, 6, 'Figure 5.1: *CHART ILLUSTRATING THE NUMBER OF '
+                        pdf.cell(0, 6, 'Figure 5.1: CHART ILLUSTRATING THE NUMBER OF '
                                        'STRUCTURAL MEMBER TESTED', align='C',
                                  new_x='LMARGIN', new_y='NEXT')
                         y_chart_b = y_cap_a + 6.0
@@ -5716,7 +5719,7 @@ class NDTReportService:
                         y_cap_b = y_chart_b + h_b + 3.0
                         pdf.set_xy(pdf.l_margin, y_cap_b)
                         pdf.set_font('Cambria', '', 11)
-                        pdf.cell(0, 6, 'Figure 5.2: *CHART ILLUSTRATING THE PERCENTAGE OF '
+                        pdf.cell(0, 6, 'Figure 5.2: CHART ILLUSTRATING THE PERCENTAGE OF '
                                        'STRENGTH OF STRUCTURAL MEMBER TESTED',
                                  align='C', new_x='LMARGIN', new_y='NEXT')
                         pdf.set_font('Cambria', '', 12)
