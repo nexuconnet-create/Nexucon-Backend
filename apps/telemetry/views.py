@@ -658,7 +658,99 @@ class TelemetrySessionDetailView(APIView):
         if corner_coords:
             config['corner_coordinates'] = corner_coords
 
+        # Handle photo deletion
+        delete_photos = []
+        if hasattr(request.data, 'getlist'):
+            delete_photos = request.data.getlist('delete_photos')
+        if not delete_photos and 'delete_photos' in request.data:
+            dp = request.data.get('delete_photos')
+            if isinstance(dp, str):
+                try:
+                    import json
+                    parsed = json.loads(dp)
+                    delete_photos = parsed if isinstance(parsed, list) else [dp]
+                except Exception:
+                    delete_photos = [dp]
+            elif isinstance(dp, list):
+                delete_photos = dp
+
+        remaining_photos = request.data.get('remaining_photos')
+        if remaining_photos is not None and isinstance(remaining_photos, str):
+            try:
+                import json
+                remaining_photos = json.loads(remaining_photos)
+            except Exception:
+                remaining_photos = None
+
+        curr_photos = list(config.get('photos') or [])
+        curr_ids = list(config.get('photo_ids') or [])
+
+        def _clean_photo_key(val):
+            if not val:
+                return ''
+            s = str(val).split('?')[0].strip()
+            return s.split('/')[-1].lower()
+
+        to_remove = set()
+        if remaining_photos is not None and isinstance(remaining_photos, list):
+            retained_keys = {_clean_photo_key(p) for p in remaining_photos}
+            for p in curr_photos:
+                if _clean_photo_key(p) not in retained_keys:
+                    to_remove.add(p)
+        if delete_photos:
+            for p in delete_photos:
+                to_remove.add(p)
+
+        if to_remove:
+            remove_keys = {_clean_photo_key(p) for p in to_remove}
+            new_photos = []
+            new_ids = []
+
+            from apps.digital_eye.models import SensorDataFile, PUNDITTest
+            sdfs = SensorDataFile.objects.filter(id__in=curr_ids)
+            sdf_by_id = {str(sf.id): sf for sf in sdfs}
+
+            for idx, p_url in enumerate(curr_photos):
+                k = _clean_photo_key(p_url)
+                if k in remove_keys or p_url in to_remove:
+                    matching_sdf = None
+                    if idx < len(curr_ids) and curr_ids[idx] in sdf_by_id:
+                        matching_sdf = sdf_by_id[curr_ids[idx]]
+                    else:
+                        for sf in sdfs:
+                            if _clean_photo_key(getattr(sf.file, 'name', '')) == k or _clean_photo_key(getattr(sf.file, 'url', '')) == k:
+                                matching_sdf = sf
+                                break
+                    if matching_sdf:
+                        try:
+                            for test in PUNDITTest.objects.filter(files=matching_sdf):
+                                test.files.remove(matching_sdf)
+                            matching_sdf.delete()
+                        except Exception as e:
+                            logger.warning("Error deleting SensorDataFile %s: %s", getattr(matching_sdf, 'id', ''), e)
+                else:
+                    new_photos.append(p_url)
+                    if idx < len(curr_ids):
+                        new_ids.append(curr_ids[idx])
+
+            config['photos'] = new_photos
+            config['photo_ids'] = new_ids
+
+            if session.project_id:
+                try:
+                    from apps.inspections.models import Inspection
+                    for insp in Inspection.objects.filter(project_id=session.project_id):
+                        if insp.visual_site_photos:
+                            updated_isp = [u for u in insp.visual_site_photos if _clean_photo_key(u) not in remove_keys and u not in to_remove]
+                            if len(updated_isp) != len(insp.visual_site_photos):
+                                insp.visual_site_photos = updated_isp
+                                insp.save(update_fields=['visual_site_photos'])
+                except Exception as e:
+                    logger.warning("Error updating inspection visual_site_photos: %s", e)
+
+        # Handle newly uploaded photos
         uploaded_photos = request.FILES.getlist('photos')
+        new_added_sdfs = []
         if uploaded_photos:
             from apps.digital_eye.models import SensorDataFile
             import hashlib
@@ -678,6 +770,7 @@ class TelemetrySessionDetailView(APIView):
                     project=session.project,
                     uploaded_by=request.user if (request.user and request.user.is_authenticated) else None,
                 )
+                new_added_sdfs.append(sdf)
                 saved_photo_ids.append(str(sdf.id))
                 try:
                     saved_photo_urls.append(sdf.file.url)
@@ -819,6 +912,14 @@ class TelemetrySessionDetailView(APIView):
                         structural_element=f'Telemetry capture {session.session_reference}'
                     )
                     qs.update(**update_fields)
+
+                if new_added_sdfs:
+                    tests_to_link = PUNDITTest.objects.filter(id__in=test_ids) if test_ids else PUNDITTest.objects.filter(
+                        project_id=session.project_id,
+                        structural_element=f'Telemetry capture {session.session_reference}'
+                    )
+                    for t in tests_to_link:
+                        t.files.add(*new_added_sdfs)
 
         session.refresh_from_db()
         _record_audit(request.user, 'telemetry.session.update', session.id, {
