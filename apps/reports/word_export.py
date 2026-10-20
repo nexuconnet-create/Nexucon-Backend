@@ -684,7 +684,7 @@ class NDTWordExporter:
                 )
             summary_table_rows.append([
                 "Structural Member Surfaces",
-                f"{len(tests)} stations tested across {floors_desc}",
+                f"{len(tests)} panels tested across {floors_desc}",
                 cond_summary
             ])
 
@@ -762,7 +762,7 @@ class NDTWordExporter:
 
             _add_para(
                 doc,
-                f"Fieldwork & Surface Synthesis: A total of {len(tests)} structural member test stations "
+                f"Fieldwork & Surface Synthesis: A total of {len(tests)} structural member test panels "
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
                 + (f"On-site visual observation noted: “{site_visual_obs[0]}”. "

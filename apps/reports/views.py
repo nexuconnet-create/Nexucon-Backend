@@ -1689,16 +1689,16 @@ class NDTReportPageQAView(APIView):
             logger.warning("Could not collect appendix photos for QA review: %s", e)
 
         stn_tag_list = [str(s.get('station') or f"S{i}") for i, s in enumerate(compact_summary, 1)]
-        stn_range_desc = f"{stn_tag_list[0]}–{stn_tag_list[-1]}" if len(stn_tag_list) > 1 else (stn_tag_list[0] if stn_tag_list else f"Stations 1–{len(tests)}")
+        stn_range_desc = f"{stn_tag_list[0]}–{stn_tag_list[-1]}" if len(stn_tag_list) > 1 else (stn_tag_list[0] if stn_tag_list else f"Panels 1–{len(tests)}")
 
         appendix_meta = {
             'appendix_i_drawing': f'APPENDIX I: SURVEY GRID LAYOUT ({stn_range_desc})',
             'survey_asset_type': f"{asset_type_val} ({sqm_val} m²)",
             'tested_stations': stn_range_desc,
-            'stations_verification': f'All {stn_range_desc} stations verified strictly within surveyed project boundary',
+            'stations_verification': f'All {stn_range_desc} panels verified strictly within surveyed project boundary',
             'fieldwork_dates': test_dates_str,
             'exif_gps_reconciliation': (
-                'Camera EXIF coordinates and survey GPS records confirm all test stations are within the georeferenced boundary.'
+                'Camera EXIF coordinates and survey GPS records confirm all test panels are within the georeferenced boundary.'
             ),
             'photographic_plates': appendix_photos,
             'equipment_certificate': {
@@ -1722,8 +1722,8 @@ class NDTReportPageQAView(APIView):
                 f"Section: {active_sec_label} (Page {page_number} of {total_pages}).\n"
                 f"Extracted page text: '{active_page_text.strip()}'.\n"
                 f"Visual Plate Description: Technical drawing / survey map / photographic plate depicting "
-                f"{'Survey Grid Layout ' + stn_range_desc + ' with boundary coordinates' if ('survey' in active_sec_label.lower() or 'layout' in active_sec_label.lower() or 'floor' in active_sec_label.lower()) else 'Field photographic evidence plates documenting test stations ' + stn_range_desc + ' and equipment calibration'}.\n"
-                f"Associated project stations: Stations {stn_range_desc}."
+                f"{'Survey Grid Layout ' + stn_range_desc + ' with boundary coordinates' if ('survey' in active_sec_label.lower() or 'layout' in active_sec_label.lower() or 'floor' in active_sec_label.lower()) else 'Field photographic evidence plates documenting test panels ' + stn_range_desc + ' and equipment calibration'}.\n"
+                f"Associated project panels: Panels {stn_range_desc}."
             )
 
         raw_payload = {
@@ -1761,7 +1761,7 @@ class NDTReportPageQAView(APIView):
             "- Regulatory Schema Validation: If reviewing a LASBCA Phase 10 Statistical Summary Table, confirm the strict presence of the mandatory compliance columns: V_min, V_max, Range, Grade, Critical Low Point, and Basis.\n"
             "- Appendix & Technical Drawings: For Appendix pages (Appendix I Survey Plan, Appendix II-IV Photo Plates, Calibration Certs):\n"
             "  * Cross-reference against raw_json_payload.appendix_metadata.\n"
-            "  * Verify that photographic plates (e.g. PIC I to PIC V, Figures 4.1 to 4.5), test stations (S1–S20), and EXIF reconciliation match the payload.\n"
+            "  * Verify that photographic plates (e.g. PIC I to PIC V, Figures 4.1 to 4.5), test panels (S1–S20), and EXIF reconciliation match the payload.\n"
             "  * Do not flag the absence of tabular statistical calculation columns on CAD drawing or photo plate pages, as visual graphical documentation is the statutory intent of the Appendix.\n\n"
             "OUTPUT FORMAT REQUIRED:\n"
             "Return a JSON object conforming to the schema with:\n"

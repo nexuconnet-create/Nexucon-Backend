@@ -2253,7 +2253,7 @@ class NDTReportService:
             ax.plot(leg_x + 2.5, leg_y + 2.25, 'o', color='#ffffff', markersize=2.2, zorder=12)
             all_tags = sorted([s['tag'] for s in slabs], key=_natural_sort_key)
             stn_range_str = f"{all_tags[0]}–{all_tags[-1]}" if all_tags else f"1–{len(slabs)}"
-            ax.text(leg_x + 4.8, leg_y + 2.25, f"NDT Test Station ({stn_range_str})",
+            ax.text(leg_x + 4.8, leg_y + 2.25, f"NDT Test Panel ({stn_range_str})",
                     va='center', fontsize=5.8, fontweight='bold', color='#0f172a', zorder=11)
             ax.plot(leg_x + 26.5, leg_y + 2.25, 'o', color='#1d4ed8', markersize=6.5, zorder=11)
             ax.plot(leg_x + 26.5, leg_y + 2.25, 'o', color='#ffffff', markersize=2.5, zorder=12)
@@ -3698,11 +3698,11 @@ class NDTReportService:
                         f'{f_min:.1f}–{f_max:.1f} N/mm² ')
                 analysis_sentence = (
                     f'and the Non-Destructive test analysis shows that all {len(good_members)} of the '
-                    f'{len(element_data)} structural stations tested achieved GOOD quality ratings under BS 1881-203 / '
+                    f'{len(element_data)} structural panels tested achieved GOOD quality ratings under BS 1881-203 / '
                     f'BS EN 12504-4, with a batch mean pulse velocity of {v_mean:.1f} m/s (velocity range '
                     f'{v_min:.2f}–{v_max:.2f} m/s), {strength_phrase}'
                     f'(statutory benchmark 25.0 N/mm²), and a point density of {total_discrete} discrete '
-                    f'readings across the {len(element_data)} surveyed stations at the time of test.'
+                    f'readings across the {len(element_data)} surveyed panels at the time of test.'
                 )
             else:
                 analysis_sentence = (
@@ -5238,7 +5238,7 @@ class NDTReportService:
                 sog_visual_items = [
                     'Concrete surface planar, dry, and verified free of honeycombing or spalling; direct acoustic coupling achieved per BS 1881-203.',
                     'Tested structural elements display uniform placement without uncoupled voids, cold joints, or structural distress.',
-                    'Survey coordinates and member markings confirmed against site grid plan (Stations S1–S20).'
+                    'Survey coordinates and member markings confirmed against site grid plan (Panels S1–S20).'
                 ]
                 builder.lettered(sog_visual_items)
                 builder.para(
@@ -5388,7 +5388,7 @@ class NDTReportService:
             builder.divider_page('5.0 ANALYSIS OF TEST RESULT')
             station_count = len(element_data) if element_data else (len(tests) or 20)
             builder.para(
-                f"The {station_count} test stations were analysed using the platform's deterministic BS 1881-203 velocity relations. "
+                f"The {station_count} test panels were analysed using the platform's deterministic BS 1881-203 velocity relations. "
                 "The AI-narrative layer was invoked separately and is presented in Section 5.3. "
                 "Both layers draw from the same verified raw readings.",
                 leading=7.5
@@ -5548,7 +5548,7 @@ class NDTReportService:
                             if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
                                 remark += (f"\nUPV variance between points: {e['spread_km_s'] * 1000:.0f} m/s (±{e['spread_pct'] / 2:.1f}%)")
                             if len(rows) < 3 or e.get('element') == 'S11':
-                                remark += "\n*Note: Station evaluated on 2-point basis. BS EN 12504-4 recommends >=3 points for statistical assessment; provisional assessment applied per ACI 228.2R."
+                                remark += "\n*Note: Panel evaluated on 2-point basis. BS EN 12504-4 recommends >=3 points for statistical assessment; provisional assessment applied per ACI 228.2R."
                             remark += flag_text
                             
                             for i, r in enumerate(rows):
@@ -5768,12 +5768,12 @@ class NDTReportService:
                         "**Executive Summary:** An ultrasonic pulse velocity (**UPV**) investigation was performed across all **20 No. RC elements (S1–S20)** on the Ground Floor laydown area of the **'Ladol Exxon Laydown Area'** facility. All **20 elements** achieved a **'GOOD'** concrete quality rating in strict accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **4,134.54 m/s to 4,491.20 m/s** against an overall batch mean of **4,349.0 m/s**. Under the project-calibrated exponential correlation model (R² = 0.8966, s = 0.29 MPa), derived equivalent cube compressive strengths (f_cu) span **29.32 MPa to 32.30 MPa**, consistently surpassing the statutory design benchmark of **25.0 MPa**. Concrete uniformity is rated **Excellent** across 19 elements and **Good** on 1 element (**S13**), confirming dense compaction, absence of internal voiding, and structural suitability for heavy industrial laydown operations.",
                         f"**Scope & Survey Verification:** This isolated NDT scan batch encompasses **20 No. reinforced concrete elements (S1–S20)** at Ground Floor elevation, functioning as an **RCC slab-on-grade laydown area**. Testing comprised **{tot_discrete_fb} discrete pulse velocity measurements** across a standard grid density (3 readings per panel across all surveyed elements). "
                         f"All physical path lengths (**500 mm**) and transit times (**106.7–125.0 µs**) were verified with **zero unit anomalies** and no out-of-range velocities (**4,000.0–4,687.5 m/s** discrete range), confirming full physical plausibility and acoustic transmission integrity per **BS 1881-203**.",
-                        "**Batch-Level Homogeneity & Acoustic Integrity (S1–S20):** All **20 slab-on-grade panels** were tested under dry surface conditions using direct transmission. Statistical analysis indicates exceptional acoustic consistency across the slab, with batch Coefficients of Variation (**CoV**) ranging tightly between **0.28% and 5.20%**. Zero stations triggered the conservative-strength threshold (**CoV > 10%**) or exhibited wide-spread outlier signatures. This confirms **homogeneous concrete placement**, **uniform acoustic matrix density**, and **thorough vibratory compaction** throughout the continuous laydown slab.",
-                        "**High Velocity Band (4,400–4,500 m/s) — RCC Slab-on-Grade Panels (S1, S2, S4, S8, S9):** Rated **GOOD** concrete quality with **Excellent Uniformity** (Average CoV: **1.97%**; peak station **S8** at **4,491.20 m/s**). Ultrasonic transmission velocities in this uppermost band represent the **densest cementitious consolidation** in the batch, yielding derived compressive strengths of **31.6–32.3 N/mm²** (exceeding the 25.0 MPa statutory target by up to **29.2%**). The low dispersion confirms high aggregate-paste interlock, minimal internal acoustic attenuation, and total absence of honeycombing or delamination.",
-                        "**Mid-High Velocity Band (4,300–4,399 m/s) — RCC Slab-on-Grade Panels (S3, S5, S6, S7, S14, S15, S18, S19):** Rated **GOOD** concrete quality with **Excellent Uniformity** (Average CoV: **2.05%**; velocities **4,331.0–4,397.0 m/s**). Panels in this group demonstrate very consistent acoustic transit times across all grid stations, producing derived compressive strengths of **30.9–31.5 N/mm²**. Point-spread analysis demonstrates tight cluster grouping with zero localized velocity drops, confirming reliable compressive capacity and robust structural resistance against dynamic wheel loads.",
-                        "**Mid Velocity Band (4,200–4,299 m/s) — RCC Slab-on-Grade Panels (S10, S11, S12, S13, S16, S20):** Rated **GOOD** concrete quality with **Good to Excellent Uniformity** (Average CoV: **3.26%**; derived strengths **30.3–30.6 N/mm²**). This group encompasses station **S11** (**4,276.32 m/s**, validated across 2 direct transmission points per **ACI 228.2R**) and station **S13** (**4,252.85 m/s**, CoV **5.20%**, monitored as the sole batch watch item). Despite slightly higher localized variance in **S13**, all discrete point readings remain well above the statutory **3,500 m/s** threshold and require no remedial intervention.",
+                        "**Batch-Level Homogeneity & Acoustic Integrity (S1–S20):** All **20 slab-on-grade panels** were tested under dry surface conditions using direct transmission. Statistical analysis indicates exceptional acoustic consistency across the slab, with batch Coefficients of Variation (**CoV**) ranging tightly between **0.28% and 5.20%**. Zero panels triggered the conservative-strength threshold (**CoV > 10%**) or exhibited wide-spread outlier signatures. This confirms **homogeneous concrete placement**, **uniform acoustic matrix density**, and **thorough vibratory compaction** throughout the continuous laydown slab.",
+                        "**High Velocity Band (4,400–4,500 m/s) — RCC Slab-on-Grade Panels (S1, S2, S4, S8, S9):** Rated **GOOD** concrete quality with **Excellent Uniformity** (Average CoV: **1.97%**; peak panel **S8** at **4,491.20 m/s**). Ultrasonic transmission velocities in this uppermost band represent the **densest cementitious consolidation** in the batch, yielding derived compressive strengths of **31.6–32.3 N/mm²** (exceeding the 25.0 MPa statutory target by up to **29.2%**). The low dispersion confirms high aggregate-paste interlock, minimal internal acoustic attenuation, and total absence of honeycombing or delamination.",
+                        "**Mid-High Velocity Band (4,300–4,399 m/s) — RCC Slab-on-Grade Panels (S3, S5, S6, S7, S14, S15, S18, S19):** Rated **GOOD** concrete quality with **Excellent Uniformity** (Average CoV: **2.05%**; velocities **4,331.0–4,397.0 m/s**). Panels in this group demonstrate very consistent acoustic transit times across all grid panels, producing derived compressive strengths of **30.9–31.5 N/mm²**. Point-spread analysis demonstrates tight cluster grouping with zero localized velocity drops, confirming reliable compressive capacity and robust structural resistance against dynamic wheel loads.",
+                        "**Mid Velocity Band (4,200–4,299 m/s) — RCC Slab-on-Grade Panels (S10, S11, S12, S13, S16, S20):** Rated **GOOD** concrete quality with **Good to Excellent Uniformity** (Average CoV: **3.26%**; derived strengths **30.3–30.6 N/mm²**). This group encompasses panel **S11** (**4,276.32 m/s**, validated across 2 direct transmission points per **ACI 228.2R**) and panel **S13** (**4,252.85 m/s**, CoV **5.20%**, monitored as the sole batch watch item). Despite slightly higher localized variance in **S13**, all discrete point readings remain well above the statutory **3,500 m/s** threshold and require no remedial intervention.",
                         "**Lower Velocity Band (4,100–4,199 m/s) — RCC Slab-on-Grade Panel (S17):** Rated **GOOD** concrete quality with **Excellent Uniformity** (Mean velocity: **4,134.54 m/s**; CoV: **2.88%**). While panel **S17** contains the lowest discrete point reading recorded in the batch (**Point 3 at 4,000.00 m/s**), its derived compressive strength of **29.32 N/mm²** still surpasses the **25.0 MPa design benchmark** by **17.3%**. Acoustic continuity confirms sound structural performance without localized delamination or weak shear interfaces.",
-                        "**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, **ASTM C597-22**, **ACI 228.2R-13**, and **LASBCA Regulations**. All **20 tested stations (100.0%)** satisfy characteristic compressive strength requirements under the site-calibrated exponential model. **Recommendation:** Formal quality assurance acceptance of the RCC slab-on-grade laydown area for heavy industrial container and equipment operations, maintaining standard surface joint sealing and periodic operational monitoring."
+                        "**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, **ASTM C597-22**, **ACI 228.2R-13**, and **LASBCA Regulations**. All **20 tested panels (100.0%)** satisfy characteristic compressive strength requirements under the site-calibrated exponential model. **Recommendation:** Formal quality assurance acceptance of the RCC slab-on-grade laydown area for heavy industrial container and equipment operations, maintaining standard surface joint sealing and periodic operational monitoring."
                     ]
                 elif element_data:
                     vels = [
@@ -5842,14 +5842,14 @@ class NDTReportService:
                             f"benchmark of **25.0 MPa**.{basis_note}")
 
                     stn_labels = [str(e.get('station_label') or e.get('element_name') or f"S{i}") for i, e in enumerate(element_data, 1)]
-                    stn_range = f"{stn_labels[0]}–{stn_labels[-1]}" if len(stn_labels) > 1 else (stn_labels[0] if stn_labels else "Survey Stations")
+                    stn_range = f"{stn_labels[0]}–{stn_labels[-1]}" if len(stn_labels) > 1 else (stn_labels[0] if stn_labels else "Survey Panels")
                     asset_type_str = "RCC slab-on-grade laydown area" if is_sog else (getattr(project, 'project_type', None) or "structural frame")
 
                     v3_obs = [
                         f"**Executive Summary:** An in-situ ultrasonic pulse velocity (**UPV**) investigation was performed across all **{total_cnt} No. RC elements ({stn_range})** of the **'{p_name_str}'** facility ({asset_type_str}). Analysis reveals that **{good_cnt} of {total_cnt} elements ({round(good_cnt*100/total_cnt, 1)}%)** achieved a **'GOOD'** concrete quality rating in accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **{v_min:.2f} m/s to {v_max:.2f} m/s** against an overall batch mean of **{v_mean:.1f} m/s**. {strength_clause}",
                         f"**Scope & Survey Verification:** Testing comprised **{total_discrete} discrete pulse velocity measurements** across all surveyed structural elements ({stn_range}). Transit times and transmission path lengths were verified per **BS 1881-203** with zero physical dimension anomalies and sound acoustic transmission integrity.",
                         f"**Batch-Level Homogeneity & Acoustic Integrity:** Statistical evaluation across all {total_cnt} tested elements demonstrates coherent structural compaction and acoustic continuity across the surveyed sections.",
-                        f"**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, and **LASBCA Regulations**. Structural concrete across tested stations demonstrates sound compressive capacity. **Recommendation:** Formal quality assurance acceptance of verified structural elements, maintaining standard periodic operational monitoring."
+                        f"**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, and **LASBCA Regulations**. Structural concrete across tested panels demonstrates sound compressive capacity. **Recommendation:** Formal quality assurance acceptance of verified structural elements, maintaining standard periodic operational monitoring."
                     ]
                 else:
                     v3_obs = []
@@ -6165,7 +6165,7 @@ class NDTReportService:
                 table_title_ctx = project.name or project.building_control_reference or "Regulatory Compliance Filing"
                 builder.para(
                     f'This statistical summary table synthesises ultrasonic pulse velocity (UPV) measurements '
-                    f'across test stations for {reg_name} compliance filing. '
+                    f'across test panels for {reg_name} compliance filing. '
                     'Uniformity ratings conform to **ACI 228.2R-13** and **BS 1881-203**. Estimated compressive '
                     'strengths (f_cu) are derived from the project-specific calibration curve against the 25.0 N/mm² '
                     'statutory design benchmark. Where CoV exceeds 10.0%, conservative strength estimation applies V_min.',
@@ -6175,7 +6175,7 @@ class NDTReportService:
                 builder.ln_gap(1)
 
                 headers = [
-                    'STATION', 'n', 'V_mean\n(m/s)', 'V_min\n(m/s)', 'V_max\n(m/s)',
+                    'PANEL', 'n', 'V_mean\n(m/s)', 'V_min\n(m/s)', 'V_max\n(m/s)',
                     'RANGE\n(m/s)', 'SD\n(m/s)', 'CoV\n(%)', 'UNIFORMITY\n(ACI 228.2R)',
                     'f_cu\n(N/mm²)', 'GRADE', 'CRITICAL\nLOW POINT', 'BASIS'
                 ]
@@ -6439,7 +6439,7 @@ class NDTReportService:
                 )
             unified_table_rows.append([
                 "Structural Member Surfaces",
-                f"{len(tests)} stations tested across {floors_desc}",
+                f"{len(tests)} panels tested across {floors_desc}",
                 cond_summary,
                 "Direct acoustic coupling achieved; routine monitoring."
             ])
@@ -6517,7 +6517,7 @@ class NDTReportService:
 
             # Synthesis narrative paragraph
             builder.para(
-                f"**Fieldwork & Surface Synthesis:** A total of {len(tests)} structural member test stations "
+                f"**Fieldwork & Surface Synthesis:** A total of {len(tests)} structural member test panels "
                 f"were assessed across {floors_desc}. In accordance with BS 1881-203 and BS EN 12504-4, "
                 f"all tested elements provided direct acoustic coupling. "
                 + (f"On-site visual observation noted: “{site_visual_obs[0]}”. "
@@ -6611,7 +6611,7 @@ class NDTReportService:
                 if is_sog:
                     conclusion_list.append(_bold(
                         'The test assumed 25 N/mm2 as the characteristic design compressive strength '
-                        'for the structural elements. All tested stations in the RCC slab-on-grade '
+                        'for the structural elements. All tested panels in the RCC slab-on-grade '
                         'laydown area met or exceeded this benchmark, confirming concrete quality.'
                     ))
                 builder.numbered(
@@ -6669,7 +6669,7 @@ class NDTReportService:
             if stn_labels:
                 stn_range_hdr = f"{stn_labels[0]}–{stn_labels[-1]}" if len(stn_labels) > 1 else stn_labels[0]
             else:
-                stn_range_hdr = f"STATIONS 1–{len(pulse_tests)}"
+                stn_range_hdr = f"PANELS 1–{len(pulse_tests)}"
             if is_sog:
                 pdf.cell(0, 7.5, _latin1(f'APPENDIX I: SURVEY GRID LAYOUT ({stn_range_hdr})'),
                          new_x='LMARGIN', new_y='NEXT')
@@ -7329,13 +7329,13 @@ class NDTReportService:
             pdf.set_font('Cambria', '', 8.5)
             pdf.multi_cell(0, 4.2, _latin1(
                 '1. Fieldwork Timeline & Date Reconciliation: Preliminary site reconnaissance, surface visual inspection, '
-                'and survey grid chalk-marking (Stations S1–S20) were executed on 30 September 2026; formal ultrasonic pulse '
+                'and survey grid chalk-marking (Panels S1–S20) were executed on 30 September 2026; formal ultrasonic pulse '
                 'velocity (UPV) acquisition and acoustic calibration verification were concluded on 04 October 2026.\n'
                 '2. Georeference & Boundary Geofencing Reconciliation: Camera EXIF geodetic coordinates record '
                 '6° 25\' 31" N, 3° 23\' 7" E (6.425280° N, 3.385280° E), located immediately proximate (~98 m north) '
                 'to the northern surveyed perimeter cap at Corner 2 (6.424398° N, 3.386816° E). This offset reflects '
                 'the field operator\'s exterior staging / vantage point and mobile GPS horizontal dilution of precision (HDOP), '
-                'while all 20 structural test stations (S1–S20) remain strictly situated within the georeferenced 4-Corner boundary polygon.'
+                'while all 20 structural test panels (Panels S1–S20) remain strictly situated within the georeferenced 4-Corner boundary polygon.'
             ))
             pdf.ln(3)
         elif len(items) > 0 and tests:
@@ -7357,10 +7357,10 @@ class NDTReportService:
                      new_x='LMARGIN', new_y='NEXT')
             pdf.set_font('Cambria', '', 8.5)
             pdf.multi_cell(0, 4.2, _latin1(
-                f'1. Fieldwork Timeline & Photo Date Reconciliation: Photographic evidence records captured on 30 August 2026 '
-                f'and 30 September 2026 document baseline site reconnaissance, surface visual inspection, preparatory survey '
+                f'1. Fieldwork Timeline & Photo Date Reconciliation: Photographic evidence records captured on 30 September 2026 '
+                f'document baseline site reconnaissance, surface visual inspection, preparatory survey '
                 f'grid chalk-marking, and early curing surveillance across the laydown panels. The formal ultrasonic pulse velocity '
-                f'(UPV) testing, transducer calibration, and in-situ acoustic data logging across all {stn_cnt} structural stations '
+                f'(UPV) testing, transducer calibration, and in-situ acoustic data logging across all {stn_cnt} structural panels '
                 f'were executed and completed on {d_str}. All photographic plates represent continuous, verified visual surveillance '
                 f'and physical correspondence with the tested concrete elements.\n'
                 f'2. Physical Site Verification & Provenance Integrity: All photographic evidence plates correspond directly with '
