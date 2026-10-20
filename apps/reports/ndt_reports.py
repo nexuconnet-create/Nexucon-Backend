@@ -7062,89 +7062,30 @@ class NDTReportService:
         items = []
         seen = set()
 
+        import re
+
         def _clean_key(u):
             if not u:
                 return ''
-            return str(u).split('?')[0].strip().lower()
+            s = str(u).split('?')[0].strip().lower()
+            fname = s.split('/')[-1]
+            base_name = re.sub(r'_[a-zA-Z0-9]{7,8}(\.[a-z0-9]+)$', r'\1', fname)
+            return base_name
 
         def _is_bim_or_cad_screenshot(url_or_path, caption='', desc=''):
             blob = f"{url_or_path} {caption} {desc}".lower()
             indicators = (
                 'bim 3d', 'bim_3d', '3d view', '_ifc', '.ifc', 'stacking area_ifc',
                 'bim model', 'bim snapshot', 'bim viewer', 'ifc view', 'bim capture',
-                'cad 3d', 'model preview', 'bim 3d view'
+                'cad 3d', 'model preview', 'bim 3d view', 'structural-layout',
+                'structural layout', '2d-structural', '2d layout', 'layout-proposed',
+                'layout_ifc', 'drawing', 'blueprint'
             )
             return any(ind in blob for ind in indicators)
 
-        # 1. Photos attached directly to test records
-        for t in tests:
-            for f in t.files.all():
-                if not f.file:
-                    continue
-                f_id = getattr(f, 'id', None)
-                if f_id and str(f_id) in seen:
-                    continue
-                url = ''
-                try:
-                    if hasattr(f.file, 'path') and os.path.exists(f.file.path):
-                        url = f.file.path
-                    else:
-                        url = f.file.url
-                except Exception:
-                    url = getattr(f.file, 'url', '') or ''
-                if not url:
-                    continue
-
-                if _is_bim_or_cad_screenshot(url, getattr(f, 'file_name', ''), getattr(f, 'description', '')):
-                    continue
-
-                k = _clean_key(url)
-                if k in seen:
-                    if f_id:
-                        seen.add(str(f_id))
-                    continue
-
-                if f_id:
-                    seen.add(str(f_id))
-                seen.add(k)
-                caption = (f.file_name or f.description
-                           or f'Photograph {len(items) + 1}')
-                items.append((url, caption))
-
-        # 1b. SensorDataFile records attached to the project
-        if project:
-            try:
-                from apps.digital_eye.models import SensorDataFile
-                for sf in SensorDataFile.objects.filter(project=project, file_type='photo'):
-                    if not sf.file:
-                        continue
-                    sf_id = getattr(sf, 'id', None)
-                    if sf_id and str(sf_id) in seen:
-                        continue
-                    url = ''
-                    try:
-                        if hasattr(sf.file, 'path') and os.path.exists(sf.file.path):
-                            url = sf.file.path
-                        else:
-                            url = sf.file.url
-                    except Exception:
-                        url = getattr(sf.file, 'url', '') or ''
-                    if not url:
-                        continue
-                    if _is_bim_or_cad_screenshot(url, getattr(sf, 'file_name', ''), getattr(sf, 'description', '')):
-                        continue
-                    k = _clean_key(url)
-                    if k in seen:
-                        continue
-                    if sf_id:
-                        seen.add(str(sf_id))
-                    seen.add(k)
-                    caption = sf.file_name or sf.description or f'Photograph {len(items) + 1}'
-                    items.append((url, caption))
-            except Exception:
-                pass
-
-        # 2. Site photos recorded in TelemetrySession & Inspection
+        # 1. Identify active, user-curated photos from project TelemetrySessions
+        active_session_keys = set()
+        active_session_photos = []
         if project:
             try:
                 from apps.telemetry.models import TelemetrySession
@@ -7167,20 +7108,97 @@ class NDTReportService:
                         except Exception:
                             raw_photos = [u.strip() for u in raw_photos.split(',')] if ',' in raw_photos else [raw_photos]
                     for p_url in raw_photos:
-                        if not isinstance(p_url, str):
+                        if not isinstance(p_url, str) or not p_url.strip():
                             continue
                         if _is_bim_or_cad_screenshot(p_url):
                             continue
                         k = _clean_key(p_url)
-                        if k and k not in seen:
-                            seen.add(k)
-                            from urllib.parse import unquote
-                            raw_fname = unquote(p_url.split('?')[0].split('/')[-1])
-                            caption = raw_fname or f"Site Observation Photo — Session {s.session_reference}"
-                            items.append((p_url, caption))
+                        if k and k not in active_session_keys:
+                            active_session_keys.add(k)
+                            active_session_photos.append((p_url, s.session_reference))
             except Exception:
                 pass
 
+        # 2. Add active session photos first so they appear in clean sequence
+        for p_url, s_ref in active_session_photos:
+            k = _clean_key(p_url)
+            if k and k not in seen:
+                seen.add(k)
+                caption = f'Photograph {len(items) + 1}: Site Observation Photo'
+                items.append((p_url, caption))
+
+        # 3. Collect from test records and project SensorDataFiles without resurrecting deleted duplicates
+        seen_checksums = set()
+        candidate_files = []
+        for t in tests:
+            for f in t.files.all():
+                if f and f.file:
+                    candidate_files.append(f)
+
+        if project:
+            try:
+                from apps.digital_eye.models import SensorDataFile
+                for sf in SensorDataFile.objects.filter(project=project, file_type='photo'):
+                    if sf and sf.file:
+                        candidate_files.append(sf)
+            except Exception:
+                pass
+
+        for sf in candidate_files:
+            sf_id = getattr(sf, 'id', None)
+            if sf_id and str(sf_id) in seen:
+                continue
+
+            checksum = getattr(sf, 'sha256_checksum', None)
+            if checksum and checksum in seen_checksums:
+                if sf_id:
+                    seen.add(str(sf_id))
+                continue
+
+            url = ''
+            try:
+                if hasattr(sf.file, 'path') and os.path.exists(sf.file.path):
+                    url = sf.file.path
+                else:
+                    url = sf.file.url
+            except Exception:
+                url = getattr(sf.file, 'url', '') or ''
+            if not url:
+                continue
+
+            fn = getattr(sf, 'file_name', '') or ''
+            desc = getattr(sf, 'description', '') or ''
+            if _is_bim_or_cad_screenshot(url, fn, desc):
+                continue
+
+            k = _clean_key(url)
+            k_fn = _clean_key(fn)
+
+            # If telemetry sessions exist with photos, and this is a telemetry observation photo that is NOT in the active curated list, it was deleted!
+            is_telemetry_photo = 'visual observation photo for' in desc.lower() or 'photo_' in fn.lower()
+            if active_session_keys and is_telemetry_photo:
+                if k not in active_session_keys and k_fn not in active_session_keys:
+                    continue
+
+            if (k and k in seen) or (k_fn and k_fn in seen):
+                if sf_id:
+                    seen.add(str(sf_id))
+                continue
+
+            if k:
+                seen.add(k)
+            if k_fn:
+                seen.add(k_fn)
+            if sf_id:
+                seen.add(str(sf_id))
+            if checksum:
+                seen_checksums.add(checksum)
+
+            caption = fn or desc or f'Photograph {len(items) + 1}'
+            items.append((url, caption))
+
+        # 4. Check Inspection photos
+        if project:
             try:
                 from apps.inspections.models import Inspection
                 insp = Inspection.objects.filter(project=project).order_by('-created_at').first()
@@ -7194,7 +7212,7 @@ class NDTReportService:
                         except Exception:
                             raw_photos = [u.strip() for u in raw_photos.split(',')] if ',' in raw_photos else [raw_photos]
                     for p_url in raw_photos:
-                        if not isinstance(p_url, str):
+                        if not isinstance(p_url, str) or not p_url.strip():
                             continue
                         if _is_bim_or_cad_screenshot(p_url):
                             continue
