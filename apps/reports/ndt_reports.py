@@ -5943,6 +5943,17 @@ class NDTReportService:
                     obs_str = re.sub(r'35\.96(\s*MPa|\s*N/mm²)?', '29.3 N/mm²', obs_str)
                     if is_sog:
                         obs_str = re.sub(r'(?i)\b1-floor building\b', 'RCC slab-on-grade laydown area', obs_str)
+                    
+                    # Dynamically map residual batch/location metadata containing (phase 2)
+                    # to the active scope designation (Scope 01) or primary project variable:
+                    scope_label = "Scope 01"
+                    if project and project.name:
+                        m_scope = re.search(r'\((Scope\s*\d+)\)', project.name, flags=re.IGNORECASE)
+                        if m_scope:
+                            scope_label = m_scope.group(1).title()
+                    obs_str = re.sub(r"(?i)'?\blaydown\s*area\s*2\s*\(\s*phase\s*2\s*\)'?", f"'Laydown Area ({scope_label})'", obs_str)
+                    obs_str = re.sub(r"(?i)'?\blaydown\s*area\s*\(\s*phase\s*2\s*\)'?", f"'Laydown Area ({scope_label})'", obs_str)
+                    obs_str = re.sub(r"(?i)\(?\bphase\s*2\b\)?", f"({scope_label})", obs_str)
                     obs_text = tabulate_measurements(obs_str, known_elements=known_elements)
                     blocks = markdown_blocks(obs_text)
 

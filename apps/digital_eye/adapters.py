@@ -1322,7 +1322,22 @@ class PUNDITAdapter:
             key=lambda t: (_natural_sort_key(t.floor or ''), _natural_sort_key(t.structural_element or t.structural_element_name or ''))
         )
 
-        batch_name = getattr(batch, 'folder_name', 'General Project Scan') if batch else None
+        target_scope = "Scope 01"
+        if project and project.name:
+            m_sc = re.search(r'\((Scope\s*\d+)\)', project.name, flags=re.IGNORECASE)
+            if m_sc:
+                target_scope = m_sc.group(1).title()
+
+        def _clean_scope_meta(val):
+            if not val:
+                return val
+            s = str(val)
+            s = re.sub(r"(?i)'?\blaydown\s*area\s*2\s*\(\s*phase\s*2\s*\)'?", f"Laydown Area ({target_scope})", s)
+            s = re.sub(r"(?i)'?\blaydown\s*area\s*\(\s*phase\s*2\s*\)'?", f"Laydown Area ({target_scope})", s)
+            s = re.sub(r"(?i)\(?\bphase\s*2\b\)?", f"({target_scope})", s)
+            return s
+
+        batch_name = _clean_scope_meta(getattr(batch, 'folder_name', 'General Project Scan')) if batch else None
         if batch_name:
             steps = [
                 f"PUNDIT roll-up over {len(tests)} verified element(s) "
@@ -1448,7 +1463,7 @@ class PUNDITAdapter:
                 'member_type': mtype,
                 'structural_element_type': mtype,
                 'floor': test.floor or None,
-                'grid_location': test.test_location or None,
+                'grid_location': _clean_scope_meta(test.test_location) or None,
                 'test_type': test.test_type,
                 'concrete_age_days': test.concrete_age_days,
                 'n_points': len(rows),
@@ -1830,6 +1845,7 @@ class PUNDITAdapter:
                 if min_ecs is not None and max_ecs is not None:
                     cal_range_str = f"{min_ecs:.1f}–{max_ecs:.1f} MPa"
                     text_o = re.sub(r'\b(?:40\.3\s*[-–]\s*54\.6|35\.96)\s*(?:MPa|N/mm2)?\b', cal_range_str, text_o)
+                text_o = _clean_scope_meta(text_o)
                 cleaned_obs.append(text_o)
             observations = cleaned_obs
 
