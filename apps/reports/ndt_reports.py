@@ -5049,9 +5049,10 @@ class NDTReportService:
                 pdf.cell(0, 6.0, _latin1('TABLE 3.1: 4-CORNER BOUNDARY MAPPING & CONVERSION'),
                          align='C', new_x='LMARGIN', new_y='NEXT')
 
-                footprint_sqm = boundary_data.get('footprintAreaSqm')
-                coord_sys = boundary_data.get('system') or 'WGS84_DD'
-                if any(c.get('easting') for c in corners_list):
+                footprint_sqm = boundary_data.get('footprintAreaSqm') if boundary_data else None
+                perimeter_m = boundary_data.get('perimeterMeters') if boundary_data else None
+                coord_sys = (boundary_data.get('system') if boundary_data else None) or 'WGS84_DD'
+                if corners_list and any(c.get('easting') for c in corners_list):
                     coord_sys = 'UTM_31N_WGS84'
 
                 badge_parts = []
