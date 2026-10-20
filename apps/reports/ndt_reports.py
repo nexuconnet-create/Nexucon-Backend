@@ -6620,7 +6620,6 @@ class NDTReportService:
                            .order_by('-created_at').first())
             if ai_record:
                 seen_recs = set()
-                import re
                 for existing in recommendations:
                     seen_recs.add(re.sub(r'[^a-z0-9]', '', existing.lower()))
                 for rec in (ai_record.recommendations or []):
