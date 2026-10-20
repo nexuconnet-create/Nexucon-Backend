@@ -1642,7 +1642,7 @@ class NDTReportPageQAView(APIView):
             'corners': corners_list,
             'exif_gps_reconciliation': (
                 'Field geodetic coordinates correspond with the tested structural perimeter; '
-                'all test stations remain situated within the surveyed boundary polygon.'
+                'all test panels remain situated within the surveyed boundary polygon.'
             )
         }
 

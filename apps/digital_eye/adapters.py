@@ -1775,12 +1775,12 @@ class PUNDITAdapter:
                                         "yielding derived compressive strengths of **31.6–32.3 N/mm²** (exceeding the 25.0 MPa statutory target by up to **29.2%**). "
                                         "The low dispersion confirms high aggregate-paste interlock, minimal internal acoustic attenuation, and total absence of honeycombing or delamination.")
                             elif any(k in grp_name for k in ('4300', '4399', 'Mid-High', 'mid-high')):
-                                corr = ("Panels in this group demonstrate very consistent acoustic transit times across all grid stations, "
+                                corr = ("Panels in this group demonstrate very consistent acoustic transit times across all grid panels, "
                                         "producing derived compressive strengths of **30.9–31.5 N/mm²**. Point-spread analysis demonstrates tight cluster grouping "
                                         "with zero localized velocity drops, confirming reliable compressive capacity and robust structural resistance against dynamic wheel loads.")
                             elif any(k in grp_name for k in ('4200', '4299', 'Mid', 'mid')):
-                                corr = ("Panels achieve derived compressive strengths of **30.3–30.6 N/mm²**. Station **S11** (**4,276.32 m/s**, validated across 2 direct transmission points per **ACI 228.2R**) "
-                                        "and station **S13** (**4,252.85 m/s**, CoV **5.20%**, monitored as the sole batch watch item) comfortably exceed the **3,500 m/s** acceptance threshold and require no remedial intervention.")
+                                corr = ("Panels achieve derived compressive strengths of **30.3–30.6 N/mm²**. Panel **S11** (**4,276.32 m/s**, validated across 2 direct transmission points per **ACI 228.2R**) "
+                                        "and panel **S13** (**4,252.85 m/s**, CoV **5.20%**, monitored as the sole batch watch item) comfortably exceed the **3,500 m/s** acceptance threshold and require no remedial intervention.")
                             elif any(k in grp_name for k in ('4100', '4199', 'Lower', 'lower')):
                                 corr = ("While panel **S17** contains the lowest discrete point reading recorded in the batch (**Point 3 at 4,000.00 m/s**), "
                                         "its derived compressive strength of **29.32 N/mm²** still surpasses the **25.0 MPa design benchmark** by **17.3%**. Acoustic continuity confirms sound structural performance without localized delamination.")
@@ -2029,14 +2029,14 @@ class PUNDITAdapter:
         obs.append(
             "**Batch-Level Homogeneity & Acoustic Integrity (S1–S20):** All **20 slab-on-grade panels** were tested under dry surface conditions using direct transmission. "
             "Statistical analysis indicates exceptional acoustic consistency across the slab, with batch Coefficients of Variation (**CoV**) ranging tightly between **0.28% and 5.20%**. "
-            "Zero stations triggered the conservative-strength threshold (**CoV > 10%**) or exhibited wide-spread outlier signatures. "
+            "Zero panels triggered the conservative-strength threshold (**CoV > 10%**) or exhibited wide-spread outlier signatures. "
             "This confirms **homogeneous concrete placement**, **uniform acoustic matrix density**, and **thorough vibratory compaction** throughout the continuous laydown slab."
         )
 
         # 4. High Velocity Band
         obs.append(
             "**High Velocity Band (4,400–4,500 m/s) — RCC Slab-on-Grade Panels (S1, S2, S4, S8, S9):** Rated **GOOD** concrete quality with **Excellent Uniformity** "
-            "(Average CoV: **1.97%**; peak station **S8** at **4,491.20 m/s**). Ultrasonic transmission velocities in this uppermost band represent the **densest cementitious consolidation** "
+            "(Average CoV: **1.97%**; peak panel **S8** at **4,491.20 m/s**). Ultrasonic transmission velocities in this uppermost band represent the **densest cementitious consolidation** "
             "in the batch, yielding derived compressive strengths of **31.6–32.3 N/mm²** (exceeding the 25.0 MPa statutory target by up to **29.2%**). "
             "The low dispersion confirms high aggregate-paste interlock, minimal internal acoustic attenuation, and total absence of honeycombing or delamination."
         )
@@ -2044,7 +2044,7 @@ class PUNDITAdapter:
         # 5. Mid-High Velocity Band
         obs.append(
             "**Mid-High Velocity Band (4,300–4,399 m/s) — RCC Slab-on-Grade Panels (S3, S5, S6, S7, S14, S15, S18, S19):** Rated **GOOD** concrete quality with **Excellent Uniformity** "
-            "(Average CoV: **2.05%**; velocities **4,331.0–4,397.0 m/s**). Panels in this group demonstrate very consistent acoustic transit times across all grid stations, "
+            "(Average CoV: **2.05%**; velocities **4,331.0–4,397.0 m/s**). Panels in this group demonstrate very consistent acoustic transit times across all grid panels, "
             "producing derived compressive strengths of **30.9–31.5 N/mm²**. Point-spread analysis demonstrates tight cluster grouping with zero localized velocity drops, "
             "confirming reliable compressive capacity and robust structural resistance against dynamic wheel loads."
         )
@@ -2052,8 +2052,8 @@ class PUNDITAdapter:
         # 6. Mid Velocity Band
         obs.append(
             "**Mid Velocity Band (4,200–4,299 m/s) — RCC Slab-on-Grade Panels (S10, S11, S12, S13, S16, S20):** Rated **GOOD** concrete quality with **Good to Excellent Uniformity** "
-            "(Average CoV: **3.26%**; derived strengths **30.3–30.6 N/mm²**). This group encompasses station **S11** (**4,276.32 m/s**, validated across 2 direct transmission points per **ACI 228.2R**) "
-            "and station **S13** (**4,252.85 m/s**, CoV **5.20%**, monitored as the sole batch watch item). Despite slightly higher localized variance in **S13**, "
+            "(Average CoV: **3.26%**; derived strengths **30.3–30.6 N/mm²**). This group encompasses panel **S11** (**4,276.32 m/s**, validated across 2 direct transmission points per **ACI 228.2R**) "
+            "and panel **S13** (**4,252.85 m/s**, CoV **5.20%**, monitored as the sole batch watch item). Despite slightly higher localized variance in **S13**, "
             "all discrete point readings remain well above the statutory **3,500 m/s** threshold and require no remedial intervention."
         )
 
@@ -2068,7 +2068,7 @@ class PUNDITAdapter:
         # 8. Statutory Compliance & Recommendations
         obs.append(
             "**Statutory Compliance & Structural Recommendations:** In accordance with **BS 1881-203**, **BS EN 12504-4**, **BS EN 13791**, **ASTM C597-22**, **ACI 228.2R-13**, "
-            "and **LASBCA Regulations**. All **20 tested stations (100.0%)** satisfy characteristic compressive strength requirements under the site-calibrated exponential model. "
+            "and **LASBCA Regulations**. All **20 tested panels (100.0%)** satisfy characteristic compressive strength requirements under the site-calibrated exponential model. "
             "**Recommendation:** Formal quality assurance acceptance of the RCC slab-on-grade laydown area for heavy industrial container and equipment operations, "
             "maintaining standard surface joint sealing and periodic operational monitoring."
         )
