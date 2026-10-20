@@ -1577,6 +1577,9 @@ class NDTReportPageQAView(APIView):
             or StrengthCurve.objects.filter(is_default=True).first()
         )
         curve_name_val = active_curve.name if active_curve else 'Calibrated Correlation Model'
+        if curve_name_val and 'phase 2' in curve_name_val.lower():
+            curve_name_val = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', curve_name_val, flags=re.IGNORECASE).strip()
+        curve_name_val = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', curve_name_val, flags=re.IGNORECASE)
         curve_form_val = getattr(active_curve, 'formula', None) or 'f_cu = A * exp(B * V)'
         has_cal_points = bool(active_curve and getattr(active_curve, 'data_points', None) and len(active_curve.data_points) > 0)
         r2_val = float(active_curve.r2_score) if (active_curve and getattr(active_curve, 'r2_score', None) is not None and has_cal_points) else None
@@ -1727,7 +1730,7 @@ class NDTReportPageQAView(APIView):
             )
 
         raw_payload = {
-            'project_name': getattr(project, 'name', ''),
+            'project_name': NDTReportService._effective_project_name(project),
             'client_name': str(getattr(project, 'client_name', None) or getattr(project, 'client', '') or ''),
             'contractor_name': contractor_name,
             'site_address': str(getattr(project, 'site_address', '') or ''),

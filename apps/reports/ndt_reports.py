@@ -2819,6 +2819,45 @@ class NDTReportService:
         return 'NOT PROVIDED'
 
     @staticmethod
+    def _effective_project_name(project):
+        """Single source of truth for official Project Name from the Government Officer Editor
+        (Project Identification -> Project Name).
+        Dynamically strips any residual 'Phase 2' and aligns to active scope designation.
+        Ensures exact 1:1 parity between Cover Page, Tables, Section 5.3, Section 6.0 and Executive Summary."""
+        if not project:
+            return 'AN EXISTING SITE'
+        p_name = (getattr(project, 'name', '') or '').strip()
+        if not p_name:
+            p_name = (getattr(project, 'description', '') or '').strip() or 'AN EXISTING SITE'
+        if 'phase 2' in p_name.lower():
+            p_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', p_name, flags=re.IGNORECASE).strip()
+        p_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', p_name, flags=re.IGNORECASE)
+        return p_name
+
+    @staticmethod
+    def _format_project_title(name):
+        """Format the project name cleanly for narrative prose (Title Case or preserved case)."""
+        if not name:
+            return ""
+        has_upper = any(c.isupper() for c in name)
+        has_lower = any(c.islower() for c in name)
+        if has_upper and has_lower:
+            return re.sub(r'\(\s*scope\s*(\d+)\s*\)', r'(Scope \1)', name, flags=re.IGNORECASE)
+
+        # Convert ALL-CAPS (e.g. from Cover Page or DB uppercase field) to Title Case
+        lower_words = {'on', 'in', 'at', 'of', 'for', 'to', 'by', 'and', 'or', 'the', 'a', 'an'}
+        def _title_word(match):
+            w = match.group(0)
+            start = match.start()
+            if start > 0 and w.lower() in lower_words:
+                return w.lower()
+            return w.capitalize()
+
+        res = re.sub(r'[A-Za-z]+', _title_word, name)
+        res = re.sub(r'\(\s*scope\s*0*(\d+)\s*\)', lambda m: f"(Scope {int(m.group(1)):02d})", res, flags=re.IGNORECASE)
+        return res
+
+    @staticmethod
     def _maps_link(project, latitude=None, longitude=None):
         """The Google Maps link for the site (C6): only when the platform
         holds real GNSS coordinates — never a guessed location. The caller
@@ -3043,12 +3082,8 @@ class NDTReportService:
             pdf.start_section('FLOOR PLANS', level=1)
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
-            cad_name = (getattr(project, 'name', '') or '').strip()
-            if not cad_name:
-                cad_name = (getattr(project, 'description', '') or '').strip() or 'Project'
-            if 'phase 2' in cad_name.lower():
-                cad_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cad_name, flags=re.IGNORECASE).strip()
-            cad_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cad_name, flags=re.IGNORECASE)
+            cad_name = cls._effective_project_name(project)
+            cad_title = cls._format_project_title(cad_name)
             pdf.cell(0, 7.5,
                      _latin1(f'{cad_title} — {floor_label.title()}'),
                      new_x='LMARGIN', new_y='NEXT')
@@ -3610,13 +3645,9 @@ class NDTReportService:
             # Dynamically bind to the exact same backend database variable used on the cover page:
             # The cover page binds to project.name (which outputs "REINFORCE CONCRETE FLOOR SLAB ON LAYDOWN AREA (SCOPE 01)").
             # We bind to project.name directly, ensuring exact 1:1 parity between the cover page and executive summary prose.
-            cov_name = (getattr(project, 'name', '') or '').strip()
-            if not cov_name:
-                cov_name = (getattr(project, 'description', '') or '').strip() or 'unnamed project'
-            if 'phase 2' in cov_name.lower():
-                cov_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_name, flags=re.IGNORECASE).strip()
-            cov_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_name, flags=re.IGNORECASE)
-            proj = _latin1(cov_name).replace('*', '')
+            cov_name = cls._effective_project_name(project)
+            proj_title = cls._format_project_title(cov_name)
+            proj = _latin1(proj_title).replace('*', '')
             client = _latin1(cls._effective_client_name(project)).replace('*', '')
             site = _latin1(', '.join(
                 p for p in (project.site_address, project.lga, project.state)
@@ -4497,12 +4528,7 @@ class NDTReportService:
                 owner_phone_val = '08089754705'
 
             p_type_val = getattr(project, 'project_type', None) or 'Commercial'
-            cov_name = (getattr(project, 'name', '') or '').strip()
-            if not cov_name:
-                cov_name = (getattr(project, 'description', '') or '').strip() or 'AN EXISTING SITE'
-            if 'phase 2' in cov_name.lower():
-                cov_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_name, flags=re.IGNORECASE).strip()
-            cov_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_name, flags=re.IGNORECASE)
+            cov_name = cls._effective_project_name(project)
             builder.cover(serial, cov_name,
                           ', '.join(site_parts), effective_client,
                           _cover_date(date_max),
@@ -4556,21 +4582,42 @@ class NDTReportService:
                 builder.para(f'**{element_scope_note}**', markdown=True)
             exec_body, _src = get_cms_text(project, 'executive_summary',
                                            computed=cms)
+            live_proj = cls._effective_project_name(project)
+            live_proj_title = cls._format_project_title(live_proj)
             if exec_body is not None:
-                # Generated-content CMS section: a project override rewords it;
-                # the computed body is the exact wording from the recorded data.
+                # Dynamic binding: ensure Paragraph 1 parenthetical project title always
+                # resolves to the live Project Name from the Government Officer Editor,
+                # overriding any legacy/cached snapshot or curve-derived title:
+                p1_pattern = r'((?:structural members of\s+)?(?:an?\s+[^\(\)\n]+?laydown area|an?\s+existing\s+[^\(\)\n]+?building|[^\(\)\n]+?facility))\s*\(\s*["\'“]?\s*\*?\*?.*?\*?\*?\s*["\'”]?\s*\)(\s*(?:belonging to|,?\s*at\b|\.))'
+                exec_body = re.sub(p1_pattern, rf'\1 ("**{live_proj_title}**")\2', exec_body, count=1, flags=re.IGNORECASE)
+
+                if active_curve and getattr(active_curve, 'name', None):
+                    curve_prefix = active_curve.name.split(' - ')[0].strip()
+                    if curve_prefix and curve_prefix != live_proj_title:
+                        exec_body = re.sub(
+                            r'\(\s*["\'“]?\s*\*?\*?' + re.escape(curve_prefix) + r'\s*\*?\*?\s*["\'”]?\s*\)',
+                            f'("**{live_proj_title}**")',
+                            exec_body,
+                            flags=re.IGNORECASE
+                        )
+                        exec_body = exec_body.replace(curve_prefix, live_proj_title)
+
+                p_legacy = r'\(\s*["\'“]?\s*\*?\*?Reinforce\s+Concrete\s+Floor\s+Slab\s+on\s+Laydown\s+Area.*?(?:["\'”]\s*\)|\)\s*["\'”]?)(?=\s|$|[,.])'
+                exec_body = re.sub(p_legacy, f'("**{live_proj_title}**")', exec_body, flags=re.IGNORECASE)
+
+                exec_body = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', exec_body, flags=re.IGNORECASE)
+                exec_body = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', exec_body, flags=re.IGNORECASE)
+
+                # Clean up any duplicated quotes/parentheses
+                exec_body = re.sub(r'\("\*\*([^\*]+)\*\*"\)"\)?', r'("**\1**")', exec_body)
+                exec_body = re.sub(r'\("\*\*([^\*]+)\*\*"\)\*\*"', r'("**\1**")', exec_body)
+                exec_body = re.sub(r'\("\*\*([^\*]+)\*\*"\)"', r'("**\1**")', exec_body)
+                exec_body = re.sub(r'\("([^\"]+)"\)"', r'("\1")', exec_body)
+
                 for para in cms_paragraphs(exec_body):
                     builder.para(para, markdown=True)
             else:
-                # No data behind this section yet and no override: the honest
-                # unquantified rendering stays (never an invented summary).
-                cov_name = (getattr(project, 'name', '') or '').strip()
-                if not cov_name:
-                    cov_name = (getattr(project, 'description', '') or '').strip() or 'unnamed project'
-                if 'phase 2' in cov_name.lower():
-                    cov_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_name, flags=re.IGNORECASE).strip()
-                cov_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_name, flags=re.IGNORECASE)
-                proj = _latin1(cov_name).replace('*', '')
+                proj = _latin1(live_proj_title).replace('*', '')
                 client = _latin1(cls._effective_client_name(project)).replace('*', '')
                 site = _latin1(', '.join(
                     p for p in (project.site_address, project.lga, project.state)
@@ -5602,8 +5649,8 @@ class NDTReportService:
                         builder.pdf.add_page()
                     builder.subheading(
                         f'TABLE 5.1: ULTRASONIC PULSE VELOCITY TEST MEASUREMENTS — {floor.upper()} {member_label}'
-                        + (f' OF {project.name.upper()}'
-                           if project.name else ''))
+                        + (f' OF {cls._effective_project_name(project).upper()}'
+                           if cls._effective_project_name(project) else ''))
                     
                     builder.ruled_table(
                         ['STRUCTURAL\nELEMENT', 'PATH LENGTH\n(mm)',
@@ -5792,8 +5839,9 @@ class NDTReportService:
                     tot_discrete_fb = sum(len([r for r in (e.get('rows') or []) if (r.get('velocity_km_s') is None or (1.0 <= r['velocity_km_s'] <= 5.0)) and 'anomalous' not in str(r.get('notes') or '').lower()]) for e in element_data)
                     if tot_discrete_fb == 0:
                         tot_discrete_fb = sum(len(e.get('rows') or []) for e in element_data) or len(element_data)
+                    v3_p_title = cls._format_project_title(cls._effective_project_name(project))
                     v3_obs = [
-                        "**Executive Summary:** An ultrasonic pulse velocity (**UPV**) investigation was performed across all **20 No. RC elements (S1–S20)** on the Ground Floor laydown area of the **'Ladol Exxon Laydown Area'** facility. All **20 elements** achieved a **'GOOD'** concrete quality rating in strict accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **4,134.54 m/s to 4,491.20 m/s** against an overall batch mean of **4,349.0 m/s**. Under the project-calibrated exponential correlation model (R² = 0.8966, s = 0.29 MPa), derived equivalent cube compressive strengths (f_cu) span **29.32 MPa to 32.30 MPa**, consistently surpassing the statutory design benchmark of **25.0 MPa**. Concrete uniformity is rated **Excellent** across 19 elements and **Good** on 1 element (**S13**), confirming dense compaction, absence of internal voiding, and structural suitability for heavy industrial laydown operations.",
+                        f"**Executive Summary:** An ultrasonic pulse velocity (**UPV**) investigation was performed across all **20 No. RC elements (S1–S20)** on the Ground Floor laydown area of the **'{v3_p_title}'** facility. All **20 elements** achieved a **'GOOD'** concrete quality rating in strict accordance with **BS 1881-203** and **BS EN 12504-4** (threshold: **≥ 3,500 m/s**), with batch mean velocities spanning **4,134.54 m/s to 4,491.20 m/s** against an overall batch mean of **4,349.0 m/s**. Under the project-calibrated exponential correlation model (R² = 0.8966, s = 0.29 MPa), derived equivalent cube compressive strengths (f_cu) span **29.32 MPa to 32.30 MPa**, consistently surpassing the statutory design benchmark of **25.0 MPa**. Concrete uniformity is rated **Excellent** across 19 elements and **Good** on 1 element (**S13**), confirming dense compaction, absence of internal voiding, and structural suitability for heavy industrial laydown operations.",
                         f"**Scope & Survey Verification:** This isolated NDT scan batch encompasses **20 No. reinforced concrete elements (S1–S20)** at Ground Floor elevation, functioning as an **RCC slab-on-grade laydown area**. Testing comprised **{tot_discrete_fb} discrete pulse velocity measurements** across a standard grid density (3 readings per panel across all surveyed elements). "
                         f"All physical path lengths (**500 mm**) and transit times (**106.7–125.0 µs**) were verified with **zero unit anomalies** and no out-of-range velocities (**4,000.0–4,687.5 m/s** discrete range), confirming full physical plausibility and acoustic transmission integrity per **BS 1881-203**.",
                         "**Batch-Level Homogeneity & Acoustic Integrity (S1–S20):** All **20 slab-on-grade panels** were tested under dry surface conditions using direct transmission. Statistical analysis indicates exceptional acoustic consistency across the slab, with batch Coefficients of Variation (**CoV**) ranging tightly between **0.28% and 5.20%**. Zero panels triggered the conservative-strength threshold (**CoV > 10%**) or exhibited wide-spread outlier signatures. This confirms **homogeneous concrete placement**, **uniform acoustic matrix density**, and **thorough vibratory compaction** throughout the continuous laydown slab.",
@@ -5947,13 +5995,14 @@ class NDTReportService:
                     
                     # Dynamically map residual batch/location metadata containing (phase 2)
                     # to the active scope designation (Scope 01) or primary project variable:
+                    live_proj_sec53 = cls._effective_project_name(project)
+                    live_proj_sec53_title = cls._format_project_title(live_proj_sec53)
                     scope_label = "Scope 01"
-                    if project and project.name:
-                        m_scope = re.search(r'\((Scope\s*\d+)\)', project.name, flags=re.IGNORECASE)
-                        if m_scope:
-                            scope_label = m_scope.group(1).title()
-                    obs_str = re.sub(r"(?i)'?\blaydown\s*area\s*2\s*\(\s*phase\s*2\s*\)'?", f"'Laydown Area ({scope_label})'", obs_str)
-                    obs_str = re.sub(r"(?i)'?\blaydown\s*area\s*\(\s*phase\s*2\s*\)'?", f"'Laydown Area ({scope_label})'", obs_str)
+                    m_scope = re.search(r'\((Scope\s*\d+)\)', live_proj_sec53, flags=re.IGNORECASE)
+                    if m_scope:
+                        scope_label = m_scope.group(1).title()
+                    obs_str = re.sub(r"(?i)'?\blaydown\s*area\s*2\s*\(\s*phase\s*2\s*\)'?", f"'{live_proj_sec53_title}'", obs_str)
+                    obs_str = re.sub(r"(?i)'?\blaydown\s*area\s*\(\s*phase\s*2\s*\)'?", f"'{live_proj_sec53_title}'", obs_str)
                     obs_str = re.sub(r"(?i)\(?\bphase\s*2\b\)?", f"({scope_label})", obs_str)
                     obs_text = tabulate_measurements(obs_str, known_elements=known_elements)
                     blocks = markdown_blocks(obs_text)
@@ -6201,12 +6250,8 @@ class NDTReportService:
 
             if stat_summary:
                 reg_name = project.regulatory_authority or (f"{project.state} Building Control" if project.state else "statutory regulatory filing")
-                table_ctx_name = (getattr(project, 'name', '') or '').strip()
-                if not table_ctx_name:
-                    table_ctx_name = (getattr(project, 'description', '') or '').strip() or project.building_control_reference or "Regulatory Compliance Filing"
-                if 'phase 2' in table_ctx_name.lower():
-                    table_ctx_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', table_ctx_name, flags=re.IGNORECASE).strip()
-                table_title_ctx = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', table_ctx_name, flags=re.IGNORECASE)
+                table_ctx_name = cls._effective_project_name(project)
+                table_title_ctx = cls._format_project_title(table_ctx_name)
                 builder.para(
                     f'This statistical summary table synthesises ultrasonic pulse velocity (UPV) measurements '
                     f'across test panels for {reg_name} compliance filing. '
@@ -6577,12 +6622,8 @@ class NDTReportService:
             # ---------------------------------------------- 6.0 RECOMMENDATIONS
             builder.section('6.0', 'RECOMMENDATION')
             if is_sog:
-                proj_name_val = (getattr(project, 'name', '') or '').strip()
-                if not proj_name_val:
-                    proj_name_val = (getattr(project, 'description', '') or '').strip() or 'Ladol Exxon Laydown Area'
-                if 'phase 2' in proj_name_val.lower():
-                    proj_name_val = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', proj_name_val, flags=re.IGNORECASE).strip()
-                proj_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', proj_name_val, flags=re.IGNORECASE)
+                proj_name_val = cls._effective_project_name(project)
+                proj_title = cls._format_project_title(proj_name_val)
                 ptype = (project.project_type or 'COMMERCIAL').upper() if (project and project.project_type) else 'COMMERCIAL'
                 reco_text = (
                     f"**Based on the purpose of investigation, the outcome of the Visual and Non-Destructive Test carried out on the "
