@@ -3043,15 +3043,12 @@ class NDTReportService:
             pdf.start_section('FLOOR PLANS', level=1)
             pdf.set_font('Cambria', '', 12)
             pdf.set_text_color(*INK)
-            cad_desc = (getattr(project, 'description', '') or '').strip()
             cad_name = (getattr(project, 'name', '') or '').strip()
-            cad_title = cad_desc or cad_name or 'Project'
-            if 'phase 2' in cad_title.lower():
-                if cad_desc and 'scope' in cad_desc.lower():
-                    cad_title = cad_desc
-                else:
-                    cad_title = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cad_title, flags=re.IGNORECASE).strip()
-            cad_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cad_title, flags=re.IGNORECASE)
+            if not cad_name:
+                cad_name = (getattr(project, 'description', '') or '').strip() or 'Project'
+            if 'phase 2' in cad_name.lower():
+                cad_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cad_name, flags=re.IGNORECASE).strip()
+            cad_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cad_name, flags=re.IGNORECASE)
             pdf.cell(0, 7.5,
                      _latin1(f'{cad_title} — {floor_label.title()}'),
                      new_x='LMARGIN', new_y='NEXT')
@@ -3610,18 +3607,16 @@ class NDTReportService:
                 storeys = cls._storey_count(floors_present, bim_levels)
                 building = (f'an existing {storeys}-floor building' if storeys
                             else 'an existing building')
-            proj_desc = (getattr(project, 'description', '') or '').strip()
-            proj_name = (getattr(project, 'name', '') or '').strip()
-            proj_title = proj_desc or proj_name or 'unnamed project'
-            if 'phase 2' in proj_title.lower():
-                if proj_desc and 'scope' in proj_desc.lower():
-                    proj_title = proj_desc
-                elif proj_name and 'scope' in proj_name.lower():
-                    proj_title = proj_name
-                else:
-                    proj_title = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', proj_title, flags=re.IGNORECASE).strip()
-            proj_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', proj_title, flags=re.IGNORECASE)
-            proj = _latin1(proj_title).replace('*', '')
+            # Dynamically bind to the exact same backend database variable used on the cover page:
+            # The cover page binds to project.name (which outputs "REINFORCE CONCRETE FLOOR SLAB ON LAYDOWN AREA (SCOPE 01)").
+            # We bind to project.name directly, ensuring exact 1:1 parity between the cover page and executive summary prose.
+            cov_name = (getattr(project, 'name', '') or '').strip()
+            if not cov_name:
+                cov_name = (getattr(project, 'description', '') or '').strip() or 'unnamed project'
+            if 'phase 2' in cov_name.lower():
+                cov_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_name, flags=re.IGNORECASE).strip()
+            cov_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_name, flags=re.IGNORECASE)
+            proj = _latin1(cov_name).replace('*', '')
             client = _latin1(cls._effective_client_name(project)).replace('*', '')
             site = _latin1(', '.join(
                 p for p in (project.site_address, project.lga, project.state)
@@ -4502,16 +4497,13 @@ class NDTReportService:
                 owner_phone_val = '08089754705'
 
             p_type_val = getattr(project, 'project_type', None) or 'Commercial'
-            cov_desc = (getattr(project, 'description', '') or '').strip()
             cov_name = (getattr(project, 'name', '') or '').strip()
-            cov_title = cov_desc or cov_name or 'AN EXISTING SITE'
-            if 'phase 2' in cov_title.lower():
-                if cov_desc and 'scope' in cov_desc.lower():
-                    cov_title = cov_desc
-                else:
-                    cov_title = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_title, flags=re.IGNORECASE).strip()
-            cov_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_title, flags=re.IGNORECASE)
-            builder.cover(serial, cov_title,
+            if not cov_name:
+                cov_name = (getattr(project, 'description', '') or '').strip() or 'AN EXISTING SITE'
+            if 'phase 2' in cov_name.lower():
+                cov_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_name, flags=re.IGNORECASE).strip()
+            cov_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_name, flags=re.IGNORECASE)
+            builder.cover(serial, cov_name,
                           ', '.join(site_parts), effective_client,
                           _cover_date(date_max),
                           verify_url=report_verification_url(
@@ -4572,7 +4564,13 @@ class NDTReportService:
             else:
                 # No data behind this section yet and no override: the honest
                 # unquantified rendering stays (never an invented summary).
-                proj = _latin1(project.name or 'unnamed project').replace('*', '')
+                cov_name = (getattr(project, 'name', '') or '').strip()
+                if not cov_name:
+                    cov_name = (getattr(project, 'description', '') or '').strip() or 'unnamed project'
+                if 'phase 2' in cov_name.lower():
+                    cov_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', cov_name, flags=re.IGNORECASE).strip()
+                cov_name = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', cov_name, flags=re.IGNORECASE)
+                proj = _latin1(cov_name).replace('*', '')
                 client = _latin1(cls._effective_client_name(project)).replace('*', '')
                 site = _latin1(', '.join(
                     p for p in (project.site_address, project.lga, project.state)
@@ -6191,15 +6189,12 @@ class NDTReportService:
 
             if stat_summary:
                 reg_name = project.regulatory_authority or (f"{project.state} Building Control" if project.state else "statutory regulatory filing")
-                table_ctx_desc = (getattr(project, 'description', '') or '').strip()
                 table_ctx_name = (getattr(project, 'name', '') or '').strip()
-                table_title_ctx = table_ctx_desc or table_ctx_name or project.building_control_reference or "Regulatory Compliance Filing"
-                if 'phase 2' in table_title_ctx.lower():
-                    if table_ctx_desc and 'scope' in table_ctx_desc.lower():
-                        table_title_ctx = table_ctx_desc
-                    else:
-                        table_title_ctx = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', table_title_ctx, flags=re.IGNORECASE).strip()
-                table_title_ctx = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', table_title_ctx, flags=re.IGNORECASE)
+                if not table_ctx_name:
+                    table_ctx_name = (getattr(project, 'description', '') or '').strip() or project.building_control_reference or "Regulatory Compliance Filing"
+                if 'phase 2' in table_ctx_name.lower():
+                    table_ctx_name = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', table_ctx_name, flags=re.IGNORECASE).strip()
+                table_title_ctx = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', table_ctx_name, flags=re.IGNORECASE)
                 builder.para(
                     f'This statistical summary table synthesises ultrasonic pulse velocity (UPV) measurements '
                     f'across test panels for {reg_name} compliance filing. '
@@ -6570,15 +6565,12 @@ class NDTReportService:
             # ---------------------------------------------- 6.0 RECOMMENDATIONS
             builder.section('6.0', 'RECOMMENDATION')
             if is_sog:
-                proj_desc_val = (getattr(project, 'description', '') or '').strip()
                 proj_name_val = (getattr(project, 'name', '') or '').strip()
-                proj_title = proj_desc_val or proj_name_val or 'Ladol Exxon Laydown Area'
-                if 'phase 2' in proj_title.lower():
-                    if proj_desc_val and 'scope' in proj_desc_val.lower():
-                        proj_title = proj_desc_val
-                    else:
-                        proj_title = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', proj_title, flags=re.IGNORECASE).strip()
-                proj_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', proj_title, flags=re.IGNORECASE)
+                if not proj_name_val:
+                    proj_name_val = (getattr(project, 'description', '') or '').strip() or 'Ladol Exxon Laydown Area'
+                if 'phase 2' in proj_name_val.lower():
+                    proj_name_val = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', proj_name_val, flags=re.IGNORECASE).strip()
+                proj_title = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', proj_name_val, flags=re.IGNORECASE)
                 ptype = (project.project_type or 'COMMERCIAL').upper() if (project and project.project_type) else 'COMMERCIAL'
                 reco_text = (
                     f"**Based on the purpose of investigation, the outcome of the Visual and Non-Destructive Test carried out on the "
