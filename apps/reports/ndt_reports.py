@@ -7217,6 +7217,10 @@ class NDTReportService:
                         if _is_bim_or_cad_screenshot(p_url):
                             continue
                         k = _clean_key(p_url)
+                        is_telemetry_photo = 'photo_' in p_url.lower()
+                        if active_session_keys and is_telemetry_photo:
+                            if k not in active_session_keys:
+                                continue
                         if k and k not in seen:
                             seen.add(k)
                             caption = f"Visual Site Evidence — Inspection {insp.inspection_reference}"
