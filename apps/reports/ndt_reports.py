@@ -7314,9 +7314,14 @@ class NDTReportService:
                 shown += 1
 
         pdf._last_photo_page = len(pdf.pages)
+        notes_on_new_page = (len(items) % 2 == 0)
 
         if has_ladol:
-            pdf.set_xy(pdf.l_margin, 126.0)
+            if notes_on_new_page:
+                pdf.add_page()
+                pdf.set_xy(pdf.l_margin, 25.0)
+            else:
+                pdf.set_xy(pdf.l_margin, 126.0)
             pdf.set_font('Cambria', 'B', 9.5)
             pdf.set_text_color(*INK)
             pdf.cell(0, 5, _latin1('PHOTOGRAPHIC EVIDENCE & SURVEY RECONCILIATION NOTES:'),
@@ -7341,7 +7346,11 @@ class NDTReportService:
                 else (_prose_date(test_dates[0]) if test_dates else 'Testing dates recorded in log')
             )
             stn_cnt = len(tests)
-            pdf.set_xy(pdf.l_margin, 126.0)
+            if notes_on_new_page:
+                pdf.add_page()
+                pdf.set_xy(pdf.l_margin, 25.0)
+            else:
+                pdf.set_xy(pdf.l_margin, 126.0)
             pdf.set_font('Cambria', 'B', 9.5)
             pdf.set_text_color(*INK)
             pdf.cell(0, 5, _latin1('PHOTOGRAPHIC EVIDENCE & SURVEY VERIFICATION NOTES:'),
@@ -7359,4 +7368,5 @@ class NDTReportService:
             ))
             pdf.ln(3)
 
+        pdf._last_photo_page = len(pdf.pages)
         return shown
