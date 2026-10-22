@@ -523,7 +523,7 @@ class ReportTemplateViewSet(viewsets.ModelViewSet):
 # ---------------------------------------------------------------------------
 from django.contrib.auth.hashers import check_password, make_password
 
-from common.permissions import IsDirector as IsCMSDirector
+from common.permissions import IsDirector as IsCMSDirector, user_agency
 
 from .models import ReportCMSPassword, ReportSectionOverride
 from .report_cms import CMS_SECTIONS, get_cms_text
@@ -533,11 +533,22 @@ def _cms_gate(request):
     """
     Director role + CMS password check for section edits. Returns a DRF
     Response when the request must be rejected, else None.
+    Guarded per government agency if the user belongs to an agency.
     """
-    credential = ReportCMSPassword.objects.first()
+    agency = user_agency(request.user)
+    credential = None
+    if agency is not None:
+        credential = ReportCMSPassword.objects.filter(agency=agency).first()
+        if credential is None:
+            # Fallback to legacy unassigned password if agency hasn't set one yet
+            credential = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+    else:
+        credential = ReportCMSPassword.objects.filter(agency__isnull=True).first() or ReportCMSPassword.objects.first()
+
     if credential is None:
+        agency_msg = f" for {agency.name}" if agency else ""
         return Response(
-            {'detail': 'No report-CMS password has been set yet. A Director '
+            {'detail': f'No report-CMS password has been set yet{agency_msg}. A Director '
                        'must set one via POST /api/v1/reports/cms/password/ '
                        'before template sections can be edited.'},
             status=status.HTTP_403_FORBIDDEN)
@@ -590,6 +601,14 @@ class ReportCMSSectionsView(APIView):
         if request.query_params.get('project') and project is None:
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
+        agency = user_agency(request.user)
+        if agency is not None:
+            cred = ReportCMSPassword.objects.filter(agency=agency).first()
+            if cred is None:
+                cred = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+        else:
+            cred = ReportCMSPassword.objects.filter(agency__isnull=True).first() or ReportCMSPassword.objects.first()
+
         computed = {}
         if project is not None:
             from .ndt_reports import NDTReportService
@@ -600,7 +619,7 @@ class ReportCMSSectionsView(APIView):
                 computed = {}
         sections = []
         for key, meta in CMS_SECTIONS.items():
-            body, source = get_cms_text(project, key, computed=computed)
+            body, source = get_cms_text(project, key, computed=computed, agency=agency)
             sections.append({
                 'key': key,
                 'label': meta['label'],
@@ -626,7 +645,8 @@ class ReportCMSSectionsView(APIView):
             })
         return Response({
             'project': str(project.id) if project else None,
-            'password_set': ReportCMSPassword.objects.exists(),
+            'agency': agency.name if agency else None,
+            'password_set': cred is not None,
             'sections': sections,
         })
 
@@ -730,19 +750,33 @@ class ReportCMSSectionView(APIView):
                                'recorded" statement — it cannot be edited '
                                'until the underlying data exists.'},
                     status=status.HTTP_409_CONFLICT)
-        override, _created = ReportSectionOverride.objects.update_or_create(
-            project=project, section_key=key,
-            defaults={'body': str(body), 'updated_by': request.user})
+        agency = user_agency(request.user)
+        if project is not None:
+            override, _created = ReportSectionOverride.objects.update_or_create(
+                project=project, section_key=key,
+                defaults={'body': str(body), 'updated_by': request.user, 'agency': agency})
+            scope = 'project'
+        elif agency is not None:
+            override, _created = ReportSectionOverride.objects.update_or_create(
+                project__isnull=True, agency=agency, section_key=key,
+                defaults={'body': str(body), 'updated_by': request.user, 'agency': agency})
+            scope = f'agency:{agency.code}'
+        else:
+            override, _created = ReportSectionOverride.objects.update_or_create(
+                project__isnull=True, agency__isnull=True, section_key=key,
+                defaults={'body': str(body), 'updated_by': request.user})
+            scope = 'platform'
+
         from apps.evidence.review import record_audit
         record_audit(
             request.user, 'report_cms_section_saved', 'ReportSectionOverride',
             override.id,
             new_state={'section_key': key,
                        'project': str(project.id) if project else None,
+                       'agency': agency.code if agency else None,
                        'body_length': len(override.body)},
-            metadata={'section_key': key, 'scope': 'project' if project
-                      else 'platform'})
-        _, source = get_cms_text(project, key)
+            metadata={'section_key': key, 'scope': scope})
+        _, source = get_cms_text(project, key, agency=agency)
         return Response({'key': key, 'source': source, 'body': override.body})
 
     def delete(self, request, key):
@@ -768,59 +802,101 @@ class ReportCMSSectionView(APIView):
             project, rejected = self._project(request)
             if rejected:
                 return rejected
-        deleted, _ = ReportSectionOverride.objects.filter(
-            project=project, section_key=key).delete()
+        agency = user_agency(request.user)
+        if project is not None:
+            deleted, _ = ReportSectionOverride.objects.filter(
+                project=project, section_key=key).delete()
+            scope = 'project'
+        elif agency is not None:
+            deleted, _ = ReportSectionOverride.objects.filter(
+                project__isnull=True, agency=agency, section_key=key).delete()
+            scope = f'agency:{agency.code}'
+        else:
+            deleted, _ = ReportSectionOverride.objects.filter(
+                project__isnull=True, agency__isnull=True, section_key=key).delete()
+            scope = 'platform'
+
         from apps.evidence.review import record_audit
         record_audit(
             request.user, 'report_cms_section_reverted',
             'ReportSectionOverride', key,
             new_state={'section_key': key,
-                       'project': str(project.id) if project else None},
-            metadata={'section_key': key, 'scope': 'project' if project
-                      else 'platform'})
+                       'project': str(project.id) if project else None,
+                       'agency': agency.code if agency else None},
+            metadata={'section_key': key, 'scope': scope})
         computed = None
         if CMS_SECTIONS[key].get('computed') and project is not None:
             from .ndt_reports import NDTReportService
             computed = NDTReportService.computed_section_bodies(project)
-        body, source = get_cms_text(project, key, computed=computed)
+        body, source = get_cms_text(project, key, computed=computed, agency=agency)
         return Response({'key': key, 'source': source, 'body': body,
                          'reverted': bool(deleted)})
 
 
 class ReportCMSPasswordView(APIView):
     """
-    POST /api/v1/reports/cms/password/   {new_password, current_password?}
-    Set (or change) the password guarding report-CMS edits. Directors only.
-    Changing an existing password requires the current one.
+    GET  /api/v1/reports/cms/password/
+    POST /api/v1/reports/cms/password/   {new_password, current_password?, reset?}
+    Set, change, or reset (forgot password) the password guarding report-CMS edits.
+    Directors only. Guarded per government agency.
     """
     permission_classes = [IsCMSDirector]
 
+    def get(self, request):
+        agency = user_agency(request.user)
+        if agency is not None:
+            cred = ReportCMSPassword.objects.filter(agency=agency).first()
+            if cred is None:
+                cred = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+        else:
+            cred = ReportCMSPassword.objects.filter(agency__isnull=True).first() or ReportCMSPassword.objects.first()
+        return Response({
+            'password_set': cred is not None,
+            'agency': agency.name if agency else None,
+            'agency_code': agency.code if agency else None,
+        })
+
     def post(self, request):
-        new_password = (request.data or {}).get('new_password')
+        data = request.data or {}
+        new_password = data.get('new_password')
         if not new_password or len(str(new_password)) < 8:
             return Response({'detail': 'new_password is required and must be '
                                        'at least 8 characters.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        credential = ReportCMSPassword.objects.first()
-        if credential is not None:
-            current = (request.data or {}).get('current_password', '')
-            if not current or not check_password(str(current),
-                                                 credential.password_hash):
+        agency = user_agency(request.user)
+        is_reset = bool(data.get('reset') or data.get('forgot_password'))
+
+        if agency is not None:
+            credential = ReportCMSPassword.objects.filter(agency=agency).first()
+        else:
+            credential = ReportCMSPassword.objects.filter(agency__isnull=True).first()
+
+        if credential is not None and not is_reset:
+            current = data.get('current_password', '')
+            if not current or not check_password(str(current), credential.password_hash):
                 return Response(
-                    {'detail': 'A report-CMS password already exists; the '
-                               'current password is required to change it.'},
+                    {'detail': 'A report-CMS password already exists; the current password is required to change it. (Use Reset if forgotten).'},
                     status=status.HTTP_403_FORBIDDEN)
             credential.password_hash = make_password(str(new_password))
             credential.set_by = request.user
             credential.save()
+            action = 'report_cms_password_changed'
+        elif credential is not None and is_reset:
+            credential.password_hash = make_password(str(new_password))
+            credential.set_by = request.user
+            credential.save()
+            action = 'report_cms_password_reset'
         else:
             credential = ReportCMSPassword.objects.create(
+                agency=agency,
                 password_hash=make_password(str(new_password)),
                 set_by=request.user)
+            action = 'report_cms_password_set'
+
         from apps.evidence.review import record_audit
-        record_audit(request.user, 'report_cms_password_set',
-                     'ReportCMSPassword', credential.id)
-        return Response({'detail': 'Report-CMS password saved.'})
+        record_audit(request.user, action, 'ReportCMSPassword', credential.id)
+        agency_label = f" for {agency.name}" if agency else ""
+        return Response({'detail': f'Report-CMS password saved{agency_label}.', 'password_set': True})
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1184,111 @@ from django.utils.decorators import method_decorator
 from rest_framework.permissions import AllowAny
 
 
+def _resolve_verified_report(ref, digest):
+    """
+    Resolve an ArchivedReport matching a report reference and/or content digest.
+    Handles exact matches, normalized reference numbers, case-insensitive digests,
+    and falls back to resolving active project live dossiers and auto-archiving.
+    """
+    from .models import ArchivedReport
+    from .ndt_reports import NDTReportService
+    from apps.projects.models import Project
+    from apps.digital_eye.models import PUNDITTest
+
+    ref = (ref or "").strip()
+    digest = (digest or "").strip()
+    norm_query_ref = "".join(c for c in ref if c.isalnum()).upper()
+    norm_digest = digest.lower()
+
+    report = None
+
+    # 1. Exact match
+    if ref and digest:
+        report = ArchivedReport.objects.filter(
+            report_reference=ref, content_key__iexact=digest
+        ).first()
+
+    # 2. Match by digest directly (handles whitespace or URL encoding variances in ref)
+    if report is None and digest:
+        cands = ArchivedReport.objects.filter(content_key__iexact=digest)
+        for cand in cands:
+            if not ref:
+                report = cand
+                break
+            norm_stored_ref = "".join(c for c in cand.report_reference if c.isalnum()).upper()
+            if not norm_query_ref or not norm_stored_ref or norm_query_ref == norm_stored_ref or norm_query_ref in norm_stored_ref or norm_stored_ref in norm_query_ref:
+                report = cand
+                break
+
+    # 3. Match by live statutory digest on existing ArchivedReport candidate projects
+    if report is None and digest:
+        for cand in ArchivedReport.objects.select_related("project").all():
+            norm_stored_ref = "".join(c for c in cand.report_reference if c.isalnum()).upper()
+            if not norm_query_ref or norm_query_ref == norm_stored_ref or norm_query_ref in norm_stored_ref or norm_stored_ref in norm_query_ref:
+                try:
+                    c_tests = list(
+                        PUNDITTest.objects.filter(project=cand.project)
+                        .select_related("device", "operator")
+                        .prefetch_related("files", "readings")
+                        .order_by("structural_element", "test_date")
+                    )
+                    if c_tests:
+                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
+                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
+                        if c_digest.lower() == norm_digest:
+                            cand.content_key = digest
+                            cand.save(update_fields=["content_key"])
+                            report = cand
+                            break
+                except Exception:
+                    pass
+
+    # 4. Fallback: Search all platform Projects to resolve and auto-archive unarchived or previewed dossiers
+    if report is None:
+        for proj in Project.objects.all():
+            try:
+                c_tests = list(
+                    PUNDITTest.objects.filter(project=proj)
+                    .select_related("device", "operator")
+                    .prefetch_related("files", "readings")
+                    .order_by("structural_element", "test_date")
+                )
+                if not c_tests:
+                    continue
+                r_no, _ = NDTReportService._effective_report_number(proj, c_tests)
+                c_digest = NDTReportService._statutory_digest(proj, c_tests, r_no)
+                norm_r_no = "".join(c for c in r_no if c.isalnum()).upper()
+
+                matches_digest = bool(digest and c_digest.lower() == norm_digest)
+                matches_ref = bool(norm_query_ref and (norm_query_ref == norm_r_no or norm_query_ref in norm_r_no or norm_r_no in norm_query_ref))
+
+                if matches_digest or (matches_ref and not digest):
+                    pdf_bytes = NDTReportService.generate_ndt_report(proj)
+                    report = NDTReportService.archive_ndt_report(proj, None, pdf_bytes, notify=False)
+                    break
+
+                # Also check per-operator dossiers if applicable
+                distinct_ops = set(t.operator_name for t in c_tests if t.operator_name)
+                for op in distinct_ops:
+                    op_tests = [t for t in c_tests if t.operator_name == op]
+                    if op_tests:
+                        op_r_no, _ = NDTReportService._effective_report_number(proj, op_tests)
+                        op_digest = NDTReportService._statutory_digest(proj, op_tests, op_r_no)
+                        norm_op_r_no = "".join(c for c in op_r_no if c.isalnum()).upper()
+                        op_matches_digest = bool(digest and op_digest.lower() == norm_digest)
+                        op_matches_ref = bool(norm_query_ref and (norm_query_ref == norm_op_r_no or norm_query_ref in norm_op_r_no or norm_op_r_no in norm_query_ref))
+                        if op_matches_digest or (op_matches_ref and not digest):
+                            pdf_bytes = NDTReportService.generate_ndt_report(proj, operator=op)
+                            report = NDTReportService.archive_ndt_report(proj, None, pdf_bytes, operator=op, notify=False)
+                            break
+                if report:
+                    break
+            except Exception:
+                pass
+
+    return report
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class ReportVerifyView(APIView):
     """
@@ -1120,8 +1301,6 @@ class ReportVerifyView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        from .models import ArchivedReport
-        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -1130,41 +1309,8 @@ class ReportVerifyView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
-        # 1. Exact match
-        report = (ArchivedReport.objects
-                  .filter(report_reference=ref, content_key=digest)
-                  .first())
-        # 2. Match by digest directly (handles whitespace or URL encoding variances in ref)
-        if report is None:
-            report = ArchivedReport.objects.filter(content_key=digest).first()
-            if report and ref:
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(report.report_reference.split())
-                if norm_query != norm_stored:
-                    report = None
-        # 3. If still None, check if any archived report's live statutory digest matches
-        if report is None:
-            for cand in ArchivedReport.objects.all():
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(cand.report_reference.split())
-                if not norm_query or norm_query == norm_stored:
-                    try:
-                        from apps.digital_eye.models import PUNDITTest
-                        c_tests = list(
-                            PUNDITTest.objects.filter(project=cand.project)
-                            .select_related('device', 'operator')
-                            .prefetch_related('files', 'readings')
-                            .order_by('structural_element', 'test_date')
-                        )
-                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
-                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
-                        if c_digest == digest:
-                            cand.content_key = digest
-                            cand.save(update_fields=['content_key'])
-                            report = cand
-                            break
-                    except Exception:
-                        pass
+
+        report = _resolve_verified_report(ref, digest)
         if report is None:
             return Response(
                 {'verified': False,
@@ -1211,41 +1357,7 @@ class ReportVerifyDownloadView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
-        # 1. Exact match
-        report = (ArchivedReport.objects
-                  .filter(report_reference=ref, content_key=digest)
-                  .first())
-        # 2. Match by digest directly
-        if report is None:
-            report = ArchivedReport.objects.filter(content_key=digest).first()
-            if report and ref:
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(report.report_reference.split())
-                if norm_query != norm_stored:
-                    report = None
-        # 3. Live digest match fallback
-        if report is None:
-            for cand in ArchivedReport.objects.all():
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(cand.report_reference.split())
-                if not norm_query or norm_query == norm_stored:
-                    try:
-                        from apps.digital_eye.models import PUNDITTest
-                        c_tests = list(
-                            PUNDITTest.objects.filter(project=cand.project)
-                            .select_related('device', 'operator')
-                            .prefetch_related('files', 'readings')
-                            .order_by('structural_element', 'test_date')
-                        )
-                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
-                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
-                        if c_digest == digest:
-                            cand.content_key = digest
-                            cand.save(update_fields=['content_key'])
-                            report = cand
-                            break
-                    except Exception:
-                        pass
+        report = _resolve_verified_report(ref, digest)
         if report is None:
             return Response(
                 {'verified': False,
@@ -1339,6 +1451,10 @@ class NDTReportPreviewView(APIView):
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
+        try:
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+        except Exception:
+            logger.exception('Failed to auto-archive previewed NDT report')
         return _pdf_response(pdf_bytes,
                              f'ndt_report_PREVIEW_{project_id}{safe_op}.pdf')
 
@@ -1373,6 +1489,10 @@ class NDTReportPreviewSectionsView(APIView):
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        try:
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+        except Exception:
+            logger.exception('Failed to auto-archive preview sections NDT report')
         return Response({
             'sections': bundle['sections'],
             'page_count': bundle['page_count'],
@@ -1501,6 +1621,9 @@ class NDTReportPageQAView(APIView):
             or StrengthCurve.objects.filter(is_default=True).first()
         )
         curve_name_val = active_curve.name if active_curve else 'Calibrated Correlation Model'
+        if curve_name_val and 'phase 2' in curve_name_val.lower():
+            curve_name_val = re.sub(r'\(?\bphase\s*2\b\)?', '(Scope 01)', curve_name_val, flags=re.IGNORECASE).strip()
+        curve_name_val = re.sub(r'\(\s*Scope\s*1\s*\)', '(Scope 01)', curve_name_val, flags=re.IGNORECASE)
         curve_form_val = getattr(active_curve, 'formula', None) or 'f_cu = A * exp(B * V)'
         has_cal_points = bool(active_curve and getattr(active_curve, 'data_points', None) and len(active_curve.data_points) > 0)
         r2_val = float(active_curve.r2_score) if (active_curve and getattr(active_curve, 'r2_score', None) is not None and has_cal_points) else None
@@ -1566,7 +1689,7 @@ class NDTReportPageQAView(APIView):
             'corners': corners_list,
             'exif_gps_reconciliation': (
                 'Field geodetic coordinates correspond with the tested structural perimeter; '
-                'all test stations remain situated within the surveyed boundary polygon.'
+                'all test panels remain situated within the surveyed boundary polygon.'
             )
         }
 
@@ -1613,16 +1736,16 @@ class NDTReportPageQAView(APIView):
             logger.warning("Could not collect appendix photos for QA review: %s", e)
 
         stn_tag_list = [str(s.get('station') or f"S{i}") for i, s in enumerate(compact_summary, 1)]
-        stn_range_desc = f"{stn_tag_list[0]}–{stn_tag_list[-1]}" if len(stn_tag_list) > 1 else (stn_tag_list[0] if stn_tag_list else f"Stations 1–{len(tests)}")
+        stn_range_desc = f"{stn_tag_list[0]}–{stn_tag_list[-1]}" if len(stn_tag_list) > 1 else (stn_tag_list[0] if stn_tag_list else f"Panels 1–{len(tests)}")
 
         appendix_meta = {
             'appendix_i_drawing': f'APPENDIX I: SURVEY GRID LAYOUT ({stn_range_desc})',
             'survey_asset_type': f"{asset_type_val} ({sqm_val} m²)",
             'tested_stations': stn_range_desc,
-            'stations_verification': f'All {stn_range_desc} stations verified strictly within surveyed project boundary',
+            'stations_verification': f'All {stn_range_desc} panels verified strictly within surveyed project boundary',
             'fieldwork_dates': test_dates_str,
             'exif_gps_reconciliation': (
-                'Camera EXIF coordinates and survey GPS records confirm all test stations are within the georeferenced boundary.'
+                'Camera EXIF coordinates and survey GPS records confirm all test panels are within the georeferenced boundary.'
             ),
             'photographic_plates': appendix_photos,
             'equipment_certificate': {
@@ -1646,12 +1769,12 @@ class NDTReportPageQAView(APIView):
                 f"Section: {active_sec_label} (Page {page_number} of {total_pages}).\n"
                 f"Extracted page text: '{active_page_text.strip()}'.\n"
                 f"Visual Plate Description: Technical drawing / survey map / photographic plate depicting "
-                f"{'Survey Grid Layout ' + stn_range_desc + ' with boundary coordinates' if ('survey' in active_sec_label.lower() or 'layout' in active_sec_label.lower() or 'floor' in active_sec_label.lower()) else 'Field photographic evidence plates documenting test stations ' + stn_range_desc + ' and equipment calibration'}.\n"
-                f"Associated project stations: Stations {stn_range_desc}."
+                f"{'Survey Grid Layout ' + stn_range_desc + ' with boundary coordinates' if ('survey' in active_sec_label.lower() or 'layout' in active_sec_label.lower() or 'floor' in active_sec_label.lower()) else 'Field photographic evidence plates documenting test panels ' + stn_range_desc + ' and equipment calibration'}.\n"
+                f"Associated project panels: Panels {stn_range_desc}."
             )
 
         raw_payload = {
-            'project_name': getattr(project, 'name', ''),
+            'project_name': NDTReportService._effective_project_name(project),
             'client_name': str(getattr(project, 'client_name', None) or getattr(project, 'client', '') or ''),
             'contractor_name': contractor_name,
             'site_address': str(getattr(project, 'site_address', '') or ''),
@@ -1682,10 +1805,12 @@ class NDTReportPageQAView(APIView):
             "  * Flag any chronological impossibility (e.g., equipment calibration dates occurring after the physical test dates).\n"
             "  * Flag asset misidentification (e.g., referring to an RCC slab-on-grade as a '1-floor building' or mentioning a 'foundation substructure').\n"
             "- Deterministic Math Enforcement: Do not recalculate f_cu, R^2, or standard deviations. Rely strictly on the Python-calculated values in the raw_json_payload. Your job is to ensure the page's narrative accurately reflects the pre-calculated backend data.\n"
-            "- Regulatory Schema Validation: If reviewing a LASBCA Phase 10 Statistical Summary Table, confirm the strict presence of the mandatory compliance columns: V_min, V_max, Range, Grade, Critical Low Point, and Basis.\n"
+            "- Table Recognition & Validation: Table 5.1 is the Section 5.1 Raw UPV Point Measurements Table (Path Length, Transit Time, Pulse Velocity, Point Spread, Strength, Remarks). Table 5.3 is the Section 5.3 Multi-Model Ensemble Analysis. Table 5.5 is the Section 5.5 LASBCA Phase 10 Statistical Summary Table (which contains V_min, V_max, Range, SD, CoV, Uniformity, f_cu, Grade, Critical Low Point, Basis). Do NOT flag Table 5.1 or Table 5.3 for omitting Table 5.5 compliance columns.\n"
+            "- Page Numbering Offset: The report body uses standard front-matter offset arabic numbering (where arabic body numbering begins after the cover/TOC, so physical page N will display body page (N - 3) in its footer). Do not flag the difference between the physical PDF page number and the body page footer as a discrepancy.\n"
+            "- Structural Member Nomenclature: For slab-on-grade laydown areas, test locations are referred to as 'stations' / 'panels' (e.g., S1–S20). Both terms describe the tested structural grid locations.\n"
             "- Appendix & Technical Drawings: For Appendix pages (Appendix I Survey Plan, Appendix II-IV Photo Plates, Calibration Certs):\n"
             "  * Cross-reference against raw_json_payload.appendix_metadata.\n"
-            "  * Verify that photographic plates (e.g. PIC I to PIC V, Figures 4.1 to 4.5), test stations (S1–S20), and EXIF reconciliation match the payload.\n"
+            "  * Verify that photographic plates (e.g. PIC I to PIC V, Figures 4.1 to 4.5), test stations/panels (S1–S20), and EXIF reconciliation match the payload.\n"
             "  * Do not flag the absence of tabular statistical calculation columns on CAD drawing or photo plate pages, as visual graphical documentation is the statutory intent of the Appendix.\n\n"
             "OUTPUT FORMAT REQUIRED:\n"
             "Return a JSON object conforming to the schema with:\n"
