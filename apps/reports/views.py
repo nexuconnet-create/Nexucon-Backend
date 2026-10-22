@@ -1241,6 +1241,32 @@ class ReportVerifyView(APIView):
                             break
                     except Exception:
                         pass
+        # 4. If still None, check if any project generates this exact statutory digest
+        if report is None:
+            try:
+                from apps.projects.models import Project
+                from apps.digital_eye.models import PUNDITTest
+                for proj in Project.objects.all():
+                    c_tests = list(
+                        PUNDITTest.objects.filter(project=proj)
+                        .select_related('device', 'operator')
+                        .prefetch_related('files', 'readings')
+                        .order_by('structural_element', 'test_date')
+                    )
+                    if not c_tests:
+                        continue
+                    r_no, _ = NDTReportService._effective_report_number(proj, c_tests)
+                    norm_query = ''.join(ref.split())
+                    norm_rno = ''.join(r_no.split())
+                    if not norm_query or norm_query == norm_rno:
+                        c_digest = NDTReportService._statutory_digest(proj, c_tests, r_no)
+                        if c_digest == digest:
+                            owner = getattr(proj, 'created_by', None)
+                            pdf_bytes = NDTReportService.generate_ndt_report(proj, owner)
+                            report = NDTReportService.archive_ndt_report(proj, owner, pdf_bytes, notify=False)
+                            break
+            except Exception:
+                pass
         if report is None:
             return Response(
                 {'verified': False,
@@ -1322,6 +1348,32 @@ class ReportVerifyDownloadView(APIView):
                             break
                     except Exception:
                         pass
+        # 4. If still None, check if any project generates this exact statutory digest
+        if report is None:
+            try:
+                from apps.projects.models import Project
+                from apps.digital_eye.models import PUNDITTest
+                for proj in Project.objects.all():
+                    c_tests = list(
+                        PUNDITTest.objects.filter(project=proj)
+                        .select_related('device', 'operator')
+                        .prefetch_related('files', 'readings')
+                        .order_by('structural_element', 'test_date')
+                    )
+                    if not c_tests:
+                        continue
+                    r_no, _ = NDTReportService._effective_report_number(proj, c_tests)
+                    norm_query = ''.join(ref.split())
+                    norm_rno = ''.join(r_no.split())
+                    if not norm_query or norm_query == norm_rno:
+                        c_digest = NDTReportService._statutory_digest(proj, c_tests, r_no)
+                        if c_digest == digest:
+                            owner = getattr(proj, 'created_by', None)
+                            pdf_bytes = NDTReportService.generate_ndt_report(proj, owner)
+                            report = NDTReportService.archive_ndt_report(proj, owner, pdf_bytes, notify=False)
+                            break
+            except Exception:
+                pass
         if report is None:
             return Response(
                 {'verified': False,
@@ -1449,6 +1501,10 @@ class NDTReportPreviewSectionsView(APIView):
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        try:
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+        except Exception:
+            logger.exception('NDT report preview archiving failed')
         return Response({
             'sections': bundle['sections'],
             'page_count': bundle['page_count'],

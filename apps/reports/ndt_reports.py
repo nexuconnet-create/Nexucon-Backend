@@ -4088,11 +4088,12 @@ class NDTReportService:
             project=project, report_kind='ndt', content_key=content_key,
         ).first()
         if existing is not None:
-            try:
-                from .notifications import notify_inspectors_ndt_report_ready
-                notify_inspectors_ndt_report_ready(existing, sender=user, force_resend=True)
-            except Exception:  # noqa: BLE001
-                logger.exception('Failed to dispatch inspector notifications for existing archived NDT report')
+            if kwargs.get('notify', True) and kwargs.get('notify') is not False:
+                try:
+                    from .notifications import notify_inspectors_ndt_report_ready
+                    notify_inspectors_ndt_report_ready(existing, sender=user, force_resend=True)
+                except Exception:  # noqa: BLE001
+                    logger.exception('Failed to dispatch inspector notifications for existing archived NDT report')
             return existing
 
         # Same strength basis as the report itself: a test is
