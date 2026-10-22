@@ -134,6 +134,8 @@ class Project(models.Model):
     construction_method = models.CharField(max_length=255, blank=True, null=True)
     structural_system = models.CharField(max_length=255, blank=True, null=True)
     special_requirements = models.TextField(blank=True, null=True)
+    floor_number_custom = models.CharField(max_length=150, blank=True, default='', help_text="Custom floor specification if Others was selected")
+    is_estimated_value_na = models.BooleanField(default=False, help_text="True if project estimated value is marked Not Applicable (N/A)")
 
     # 8. Government Assignment
     assigned_department = models.CharField(max_length=255, blank=True, null=True)
