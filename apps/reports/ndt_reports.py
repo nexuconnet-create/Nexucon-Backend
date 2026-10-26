@@ -3171,16 +3171,33 @@ class NDTReportService:
         f = (floor_label or '').lower()
         if 'ground' in f:
             return 'GF'
+        if 'roof' in f:
+            return 'RF'
+        if 'basement' in f:
+            bm = re.search(r'(\d+)', f)
+            return f'B{bm.group(1)}' if bm else 'BF'
+        if 'not recorded' in f:
+            return 'UF'
         if 'first' in f or '1st' in f:
             return 'FF'
         if 'second' in f or '2nd' in f:
             return 'SF'
         if 'third' in f or '3rd' in f:
             return 'TF'
-        if 'roof' in f:
-            return 'RF'
-        if 'not recorded' in f:
-            return 'UF'
+        num_match = re.search(r'(\d+)', f)
+        if num_match:
+            n = int(num_match.group(1))
+            return f'{n}F'
+        ordinals = {
+            'fourth': '4F', 'fifth': '5F', 'sixth': '6F', 'seventh': '7F',
+            'eighth': '8F', 'ninth': '9F', 'tenth': '10F', 'eleventh': '11F',
+            'twelfth': '12F', 'thirteenth': '13F', 'fourteenth': '14F',
+            'fifteenth': '15F', 'sixteenth': '16F', 'seventeenth': '17F',
+            'eighteenth': '18F', 'nineteenth': '19F', 'twentieth': '20F',
+        }
+        for word, code in ordinals.items():
+            if word in f:
+                return code
         return ''.join(w[0] for w in f.split()[:2]).upper() or 'UF'
 
     @staticmethod
@@ -7114,11 +7131,19 @@ class NDTReportService:
         floor_numbers = {
             'BASEMENT': -1, 'GROUND FLOOR': 0, 'GROUND': 0,
             'FIRST FLOOR': 1, 'SECOND FLOOR': 2, 'THIRD FLOOR': 3,
-            'FOURTH FLOOR': 4, 'FIFTH FLOOR': 5,
+            'FOURTH FLOOR': 4, 'FIFTH FLOOR': 5, 'SIXTH FLOOR': 6,
+            'SEVENTH FLOOR': 7, 'EIGHTH FLOOR': 8, 'NINTH FLOOR': 9,
+            'TENTH FLOOR': 10, 'TWENTIETH FLOOR': 20,
         }
         storeys = set()
         for label in floors_present:
-            storeys.add(floor_numbers.get((label or '').strip().upper()))
+            up = (label or '').strip().upper()
+            if up in floor_numbers:
+                storeys.add(floor_numbers[up])
+            else:
+                num_m = re.search(r'(-?\d+)', up)
+                if num_m:
+                    storeys.add(int(num_m.group(1)))
         for level in bim_levels:
             match = re.match(r'\s*(-?\d+)', level or '')
             if match:
