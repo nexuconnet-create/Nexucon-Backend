@@ -173,10 +173,16 @@ def parse_readings_workbook(file_obj):
             test_type = _test_type(cell(row_number, 'TEST TYPE'), row_number, errors)
             if test_type is None:
                 continue
+            raw_floor = _text(cell(row_number, 'FLOOR')) or ''
+            from apps.data_import.readers import infer_floor_from_name
+            if not raw_floor or raw_floor.strip().lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+                inferred = infer_floor_from_name(element)
+                if inferred != 'Ground Floor' or not raw_floor:
+                    raw_floor = inferred
             parsed_rows.append({
                 'row': row_number,
                 'element': element,
-                'floor': _text(cell(row_number, 'FLOOR')) or '',
+                'floor': raw_floor,
                 'test_type': test_type,
                 'point': _text(cell(row_number, 'POINT')),
                 'path_length_mm': _number(cell(row_number, 'PATH LENGTH L (MM)'),

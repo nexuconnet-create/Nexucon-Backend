@@ -3130,30 +3130,28 @@ class NDTReportService:
     def _member_type(element):
         """Column / Beam / Slab / Wall / Foundation ... from the element's
         own label (e.g. 'COL-C24' -> COLUMN, 'Floor:200THK RC SLAB:781094'
-        -> SLAB, 'BLD-A-COL-G1' -> COLUMN). Real data only — nothing is re-typed."""
+        -> SLAB). Real data only — nothing is re-typed."""
         label = (element or '').strip().upper()
         if not label:
             return 'UNSPECIFIED'
-        multi_mapping = {
-            'COLUMN': 'COLUMN', 'COL': 'COLUMN', 'CS': 'COLUMN',
-            'BEAM': 'BEAM', 'BM': 'BEAM',
-            'SLAB': 'SLAB', 'SL': 'SLAB',
-            'WALL': 'WALL', 'WL': 'WALL',
-            'FOUNDATION': 'FOUNDATION', 'FOUND': 'FOUNDATION', 'FDN': 'FOUNDATION',
-            'STRUCTURAL ELEMENT': 'STRUCTURAL ELEMENT',
+        token = re.split(r'[-\s]', label)[0]
+        mapping = {
+            'C': 'COLUMN', 'COL': 'COLUMN', 'COLUMN': 'COLUMN', 'CS': 'COLUMN', 'G1': 'COLUMN',
+            'B': 'BEAM', 'BM': 'BEAM', 'BEAM': 'BEAM', 'G2': 'BEAM',
+            'SL': 'SLAB', 'SLAB': 'SLAB', 'G4': 'SLAB',
+            'S': 'STRUCTURAL ELEMENT', 'SE': 'STRUCTURAL ELEMENT', 'ST': 'STRUCTURAL ELEMENT',
+            'WL': 'WALL', 'WALL': 'WALL', 'G3': 'WALL',
+            'F': 'FOUNDATION', 'FDN': 'FOUNDATION', 'FOUND': 'FOUNDATION', 'FOUNDATION': 'FOUNDATION',
         }
-        single_mapping = {
-            'C': 'COLUMN', 'B': 'BEAM', 'S': 'SLAB', 'W': 'WALL', 'F': 'FOUNDATION',
-        }
-        tokens = re.split(r'[-\s_:]+', label)
-        # 1. Search for full/abbreviated tokens (e.g. COL, BM, SL, BEAM)
-        for t in tokens:
-            if t in multi_mapping:
-                return multi_mapping[t]
-            base_match = re.match(r'^([A-Z]{2,})\d+$', t)
-            if base_match and base_match.group(1) in multi_mapping:
-                return multi_mapping[base_match.group(1)]
-        # 2. Check full words anywhere in the label
+        if token in mapping:
+            return mapping[token]
+        base_match = re.match(r'^([A-Z]+)\d+$', token)
+        if base_match and base_match.group(1) in mapping:
+            return mapping[base_match.group(1)]
+        # BIM-style names ('M_Footing-Rectangular:900 x 900 x 200mm:803711',
+        # 'Floor:200THK RC SLAB:781094') carry the member word anywhere in
+        # the label — find it instead of printing a raw name fragment like
+        # 'M_FOOTING' or 'FLOOR:200THK' in the group headings.
         for word, member in (
                 ('COLUMN', 'COLUMN'), ('BEAM', 'BEAM'), ('SLAB', 'SLAB'),
                 ('WALL', 'WALL'), ('FOOTING', 'FOUNDATION'),
@@ -3161,44 +3159,41 @@ class NDTReportService:
                 ('STAIR', 'STAIR')):
             if word in label:
                 return member
-        # 3. Single-letter member codes (e.g. C1, B2, S3)
-        for i, t in enumerate(tokens):
-            base_match = re.match(r'^([A-Z])\d+$', t)
-            if base_match and base_match.group(1) in single_mapping:
-                return single_mapping[base_match.group(1)]
-            if t in single_mapping and (i > 0 or len(tokens) == 1):
-                return single_mapping[t]
-        return tokens[0] or 'UNSPECIFIED'
+        return token or 'UNSPECIFIED'
 
     @staticmethod
-    def _floor_label(floor):
-        return (floor or '').strip() or 'FLOOR NOT RECORDED'
+    def _floor_label(floor, element=None):
+        raw = (floor or '').strip()
+        from apps.data_import.readers import infer_floor_from_name
+        if not raw or raw.lower() in ('ground floor', 'floor not recorded', 'unspecified'):
+            inferred = infer_floor_from_name(element)
+            if inferred != 'Ground Floor' or not raw:
+                return inferred
+        return raw or 'FLOOR NOT RECORDED'
 
     @staticmethod
     def _floor_code(floor_label):
         """Chart category prefix (reference GFC/FFC/FFB/FFS style)."""
         f = (floor_label or '').lower()
-        b_match = re.search(r'\b(?:building|block|bld|blk)\s*([a-z0-9]+)\b', f)
-        b_pfx = f"{b_match.group(1).upper()}-" if b_match else ""
         if 'ground' in f:
-            return f"{b_pfx}GF"
+            return 'GF'
         if 'roof' in f:
-            return f"{b_pfx}RF"
+            return 'RF'
         if 'basement' in f:
-            bm = re.search(r'basement\s*(\d+)', f)
-            return f"{b_pfx}B{bm.group(1)}" if bm else f"{b_pfx}BF"
+            bm = re.search(r'(\d+)', f)
+            return f'B{bm.group(1)}' if bm else 'BF'
         if 'not recorded' in f:
             return 'UF'
         if 'first' in f or '1st' in f:
-            return f"{b_pfx}FF"
+            return 'FF'
         if 'second' in f or '2nd' in f:
-            return f"{b_pfx}SF"
+            return 'SF'
         if 'third' in f or '3rd' in f:
-            return f"{b_pfx}TF"
+            return 'TF'
         num_match = re.search(r'(\d+)', f)
         if num_match:
             n = int(num_match.group(1))
-            return f"{b_pfx}{n}F"
+            return f'{n}F'
         ordinals = {
             'fourth': '4F', 'fifth': '5F', 'sixth': '6F', 'seventh': '7F',
             'eighth': '8F', 'ninth': '9F', 'tenth': '10F', 'eleventh': '11F',
@@ -3208,7 +3203,7 @@ class NDTReportService:
         }
         for word, code in ordinals.items():
             if word in f:
-                return f"{b_pfx}{code}"
+                return code
         return ''.join(w[0] for w in f.split()[:2]).upper() or 'UF'
 
     @staticmethod
@@ -3371,7 +3366,7 @@ class NDTReportService:
                 'test': t,
                 'element': t.structural_element or 'UNSPECIFIED',
                 'member_type': cls._member_type(t.structural_element),
-                'floor_label': cls._floor_label(t.floor),
+                'floor_label': cls._floor_label(t.floor, t.structural_element),
                 'rows': rows,
                 'mean_v': mean_v,
                 'mean_ecs': mean_ecs,

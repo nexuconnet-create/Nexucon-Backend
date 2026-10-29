@@ -394,6 +394,14 @@ class SessionFromFileService:
             for key, value in row.data.items():
                 if not _blank(value):
                     data[key] = value
+            elem = data.get('structural_element')
+            curr_floor = str(data.get('floor') or '').strip()
+            if elem:
+                from apps.data_import.readers import infer_floor_from_name
+                inferred = infer_floor_from_name(elem)
+                if not curr_floor or curr_floor.lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+                    if inferred != 'Ground Floor' or not curr_floor:
+                        data['floor'] = inferred
             merged.append(SourceRow(row_number=row.row_number, data=data))
         return merged
 

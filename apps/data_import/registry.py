@@ -307,11 +307,19 @@ def _build_upv(rows, ctx):
 
         readings.append(reading)
 
+    elem_val = _text(first.get('structural_element'))
+    floor_val = _text(first.get('floor'))
+    from apps.data_import.readers import infer_floor_from_name
+    if not floor_val or floor_val.lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+        inferred = infer_floor_from_name(elem_val)
+        if inferred != 'Ground Floor' or not floor_val:
+            floor_val = inferred
+
     payload = {
         'project': ctx.project.id,
         'test_type': test_type,
-        'structural_element': _text(first.get('structural_element')),
-        'floor': _text(first.get('floor')),
+        'structural_element': elem_val,
+        'floor': floor_val,
         'test_location': _text(first.get('test_location')),
         'weather_condition': _text(first.get('weather_condition')),
         'readings': readings,
@@ -355,11 +363,19 @@ def group_upv_rows(rows):
     """
     groups = []
     seen = {}
+    from apps.data_import.readers import infer_floor_from_name
     for row in rows:
         data = row.data
-        key = (_text(data.get('structural_element')),
+        elem = _text(data.get('structural_element'))
+        floor = _text(data.get('floor'))
+        if not floor or floor.lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+            inferred = infer_floor_from_name(elem)
+            if inferred != 'Ground Floor' or not floor:
+                floor = inferred
+                data['floor'] = floor
+        key = (elem,
                _text(data.get('test_type')).lower(),
-               _text(data.get('floor')))
+               floor)
         if groups and groups[-1][0] == key:
             groups[-1][1].append(row)
             continue

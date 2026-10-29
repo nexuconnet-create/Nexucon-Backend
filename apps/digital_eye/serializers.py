@@ -507,8 +507,18 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
     @staticmethod
     def _assign_labels(readings_data):
         """Auto-assign point labels A, B, C, ... to any reading that arrives
-        without one. Duplicate labels are rejected — each point on an element
-        must be distinct."""
+        without one. When duplicate raw point labels arrive (e.g. repeated 1, 2, 3
+        from field scans on an element), cleanly auto-sequence them A, B, C, D...
+        so each point is distinct and valid."""
+        raw_labels = [(r.get('point_label') or '').strip().upper() for r in readings_data]
+        non_empty = [l for l in raw_labels if l]
+        has_dupes = len(non_empty) != len(set(non_empty))
+
+        if has_dupes or not non_empty:
+            for idx, reading in enumerate(readings_data):
+                reading['point_label'] = chr(ord('A') + idx) if idx < 26 else f"P{idx + 1}"
+            return [r['point_label'] for r in readings_data]
+
         used_labels = set()
         for reading in readings_data:
             explicit = (reading.get('point_label') or '').strip().upper()
@@ -516,9 +526,6 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
                 if len(explicit) > 10:
                     raise serializers.ValidationError(
                         {'readings': f'Point label {explicit!r} is too long (max 10 characters).'})
-                if explicit in used_labels:
-                    raise serializers.ValidationError(
-                        {'readings': f'Duplicate test-point label {explicit!r} — each point on an element must be distinct.'})
                 used_labels.add(explicit)
 
         alphabet_idx = 0
@@ -681,6 +688,14 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         test_type = attrs.get('test_type', getattr(self.instance, 'test_type', 'pulse_velocity'))
+        elem = attrs.get('structural_element') or (self.instance.structural_element if self.instance else '')
+        curr_floor = attrs.get('floor') or (self.instance.floor if self.instance else '')
+        if elem:
+            from apps.data_import.readers import infer_floor_from_name
+            inferred = infer_floor_from_name(elem)
+            if not curr_floor or str(curr_floor).strip().lower() in ('', 'ground floor', 'unspecified', 'floor not recorded'):
+                if inferred != 'Ground Floor' or not curr_floor:
+                    attrs['floor'] = inferred
         readings = attrs.get('readings')
         if test_type == 'pulse_velocity':
             if readings is not None:
