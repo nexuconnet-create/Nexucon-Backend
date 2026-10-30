@@ -487,9 +487,17 @@ class NDTWordExporter:
                                'project.')
             else:
                 _add_heading(doc, 'SUMMARY OF TEST ANALYSIS', level=2)
+                buildings_present = sorted({e.get('building_label', 'Main Building') for e in element_data}, key=_natural_sort_key)
+                has_multi_bld = len(buildings_present) > 1
+
                 analysis_rows = [
-                    [_element_display(e['element']), '1', e['floor_label'].title(), str(e['n_points'])]
-                    for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element']))
+                    [
+                        f"{e.get('building_label', 'Main Building')} — {_element_display(e['element'])}" if has_multi_bld else _element_display(e['element']),
+                        '1',
+                        f"{e.get('building_label', 'Main Building')} {e['floor_label'].title()}" if has_multi_bld else e['floor_label'].title(),
+                        str(e['n_points'])
+                    ]
+                    for e in sorted(element_data, key=lambda e: (_natural_sort_key(e.get('building_label', 'Main Building')), _natural_sort_key(e['element'])))
                 ]
                 _add_table(
                     doc,
@@ -498,58 +506,109 @@ class NDTWordExporter:
                     analysis_rows)
 
                 _add_heading(doc, 'SUMMARY OF TEST RESULTS', level=2)
-                for floor in floors_present:
-                    floor_elements = sorted(
-                        [e for e in element_data if e['floor_label'] == floor],
-                        key=lambda e: _natural_sort_key(e['element'])
-                    )
-                    member_order = []
-                    for e in floor_elements:
-                        if e['member_type'] not in member_order:
-                            member_order.append(e['member_type'])
-                    member_order = sorted(member_order, key=_natural_sort_key)
-                    for member in member_order:
-                        group = sorted(
-                            [e for e in floor_elements if e['member_type'] == member],
+                if has_multi_bld:
+                    for bld in buildings_present:
+                        bld_elements = [e for e in element_data if e.get('building_label') == bld]
+                        bld_floors = sorted({e['floor_label'] for e in bld_elements}, key=_natural_sort_key)
+                        for floor in bld_floors:
+                            floor_elements = sorted(
+                                [e for e in bld_elements if e['floor_label'] == floor],
+                                key=lambda e: _natural_sort_key(e['element'])
+                            )
+                            member_order = []
+                            for e in floor_elements:
+                                if e['member_type'] not in member_order:
+                                    member_order.append(e['member_type'])
+                            member_order = sorted(member_order, key=_natural_sort_key)
+                            for member in member_order:
+                                group = sorted(
+                                    [e for e in floor_elements if e['member_type'] == member],
+                                    key=lambda e: _natural_sort_key(e['element'])
+                                )
+                                plural = member if member.endswith('S') else member + 'S'
+                                _add_heading(doc, f'{bld.upper()} — {floor.upper()} {plural}', level=3)
+                                table_rows = []
+                                for e in group:
+                                    rows = e['rows']
+                                    mid = len(rows) // 2 if len(rows) > 1 else 0
+                                    remark = e['remark']
+                                    if (remark != 'UNVERIFIED'
+                                            and e['spread_pct'] is not None
+                                            and e['spread_pct'] > 2.0):
+                                        remark += (f" (UPV variance between points: "
+                                                   f"{e['spread_km_s'] * 1000:.0f} m/s, "
+                                                   f"±{e['spread_pct'] / 2:.1f}%)")
+                                    
+                                    for i, r in enumerate(rows):
+                                        table_rows.append([
+                                            _element_display(e['element']) if i == 0 else '',
+                                            S._fp(r['path_mm']),
+                                            S._f1(r['transit_us']),
+                                            S._fms(r['velocity_km_s']),
+                                            f"{e['spread_pct']:.1f}%" if i == mid and e.get('spread_pct') is not None else '-',
+                                            S._f1(e['mean_ecs']) if i == mid else '',
+                                            remark if i == mid else ''
+                                        ])
+                                _add_table(
+                                    doc,
+                                    ['STRUCTURAL ELEMENT', 'PATH LENGTH (mm)', 'TRANSIT TIME (µs)',
+                                     'PULSE VELOCITY (m/s)', 'POINT SPREAD (%)',
+                                     'AVG. STRENGTH (N/mm²)', 'REMARKS'],
+                                    table_rows)
+                else:
+                    for floor in floors_present:
+                        floor_elements = sorted(
+                            [e for e in element_data if e['floor_label'] == floor],
                             key=lambda e: _natural_sort_key(e['element'])
                         )
-                        plural = member if member.endswith('S') else member + 'S'
-                        _add_heading(doc, f'{floor.upper()} {plural}', level=3)
-                        table_rows = []
-                        for e in group:
-                            rows = e['rows']
-                            mid = len(rows) // 2 if len(rows) > 1 else 0
-                            remark = e['remark']
-                            if (remark != 'UNVERIFIED'
-                                    and e['spread_pct'] is not None
-                                    and e['spread_pct'] > 2.0):
-                                remark += (f" (UPV variance between points: "
-                                           f"{e['spread_km_s'] * 1000:.0f} m/s, "
-                                           f"±{e['spread_pct'] / 2:.1f}%)")
-                            
-                            for i, r in enumerate(rows):
-                                table_rows.append([
-                                    _element_display(e['element']) if i == 0 else '',
-                                    S._fp(r['path_mm']),
-                                    S._f1(r['transit_us']),
-                                    S._fms(r['velocity_km_s']),
-                                    f"{e['spread_pct']:.1f}%" if i == mid and e.get('spread_pct') is not None else '-',
-                                    S._f1(e['mean_ecs']) if i == mid else '',
-                                    remark if i == mid else ''
-                                ])
-                        _add_table(
-                            doc,
-                            ['STRUCTURAL ELEMENT', 'PATH LENGTH (mm)', 'TRANSIT TIME (µs)',
-                             'PULSE VELOCITY (m/s)', 'POINT SPREAD (%)',
-                             'AVG. STRENGTH (N/mm²)', 'REMARKS'],
-                            table_rows)
+                        member_order = []
+                        for e in floor_elements:
+                            if e['member_type'] not in member_order:
+                                member_order.append(e['member_type'])
+                        member_order = sorted(member_order, key=_natural_sort_key)
+                        for member in member_order:
+                            group = sorted(
+                                [e for e in floor_elements if e['member_type'] == member],
+                                key=lambda e: _natural_sort_key(e['element'])
+                            )
+                            plural = member if member.endswith('S') else member + 'S'
+                            _add_heading(doc, f'{floor.upper()} {plural}', level=3)
+                            table_rows = []
+                            for e in group:
+                                rows = e['rows']
+                                mid = len(rows) // 2 if len(rows) > 1 else 0
+                                remark = e['remark']
+                                if (remark != 'UNVERIFIED'
+                                        and e['spread_pct'] is not None
+                                        and e['spread_pct'] > 2.0):
+                                    remark += (f" (UPV variance between points: "
+                                               f"{e['spread_km_s'] * 1000:.0f} m/s, "
+                                               f"±{e['spread_pct'] / 2:.1f}%)")
+                                
+                                for i, r in enumerate(rows):
+                                    table_rows.append([
+                                        _element_display(e['element']) if i == 0 else '',
+                                        S._fp(r['path_mm']),
+                                        S._f1(r['transit_us']),
+                                        S._fms(r['velocity_km_s']),
+                                        f"{e['spread_pct']:.1f}%" if i == mid and e.get('spread_pct') is not None else '-',
+                                        S._f1(e['mean_ecs']) if i == mid else '',
+                                        remark if i == mid else ''
+                                    ])
+                            _add_table(
+                                doc,
+                                ['STRUCTURAL ELEMENT', 'PATH LENGTH (mm)', 'TRANSIT TIME (µs)',
+                                 'PULSE VELOCITY (m/s)', 'POINT SPREAD (%)',
+                                 'AVG. STRENGTH (N/mm²)', 'REMARKS'],
+                                table_rows)
                 result_rows = []
                 for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element'])):
                     good_str = '1 (100.0%)' if e['remark'] == 'GOOD' else '0 (0.0%)'
                     poor_str = '1 (100.0%)' if e['remark'] == 'POOR' else '0 (0.0%)'
+                    loc_str = f"{e.get('building_label', 'Main Building')} - {e['floor_label'].title()}" if has_multi_bld else e['floor_label'].title()
                     result_rows.append([
                         _element_display(e['element']),
-                        e['floor_label'].title(),
+                        loc_str,
                         good_str,
                         poor_str,
                     ])

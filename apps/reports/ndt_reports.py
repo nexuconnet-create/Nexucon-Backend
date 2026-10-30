@@ -3127,14 +3127,57 @@ class NDTReportService:
 
     # ------------------------------------------------ element classification
     @staticmethod
-    def _member_type(element):
+    @staticmethod
+    def _building_label(element):
+        """Infer building identifier from structural element name.
+        
+        Examples:
+          'A-GFC1', 'A-GCF3' -> 'Building A'
+          'B-GCF3', 'B--GCF13' -> 'Building B'
+          'C-FFS3' -> 'Building C'
+          'BLOCK 1', 'TOWER A', 'WING B' -> 'Block 1', 'Tower A', 'Wing B'
+          'COL-10-C1', 'S1' -> 'Main Building'
+        """
+        if not element:
+            return 'Main Building'
+        clean = str(element).strip()
+        m_full = re.search(r'(?:BUILDING|BLOCK|TOWER|WING)\s*([A-Za-z0-9]+)', clean, re.IGNORECASE)
+        if m_full:
+            raw = m_full.group(0).lower()
+            tok = m_full.group(1).upper()
+            if 'block' in raw: return f'Block {tok}'
+            if 'tower' in raw: return f'Tower {tok}'
+            if 'wing' in raw: return f'Wing {tok}'
+            return f'Building {tok}'
+        m_bld = re.match(r'^([A-Za-z0-9]+)-+', clean)
+        if m_bld:
+            p = m_bld.group(1).upper()
+            if re.match(r'^[A-Z]$', p):
+                return f'Building {p}'
+            bld_m = re.match(r'^(?:BLD|BLDG|BUILDING)([A-Z0-9]+)$', p)
+            if bld_m: return f'Building {bld_m.group(1)}'
+            blk_m = re.match(r'^(?:BLK|BLOCK)([A-Z0-9]+)$', p)
+            if blk_m: return f'Block {blk_m.group(1)}'
+        return 'Main Building'
+
+    @classmethod
+    def _member_type(cls, element):
         """Column / Beam / Slab / Wall / Foundation ... from the element's
         own label (e.g. 'COL-C24' -> COLUMN, 'Floor:200THK RC SLAB:781094'
-        -> SLAB). Real data only — nothing is re-typed."""
+        -> SLAB, 'A-GFC1' -> COLUMN, 'A-FFB1' -> BEAM, 'A-FFS1' -> SLAB).
+        """
         label = (element or '').strip().upper()
         if not label:
             return 'UNSPECIFIED'
-        token = re.split(r'[-\s]', label)[0]
+
+        # Strip leading building prefix if present (e.g. A-GFC1 -> GFC1, B--GCF13 -> GCF13)
+        # Only single-letter (A-, B-, C-) or explicit building/block/tower tokens
+        m_bld = re.match(r'^([A-Z])-+(.*)$', label)
+        if not m_bld:
+            m_bld = re.match(r'^(?:BLD|BLDG|BUILDING|BLK|BLOCK|TOWER|WING)[A-Z0-9]*-+(.*)$', label)
+        target = m_bld.group(2).strip() if (m_bld and len(m_bld.groups()) >= 2 and m_bld.group(2)) else label
+
+        token = re.split(r'[-\s]', target)[0]
         mapping = {
             'C': 'COLUMN', 'COL': 'COLUMN', 'COLUMN': 'COLUMN', 'CS': 'COLUMN', 'G1': 'COLUMN',
             'B': 'BEAM', 'BM': 'BEAM', 'BEAM': 'BEAM', 'G2': 'BEAM',
@@ -3148,17 +3191,23 @@ class NDTReportService:
         base_match = re.match(r'^([A-Z]+)\d+$', token)
         if base_match and base_match.group(1) in mapping:
             return mapping[base_match.group(1)]
-        # BIM-style names ('M_Footing-Rectangular:900 x 900 x 200mm:803711',
-        # 'Floor:200THK RC SLAB:781094') carry the member word anywhere in
-        # the label — find it instead of printing a raw name fragment like
-        # 'M_FOOTING' or 'FLOOR:200THK' in the group headings.
+
         for word, member in (
                 ('COLUMN', 'COLUMN'), ('BEAM', 'BEAM'), ('SLAB', 'SLAB'),
                 ('WALL', 'WALL'), ('FOOTING', 'FOUNDATION'),
                 ('FOUNDATION', 'FOUNDATION'), ('PILE', 'FOUNDATION'),
                 ('STAIR', 'STAIR')):
-            if word in label:
+            if word in target:
                 return member
+
+        # Acronym patterns: GFC, GCF, FFC -> COLUMN; FFB, GFB -> BEAM; FFS, GFS -> SLAB
+        if re.search(r'(?:GF|FF|SF|TF|RF)?[CB]F\d*|(?:GF|FF|SF|TF|RF)?C\d*', target) and 'C' in target:
+            return 'COLUMN'
+        if 'B' in target and re.search(r'(?:GF|FF|SF|TF|RF)?B\d*', target):
+            return 'BEAM'
+        if 'S' in target and re.search(r'(?:GF|FF|SF|TF|RF)?S\d*', target):
+            return 'SLAB'
+
         return token or 'UNSPECIFIED'
 
     @staticmethod
@@ -3365,6 +3414,7 @@ class NDTReportService:
             out.append({
                 'test': t,
                 'element': t.structural_element or 'UNSPECIFIED',
+                'building_label': cls._building_label(t.structural_element),
                 'member_type': cls._member_type(t.structural_element),
                 'floor_label': cls._floor_label(t.floor, t.structural_element),
                 'rows': rows,
@@ -3391,7 +3441,7 @@ class NDTReportService:
                 'upv_range_m_s': upv_range_m_s,
                 'flagged_spread': flagged_spread,
             })
-        out.sort(key=lambda e: (_natural_sort_key(e['floor_label']), _natural_sort_key(e['member_type']), _natural_sort_key(e['element'])))
+        out.sort(key=lambda e: (_natural_sort_key(e['building_label']), _natural_sort_key(e['floor_label']), _natural_sort_key(e['member_type']), _natural_sort_key(e['element'])))
         return out
 
     @classmethod
@@ -3659,8 +3709,15 @@ class NDTReportService:
         # -- executive summary (needs test results: it states them)
         if element_data:
             is_sog = cls._is_slab_on_grade(project, element_data)
+            buildings_present = sorted({e.get('building_label', 'Main Building') for e in element_data}, key=_natural_sort_key)
+            has_multi_bld = len(buildings_present) > 1
             if is_sog:
                 building = 'an RCC slab-on-grade laydown area'
+            elif has_multi_bld:
+                storeys = cls._storey_count(floors_present, bim_levels)
+                bld_names = ", ".join(buildings_present)
+                building = (f'an existing {storeys}-floor building complex ({bld_names})' if storeys
+                            else f'an existing building complex ({bld_names})')
             else:
                 storeys = cls._storey_count(floors_present, bim_levels)
                 building = (f'an existing {storeys}-floor building' if storeys
@@ -5565,24 +5622,51 @@ class NDTReportService:
                 builder.section('5.1', 'SUMMARY OF TEST RESULTS', sub=True)
                 builder.heading('SUMMARY OF TEST ANALYSIS', page_break=False)
                 builder.inner_heading('Table 5.0: Classification and Quantity of Tested Structural Elements')
+                
+                buildings_present = sorted({e.get('building_label', 'Main Building') for e in element_data}, key=_natural_sort_key)
+                has_multi_bld = len(buildings_present) > 1
+
                 analysis_rows = []
-                for floor in floors_present:
-                    floor_elements = sorted(
-                        [e for e in element_data if e['floor_label'] == floor],
-                        key=lambda e: _natural_sort_key(e['element'])
-                    )
-                    member_order = []
-                    for e in floor_elements:
-                        if e['member_type'] not in member_order:
-                            member_order.append(e['member_type'])
-                    for member in member_order:
-                        group = [e for e in floor_elements if e['member_type'] == member]
-                        count = len(group)
-                        floor_abbr = cls._floor_code(floor)
-                        member_abbr = cls._member_code(member)
-                        label = f'**{floor_abbr}{member_abbr} - {floor.title()} {member.title()}**'
-                        tested_str = f'**{count} Tested Panels**' if member.endswith('SLAB') else f'**{count} Tested Elements**'
-                        analysis_rows.append([label, tested_str])
+                if has_multi_bld:
+                    for bld in buildings_present:
+                        bld_elements = [e for e in element_data if e.get('building_label') == bld]
+                        bld_floors = sorted({e['floor_label'] for e in bld_elements}, key=_natural_sort_key)
+                        for floor in bld_floors:
+                            floor_elements = sorted(
+                                [e for e in bld_elements if e['floor_label'] == floor],
+                                key=lambda e: _natural_sort_key(e['element'])
+                            )
+                            member_order = []
+                            for e in floor_elements:
+                                if e['member_type'] not in member_order:
+                                    member_order.append(e['member_type'])
+                            member_order = sorted(member_order, key=_natural_sort_key)
+                            for member in member_order:
+                                group = [e for e in floor_elements if e['member_type'] == member]
+                                count = len(group)
+                                floor_abbr = cls._floor_code(floor)
+                                member_abbr = cls._member_code(member)
+                                label = f'**{bld} — {floor_abbr}{member_abbr} ({floor.title()} {member.title()})**'
+                                tested_str = f'**{count} Tested Panels**' if member.endswith('SLAB') else f'**{count} Tested Elements**'
+                                analysis_rows.append([label, tested_str])
+                else:
+                    for floor in floors_present:
+                        floor_elements = sorted(
+                            [e for e in element_data if e['floor_label'] == floor],
+                            key=lambda e: _natural_sort_key(e['element'])
+                        )
+                        member_order = []
+                        for e in floor_elements:
+                            if e['member_type'] not in member_order:
+                                member_order.append(e['member_type'])
+                        for member in member_order:
+                            group = [e for e in floor_elements if e['member_type'] == member]
+                            count = len(group)
+                            floor_abbr = cls._floor_code(floor)
+                            member_abbr = cls._member_code(member)
+                            label = f'**{floor_abbr}{member_abbr} - {floor.title()} {member.title()}**'
+                            tested_str = f'**{count} Tested Panels**' if member.endswith('SLAB') else f'**{count} Tested Elements**'
+                            analysis_rows.append([label, tested_str])
                 
                 builder.ruled_table(
                     ['STRUCTURAL ELEMENT', 'NUMBER TESTED'],
@@ -5594,103 +5678,205 @@ class NDTReportService:
 
                 # ---- Per-floor / per-member result tables (reference layout:
                 # one row per member-type group)
-                for floor in floors_present:
-                    floor_elements = sorted(
-                        [e for e in element_data if e['floor_label'] == floor],
-                        key=lambda e: _natural_sort_key(e['element'])
-                    )
-                    member_order = []
-                    for e in floor_elements:
-                        if e['member_type'] not in member_order:
-                            member_order.append(e['member_type'])
-                    member_order = sorted(member_order, key=_natural_sort_key)
+                if has_multi_bld:
+                    for bld in buildings_present:
+                        bld_elements = [e for e in element_data if e.get('building_label') == bld]
+                        bld_floors = sorted({e['floor_label'] for e in bld_elements}, key=_natural_sort_key)
+                        for floor in bld_floors:
+                            floor_elements = sorted(
+                                [e for e in bld_elements if e['floor_label'] == floor],
+                                key=lambda e: _natural_sort_key(e['element'])
+                            )
+                            member_order = []
+                            for e in floor_elements:
+                                if e['member_type'] not in member_order:
+                                    member_order.append(e['member_type'])
+                            member_order = sorted(member_order, key=_natural_sort_key)
 
-                    all_floor_rows = []
-                    for member in member_order:
-                        group = sorted(
-                            [e for e in floor_elements if e['member_type'] == member],
+                            all_floor_rows = []
+                            for member in member_order:
+                                group = sorted(
+                                    [e for e in floor_elements if e['member_type'] == member],
+                                    key=lambda e: _natural_sort_key(e['element'])
+                                )
+                                for e in group:
+                                    rows = e['rows']
+                                    mid = len(rows) // 2 if len(rows) > 1 else 0
+                                    element_cell = f"**{_element_display(e['element'])}**"
+                                    remark = f"**{e['remark']}**" if e['remark'] else "-"
+
+                                    # UPV quality classification (BS 1881-203 / ASTM C597)
+                                    from apps.digital_eye.adapters import PUNDITAdapter
+                                    _upv_grade = (
+                                        PUNDITAdapter.grade_quality(e['mean_v'])
+                                        if e.get('mean_v') is not None else None
+                                    )
+                                    _upv_label_map = {
+                                        'excellent':    'Excellent',
+                                        'good':         'Good',
+                                        'questionable': 'Questionable',
+                                        'poor':         'Poor',
+                                        'very_poor':    'Very Poor',
+                                        'unverified':   None,
+                                        'pending':      None,
+                                    }
+                                    _upv_label = _upv_label_map.get(_upv_grade or '', None)
+                                    if _upv_label:
+                                        remark += f"\nUPV Classification: {_upv_label}"
+
+                                    flag_text = ""
+                                    spread_str = "-"
+                                    if e.get('flagged_spread'):
+                                        flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
+
+                                    point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
+                                    if len(point_vels) > 1 and e['mean_v']:
+                                        total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
+                                        spread_str = f"{total_spread:.1f}%"
+
+                                    if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
+                                        remark += (f"\nUPV variance between points: {e['spread_km_s'] * 1000:.0f} m/s (±{e['spread_pct'] / 2:.1f}%)")
+                                    if len(rows) < 3 or e.get('element') == 'S11':
+                                        remark += "\n*Note: Panel evaluated on 2-point basis. BS EN 12504-4 recommends >=3 points for statistical assessment; provisional assessment applied per ACI 228.2R."
+                                    remark += flag_text
+                                    
+                                    for i, r in enumerate(rows):
+                                        all_floor_rows.append([
+                                            element_cell if i == 0 else '-',
+                                            cls._fp(r['path_mm']),
+                                            cls._f1(r['transit_us']),
+                                            cls._fms(r['velocity_km_s']),
+                                            spread_str if i == mid else '-',
+                                            (f"{cls._f1(e['mean_ecs'])} "
+                                             f"{strength_source_tag(e)}".strip()
+                                             if i == mid else '-'),
+                                            remark if i == mid else '-',
+                                        ])
+
+                            if member_order:
+                                member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
+                            if not member_label.endswith('S'):
+                                member_label = f'{member_label}S'
+                            if builder.pdf.will_page_break(45):
+                                builder.pdf.add_page()
+                            builder.subheading(
+                                f'TABLE 5.1: ULTRASONIC PULSE VELOCITY TEST MEASUREMENTS — {bld.upper()}: {floor.upper()} {member_label}'
+                                + (f' OF {cls._effective_project_name(project).upper()}'
+                                   if cls._effective_project_name(project) else ''))
+                            
+                            builder.ruled_table(
+                                ['STRUCTURAL\nELEMENT', 'PATH LENGTH\n(mm)',
+                                 'TRANSIT TIME\n(µs)', 'PULSE VELOCITY\n(m/s)',
+                                 'POINT SPREAD\n(%)',
+                                 'AVG. STRENGTH\n(N/mm²)\n(M)/(C)',
+                                 'REMARKS'],
+                                all_floor_rows,
+                                [26, 21, 21, 25, 20, 24, 43],
+                                ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
+                                font_size=9.5,
+                                line_h=5.0
+                            )
+                            if any(strength_source_tag(e) for e in floor_elements):
+                                builder.para(STRENGTH_SOURCE_LEGEND, markdown=True)
+                            builder.ln_gap(3)
+                else:
+                    for floor in floors_present:
+                        floor_elements = sorted(
+                            [e for e in element_data if e['floor_label'] == floor],
                             key=lambda e: _natural_sort_key(e['element'])
                         )
-                        for e in group:
-                            rows = e['rows']
-                            mid = len(rows) // 2 if len(rows) > 1 else 0
-                            element_cell = f"**{_element_display(e['element'])}**"
-                            remark = f"**{e['remark']}**" if e['remark'] else "-"
+                        member_order = []
+                        for e in floor_elements:
+                            if e['member_type'] not in member_order:
+                                member_order.append(e['member_type'])
+                        member_order = sorted(member_order, key=_natural_sort_key)
 
-                            # UPV quality classification (BS 1881-203 / ASTM C597)
-                            from apps.digital_eye.adapters import PUNDITAdapter
-                            _upv_grade = (
-                                PUNDITAdapter.grade_quality(e['mean_v'])
-                                if e.get('mean_v') is not None else None
+                        all_floor_rows = []
+                        for member in member_order:
+                            group = sorted(
+                                [e for e in floor_elements if e['member_type'] == member],
+                                key=lambda e: _natural_sort_key(e['element'])
                             )
-                            _upv_label_map = {
-                                'excellent':    'Excellent',
-                                'good':         'Good',
-                                'questionable': 'Questionable',
-                                'poor':         'Poor',
-                                'very_poor':    'Very Poor',
-                                'unverified':   None,
-                                'pending':      None,
-                            }
-                            _upv_label = _upv_label_map.get(_upv_grade or '', None)
-                            if _upv_label:
-                                remark += f"\nUPV Classification: {_upv_label}"
+                            for e in group:
+                                rows = e['rows']
+                                mid = len(rows) // 2 if len(rows) > 1 else 0
+                                element_cell = f"**{_element_display(e['element'])}**"
+                                remark = f"**{e['remark']}**" if e['remark'] else "-"
 
-                            flag_text = ""
-                            spread_str = "-"
-                            if e.get('flagged_spread'):
-                                flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
+                                # UPV quality classification (BS 1881-203 / ASTM C597)
+                                from apps.digital_eye.adapters import PUNDITAdapter
+                                _upv_grade = (
+                                    PUNDITAdapter.grade_quality(e['mean_v'])
+                                    if e.get('mean_v') is not None else None
+                                )
+                                _upv_label_map = {
+                                    'excellent':    'Excellent',
+                                    'good':         'Good',
+                                    'questionable': 'Questionable',
+                                    'poor':         'Poor',
+                                    'very_poor':    'Very Poor',
+                                    'unverified':   None,
+                                    'pending':      None,
+                                }
+                                _upv_label = _upv_label_map.get(_upv_grade or '', None)
+                                if _upv_label:
+                                    remark += f"\nUPV Classification: {_upv_label}"
 
-                            point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
-                            if len(point_vels) > 1 and e['mean_v']:
-                                total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
-                                spread_str = f"{total_spread:.1f}%"
+                                flag_text = ""
+                                spread_str = "-"
+                                if e.get('flagged_spread'):
+                                    flag_text = "\n**FLAGGED FOR FURTHER INSPECTION — POINT SPREAD EXCEEDS ACCEPTABLE LIMIT.**"
 
-                            if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
-                                remark += (f"\nUPV variance between points: {e['spread_km_s'] * 1000:.0f} m/s (±{e['spread_pct'] / 2:.1f}%)")
-                            if len(rows) < 3 or e.get('element') == 'S11':
-                                remark += "\n*Note: Panel evaluated on 2-point basis. BS EN 12504-4 recommends >=3 points for statistical assessment; provisional assessment applied per ACI 228.2R."
-                            remark += flag_text
-                            
-                            for i, r in enumerate(rows):
-                                all_floor_rows.append([
-                                    element_cell if i == 0 else '-',
-                                    cls._fp(r['path_mm']),
-                                    cls._f1(r['transit_us']),
-                                    cls._fms(r['velocity_km_s']),
-                                    spread_str if i == mid else '-',
-                                    (f"{cls._f1(e['mean_ecs'])} "
-                                     f"{strength_source_tag(e)}".strip()
-                                     if i == mid else '-'),
-                                    remark if i == mid else '-',
-                                ])
+                                point_vels = [r['velocity_km_s'] for r in rows if r.get('velocity_km_s') is not None]
+                                if len(point_vels) > 1 and e['mean_v']:
+                                    total_spread = (max(point_vels) - min(point_vels)) / e['mean_v'] * 100
+                                    spread_str = f"{total_spread:.1f}%"
 
-                    if member_order:
-                        member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
-                    if not member_label.endswith('S'):
-                        member_label = f'{member_label}S'
-                    if builder.pdf.will_page_break(45):
-                        builder.pdf.add_page()
-                    builder.subheading(
-                        f'TABLE 5.1: ULTRASONIC PULSE VELOCITY TEST MEASUREMENTS — {floor.upper()} {member_label}'
-                        + (f' OF {cls._effective_project_name(project).upper()}'
-                           if cls._effective_project_name(project) else ''))
-                    
-                    builder.ruled_table(
-                        ['STRUCTURAL\nELEMENT', 'PATH LENGTH\n(mm)',
-                         'TRANSIT TIME\n(µs)', 'PULSE VELOCITY\n(m/s)',
-                         'POINT SPREAD\n(%)',
-                         'AVG. STRENGTH\n(N/mm²)\n(M)/(C)',
-                         'REMARKS'],
-                        all_floor_rows,
-                        [26, 21, 21, 25, 20, 24, 43],
-                        ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
-                        font_size=9.5,
-                        line_h=5.0
-                    )
-                    if any(strength_source_tag(e) for e in floor_elements):
-                        builder.para(STRENGTH_SOURCE_LEGEND, markdown=True)
-                    builder.ln_gap(3)
+                                if (e['remark'] != 'UNVERIFIED' and e['spread_pct'] is not None):
+                                    remark += (f"\nUPV variance between points: {e['spread_km_s'] * 1000:.0f} m/s (±{e['spread_pct'] / 2:.1f}%)")
+                                if len(rows) < 3 or e.get('element') == 'S11':
+                                    remark += "\n*Note: Panel evaluated on 2-point basis. BS EN 12504-4 recommends >=3 points for statistical assessment; provisional assessment applied per ACI 228.2R."
+                                remark += flag_text
+                                
+                                for i, r in enumerate(rows):
+                                    all_floor_rows.append([
+                                        element_cell if i == 0 else '-',
+                                        cls._fp(r['path_mm']),
+                                        cls._f1(r['transit_us']),
+                                        cls._fms(r['velocity_km_s']),
+                                        spread_str if i == mid else '-',
+                                        (f"{cls._f1(e['mean_ecs'])} "
+                                         f"{strength_source_tag(e)}".strip()
+                                         if i == mid else '-'),
+                                        remark if i == mid else '-',
+                                    ])
+
+                        if member_order:
+                            member_label = member_order[0] if len(member_order) == 1 else 'STRUCTURAL ELEMENTS'
+                        if not member_label.endswith('S'):
+                            member_label = f'{member_label}S'
+                        if builder.pdf.will_page_break(45):
+                            builder.pdf.add_page()
+                        builder.subheading(
+                            f'TABLE 5.1: ULTRASONIC PULSE VELOCITY TEST MEASUREMENTS — {floor.upper()} {member_label}'
+                            + (f' OF {cls._effective_project_name(project).upper()}'
+                               if cls._effective_project_name(project) else ''))
+                        
+                        builder.ruled_table(
+                            ['STRUCTURAL\nELEMENT', 'PATH LENGTH\n(mm)',
+                             'TRANSIT TIME\n(µs)', 'PULSE VELOCITY\n(m/s)',
+                             'POINT SPREAD\n(%)',
+                             'AVG. STRENGTH\n(N/mm²)\n(M)/(C)',
+                             'REMARKS'],
+                            all_floor_rows,
+                            [26, 21, 21, 25, 20, 24, 43],
+                            ['C', 'C', 'C', 'C', 'C', 'C', 'L'],
+                            font_size=9.5,
+                            line_h=5.0
+                        )
+                        if any(strength_source_tag(e) for e in floor_elements):
+                            builder.para(STRENGTH_SOURCE_LEGEND, markdown=True)
+                        builder.ln_gap(3)
 
 
                 # ---- Summary of Test Results: Grouped by member family (REQ-18, REQ-19)
@@ -5702,11 +5888,15 @@ class NDTReportService:
                 for e in sorted(element_data, key=lambda e: _natural_sort_key(e['element'])):
                     f_key = e['floor_label'].title()
                     m_type = e.get('member_type', 'Structural Member')
-                    grp_key = (f_key, m_type)
+                    if has_multi_bld:
+                        b_key = e.get('building_label', 'Main Building')
+                        grp_key = (b_key, f_key, m_type)
+                    else:
+                        grp_key = (f_key, m_type)
                     groups.setdefault(grp_key, []).append(e)
 
                 result_rows = []
-                for (f_name, m_type), full_grp in groups.items():
+                for grp_key, full_grp in groups.items():
                     grp_list = [e for e in full_grp if e['remark'] in ('GOOD', 'POOR')]
                     if not grp_list:
                         continue
@@ -5717,16 +5907,23 @@ class NDTReportService:
                     pr_pct = (n_pr / n_tot * 100.0) if n_tot else 0.0
 
                     el_names = [e['element'] for e in grp_list]
-                    if len(el_names) > 1 and el_names[0].startswith('S') and el_names[-1].startswith('S'):
-                        member_desc = f"{f_name} Slab Panels ({el_names[0]}–{el_names[-1]})"
-                    elif len(el_names) > 1:
-                        member_desc = f"{f_name} {m_type}s ({el_names[0]}–{el_names[-1]})"
+                    if has_multi_bld:
+                        b_name, f_name, m_type = grp_key
+                        loc_str = f"{b_name} - {f_name}"
+                        member_desc = f"{b_name} {f_name} {m_type}s ({el_names[0]}–{el_names[-1]})" if len(el_names) > 1 else f"{_element_display(el_names[0])} ({m_type})"
                     else:
-                        member_desc = f"{_element_display(el_names[0])} ({m_type})"
+                        f_name, m_type = grp_key
+                        loc_str = f"{f_name} Laydown Area" if "ground" in f_name.lower() else f_name
+                        if len(el_names) > 1 and el_names[0].startswith('S') and el_names[-1].startswith('S'):
+                            member_desc = f"{f_name} Slab Panels ({el_names[0]}–{el_names[-1]})"
+                        elif len(el_names) > 1:
+                            member_desc = f"{f_name} {m_type}s ({el_names[0]}–{el_names[-1]})"
+                        else:
+                            member_desc = f"{_element_display(el_names[0])} ({m_type})"
 
                     result_rows.append([
                         member_desc,
-                        f"{f_name} Laydown Area" if "ground" in f_name.lower() else f_name,
+                        loc_str,
                         f"{n_gd} ({gd_pct:.1f}%)",
                         f"{n_pr} ({pr_pct:.1f}%)",
                     ])
