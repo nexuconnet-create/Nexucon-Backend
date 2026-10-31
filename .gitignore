@@ -41,3 +41,6 @@ test_db.sqlite3
 check_prod_ai.py
 update_prod_ai_record.py
 test_prod_preview.py
+*.bundle
+
+
