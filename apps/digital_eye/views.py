@@ -757,7 +757,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                 return Response({'detail': f'Scan batch {batch_id} not found for this project.'},
                                 status=status.HTTP_404_NOT_FOUND)
 
-        tests_qs = self.get_queryset().filter(project=project)
+        tests_qs = self.get_queryset().filter(project=project).prefetch_related('readings')
         if batch:
             tests_qs = tests_qs.filter(batch=batch)
 
@@ -918,6 +918,11 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         curve_profile['curve_id'] = str(strength_curve.id) if strength_curve else None
 
         # Update each test's compressive strength based on calibrated curve
+        readings_to_update = []
+        tests_to_update = []
+        now = timezone.now()
+        snap = strength_curve.snapshot() if strength_curve else None
+
         for t in tests:
             if not t.batch_id and batch:
                 t.batch = batch
@@ -931,8 +936,9 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                             new_r_ecs = PUNDITAdapter.compute_profile_ecs(v, curve_profile, rebound_number=r.rebound_number or t.rebound_number)
                             if new_r_ecs is not None and new_r_ecs > 0:
                                 r.ecs_mpa = new_r_ecs
-                                r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
-                                r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
+                                r.strength_curve_snapshot = snap
+                                r.updated_at = now
+                                readings_to_update.append(r)
                 v_mean = t.element_mean_velocity_km_s()
                 # On analysis run: calibrated mathematical formula governs from element mean velocity
                 mean_ecs = None
@@ -947,16 +953,31 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                 if mean_ecs is not None:
                     t.estimated_compressive_strength_mpa = mean_ecs
                 if strength_curve:
-                    t.strength_curve_snapshot = strength_curve.snapshot()
-                t.save(update_fields=['batch', 'velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                    t.strength_curve_snapshot = snap
+                t.updated_at = now
+                tests_to_update.append(t)
             else:
                 v_mean = t.element_mean_velocity_km_s()
                 if v_mean is not None:
                     new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
                     if new_ecs is not None:
                         t.estimated_compressive_strength_mpa = new_ecs
-                        t.strength_curve_snapshot = strength_curve.snapshot()
-                        t.save(update_fields=['batch', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                        t.strength_curve_snapshot = snap
+                        t.updated_at = now
+                        tests_to_update.append(t)
+
+        if readings_to_update:
+            PUNDITReading.objects.bulk_update(
+                readings_to_update,
+                ['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'],
+                batch_size=500
+            )
+        if tests_to_update:
+            PUNDITTest.objects.bulk_update(
+                tests_to_update,
+                ['batch', 'velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'],
+                batch_size=500
+            )
 
         records = []
         for test in tests:
