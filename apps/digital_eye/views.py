@@ -754,8 +754,15 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         if batch_id:
             batch = PunditScanBatch.objects.filter(pk=batch_id, project=project).first()
             if not batch:
-                return Response({'detail': f'Scan batch {batch_id} not found for this project.'},
-                                status=status.HTTP_404_NOT_FOUND)
+                # If a client submits a batch_id that belongs to another project (e.g. user switched projects in UI),
+                # gracefully resolve to this project's matching primary batch
+                project_batch = PunditScanBatch.objects.filter(project=project).first()
+                if project_batch:
+                    logger.warning("Batch %s not found for project %s; falling back to project's active batch %s (%s)",
+                                   batch_id, project.id, project_batch.id, project_batch.folder_name)
+                    batch = project_batch
+                else:
+                    logger.warning("Batch %s not found for project %s; proceeding with all project tests", batch_id, project.id)
 
         tests_qs = self.get_queryset().filter(project=project).prefetch_related('readings')
         if batch:
@@ -3398,13 +3405,16 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
 
         project_id = request.data.get('project_id') or request.data.get('project')
         project = None
-        if batch:
-            project = batch.project
-        elif project_id:
+        if project_id:
             project = scoped_projects(request.user).filter(pk=project_id).first()
             if not project:
                 from apps.projects.models import Project
                 project = Project.objects.filter(pk=project_id).first()
+
+        if batch and project and batch.project_id != project.id:
+            batch = PunditScanBatch.objects.filter(project=project).first()
+        elif batch and not project:
+            project = batch.project
 
         if not project and not batch:
             return Response({'detail': 'A valid project_id or batch_id is required for calibration.'},
@@ -4038,7 +4048,9 @@ class PunditBatchCalibrateView(APIView):
         project = Project.objects.filter(pk=project_id).first() if project_id else None
         batch = None
         if data.get('batch_id'):
-            batch = PunditScanBatch.objects.filter(pk=data.get('batch_id')).first()
+            batch = PunditScanBatch.objects.filter(pk=data.get('batch_id'), project=project).first() if project else PunditScanBatch.objects.filter(pk=data.get('batch_id')).first()
+            if not batch and project:
+                batch = PunditScanBatch.objects.filter(project=project).first()
 
         cal_profile = None
         if project:
