@@ -1754,10 +1754,19 @@ class PUNDITAdapter:
                 cal_dict = curve_profile['params']
             stat_summary = cls.build_statistical_summary(spread_stats, calibration=cal_dict, project=project)
 
+            prompt_fact_pack = dict(fact_pack)
+            if len(tests) > 25:
+                # Keep project-level metadata, summary metrics, correlation model, witnesses, weather
+                prompt_fact_pack = {k: v for k, v in fact_pack.items() if k != 'floors'}
+                prompt_fact_pack['element_count'] = len(tests)
+                prompt_fact_pack['sample_elements'] = fact_pack.get('floors', [])[:3]
+
+            prompt_stat_summary = stat_summary[:15] if len(stat_summary) > 25 else stat_summary
+
             prompt_payload = {
-                "raw_data": fact_pack,
+                "raw_data": prompt_fact_pack,
                 "precalculated_stats": spread_stats,
-                "statistical_summary": stat_summary,
+                "statistical_summary": prompt_stat_summary,
                 "cracks_detected": has_crack_findings,
                 "joint_peer_review": bool(peer_review),
                 "peer_review_notes": review_parts if review_parts else None

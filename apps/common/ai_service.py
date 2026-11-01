@@ -604,7 +604,8 @@ class AIService:
                 if match:
                     wait_time = float(match.group(1)) + 1
 
-                wait_time = min(max(wait_time, 1), 60)
+                if wait_time > 8.0 or attempt >= max_retries:
+                    raise AIServiceError("OpenAI API rate limit exceeded after retries.") from e
                 logger.warning("OpenAI rate limit encountered. Waiting %.1f seconds before retry.", wait_time)
                 time.sleep(wait_time)
 
@@ -659,9 +660,9 @@ class AIService:
                 is_server_error = (getattr(e, "status_code", None) or 0) >= 500
 
                 if is_rate_limit or is_server_error:
-                    if attempt >= max_retries:
-                        raise AIServiceError("DeepSeek rate limit/server error after retries.") from e
                     wait_time = min(max(2.0 ** attempt, 1), 60)
+                    if wait_time > 8.0 or attempt >= max_retries:
+                        raise AIServiceError("DeepSeek rate limit/server error after retries.") from e
                     logger.warning("DeepSeek transient failure. Waiting %.1f seconds before retry.", wait_time)
                     time.sleep(wait_time)
                     continue
@@ -738,9 +739,10 @@ class AIService:
                     raise AIQuotaExceeded("Gemini API quota has been exhausted.") from e
 
                 if cls._is_gemini_temporary_rate_limit(e):
-                    if attempt >= max_retries:
-                        raise AIServiceError("Gemini API rate limit exceeded after retries.") from e
-                    wait_time = min(max(cls._extract_gemini_retry_seconds(e), 1), 120)
+                    wait_time = cls._extract_gemini_retry_seconds(e)
+                    if wait_time > 8.0 or attempt >= max_retries:
+                        logger.warning("Gemini rate limit suggests waiting %.1fs (>8s limit) - failing fast to prevent worker timeout.", wait_time)
+                        raise AIServiceError(f"Gemini API rate limit exceeded (wait {wait_time:.1f}s).") from e
                     logger.warning("Gemini rate limit encountered. Waiting %.1f seconds before retry.", wait_time)
                     time.sleep(wait_time)
                     continue
@@ -841,10 +843,9 @@ class AIService:
             if status == 402:
                 raise AIQuotaExceeded("Anthropic account has insufficient credit.")
             if status == 429 or status >= 500:
-                if attempt >= max_retries:
-                    raise AIServiceError(
-                        f"Anthropic returned HTTP {status} after {max_retries + 1} attempt(s).")
                 wait_time = cls._anthropic_retry_after(response)
+                if wait_time > 8.0 or attempt >= max_retries:
+                    raise AIServiceError(f"Anthropic HTTP {status} (wait {wait_time:.1f}s) — failing fast.")
                 logger.warning("Anthropic HTTP %s. Waiting %.1f seconds before retry.", status, wait_time)
                 time.sleep(wait_time)
                 continue
@@ -1328,21 +1329,32 @@ class AIService:
 
         active_items = [(p, r) for p, r in runners.items() if cls._provider_has_key(p)]
         if active_items:
+            ensemble_timeout = float(getattr(settings, "AI_ENSEMBLE_TIMEOUT_SECONDS", 15.0))
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(active_items))) as executor:
-                futures = [executor.submit(_execute, item) for item in active_items]
-                for future in concurrent.futures.as_completed(futures):
-                    prov, out, exc = future.result()
-                    if exc is None and out is not None:
-                        successful_results[prov] = out
-                    else:
-                        err_str = str(exc)
-                        if "quota" in err_str.lower():
-                            failed_providers[prov] = "Quota exceeded"
-                        elif "timeout" in err_str.lower():
-                            failed_providers[prov] = "Timed out"
+                future_map = {executor.submit(_execute, item): item[0] for item in active_items}
+                done, not_done = concurrent.futures.wait(future_map.keys(), timeout=ensemble_timeout)
+                for f in done:
+                    try:
+                        prov, out, exc = f.result()
+                        if exc is None and out is not None:
+                            successful_results[prov] = out
                         else:
-                            failed_providers[prov] = type(exc).__name__ if exc else "Failed"
-                        logger.warning("Ensemble engine %s isolated on error: %s", prov, err_str)
+                            err_str = str(exc)
+                            if "quota" in err_str.lower():
+                                failed_providers[prov] = "Quota exceeded"
+                            elif "timeout" in err_str.lower():
+                                failed_providers[prov] = "Timed out"
+                            else:
+                                failed_providers[prov] = type(exc).__name__ if exc else "Failed"
+                            logger.warning("Ensemble engine %s isolated on error: %s", prov, err_str)
+                    except Exception as f_err:
+                        prov = future_map.get(f, "unknown")
+                        failed_providers[prov] = type(f_err).__name__
+                        logger.warning("Ensemble engine %s isolated on error: %s", prov, f_err)
+                for f in not_done:
+                    prov = future_map.get(f, "unknown")
+                    failed_providers[prov] = "Timed out"
+                    logger.warning("Ensemble engine %s isolated on timeout (>%.1fs)", prov, ensemble_timeout)
 
         # Merge observations across responding models
         # For structured reports, singleton sections (Executive Summary, Scope, Compliance)
