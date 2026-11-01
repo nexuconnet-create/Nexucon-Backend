@@ -817,28 +817,33 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         from .strength_curves import curve_fit_stats
 
         # Extract cube correlation points if passed in request or if available on active profile/curve
-        raw_pts = request.data.get('cube_correlation_points') or request.data.get('data_points') or []
+        has_explicit_pts = ('cube_correlation_points' in request.data) or ('data_points' in request.data)
+        if has_explicit_pts:
+            raw_pts = request.data.get('cube_correlation_points') if 'cube_correlation_points' in request.data else request.data.get('data_points', [])
+        else:
+            raw_pts = []
         formatted_pts = []
-        for pt in raw_pts:
-            if not isinstance(pt, dict):
-                continue
-            v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
-            if 0 < v < 100:
-                v = v * 1000.0
-            f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
-            r = pt.get('rebound') or pt.get('r')
-            if r is not None:
-                try:
-                    r = float(r)
-                except (ValueError, TypeError):
-                    r = None
-            if v > 0 and f > 0:
-                formatted_pts.append({'v': v, 'f': f, 'r': r})
+        if raw_pts:
+            for pt in raw_pts:
+                if not isinstance(pt, dict):
+                    continue
+                v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+                if 0 < v < 100:
+                    v = v * 1000.0
+                f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+                r = pt.get('rebound') or pt.get('r')
+                if r is not None:
+                    try:
+                        r = float(r)
+                    except (ValueError, TypeError):
+                        r = None
+                if v > 0 and f > 0:
+                    formatted_pts.append({'v': v, 'f': f, 'r': r})
 
-        # If not passed in request, look up existing data_points on active_curve or CalibrationProfile
-        if not formatted_pts and active_curve and getattr(active_curve, 'data_points', None):
+        # Only look up existing data_points on active_curve or CalibrationProfile if request DID NOT explicitly pass cube_correlation_points
+        if not has_explicit_pts and not formatted_pts and active_curve and getattr(active_curve, 'data_points', None):
             formatted_pts = list(active_curve.data_points)
-        if not formatted_pts and project:
+        if not has_explicit_pts and not formatted_pts and project:
             active_cal = CalibrationProfile.objects.filter(project=project, is_active=True).first()
             if active_cal and getattr(active_cal, 'cube_correlation_data', None):
                 for pt in active_cal.cube_correlation_data:
@@ -871,12 +876,11 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                 'valid_range_max_ms': v_max,
                 'standard': 'BS 1881-203 / BS EN 12504-4',
                 'created_by': request.user if request.user.is_authenticated else None,
+                'data_points': formatted_pts,
+                'r2_score': r2_val,
+                'standard_error': se_val,
+                'aic': aic_val,
             }
-            if formatted_pts:
-                curve_defaults['data_points'] = formatted_pts
-                curve_defaults['r2_score'] = r2_val
-                curve_defaults['standard_error'] = se_val
-                curve_defaults['aic'] = aic_val
 
             strength_curve, _ = StrengthCurve.objects.update_or_create(
                 project=project,
@@ -890,12 +894,11 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             setting.save()
         else:
             strength_curve = active_curve
-            if formatted_pts and not getattr(strength_curve, 'data_points', None):
-                strength_curve.data_points = formatted_pts
-                strength_curve.r2_score = r2_val
-                strength_curve.standard_error = se_val
-                strength_curve.aic = aic_val
-                strength_curve.save(update_fields=['data_points', 'r2_score', 'standard_error', 'aic'])
+            strength_curve.data_points = formatted_pts
+            strength_curve.r2_score = r2_val
+            strength_curve.standard_error = se_val
+            strength_curve.aic = aic_val
+            strength_curve.save(update_fields=['data_points', 'r2_score', 'standard_error', 'aic'])
             setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
             if setting.prefer_measured_strength:
                 setting.prefer_measured_strength = False
@@ -3461,6 +3464,10 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
                 'standard': 'BS 1881-203 / BS EN 12504-4 / ACI 228.2R',
                 'provenance': {'source': f"Calibrated via batch '{batch.folder_name if batch else 'Primary Grid Scan'}'"},
                 'created_by': request.user if request.user.is_authenticated else None,
+                'data_points': cube_points if cube_points else [],
+                'r2_score': getattr(profile, 'r2_score', None) if cube_points else None,
+                'standard_error': getattr(profile, 'standard_error', None) if cube_points else None,
+                'aic': getattr(profile, 'aic', None) if cube_points else None,
             }
         )
         setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
@@ -4061,12 +4068,11 @@ class PunditBatchCalibrateView(APIView):
                     'valid_range_max_ms': v_max,
                     'standard': 'BS 1881-203 / BS EN 12504-4',
                     'created_by': request.user if request.user.is_authenticated else None,
+                    'data_points': formatted_pts,
+                    'r2_score': r2_score,
+                    'standard_error': standard_error,
+                    'aic': aic,
                 }
-                if formatted_pts:
-                    curve_defaults['data_points'] = formatted_pts
-                    curve_defaults['r2_score'] = r2_score
-                    curve_defaults['standard_error'] = standard_error
-                    curve_defaults['aic'] = aic
 
                 strength_curve, _ = StrengthCurve.objects.update_or_create(
                     project=project,

@@ -310,14 +310,6 @@ def ecs_report_disclosure(project):
                         curve.r2_score = r2
                         curve.standard_error = se
                         curve.aic = aic
-            if not n_points and hasattr(project, 'strength_curves'):
-                other_sc = project.strength_curves.exclude(data_points=[]).first()
-                if other_sc and other_sc.data_points:
-                    curve.data_points = other_sc.data_points
-                    n_points = len(curve.data_points)
-                    curve.r2_score = other_sc.r2_score
-                    curve.standard_error = other_sc.standard_error
-                    curve.aic = other_sc.aic
         except Exception:
             pass
 
@@ -4922,14 +4914,6 @@ class NDTReportService:
                 active_cal = project.calibration_profiles.filter(is_active=True).first()
                 if active_cal and getattr(active_cal, 'cube_correlation_data', None):
                     cal_pts = active_cal.cube_correlation_data
-            if not cal_pts and hasattr(project, 'strength_curves'):
-                sc_pts = project.strength_curves.exclude(data_points=[]).first()
-                if sc_pts and getattr(sc_pts, 'data_points', None):
-                    cal_pts = sc_pts.data_points
-            if not cal_pts and hasattr(project, 'projectcalibration_set') and project.projectcalibration_set.exists():
-                cal_rec = project.projectcalibration_set.first()
-                if getattr(cal_rec, 'data_points', None):
-                    cal_pts = cal_rec.data_points
 
             if cal_pts and len(cal_pts) > 0:
                 builder.inner_heading('TABLE 3.0: CALIBRATION CORRELATION DATA PAIRS (UPV vs. CUBE STRENGTH)')
