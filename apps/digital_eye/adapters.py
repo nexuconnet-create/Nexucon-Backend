@@ -1763,9 +1763,17 @@ class PUNDITAdapter:
 
             prompt_stat_summary = stat_summary[:15] if len(stat_summary) > 25 else stat_summary
 
+            prompt_spread_stats = spread_stats
+            if len(tests) > 25 and isinstance(spread_stats, dict) and 'precalculated_stats' in spread_stats:
+                prompt_spread_stats = {
+                    'summary': spread_stats.get('summary', {}),
+                    'sample_stats': spread_stats.get('precalculated_stats', [])[:10],
+                    'critical_elements': [r for r in spread_stats.get('precalculated_stats', []) if r.get('use_conservative_strength') or r.get('requires_verification')][:10],
+                }
+
             prompt_payload = {
                 "raw_data": prompt_fact_pack,
-                "precalculated_stats": spread_stats,
+                "precalculated_stats": prompt_spread_stats,
                 "statistical_summary": prompt_stat_summary,
                 "cracks_detected": has_crack_findings,
                 "joint_peer_review": bool(peer_review),

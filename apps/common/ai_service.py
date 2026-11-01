@@ -884,8 +884,9 @@ class AIService:
                 except json.JSONDecodeError:
                     pass
             try:
-                # Replace raw control characters that break JSON decoders
+                # Replace raw control characters that break JSON decoders and strip trailing commas
                 cleaned = re.sub(r'[\x00-\x1f]', lambda match: '\\n' if match.group(0) == '\n' else ('\\t' if match.group(0) == '\t' else ' '), content)
+                cleaned = re.sub(r',\s*([\]\}])', r'\1', cleaned)
                 return json.loads(cleaned, strict=False)
             except Exception:
                 pass
@@ -1330,7 +1331,8 @@ class AIService:
         active_items = [(p, r) for p, r in runners.items() if cls._provider_has_key(p)]
         if active_items:
             ensemble_timeout = float(getattr(settings, "AI_ENSEMBLE_TIMEOUT_SECONDS", 15.0))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(active_items))) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(active_items)))
+            try:
                 future_map = {executor.submit(_execute, item): item[0] for item in active_items}
                 done, not_done = concurrent.futures.wait(future_map.keys(), timeout=ensemble_timeout)
                 for f in done:
@@ -1355,6 +1357,8 @@ class AIService:
                     prov = future_map.get(f, "unknown")
                     failed_providers[prov] = "Timed out"
                     logger.warning("Ensemble engine %s isolated on timeout (>%.1fs)", prov, ensemble_timeout)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         # Merge observations across responding models
         # For structured reports, singleton sections (Executive Summary, Scope, Compliance)
