@@ -5374,22 +5374,39 @@ class NDTReportService:
                     'In strict accordance with statutory testing protocols, quality assurance standards, '
                     'and transparency requirements, the field investigation, surface preparation, '
                     'transducer calibration, and acoustic velocity measurements were conducted in the presence '
-                    'of the following verified site representatives, resident engineers, and testing witnesses:',
+                    'of the following verified site representatives and testing witnesses:',
                     leading=6.8
                 )
-                att_headers = ['S/N', 'NAME OF ATTENDEE / WITNESS', 'DESIGNATION / ROLE', 'ORGANIZATION / REPRESENTATION', 'STATUS']
-                att_rows = [
-                    [str(idx + 1), _latin1(a['name']), _latin1(a['role']), _latin1(a['organization']), _latin1(a.get('status', 'Verified'))]
-                    for idx, a in enumerate(att_records)
-                ]
-                builder.ruled_table(
-                    att_headers,
-                    att_rows,
-                    [12.0, 52.0, 52.0, 50.0, 14.0],
-                    ['C', 'L', 'L', 'L', 'C'],
-                    font_size=8.5,
-                    line_h=4.5
-                )
+                has_roles = any(a.get('role') and a['role'].strip() for a in att_records)
+                has_orgs = any(a.get('organization') and a['organization'].strip() for a in att_records)
+                if has_roles or has_orgs:
+                    att_headers = ['S/N', 'NAME OF ATTENDEE / WITNESS', 'DESIGNATION / ROLE', 'ORGANIZATION / REPRESENTATION', 'STATUS']
+                    att_rows = [
+                        [str(idx + 1), _latin1(a['name']), _latin1(a.get('role') or '-'), _latin1(a.get('organization') or '-'), _latin1(a.get('status', 'Verified'))]
+                        for idx, a in enumerate(att_records)
+                    ]
+                    builder.ruled_table(
+                        att_headers,
+                        att_rows,
+                        [12.0, 52.0, 52.0, 50.0, 14.0],
+                        ['C', 'L', 'L', 'L', 'C'],
+                        font_size=8.5,
+                        line_h=4.5
+                    )
+                else:
+                    att_headers = ['S/N', 'NAME OF ATTENDEE / WITNESS', 'STATUS']
+                    att_rows = [
+                        [str(idx + 1), _latin1(a['name']), _latin1(a.get('status', 'Present & Verified On-Site'))]
+                        for idx, a in enumerate(att_records)
+                    ]
+                    builder.ruled_table(
+                        att_headers,
+                        att_rows,
+                        [16.0, 114.0, 50.0],
+                        ['C', 'L', 'C'],
+                        font_size=8.5,
+                        line_h=4.8
+                    )
                 builder.ln_gap(3)
 
             state_val = project.state.strip() if project.state else None
@@ -7430,29 +7447,56 @@ class NDTReportService:
                 builder.para(_bold('No pulse velocity results are available for '
                                    'this project; no recommendation on concrete '
                                    'quality can be made.'), markdown=True)
-            if has_multi_bld and poor_members:
+            if poor_members:
                 builder.ln_gap(2)
                 builder.subheading('SUB-BENCHMARK STRUCTURAL ELEMENTS REQUIRING TECHNICAL ADVICE & REMEDIATION')
                 builder.para(
                     f"A total of **{len(poor_members)} of {len(element_data)} structural elements "
                     f"({len(poor_members)/len(element_data)*100.0:.1f}%)** fell below the statutory 25.0 N/mm² design benchmark. "
-                    f"These elements are classified by building and floor level below:",
+                    f"These elements are classified and tabulated by building and floor level below:",
                     markdown=True
                 )
-                for b_name in buildings_present:
-                    bld_poor = [e for e in poor_members if e.get('building_label', 'Main Building') == b_name]
-                    if bld_poor:
-                        bld_floors = sorted({e.get('floor_label', 'Ground Floor') for e in bld_poor}, key=_natural_sort_key)
-                        bld_items = []
-                        for fl in bld_floors:
-                            fl_poor = [e for e in bld_poor if e.get('floor_label', 'Ground Floor') == fl]
-                            fl_str = ", ".join(f"{e['element']} ({e.get('mean_ecs', 0.0):.1f} N/mm²)" for e in sorted(fl_poor, key=lambda x: _natural_sort_key(x['element'])))
-                            bld_items.append(f"**{fl} ({len(fl_poor)} No.):** {fl_str}")
-                        desc_str = " | ".join(bld_items)
-                        builder.bullet(f"**{b_name.upper()} ({len(bld_poor)} Elements Sub-Benchmark):** {desc_str}", markdown=True)
-                    else:
-                        bld_total = len([e for e in element_data if e.get('building_label', 'Main Building') == b_name])
-                        builder.bullet(f"**{b_name.upper()} (0 Elements Sub-Benchmark):** All {bld_total} No. tested structural members (100.0%) strictly meet or exceed the statutory 25.0 N/mm² design benchmark; routine monitoring only.", markdown=True)
+                sub_headers = ['S/N', 'BUILDING', 'FLOOR LEVEL', 'ELEMENT ID', 'MEAN VELOCITY', 'f_cu (N/mm²)', 'BENCHMARK', 'STATUS']
+                sub_rows = []
+                sorted_poor = sorted(poor_members, key=lambda x: (
+                    _natural_sort_key(x.get('building_label', '')),
+                    _natural_sort_key(x.get('floor_label', '')),
+                    _natural_sort_key(x.get('element', ''))
+                ))
+                for idx, e in enumerate(sorted_poor):
+                    b_label = e.get('building_label', 'Main Building')
+                    fl_label = e.get('floor_label', 'Ground Floor')
+                    elem_id = e.get('element', '-')
+                    mv = e.get('mean_v')
+                    if mv is None and e.get('mean_velocity_km_s'):
+                        mv = e['mean_velocity_km_s'] * 1000
+                    mv_str = f"{mv:,.1f} m/s" if mv else "-"
+                    fcu = e.get('mean_ecs', 0.0)
+                    fcu_str = f"{fcu:.1f}"
+                    bench_str = "25.0"
+                    stat = "Sub-Benchmark" if fcu >= 18.0 else "Critical Deficit"
+                    sub_rows.append([
+                        str(idx + 1),
+                        b_label,
+                        fl_label,
+                        elem_id,
+                        mv_str,
+                        fcu_str,
+                        bench_str,
+                        stat
+                    ])
+                col_widths = [10.0, 26.0, 26.0, 26.0, 26.0, 22.0, 20.0, 24.0]
+                col_aligns = ['C', 'L', 'L', 'L', 'C', 'C', 'C', 'C']
+                builder.ruled_table(sub_headers, sub_rows, col_widths, col_aligns, font_size=8.0, line_h=4.4)
+                builder.ln_gap(2)
+
+                if has_multi_bld:
+                    for b_name in buildings_present:
+                        bld_poor_cnt = len([e for e in poor_members if e.get('building_label', 'Main Building') == b_name])
+                        if bld_poor_cnt == 0:
+                            bld_total = len([e for e in element_data if e.get('building_label', 'Main Building') == b_name])
+                            builder.bullet(f"**{b_name.upper()} (0 Elements Sub-Benchmark):** All {bld_total} No. tested structural members (100.0%) strictly meet or exceed the statutory 25.0 N/mm² design benchmark; routine monitoring only.", markdown=True)
+                    builder.ln_gap(2)
 
                 builder.ln_gap(2)
                 builder.subheading('ACTIONABLE STRUCTURAL ENGINEERING DIRECTIVES')
@@ -8037,8 +8081,8 @@ class NDTReportService:
                     seen_names.add(k)
                     records.append({
                         'name': nm,
-                        'role': att.get_role_display() if hasattr(att, 'get_role_display') else (att.role or 'Site Representative'),
-                        'organization': att.organization or 'Project Stakeholder',
+                        'role': att.get_role_display() if hasattr(att, 'get_role_display') else (att.role or ''),
+                        'organization': att.organization or '',
                         'status': 'Present & Verified On-Site',
                         'signed_off': att.signed_off,
                     })
@@ -8060,34 +8104,10 @@ class NDTReportService:
                     if not k or k in seen_names or len(k) < 3:
                         continue
                     seen_names.add(k)
-
-                    low = raw_name.lower()
-                    if 'ojugbele' in low or 'abdullateef' in low:
-                        role = 'Lead NDT Testing Engineer'
-                        org = 'Nexucon NDT Inspection Division'
-                    elif 'onike' in low or 'abdulwahab' in low:
-                        role = 'Resident Structural Engineer'
-                        org = 'Supervising Engineering Team'
-                    elif 'faraday' in low:
-                        role = 'Consultant Structural Engineer'
-                        org = 'Project QA/QC Engineering Consultant'
-                    elif 'olowonishaye' in low:
-                        role = 'Project Site Engineer'
-                        org = 'Main Contractor Engineering Team'
-                    elif 'aminah' in low or low.startswith(('miss', 'mrs', 'mr.', 'chief', 'client')):
-                        role = 'Client / Site Representative'
-                        org = 'Client / Commissioning Authority'
-                    elif 'engr' in low:
-                        role = 'Field Inspection Engineer'
-                        org = 'Engineering Inspection Team'
-                    else:
-                        role = 'Site Representative / Testing Witness'
-                        org = 'Project Stakeholder Team'
-
                     records.append({
                         'name': raw_name,
-                        'role': role,
-                        'organization': org,
+                        'role': '',
+                        'organization': '',
                         'status': 'Present & Verified On-Site',
                         'signed_off': True,
                     })
@@ -8109,8 +8129,8 @@ class NDTReportService:
                         seen_names.add(k)
                         records.append({
                             'name': raw_name,
-                            'role': 'Inspection Witness',
-                            'organization': 'Project Stakeholder',
+                            'role': '',
+                            'organization': '',
                             'status': 'Present & Verified On-Site',
                             'signed_off': True,
                         })
@@ -8558,7 +8578,8 @@ class NDTReportService:
             logger.warning("Could not query EvidenceRecord for appendix: %s", e)
             return
 
-        if not ev_records:
+        voice_records = [e for e in ev_records if e.source_type == 'voice_note']
+        if not voice_records:
             return
 
         pdf = builder.pdf
@@ -8581,81 +8602,51 @@ class NDTReportService:
         )
         builder.ln_gap(2)
 
-        # 1. Voice Note Evidence Cards
-        voice_records = [e for e in ev_records if e.source_type == 'voice_note']
-        if voice_records:
-            builder.inner_heading('INSPECTOR FIELD VOICE NOTE RECORDS & TRANSCRIPTIONS', centered=False, underline=False)
-            for ev in voice_records:
-                payload = ev.payload or {}
-                fn = payload.get('file_name') or getattr(getattr(ev, 'file', None), 'file_name', '') or 'field_voice_note.webm'
-                dur = payload.get('duration_seconds') or payload.get('duration') or 16
-                gps = payload.get('gps') or {}
-                lat = gps.get('latitude') or (ev.coordinates.get('latitude') if ev.coordinates else None)
-                lon = gps.get('longitude') or (ev.coordinates.get('longitude') if ev.coordinates else None)
-                gps_str = f"{lat:.4f}° N, {lon:.4f}° E" if (lat and lon) else "Field Testing Station (Ebute Metta, Lagos State)"
-                sha = getattr(getattr(ev, 'file', None), 'sha256_hash', '') or payload.get('sha256') or ev.evidence_hash or ''
-                trans = (payload.get('transcript') or payload.get('transcription') or '').strip()
-                if not trans and isinstance(payload.get('translations'), dict):
-                    trans = (payload['translations'].get('en') or '').strip()
-                translations = payload.get('translations') or {}
+        # Voice Note Evidence Cards
+        builder.inner_heading('INSPECTOR FIELD VOICE NOTE RECORDS & TRANSCRIPTIONS', centered=False, underline=False)
+        for ev in voice_records:
+            payload = ev.payload or {}
+            fn = payload.get('file_name') or getattr(getattr(ev, 'file', None), 'file_name', '') or 'field_voice_note.webm'
+            dur = payload.get('duration_seconds') or payload.get('duration') or 16
+            gps = payload.get('gps') or {}
+            lat = gps.get('latitude') or (ev.coordinates.get('latitude') if ev.coordinates else None)
+            lon = gps.get('longitude') or (ev.coordinates.get('longitude') if ev.coordinates else None)
+            gps_str = f"{lat:.4f}° N, {lon:.4f}° E" if (lat and lon) else "Field Testing Station (Ebute Metta, Lagos State)"
+            sha = getattr(getattr(ev, 'file', None), 'sha256_hash', '') or payload.get('sha256') or ev.evidence_hash or ''
+            trans = (payload.get('transcript') or payload.get('transcription') or '').strip()
+            if not trans and isinstance(payload.get('translations'), dict):
+                trans = (payload['translations'].get('en') or '').strip()
+            translations = payload.get('translations') or {}
 
-                # Evidence card metadata table
-                card_rows = [
-                    ('Evidence Reference', ev.evidence_reference),
-                    ('Audio Asset & Format', f"{fn} (Duration: {dur:.1f}s)"),
-                    ('Field Geotag / Location', gps_str),
-                    ('Cryptographic SHA-256 Seal', sha[:32] + '...' if len(sha) > 32 else (sha or 'SEALED')),
-                    ('Audit Status', 'VERIFIED IMMUTABLE — GOVERNMENT COMMAND CENTER LOGGED'),
-                ]
-                builder.kv_table(card_rows)
+            # Evidence card metadata table
+            card_rows = [
+                ('Evidence Reference', ev.evidence_reference),
+                ('Audio Asset & Format', f"{fn} (Duration: {dur:.1f}s)"),
+                ('Field Geotag / Location', gps_str),
+                ('Cryptographic SHA-256 Seal', sha[:32] + '...' if len(sha) > 32 else (sha or 'SEALED')),
+                ('Audit Status', 'VERIFIED IMMUTABLE — GOVERNMENT COMMAND CENTER LOGGED'),
+            ]
+            builder.kv_table(card_rows)
+            builder.ln_gap(2)
+
+            # Transcription Box
+            if trans:
+                pdf.set_font('Cambria', 'B', 9.5)
+                pdf.cell(0, 5, _latin1('Verbatim Audio Transcription:'), new_x='LMARGIN', new_y='NEXT')
+                pdf.set_font('Cambria', 'I', 9.0)
+                pdf.multi_cell(0, 4.5, _latin1(f'“{trans}”'))
                 builder.ln_gap(2)
 
-                # Transcription Box
-                if trans:
-                    pdf.set_font('Cambria', 'B', 9.5)
-                    pdf.cell(0, 5, _latin1('Verbatim Audio Transcription:'), new_x='LMARGIN', new_y='NEXT')
-                    pdf.set_font('Cambria', 'I', 9.0)
-                    pdf.multi_cell(0, 4.5, _latin1(f'“{trans}”'))
+            # Multi-language translations
+            if translations and isinstance(translations, dict):
+                trans_items = []
+                if translations.get('yo'):
+                    trans_items.append(f"**Yorùbá Translation:** {_latin1(translations['yo'])}")
+                if translations.get('ha'):
+                    trans_items.append(f"**Hausa Translation:** {_latin1(translations['ha'])}")
+                if translations.get('ig'):
+                    trans_items.append(f"**Igbo Translation:** {_latin1(translations['ig'])}")
+                if trans_items:
+                    for ti in trans_items:
+                        builder.para(ti, leading=5.5, markdown=True)
                     builder.ln_gap(2)
-
-                # Multi-language translations
-                if translations and isinstance(translations, dict):
-                    trans_items = []
-                    if translations.get('yo'):
-                        trans_items.append(f"**Yorùbá Translation:** {_latin1(translations['yo'])}")
-                    if translations.get('ha'):
-                        trans_items.append(f"**Hausa Translation:** {_latin1(translations['ha'])}")
-                    if translations.get('ig'):
-                        trans_items.append(f"**Igbo Translation:** {_latin1(translations['ig'])}")
-                    if trans_items:
-                        for ti in trans_items:
-                            builder.para(ti, leading=5.5, markdown=True)
-                        builder.ln_gap(2)
-
-        # 2. Complete Evidence Registry Ledger Table
-        builder.inner_heading('CRYPTOGRAPHIC SHA-256 EVIDENCE REGISTRY LEDGER', centered=False, underline=False)
-        ledger_headers = ['EVIDENCE REF', 'TYPE', 'ASSET / FILENAME', 'SHA-256 HASH SEAL', 'STATUS']
-        ledger_rows = []
-        for e in ev_records[:35]:
-            payload = e.payload or {}
-            f_obj = getattr(e, 'file', None)
-            fname = payload.get('file_name') or getattr(f_obj, 'file_name', '') or (os.path.basename(f_obj.file.name) if f_obj and f_obj.file else '-')
-            sha = getattr(f_obj, 'sha256_hash', '') or payload.get('sha256') or e.evidence_hash or ''
-            sha_disp = (sha[:14] + '...' + sha[-6:]) if len(sha) > 20 else (sha or 'SEALED')
-            stype_disp = e.get_source_type_display() if hasattr(e, 'get_source_type_display') else e.source_type
-            if 'Photo' in stype_disp:
-                stype_disp = 'Photo Capture'
-            elif 'Voice' in stype_disp:
-                stype_disp = 'Voice Note'
-            ledger_rows.append([
-                e.evidence_reference,
-                stype_disp,
-                fname[:24] + ('..' if len(fname) > 24 else ''),
-                sha_disp,
-                'VERIFIED'
-            ])
-
-        col_widths = [32.0, 32.0, 48.0, 46.0, 22.0]
-        col_aligns = ['C', 'L', 'L', 'C', 'C']
-        builder.ruled_table(ledger_headers, ledger_rows, col_widths, col_aligns, font_size=8.0, line_h=4.2)
-        builder.ln_gap(3)

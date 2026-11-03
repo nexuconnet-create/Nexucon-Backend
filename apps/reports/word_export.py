@@ -385,14 +385,24 @@ class NDTWordExporter:
                     doc,
                     'In strict accordance with statutory quality assurance procedures and transparency requirements, '
                     'the field testing, transducer calibration, and ultrasonic velocity measurements were witnessed '
-                    'by the following verified site representatives, resident engineers, and testing witnesses:'
+                    'by the following verified site representatives and testing witnesses:'
                 )
-                _add_table(
-                    doc,
-                    ['S/N', 'NAME OF ATTENDEE / WITNESS', 'DESIGNATION / ROLE', 'ORGANIZATION / REPRESENTATION', 'STATUS'],
-                    [[str(idx + 1), a['name'], a['role'], a['organization'], a.get('status', 'Verified')]
-                     for idx, a in enumerate(att_records)]
-                )
+                has_roles = any(a.get('role') and a['role'].strip() for a in att_records)
+                has_orgs = any(a.get('organization') and a['organization'].strip() for a in att_records)
+                if has_roles or has_orgs:
+                    _add_table(
+                        doc,
+                        ['S/N', 'NAME OF ATTENDEE / WITNESS', 'DESIGNATION / ROLE', 'ORGANIZATION / REPRESENTATION', 'STATUS'],
+                        [[str(idx + 1), a['name'], a.get('role') or '-', a.get('organization') or '-', a.get('status', 'Verified')]
+                         for idx, a in enumerate(att_records)]
+                    )
+                else:
+                    _add_table(
+                        doc,
+                        ['S/N', 'NAME OF ATTENDEE / WITNESS', 'STATUS'],
+                        [[str(idx + 1), a['name'], a.get('status', 'Present & Verified On-Site')]
+                         for idx, a in enumerate(att_records)]
+                    )
 
         def emit_visual():
             # ------------------------------------------------------------ 4.1
@@ -908,6 +918,39 @@ class NDTWordExporter:
                 _add_para(doc, ' '.join(
                     part for part in
                     (_bold(lead_in.rstrip()), _bold(findings_body)) if part))
+                if poor_members:
+                    _add_heading(doc, 'SUB-BENCHMARK STRUCTURAL ELEMENTS REQUIRING TECHNICAL ADVICE & REMEDIATION', level=2)
+                    _add_para(
+                        doc,
+                        f"A total of {len(poor_members)} of {len(element_data)} structural elements "
+                        f"({len(poor_members)/len(element_data)*100.0:.1f}%) fell below the statutory 25.0 N/mm2 design benchmark. "
+                        f"These elements are classified and tabulated by building and floor level below:"
+                    )
+                    sorted_poor = sorted(poor_members, key=lambda x: (
+                        _natural_sort_key(x.get('building_label', '')),
+                        _natural_sort_key(x.get('floor_label', '')),
+                        _natural_sort_key(x.get('element', ''))
+                    ))
+                    sub_headers = ['S/N', 'BUILDING', 'FLOOR LEVEL', 'ELEMENT ID', 'MEAN VELOCITY (M/S)', 'EST. f_cu (N/MM2)', 'BENCHMARK', 'STATUS']
+                    sub_rows = []
+                    for idx, e in enumerate(sorted_poor):
+                        mv = e.get('mean_v')
+                        if mv is None and e.get('mean_velocity_km_s'):
+                            mv = e['mean_velocity_km_s'] * 1000
+                        mv_str = f"{mv:,.1f}" if mv else "-"
+                        fcu = e.get('mean_ecs', 0.0)
+                        stat = "Sub-Benchmark" if fcu >= 18.0 else "Critical Deficit"
+                        sub_rows.append([
+                            str(idx + 1),
+                            e.get('building_label', 'Main Building'),
+                            e.get('floor_label', 'Ground Floor'),
+                            e.get('element', '-'),
+                            mv_str,
+                            f"{fcu:.1f}",
+                            "25.0",
+                            stat
+                        ])
+                    _add_table(doc, sub_headers, sub_rows)
             else:
                 _add_para(doc, _bold('No pulse velocity results are available '
                                      'for this project; no recommendation on '
@@ -1001,23 +1044,7 @@ class NDTWordExporter:
                             if lang in ('yo', 'ha', 'ig') and t_text:
                                 _add_para(doc, f"Translation ({lang.upper()}): {t_text}", size=10)
 
-                _add_heading(doc, 'CRYPTOGRAPHIC SHA-256 EVIDENCE REGISTRY LEDGER', level=2)
-                ledger_rows = []
-                for e in ev_records[:35]:
-                    pld = e.payload or {}
-                    f_obj = getattr(e, 'file', None)
-                    fname = pld.get('file_name') or getattr(f_obj, 'file_name', '') or '-'
-                    sha = getattr(f_obj, 'sha256_hash', '') or pld.get('sha256') or e.evidence_hash or ''
-                    sha_disp = (sha[:14] + '...' + sha[-6:]) if len(sha) > 20 else (sha or 'SEALED')
-                    stype_disp = e.get_source_type_display() if hasattr(e, 'get_source_type_display') else e.source_type
-                    ledger_rows.append([
-                        e.evidence_reference,
-                        stype_disp,
-                        fname[:28],
-                        sha_disp,
-                        'VERIFIED'
-                    ])
-                _add_table(doc, ['EVIDENCE REF', 'TYPE', 'ASSET / FILENAME', 'SHA-256 HASH SEAL', 'STATUS'], ledger_rows)
+
 
         # ---------------------- §2.5 ordered emission (document structure)
         # Same source of truth as the certified PDF: the project's structure
