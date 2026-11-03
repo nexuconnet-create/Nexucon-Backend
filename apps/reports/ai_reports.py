@@ -40,21 +40,39 @@ def _latin1(text):
     Transcribe text into the latin-1 range supported by the core fpdf fonts.
 
     The report generators render live database content (project names, AI
-    observations, recommendation text), which can contain typographic
-    characters outside latin-1. Substituting close ASCII equivalents keeps
-    the document honest (nothing dropped or invented) while avoiding
-    FPDFUnicodeEncodingException.
+    observations, recommendation text, field voice notes in English, Yoruba,
+    Hausa, Igbo), which can contain typographic characters outside latin-1.
+    Substituting close ASCII equivalents keeps the document honest (nothing
+    dropped or invented) while avoiding FPDFUnicodeEncodingException.
     """
+    import unicodedata
+
+    if text is None:
+        return ''
+    s = str(text)
+
+    # Specific Nigerian & West African diacritics mapping
     substitutions = (
         ('—', '-'), ('–', '-'), ('‘', "'"), ('’', "'"),
         ('“', '"'), ('”', '"'), ('…', '...'), ('•', '-'),
         (' ', ' '), ('≤', '<='), ('≥', '>='), ('≈', '~'),
-        ('≠', '!='), ('×', 'x'),
+        ('≠', '!='), ('×', 'x'), ('±', '+/-'), ('²', '2'), ('³', '3'),
+        # Yoruba / Igbo dot-below and accented letters
+        ('ọ', 'o'), ('Ọ', 'O'), ('ẹ', 'e'), ('Ẹ', 'E'),
+        ('ṣ', 's'), ('Ṣ', 'S'), ('ụ', 'u'), ('Ụ', 'U'),
+        ('ị', 'i'), ('Ị', 'I'), ('ṅ', 'n'), ('Ṅ', 'N'),
+        ('ń', 'n'), ('Ń', 'N'), ('ǹ', 'n'), ('Ǹ', 'N'),
+        # Hausa hooked letters
+        ('ɓ', 'b'), ('Ɓ', 'B'), ('ɗ', 'd'), ('Ɗ', 'D'),
+        ('ƙ', 'k'), ('Ƙ', 'K'), ('ƴ', 'y'), ('Ƴ', 'Y'),
     )
-    s = str(text)
     for src, dst in substitutions:
         s = s.replace(src, dst)
-    return s.encode('latin-1', 'replace').decode('latin-1')
+
+    # Decompose any remaining unicode accents and drop non-latin1 combining characters
+    normalized = unicodedata.normalize('NFKD', s)
+    cleaned = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
+    return cleaned.encode('latin-1', 'replace').decode('latin-1')
 
 
 class AIReportBuilder:

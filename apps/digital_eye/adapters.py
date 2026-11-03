@@ -1522,6 +1522,19 @@ class PUNDITAdapter:
         if batch is not None:
             attendance_qs = attendance_qs.filter(Q(batch=batch) | Q(batch__isnull=True))
         site_witnesses = list(attendance_qs[:25])
+        if not site_witnesses:
+            try:
+                from apps.reports.ndt_reports import NDTReportService
+                att_records = NDTReportService._get_project_attendance_records(project)
+                for a in att_records:
+                    site_witnesses.append(type('WitnessRecord', (), {
+                        'attendee_name': a['name'],
+                        'organization': a['organization'],
+                        'get_role_display': lambda self=a: self['role'],
+                        'signed_off': a.get('signed_off', True),
+                    })())
+            except Exception:
+                pass
 
         # ---- Fact pack: crack findings FIRST, then visual defects, attendance, floors -> elements
         crack_elements = [

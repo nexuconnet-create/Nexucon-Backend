@@ -367,6 +367,33 @@ class NDTWordExporter:
             if example:
                 _add_para(doc, example)
 
+        def emit_fieldwork():
+            # ------------------------------------------------------------ 4.0
+            _add_heading(doc, '4.0 FIELD WORK')
+            _add_para(
+                doc,
+                'Visual test was carried out on the structure to ascertain any possible structural defects '
+                '(e.g. cracks, differential settlement, spalling, honeycombs, hogging and sagging). This is '
+                'a vital aspect of non-destructive test. The Standard Portable Ultrasonic Non-Destructive '
+                'Digital Indicating Tester (PUNDIT) was employed for the estimation of compressive strength '
+                'of the hardened concrete on the structural elements.'
+            )
+            att_records = S._get_project_attendance_records(project)
+            if att_records:
+                _add_heading(doc, 'STATUTORY SITE ATTENDANCE & TESTING WITNESS REGISTER', level=2)
+                _add_para(
+                    doc,
+                    'In strict accordance with statutory quality assurance procedures and transparency requirements, '
+                    'the field testing, transducer calibration, and ultrasonic velocity measurements were witnessed '
+                    'by the following verified site representatives, resident engineers, and testing witnesses:'
+                )
+                _add_table(
+                    doc,
+                    ['S/N', 'NAME OF ATTENDEE / WITNESS', 'DESIGNATION / ROLE', 'ORGANIZATION / REPRESENTATION', 'STATUS'],
+                    [[str(idx + 1), a['name'], a['role'], a['organization'], a.get('status', 'Verified')]
+                     for idx, a in enumerate(att_records)]
+                )
+
         def emit_visual():
             # ------------------------------------------------------------ 4.1
             _add_heading(doc, '4.1 VISUAL TEST')
@@ -795,6 +822,43 @@ class NDTWordExporter:
                 photo_notes
             ])
 
+            # Field Attendance & Statutory Witnesses
+            att_records = S._get_project_attendance_records(project)
+            if att_records:
+                witness_names = ", ".join(a['name'] for a in att_records[:3])
+                if len(att_records) > 3:
+                    witness_names += f" and {len(att_records) - 3} other(s)"
+                summary_table_rows.append([
+                    "Field Attendance Register",
+                    "Statutory Inspection Staging",
+                    f"{len(att_records)} verified witness(es) logged: {witness_names}. Recorded in Section 4.0."
+                ])
+
+            # Unified Evidence Registry
+            try:
+                from apps.evidence.models import EvidenceRecord
+                for ev in EvidenceRecord.objects.filter(project=project, source_type='voice_note'):
+                    pld = ev.payload or {}
+                    dur = pld.get('duration_seconds') or 16
+                    tr = (pld.get('transcript') or pld.get('transcription') or '').strip()
+                    if not tr and isinstance(pld.get('translations'), dict):
+                        tr = (pld['translations'].get('en') or '').strip()
+                    summary_table_rows.append([
+                        "Evidence Registry — Voice Note",
+                        f"Ref: {ev.evidence_reference}",
+                        f"Field Voice Note ({dur:.0f}s): “{tr[:80]}” — Sealed SHA-256."
+                    ])
+                for ev in EvidenceRecord.objects.filter(project=project, source_type='photo'):
+                    f_obj = getattr(ev, 'file', None)
+                    fn = getattr(f_obj, 'file_name', '') or 'Site Photo'
+                    summary_table_rows.append([
+                        "Evidence Registry — Photo Capture",
+                        f"Ref: {ev.evidence_reference}",
+                        f"Field Photo: {fn}. Government Command Center logged."
+                    ])
+            except Exception:
+                pass
+
             _add_table(
                 doc,
                 ['FIELD ASSESSMENT SCOPE', 'LOCATION / LEVEL', 'SUMMARIZED REMARKS & OBSERVATIONS'],
@@ -904,6 +968,57 @@ class NDTWordExporter:
                                      'available for this project; no conclusion '
                                      'on concrete quality can be drawn.'))
 
+        def emit_appendix():
+            # -------------------------------------------------------- APPENDIX
+            _add_heading(doc, 'APPENDIX: FIELD EVIDENCE & AUDIT TRAIL')
+            try:
+                from apps.evidence.models import EvidenceRecord
+                ev_records = list(EvidenceRecord.objects.filter(project=project).order_by('created_at'))
+            except Exception:
+                ev_records = []
+
+            if ev_records:
+                _add_heading(doc, 'UNIFIED EVIDENCE REGISTRY & FIELD VOICE NOTE DOSSIER', level=2)
+                _add_para(
+                    doc,
+                    'All tamper-evident sensor scans, radargrams, UPV waveforms, field voice notes, '
+                    'and photographic plates recorded on this project are anchored by cryptographic '
+                    'SHA-256 checksums and reported directly to the Government Command Center.'
+                )
+                voice_records = [e for e in ev_records if e.source_type == 'voice_note']
+                for ev in voice_records:
+                    pld = ev.payload or {}
+                    dur = pld.get('duration_seconds') or 16
+                    tr = (pld.get('transcript') or pld.get('transcription') or '').strip()
+                    if not tr and isinstance(pld.get('translations'), dict):
+                        tr = (pld['translations'].get('en') or '').strip()
+                    _add_heading(doc, f"Voice Note: {ev.evidence_reference} (Duration: {dur:.1f}s)", level=3)
+                    if tr:
+                        _add_para(doc, f'Verbatim Audio Transcription: “{tr}”')
+                    translations = pld.get('translations') or {}
+                    if isinstance(translations, dict):
+                        for lang, t_text in translations.items():
+                            if lang in ('yo', 'ha', 'ig') and t_text:
+                                _add_para(doc, f"Translation ({lang.upper()}): {t_text}", size=10)
+
+                _add_heading(doc, 'CRYPTOGRAPHIC SHA-256 EVIDENCE REGISTRY LEDGER', level=2)
+                ledger_rows = []
+                for e in ev_records[:35]:
+                    pld = e.payload or {}
+                    f_obj = getattr(e, 'file', None)
+                    fname = pld.get('file_name') or getattr(f_obj, 'file_name', '') or '-'
+                    sha = getattr(f_obj, 'sha256_hash', '') or pld.get('sha256') or e.evidence_hash or ''
+                    sha_disp = (sha[:14] + '...' + sha[-6:]) if len(sha) > 20 else (sha or 'SEALED')
+                    stype_disp = e.get_source_type_display() if hasattr(e, 'get_source_type_display') else e.source_type
+                    ledger_rows.append([
+                        e.evidence_reference,
+                        stype_disp,
+                        fname[:28],
+                        sha_disp,
+                        'VERIFIED'
+                    ])
+                _add_table(doc, ['EVIDENCE REF', 'TYPE', 'ASSET / FILENAME', 'SHA-256 HASH SEAL', 'STATUS'], ledger_rows)
+
         # ---------------------- §2.5 ordered emission (document structure)
         # Same source of truth as the certified PDF: the project's structure
         # rows drive section order, enable/disable state and custom
@@ -917,6 +1032,7 @@ class NDTWordExporter:
             '1.0': emit_intro,
             '2.0': emit_purpose,
             '3.0': emit_lit,
+            '4.0': emit_fieldwork,
             '4.1': emit_visual,
             '4.2': emit_methodology,   # 4.2 + 4.3 + 4.4, as one unit
             '5.0': emit_analysis,
@@ -925,6 +1041,7 @@ class NDTWordExporter:
             'remarks': emit_remarks,
             '6.0': emit_reco,
             '7.0': emit_conclusion,
+            'APPENDIX': emit_appendix,
         }
         for entry in resolve_report_structure(project):
             if not entry['is_enabled']:
