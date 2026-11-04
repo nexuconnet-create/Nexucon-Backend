@@ -385,20 +385,131 @@ class NDTReportView(APIView):
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
         element_id = request.query_params.get('elementId')
+        building = request.query_params.get('building')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
-            pdf_bytes = NDTReportService.generate_ndt_report(project, request.user, operator=operator, element_id=element_id)
+            pdf_bytes = NDTReportService.generate_ndt_report(
+                project, request.user, operator=operator, element_id=element_id, building=building
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report generation failed')
             return Response({'detail': f'Report generation failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         try:
-            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator)
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, building=building)
         except Exception:  # noqa: BLE001 — archive failure must not block the stream
             logger.exception('NDT report archiving failed')
+        safe_bld = f"_{building.strip().replace(' ', '_')}" if building and building.strip() and building.strip().lower() not in ('all', 'null', 'undefined') else ""
         safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
-        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}{safe_op}.pdf')
+        return _pdf_response(pdf_bytes, f'ndt_report_{project_id}{safe_bld}{safe_op}.pdf')
+
+
+class NDTBuildingsListView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ndt-buildings/
+    Returns the distinct buildings identified across field scans/PUNDIT tests
+    on this project, along with per-building statistics (total scans, compliant
+    members, sub-benchmark members, compliance rate, mean strength, and floor levels).
+    
+    Enables users to generate building-specific reports or estate-wide combined reports.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from apps.digital_eye.models import PUNDITTest, StrengthCurve
+        from apps.data_import.readers import infer_floor_from_name
+        from .ndt_reports import NDTReportService
+
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        tests = list(
+            PUNDITTest.objects.filter(project=project)
+            .select_related('device')
+            .prefetch_related('files', 'readings')
+            .order_by('structural_element', 'tested_at')
+        )
+
+        S = NDTReportService
+        benchmark = getattr(project, 'target_compressive_strength', None) or 25.0
+        pulse_tests = [t for t in tests if t.test_type == 'pulse_velocity'] or tests
+        element_data = S._element_data(pulse_tests)
+
+        bld_map = {}
+        for e in element_data:
+            bld_label = e.get('building_label') or "Main Building"
+            if bld_label not in bld_map:
+                bld_map[bld_label] = {
+                    'building': bld_label,
+                    'scan_count': 0,
+                    'elements': set(),
+                    'good_count': 0,
+                    'poor_count': 0,
+                    'strength_values': [],
+                    'floors': set(),
+                }
+
+            bld_info = bld_map[bld_label]
+            bld_info['scan_count'] += 1
+            elem_name = e.get('element') or ''
+            if elem_name:
+                bld_info['elements'].add(elem_name)
+
+            floor = e.get('floor_label')
+            if floor:
+                bld_info['floors'].add(floor)
+
+            mean_ecs = e.get('mean_ecs')
+            if mean_ecs is not None and mean_ecs > 0:
+                bld_info['strength_values'].append(mean_ecs)
+
+            if e.get('remark') == 'POOR':
+                bld_info['poor_count'] += 1
+            else:
+                bld_info['good_count'] += 1
+
+        floor_order = ['Ground Floor', 'First Floor', 'Second Floor', 'Third Floor', 'Fourth Floor', 'Fifth Floor', 'Roof']
+        def floor_key(f):
+            try:
+                return floor_order.index(f)
+            except ValueError:
+                return 99
+
+        buildings_list = []
+        for bld_label, bld_data in bld_map.items():
+            scans = bld_data['scan_count']
+            good = bld_data['good_count']
+            poor = bld_data['poor_count']
+            strengths = bld_data['strength_values']
+            mean_str = round(sum(strengths) / len(strengths), 1) if strengths else None
+            comp_rate = round((good / scans) * 100, 1) if scans > 0 else 100.0
+            sorted_floors = sorted(list(bld_data['floors']), key=floor_key)
+
+            buildings_list.append({
+                'building': bld_label,
+                'scan_count': scans,
+                'element_count': len(bld_data['elements']),
+                'good_count': good,
+                'poor_count': poor,
+                'compliance_rate': comp_rate,
+                'mean_strength': mean_str,
+                'benchmark': benchmark,
+                'floors': sorted_floors,
+            })
+
+        buildings_list.sort(key=lambda x: x['building'])
+        has_multiple = len(buildings_list) > 1
+
+        return Response({
+            'total_scans': len(element_data),
+            'total_buildings': len(buildings_list),
+            'has_multiple_buildings': has_multiple,
+            'buildings': buildings_list,
+        })
 
 
 class NDTOperatorsListView(APIView):
@@ -1154,10 +1265,13 @@ class NDTWordExportView(APIView):
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
         element_id = request.query_params.get('elementId')
+        building = request.query_params.get('building')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
-            docx_bytes = NDTWordExporter.export_docx(project, request.user, operator=operator, element_id=element_id)
+            docx_bytes = NDTWordExporter.export_docx(
+                project, request.user, operator=operator, element_id=element_id, building=building
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT Word export failed')
             return Response({'detail': f'Word export failed: {exc}'},
@@ -1166,9 +1280,10 @@ class NDTWordExportView(APIView):
             docx_bytes,
             content_type=('application/vnd.openxmlformats-officedocument'
                           '.wordprocessingml.document'))
+        safe_bld = f"_{building.strip().replace(' ', '_')}" if building and building.strip() and building.strip().lower() not in ('all', 'null', 'undefined') else ""
         safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         response['Content-Disposition'] = \
-            f'attachment; filename="ndt_report_{project_id}{safe_op}.docx"'
+            f'attachment; filename="ndt_report_{project_id}{safe_bld}{safe_op}.docx"'
         return response
 
 
@@ -1438,24 +1553,27 @@ class NDTReportPreviewView(APIView):
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
         element_id = request.query_params.get('elementId')
+        building = request.query_params.get('building')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes = NDTReportService.generate_ndt_report(project,
                                                              request.user,
                                                              operator=operator,
-                                                             element_id=element_id)
+                                                             element_id=element_id,
+                                                             building=building)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        safe_bld = f"_{building.strip().replace(' ', '_')}" if building and building.strip() and building.strip().lower() not in ('all', 'null', 'undefined') else ""
         safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
         try:
-            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, building=building, notify=False)
         except Exception:
             logger.exception('Failed to auto-archive previewed NDT report')
         return _pdf_response(pdf_bytes,
-                             f'ndt_report_PREVIEW_{project_id}{safe_op}.pdf')
+                             f'ndt_report_PREVIEW_{project_id}{safe_bld}{safe_op}.pdf')
 
 
 class NDTReportPreviewSectionsView(APIView):
@@ -1479,17 +1597,18 @@ class NDTReportPreviewSectionsView(APIView):
                             status=status.HTTP_404_NOT_FOUND)
         operator = request.query_params.get('operator')
         element_id = request.query_params.get('elementId')
+        building = request.query_params.get('building')
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
         try:
             pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
-                project, request.user, operator=operator, element_id=element_id)
+                project, request.user, operator=operator, element_id=element_id, building=building)
         except Exception as exc:  # noqa: BLE001
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         try:
-            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, building=building, notify=False)
         except Exception:
             logger.exception('Failed to auto-archive preview sections NDT report')
         return Response({
@@ -1534,6 +1653,7 @@ class NDTReportPageQAView(APIView):
         model_choice = str(request.data.get('model_provider', 'anthropic')).strip().lower()
         operator = request.data.get('operator')
         element_id = request.data.get('elementId')
+        building = request.data.get('building')
 
         if not operator and getattr(request.user, 'role', None) == 'inspector':
             operator = request.user.get_full_name() or request.user.username
@@ -1541,7 +1661,7 @@ class NDTReportPageQAView(APIView):
         # 1. Render bundled PDF bytes
         try:
             pdf_bytes, bundle = NDTReportService.generate_ndt_report_bundled(
-                project, request.user, operator=operator, element_id=element_id)
+                project, request.user, operator=operator, element_id=element_id, building=building)
         except Exception as exc:
             logger.exception('NDT report generation failed during QA review')
             return Response({'detail': f'Report render failed: {exc}'},

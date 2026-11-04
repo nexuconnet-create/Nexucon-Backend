@@ -116,7 +116,7 @@ class NDTWordExporter:
     """Builds the .docx edition of the statutory NDT report."""
 
     @classmethod
-    def export_docx(cls, project, user=None, operator=None, element_id=None):
+    def export_docx(cls, project, user=None, operator=None, element_id=None, building=None):
         from apps.digital_eye.models import PUNDITTest, RebarTest
 
         S = NDTReportService
@@ -127,6 +127,18 @@ class NDTWordExporter:
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'tested_at')
         )
+
+        # Building filter (Multi-building scans or single building selection)
+        has_explicit_building = bool(
+            building and str(building).strip() and str(building).strip().lower() not in ('all', 'null', 'undefined', 'estate', 'combined')
+        )
+        selected_building_label = None
+        if has_explicit_building:
+            bld_target = str(building).strip()
+            matched_bld = [t for t in all_tests if S._building_matches_query(t, bld_target)]
+            if matched_bld:
+                all_tests = matched_bld
+                selected_building_label = S._get_test_building_label(matched_bld[0]) or bld_target
 
         def _get_test_operator_label(t):
             if t.operator_name and t.operator_name.strip():
@@ -286,7 +298,8 @@ class NDTWordExporter:
             poor_members=poor_members, visual_notes=visual_notes,
             floors_present=floors_present, bim_levels=bim_levels,
             has_drawings=has_drawings, tested=tested, same_day=same_day,
-            date_min=date_min, date_max=date_max)
+            date_min=date_min, date_max=date_max,
+            selected_building=selected_building_label)
 
         doc = Document()
 
@@ -299,9 +312,17 @@ class NDTWordExporter:
                            'COMPRESSIVE STRENGTH OF STRUCTURAL MEMBERS',
                       bold=True, size=12, align=WD_ALIGN_PARAGRAPH.CENTER,
                       space_after=18)
+            if selected_building_label:
+                bld_slug = "".join(c if c.isalnum() else "_" for c in selected_building_label).strip("_")
+                eff_report_no = f"{report_no}/{bld_slug.upper()}"
+                eff_project_name = f"{project.name or '-'} - {selected_building_label}"
+            else:
+                eff_report_no = report_no
+                eff_project_name = project.name or '-'
+
             _add_table(doc, ['FIELD', 'VALUE'], [
-                ['Report No', report_no],
-                ['Project', project.name or '-'],
+                ['Report No', eff_report_no],
+                ['Project', eff_project_name],
                 ['Client', project.client_name or '-'],
                 ['Site Address', ', '.join(
                     p for p in (project.site_address, project.lga,

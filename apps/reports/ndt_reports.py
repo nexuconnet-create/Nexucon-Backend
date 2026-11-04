@@ -3154,7 +3154,55 @@ class NDTReportService:
             if bld_m: return f'Building {bld_m.group(1)}'
             blk_m = re.match(r'^(?:BLK|BLOCK)([A-Z0-9]+)$', p)
             if blk_m: return f'Block {blk_m.group(1)}'
+            num_m = re.match(r'^(\d+)$', p)
+            if num_m: return f'Building {num_m.group(1)}'
         return 'Main Building'
+
+    @classmethod
+    def _get_test_building_label(cls, test):
+        """Extract the building label from a test measurement by inspecting its
+        structural_element, structural_element_name, test_location, location_address,
+        batch, or notes."""
+        el = getattr(test, 'structural_element', '') or ''
+        bld = cls._building_label(el)
+        if bld != 'Main Building':
+            return bld
+        for candidate in (
+            getattr(test, 'structural_element_name', ''),
+            getattr(test, 'test_location', ''),
+            getattr(test, 'location_address', ''),
+            getattr(test, 'notes', ''),
+        ):
+            if candidate:
+                cand_bld = cls._building_label(candidate)
+                if cand_bld != 'Main Building':
+                    return cand_bld
+        batch = getattr(test, 'batch', None)
+        if batch:
+            for b_field in (getattr(batch, 'batch_name', ''), getattr(batch, 'title', ''), getattr(batch, 'notes', '')):
+                if b_field:
+                    cand_bld = cls._building_label(b_field)
+                    if cand_bld != 'Main Building':
+                        return cand_bld
+        return 'Main Building'
+
+    @classmethod
+    def _building_matches_query(cls, test, target):
+        """Check if a test belongs to the targeted building query string (e.g.
+        'Building A', 'building a', 'A', 'Building 1', '1')."""
+        if not target:
+            return True
+        norm_target = str(target).strip().lower()
+        if norm_target in ('all', 'all buildings', 'estate', 'combined', 'null', 'undefined', ''):
+            return True
+        bld_label = cls._get_test_building_label(test).strip().lower()
+        if bld_label == norm_target or norm_target in bld_label or bld_label in norm_target:
+            return True
+        clean_lbl = re.sub(r'^(?:building|block|tower|wing)\s*', '', bld_label).strip()
+        clean_target = re.sub(r'^(?:building|block|tower|wing)\s*', '', norm_target).strip()
+        if clean_lbl and clean_target and clean_lbl == clean_target:
+            return True
+        return False
 
     @classmethod
     def _member_type(cls, element):
@@ -3692,7 +3740,7 @@ class NDTReportService:
     def _computed_bodies(cls, project, *, tests, rebar_tests, element_data,
                           good_members, poor_members, visual_notes,
                           floors_present, bim_levels, has_drawings, tested,
-                          same_day, date_min, date_max):
+                          same_day, date_min, date_max, selected_building=None):
         bodies = {}
 
         # -- report reference (11 Sep client request): the deterministic
@@ -3709,6 +3757,10 @@ class NDTReportService:
             has_multi_bld = len(buildings_present) > 1
             if is_sog:
                 building = 'an RCC slab-on-grade laydown area'
+            elif selected_building:
+                storeys = cls._storey_count(floors_present, bim_levels)
+                building = (f'an existing {storeys}-floor {selected_building}' if storeys
+                            else f'an existing {selected_building}')
             elif has_multi_bld:
                 storeys = cls._storey_count(floors_present, bim_levels)
                 bld_names = ", ".join(buildings_present)
@@ -3716,8 +3768,9 @@ class NDTReportService:
                             else f'an existing building complex ({bld_names})')
             else:
                 storeys = cls._storey_count(floors_present, bim_levels)
-                building = (f'an existing {storeys}-floor building' if storeys
-                            else 'an existing building')
+                b_name = buildings_present[0] if buildings_present else 'building'
+                building = (f'an existing {storeys}-floor {b_name}' if (storeys and buildings_present)
+                            else (f'an existing {b_name}' if buildings_present else 'an existing building'))
             # Dynamically bind to the exact same backend database variable used on the cover page:
             # The cover page binds to project.name (which outputs "REINFORCE CONCRETE FLOOR SLAB ON LAYDOWN AREA (SCOPE 01)").
             # We bind to project.name directly, ensuring exact 1:1 parity between the cover page and executive summary prose.
@@ -3962,12 +4015,16 @@ class NDTReportService:
             if is_sog:
                 asset_loc = 'in the RCC slab-on-grade laydown area'
                 asset_noun = 'RCC slab-on-grade laydown area'
+            elif selected_building:
+                asset_loc = f'in {selected_building}'
+                asset_noun = f'{selected_building}'
             elif has_multi_bld:
                 asset_loc = f"across the building complex ({', '.join(buildings_present)})"
                 asset_noun = f"building complex ({', '.join(buildings_present)})"
             else:
-                asset_loc = 'in the building'
-                asset_noun = 'building'
+                b_name = buildings_present[0] if buildings_present else 'building'
+                asset_loc = f'in {b_name}'
+                asset_noun = f'{b_name}'
             strength_sentence = (
                 f'the test analysis revealed that {len(good_members)} of the '
                 f'{len(element_data)} structural members tested {asset_loc} '
@@ -4015,10 +4072,13 @@ class NDTReportService:
             good_pct = round(len(good_members) * 100 / total, 1)
             if is_sog:
                 asset_loc = 'in the RCC slab-on-grade laydown area'
+            elif selected_building:
+                asset_loc = f'in {selected_building}'
             elif has_multi_bld:
                 asset_loc = f"across the building complex ({', '.join(buildings_present)})"
             else:
-                asset_loc = 'in the building'
+                b_name = buildings_present[0] if buildings_present else 'building'
+                asset_loc = f'in {b_name}'
             bodies['conclusion_items'] = '\n'.join([
                 'The Non-Destructive Test analysis as shown in the summary '
                 'of test result (Section 5.0) shows the percentage of '
@@ -4217,8 +4277,22 @@ class NDTReportService:
             compliance = 'COMPLIANT'
 
         rep_title = 'BS 1881-203 Ultrasonic Pulse Velocity (UPV) NDT Report'
-        if op_label:
+        building = kwargs.get('building') or kwargs.get('selected_building')
+        bld_label = None
+        if building and str(building).strip().lower() not in ('all', 'all buildings', 'estate', 'combined', 'null', 'undefined', ''):
+            bld_label = str(building).strip()
+
+        if bld_label and op_label:
+            rep_title = f'BS 1881-203 UPV NDT Report — {bld_label} ({op_label})'
+        elif bld_label:
+            rep_title = f'BS 1881-203 UPV NDT Report — {bld_label}'
+        elif op_label:
             rep_title = f'BS 1881-203 UPV NDT Report ({op_label})'
+
+        if bld_label:
+            bld_slug = bld_label.replace(' ', '_')
+            content_key = f"{content_key}_{bld_slug}"
+            report_no = f"{report_no}-{bld_slug}"
 
         archived = ArchivedReport(
             project=project,
@@ -4247,16 +4321,17 @@ class NDTReportService:
         return archived
 
     @classmethod
-    def generate_ndt_report(cls, project, user=None, operator=None, element_id=None, **kwargs):
-        return cls.generate_ndt_report_bundled(project, user, operator=operator, element_id=element_id, **kwargs)[0]
+    def generate_ndt_report(cls, project, user=None, operator=None, element_id=None, building=None, **kwargs):
+        return cls.generate_ndt_report_bundled(project, user, operator=operator, element_id=element_id, building=building, **kwargs)[0]
 
     @classmethod
-    def generate_ndt_report_bundled(cls, project, user=None, operator=None, element_id=None, **kwargs):
+    def generate_ndt_report_bundled(cls, project, user=None, operator=None, element_id=None, building=None, **kwargs):
         """Render the report and return (pdf_bytes, preview_bundle) from ONE
         generation pass — the bundle carries the §2.1 preview sidebar's
         section→page map and the total page count, guaranteed to describe
         exactly the bytes returned alongside them.
-        Enforces STRICTLY ONE inspector per report based on scans done by them."""
+        Enforces STRICTLY ONE inspector per report based on scans done by them.
+        Supports single-building isolation or estate-wide combined reporting."""
         from apps.digital_eye.adapters import PUNDITAdapter
         from apps.digital_eye.models import PUNDITTest, RebarTest
 
@@ -4267,6 +4342,20 @@ class NDTReportService:
             .prefetch_related('files', 'readings')
             .order_by('structural_element', 'test_date')
         )
+
+        # ---- Building scope (optional): isolate scans for a single building
+        # or combine all buildings into an estate-wide report
+        building = building or kwargs.get('building')
+        active_building_label = None
+        has_explicit_building = bool(
+            building and str(building).strip() and str(building).strip().lower() not in ('all', 'all buildings', 'estate', 'combined', 'null', 'undefined', '')
+        )
+        if has_explicit_building:
+            bld_target = str(building).strip()
+            matched_bld_tests = [t for t in all_tests if cls._building_matches_query(t, bld_target)]
+            if matched_bld_tests:
+                all_tests = matched_bld_tests
+                active_building_label = cls._get_test_building_label(matched_bld_tests[0])
 
         def _get_test_operator_label(t):
             if t.operator_name and t.operator_name.strip():
@@ -4590,7 +4679,8 @@ class NDTReportService:
             poor_members=poor_members, visual_notes=visual_notes,
             floors_present=floors_present, bim_levels=bim_levels,
             has_drawings=has_drawings, tested=tested, same_day=same_day,
-            date_min=date_min, date_max=date_max)
+            date_min=date_min, date_max=date_max,
+            selected_building=active_building_label)
 
         def emit_cover():
             # ------------------------------------------------------------ cover
@@ -4621,6 +4711,8 @@ class NDTReportService:
 
             p_type_val = getattr(project, 'project_type', None) or 'Commercial'
             cov_name = cls._effective_project_name(project)
+            if active_building_label:
+                cov_name = f"{cov_name} — {active_building_label.upper()}"
             builder.cover(serial, cov_name,
                           ', '.join(site_parts), effective_client,
                           _cover_date(date_max),
@@ -4667,7 +4759,10 @@ class NDTReportService:
             # ------------------------------- EXECUTIVE SUMMARY (p3, un-TOC'd, C1)
             builder.record_section('executive_summary', 'Executive Summary')
             builder.heading('EXECUTIVE SUMMARY', page_break=False, underline=True)
-            if element_scope_note:
+            if active_building_label:
+                bld_scope_note = f"Report Scope: This statutory NDT investigation report is scoped exclusively to {active_building_label} ({len(element_data)} tested structural element{'s' if len(element_data) != 1 else ''})."
+                builder.para(f'**{bld_scope_note}**', markdown=True)
+            elif element_scope_note:
                 # The one thing that decides which measurements the whole
                 # document describes prints first, so a scoped report can
                 # never be mistaken for a report that lost its sections.
