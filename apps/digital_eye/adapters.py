@@ -1522,17 +1522,27 @@ class PUNDITAdapter:
         if batch is not None:
             attendance_qs = attendance_qs.filter(Q(batch=batch) | Q(batch__isnull=True))
         site_witnesses = list(attendance_qs[:25])
+        class _WitnessRecord:
+            def __init__(self, name, organization, role, signed_off):
+                self.attendee_name = name
+                self.organization = organization
+                self.role = role
+                self.signed_off = signed_off
+
+            def get_role_display(self):
+                return self.role or ''
+
         if not site_witnesses:
             try:
                 from apps.reports.ndt_reports import NDTReportService
                 att_records = NDTReportService._get_project_attendance_records(project)
                 for a in att_records:
-                    site_witnesses.append(type('WitnessRecord', (), {
-                        'attendee_name': a['name'],
-                        'organization': a['organization'],
-                        'get_role_display': lambda self=a: self['role'],
-                        'signed_off': a.get('signed_off', True),
-                    })())
+                    site_witnesses.append(_WitnessRecord(
+                        name=a.get('name') or '',
+                        organization=a.get('organization') or '',
+                        role=a.get('role') or '',
+                        signed_off=a.get('signed_off', True),
+                    ))
             except Exception:
                 pass
 
@@ -1643,10 +1653,10 @@ class PUNDITAdapter:
             ],
             'site_witnesses': [
                 {
-                    'name': att.attendee_name,
-                    'organization': att.organization,
-                    'role': att.get_role_display(),
-                    'signed_off': att.signed_off,
+                    'name': getattr(att, 'attendee_name', '') or getattr(att, 'name', ''),
+                    'organization': getattr(att, 'organization', ''),
+                    'role': (att.get_role_display() if hasattr(att, 'get_role_display') and callable(att.get_role_display) else getattr(att, 'role', '')) or '',
+                    'signed_off': getattr(att, 'signed_off', True),
                 }
                 for att in site_witnesses
             ],
