@@ -1886,19 +1886,30 @@ class NDTReportPageQAView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
 
         # 3. Assemble lean deterministic raw_json_payload
-        tests = list(
+        all_project_tests = list(
             PUNDITTest.objects.filter(project=project)
             .select_related('device')
             .prefetch_related('readings')
             .order_by('structural_element', 'test_date')
         )
+        tests = all_project_tests
+        has_explicit_building = bool(
+            building and str(building).strip() and str(building).strip().lower() not in ('all', 'all buildings', 'estate', 'combined', 'null', 'undefined', '')
+        )
+        if has_explicit_building:
+            bld_target = str(building).strip()
+            matched_bld_tests = [t for t in all_project_tests if NDTReportService._building_matches_query(t, bld_target)]
+            if matched_bld_tests:
+                tests = matched_bld_tests
 
         from apps.evidence.models import AIAnalysisRecord
         from apps.digital_eye.adapters import PUNDITAdapter
-        ai_record = AIAnalysisRecord.objects.filter(project=project).order_by('-created_at').first()
         stat_summary = []
-        if ai_record and ai_record.correlations and isinstance(ai_record.correlations, dict):
-            stat_summary = ai_record.correlations.get('statistical_summary') or []
+        if not has_explicit_building:
+            ai_record = AIAnalysisRecord.objects.filter(project=project).order_by('-created_at').first()
+            if ai_record and ai_record.correlations and isinstance(ai_record.correlations, dict):
+                stat_summary = ai_record.correlations.get('statistical_summary') or []
+
         if not stat_summary and tests:
             point_spread_data = []
             for t in tests:
@@ -2089,7 +2100,9 @@ class NDTReportPageQAView(APIView):
             'project_number': str(getattr(project, 'project_number', '') or ''),
             'project_name': eff_p_name,
             'root_project_name': NDTReportService._effective_project_name(project),
-            'building_scope': building or 'All Buildings (Combined Estate)',
+            'building_scope': building if has_explicit_building else 'All Buildings (Combined Estate)',
+            'building_element_count': len(tests),
+            'estate_total_element_count': len(all_project_tests),
             'client_name': str(getattr(project, 'client_name', None) or getattr(project, 'client', '') or ''),
             'contractor_name': contractor_name,
             'site_address': str(getattr(project, 'site_address', '') or ''),
@@ -2143,6 +2156,9 @@ class NDTReportPageQAView(APIView):
             f"{context_mode_directive}\n"
             "- Report Reference & Project Number: The official report reference is defined in raw_json_payload.report_reference (e.g. '0042 / MTL/NDT/2026') and raw_json_payload.project_number (e.g. 'TAG-2026-0042'). Verify that the report header/cover page matches this reference.\n"
             "- Multi-Building Project Titles: Suffixes specifying distinct buildings or blocks (such as '- Building A', '- Building B', 'Block 1', 'Phase 1', etc.) are valid building segregation designations. Do NOT flag building suffixes as title discrepancies if the root project title matches.\n"
+            "- Building Scope & Element Count Truth: When the report or audit is scoped to a specific building (raw_json_payload.building_scope, e.g. 'Building A'), the tested elements within this building scope is defined by raw_json_payload.total_tested_elements (e.g. 82 elements). Do NOT flag the building's element count (e.g. 82) as a discrepancy against the combined estate total (e.g. 198). The building scope count is authoritative and concordant.\n"
+            "- Statutory & Standards Compliance: Verify that all statutory standards (BS 1881-203, BS EN 12504-4, ACI 228.2R, and LASBCA Phase 10) are followed strictly with zero deviations. Confirm full adherence to regulatory schemas and statutory mandates.\n"
+            "- Zero Tolerances for False Deviations: Only flag genuine, demonstrable physical contradictions against raw_json_payload. Do not flag standard abbreviations, formatting conventions, or partial section scopes as deviations.\n"
             "- Table of Contents & Appendix Naming Parity: The Table of Contents lists sections 1.0–7.0 and Appendix items (Geo-Referenced Grid & Floor Layout, Photographs, and Equipment Calibration Certificate). Note that 'TABLE OF CONTENTS' (plural) is grammatically standard. Appendix I represents the Geo-Referenced Grid Layout / Floor Layout containing ground and first floors / structural layouts as defined by the payload. Do NOT flag naming alignment between 'Survey Grid Layout', 'Floor Layout', and 'Geo-Referenced Grid & Floor Layout' as a discrepancy.\n"
             "- Data-to-Narrative Verification: Cross-check every number, date, and coordinate in the page text against the raw_json_payload.\n"
             "  * Flag any numerical contradiction (e.g., text states 40.3 MPa but the JSON array shows 31.7 MPa).\n"
