@@ -800,6 +800,9 @@ class PUNDITTest(models.Model):
             from .models import CalibrationProfile
             if CalibrationProfile.objects.filter(project_id=self.project_id, is_active=True).exists():
                 return True
+            setting = getattr(self.project, 'curve_setting', None)
+            if setting is not None and not setting.prefer_measured_strength:
+                return True
         return False
 
     def element_correlated_strength_mpa(self):

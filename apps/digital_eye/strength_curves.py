@@ -282,13 +282,22 @@ def _builtin_default_params():
     }
 
 
-BUILTIN_CURVE_NAME = 'Laboratory fixed calibration (built-in)'
+BUILTIN_CURVE_NAME = 'Jones Equation (Classic Baseline — A=2.8, B=0.53)'
 
 
-def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_condition=None):
+def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_condition=None,
+                           velocity_correction_factor=None):
     """Snapshot of the built-in fallback curve (used when no DB curve is
     seeded yet — identical maths to the seeded default)."""
     p = _builtin_default_params()
+    v_factor = 1.00
+    if velocity_correction_factor is not None:
+        try:
+            v_factor = float(velocity_correction_factor)
+        except (ValueError, TypeError):
+            v_factor = 1.00
+    m_factor = v_factor if v_factor != 1.00 else moisture_correction_factor(moisture_condition)
+
     return {
         'curve_id': None,
         'name': BUILTIN_CURVE_NAME,
@@ -299,11 +308,13 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_cond
         'valid_range_ms': p['valid_range_ms'],
         'r2_score': None,
         'standard_error': None,  # fixed curve: no regression, no error estimate
-        'provenance_source': 'Laboratory default exponential calibration curve (documented in report section 3.0)',
+        'provenance_source': 'Baseline Jones Equation (1962) exponential calibration curve (documented in report section 3.0)',
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
         'moisture_condition': moisture_condition or 'dry',
-        'moisture_correction_applied': moisture_correction_applied(moisture_condition),
-        'moisture_factor': moisture_correction_factor(moisture_condition),
+        'moisture_correction_applied': m_factor != 1.00,
+        'moisture_factor': m_factor,
+        'velocity_correction_factor': v_factor,
+        'velocity_correction_applied': v_factor != 1.00,
         'se_adjustment': None,
     }
 
@@ -410,11 +421,14 @@ def recognize_model_factors(a, b, c=0.0):
 
 
 def seed_default_exponential_models():
-    """Ensure Standard Mix, Jones Equation, and Aggregate Mix curves exist in the platform library."""
+    """Ensure Jones Equation, Standard Mix, and Aggregate Mix curves exist in the platform library.
+    Per executive engineering review, Jones Equation (1962) is the baseline default model."""
     from .models import StrengthCurve
     created_or_updated = []
+    # Clear is_default from existing curves before applying Jones Equation default
+    StrengthCurve.objects.filter(is_default=True).update(is_default=False)
     for key, model_def in DEFAULT_EXPONENTIAL_MODELS.items():
-        is_default = (key == 'standard_mix')
+        is_default = (key == 'jones_equation')
         curve, _ = StrengthCurve.objects.update_or_create(
             name=model_def['name'],
             project=None,
@@ -470,10 +484,21 @@ MOISTURE_FACTORS = {
 
 
 def moisture_correction_factor(moisture_condition):
-    """Multiplicative factor for moisture condition: Dry=1.00, Damp=1.03, Saturated=1.05."""
+    """Multiplicative factor for moisture condition: Dry=1.00, Damp=1.03, Saturated=1.05.
+    Also accepts numeric float / user-selectable factors (e.g. 1.00, 1.01, 1.015, 1.02, 1.03, 1.05)."""
     if not moisture_condition:
         return 1.00
+    if isinstance(moisture_condition, (int, float)):
+        val = float(moisture_condition)
+        if 0.90 <= val <= 1.15:
+            return val
     norm = str(moisture_condition).lower().strip()
+    try:
+        val = float(norm)
+        if 0.90 <= val <= 1.15:
+            return val
+    except ValueError:
+        pass
     return MOISTURE_FACTORS.get(norm, 1.00)
 
 
@@ -497,18 +522,33 @@ def apply_curve_params(curve_type, params, velocity_km_s,
     """
     if velocity_km_s is None or velocity_km_s <= 0:
         return None
+
+    # Check for environmental/moisture velocity correction factor (clamped 0.90 - 1.15)
+    v_factor = 1.00
+    if isinstance(params, dict):
+        raw_factor = params.get('velocity_correction_factor') or params.get('moisture_factor')
+        if raw_factor is not None:
+            try:
+                rf = float(raw_factor)
+                if 0.90 <= rf <= 1.15:
+                    v_factor = rf
+            except (ValueError, TypeError):
+                pass
+
+    eff_velocity_km_s = velocity_km_s * v_factor if v_factor != 1.00 else velocity_km_s
+
     if valid_range_ms is not None:
         lo, hi = valid_range_ms
-        v_ms = velocity_km_s * 1000.0
+        v_ms = eff_velocity_km_s * 1000.0
         if not (lo <= v_ms <= hi):
             return None
     try:
         if curve_type == 'linear':
             m = params.get('m', params.get('a', 8.961))
             c = params.get('c', params.get('b', -7.97))
-            v_ms = velocity_km_s * 1000.0
+            v_ms = eff_velocity_km_s * 1000.0
             if abs(m) > 1.0:
-                value = m * velocity_km_s + c
+                value = m * eff_velocity_km_s + c
             else:
                 value = m * v_ms + c
         elif curve_type == 'polynomial':
@@ -517,17 +557,18 @@ def apply_curve_params(curve_type, params, velocity_km_s,
                 coeffs = [params['a'], params['b'], params['c']]
             if not coeffs:
                 return None
-            v_ms = velocity_km_s * 1000.0
+            v_ms = eff_velocity_km_s * 1000.0
             if len(coeffs) >= 3 and abs(float(coeffs[2])) > 1e-4:
-                v_use = velocity_km_s
+                v_use = eff_velocity_km_s
             else:
                 v_use = v_ms
             value = sum(float(co) * (v_use ** i) for i, co in enumerate(coeffs))
         elif curve_type == 'exponential':
-            a = params.get('a', 1.20)
-            b = params.get('b', 0.85)
+            # Default to Jones equation baseline (A=2.80, B=0.53) if params not explicit
+            a = params.get('a', 2.80)
+            b = params.get('b', 0.53)
             c = params.get('c', 0.0) or 0.0
-            exp_arg = b * (velocity_km_s * 1000.0) if abs(b) < 0.01 else b * velocity_km_s
+            exp_arg = b * (eff_velocity_km_s * 1000.0) if abs(b) < 0.01 else b * eff_velocity_km_s
             value = a * math.exp(exp_arg) + c
         elif curve_type == 'sonreb':
             # SonReb needs both non-destructive readings. Without a rebound
@@ -877,7 +918,13 @@ def resolve_active_curve(project):
                 return curve
 
     from .models import StrengthCurve
-    return StrengthCurve.objects.filter(is_default=True).first()
+    def_curve = StrengthCurve.objects.filter(is_default=True, project=None).first()
+    if def_curve and 'jones' in def_curve.name.lower():
+        return def_curve
+    jones = StrengthCurve.objects.filter(name__icontains='jones', project=None).first()
+    if jones:
+        return jones
+    return def_curve or StrengthCurve.objects.filter(is_default=True).first()
 
 
 # The documented laboratory coefficients, applied when a project has NO
@@ -901,7 +948,7 @@ def resolve_active_curve(project):
 # therefore answered with the documented exponential, and the substitution is
 # reported in the snapshot's provenance rather than hidden.
 DOCUMENTED_DEFAULT_PARAMS = {
-    'exponential': {'a': 1.20, 'b': 0.85, 'c': 0.0},
+    'exponential': {'a': 2.80, 'b': 0.53, 'c': 0.0},
     'linear': {'m': 8.961, 'c': -7.97},
 }
 
@@ -987,12 +1034,27 @@ def resolve_analysis_curve(project, requested_type=None, requested_params=None,
         'documented_default', False
 
 
-def curve_snapshot(curve, temperature_c=None, moisture_condition=None):
+def curve_snapshot(curve, temperature_c=None, moisture_condition=None, velocity_correction_factor=None):
     """JSON snapshot of the curve that produced a strength value — the
     formula provenance stored on every reading/test (client spec §B.1
     formula_snapshot_json)."""
     if curve is None:
-        return builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition)
+        return builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition,
+                                      velocity_correction_factor=velocity_correction_factor)
+    v_factor = 1.00
+    if velocity_correction_factor is not None:
+        try:
+            v_factor = float(velocity_correction_factor)
+        except (ValueError, TypeError):
+            v_factor = 1.00
+    elif getattr(curve, 'formula_params', None) and isinstance(curve.formula_params, dict):
+        try:
+            v_factor = float(curve.formula_params.get('velocity_correction_factor', 1.00))
+        except (ValueError, TypeError):
+            v_factor = 1.00
+
+    m_factor = v_factor if v_factor != 1.00 else moisture_correction_factor(moisture_condition)
+
     return {
         'curve_id': str(curve.id),
         'name': curve.name,
@@ -1006,8 +1068,10 @@ def curve_snapshot(curve, temperature_c=None, moisture_condition=None):
         'provenance_source': (curve.provenance or {}).get('source'),
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
         'moisture_condition': moisture_condition or 'dry',
-        'moisture_correction_applied': moisture_correction_applied(moisture_condition),
-        'moisture_factor': moisture_correction_factor(moisture_condition),
+        'moisture_correction_applied': m_factor != 1.00,
+        'moisture_factor': m_factor,
+        'velocity_correction_factor': v_factor,
+        'velocity_correction_applied': v_factor != 1.00,
         'se_adjustment': None,
     }
 
@@ -1096,7 +1160,8 @@ def apply_se_adjustment_at_velocity(velocity_km_s, curve, n_points=None,
 
 
 def apply_active_curve(project, velocity_km_s, rebound_number=None,
-                       temperature_c=None, moisture_condition=None, n_points=None):
+                       temperature_c=None, moisture_condition=None, n_points=None,
+                       velocity_correction_factor=None):
     """
     THE f_cu path: resolve the project's active curve, temperature-correct
     and moisture-correct the velocity (BS 1881-203 / ACI 228.2R band),
@@ -1106,10 +1171,28 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
 
     corrected_v = temperature_corrected_velocity_km_s(velocity_km_s, temperature_c)
     m_factor = moisture_correction_factor(moisture_condition)
+    if velocity_correction_factor is not None:
+        try:
+            vf = float(velocity_correction_factor)
+            if 0.90 <= vf <= 1.15:
+                m_factor = vf
+        except (ValueError, TypeError):
+            pass
+
+    curve = resolve_active_curve(project)
+    if curve and getattr(curve, 'formula_params', None) and isinstance(curve.formula_params, dict):
+        saved_vf = curve.formula_params.get('velocity_correction_factor')
+        if saved_vf and velocity_correction_factor is None:
+            try:
+                vf = float(saved_vf)
+                if 0.90 <= vf <= 1.15 and vf != 1.00:
+                    m_factor = vf
+            except (ValueError, TypeError):
+                pass
+
     if corrected_v is not None and m_factor != 1.0:
         corrected_v = corrected_v * m_factor
 
-    curve = resolve_active_curve(project)
     if curve is None:
         p = _builtin_default_params()
         strength = apply_curve_params(
@@ -1118,7 +1201,8 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
             valid_range_ms=p['valid_range_ms'])
         # The built-in laboratory curve carries no regression, so there is
         # no standard error to adjust by — disclosed, never assumed away.
-        snapshot = builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition)
+        snapshot = builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition,
+                                          velocity_correction_factor=m_factor)
         adjusted, disclosure = apply_se_adjustment(strength, None,
                                                    n_points=n_points)
         snapshot['se_adjustment'] = disclosure
@@ -1131,7 +1215,8 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
     # velocity, so the strength is not computed here first.
     adjusted, disclosure = apply_se_adjustment_at_velocity(
         corrected_v, curve, n_points=n_points, rebound_number=rebound_number)
-    snapshot = curve_snapshot(curve, temperature_c=temperature_c, moisture_condition=moisture_condition)
+    snapshot = curve_snapshot(curve, temperature_c=temperature_c, moisture_condition=moisture_condition,
+                              velocity_correction_factor=m_factor)
     snapshot['se_adjustment'] = disclosure
     return adjusted, snapshot
 

@@ -1911,19 +1911,21 @@ class PUNDITAdapter:
                 successful_provs.append('deterministic_acoustics')
 
             prov_names = [p.capitalize() for p in successful_provs if p != 'deterministic_acoustics']
-            if not prov_names:
-                prov_names = ['DeepSeek', 'Inversion']
-            provider = "DeepSeek Active Engine"
-
-            model_names = data.get('models_used') or []
-            if not model_names:
-                model_names = ['deepseek-reasoner', 'BS 1881-203 Inversion']
-            model_version = f"DeepSeek R1 / V3 Consensus ({', '.join(model_names[:2])})"
-            if len(model_version) > 95:
-                model_version = model_version[:92] + "..."
-            ensemble_active = True
-
-            steps.append("[ENSEMBLE] Multi-Model Consensus active: dispatched parallel inference across analytical engines.")
+            if prov_names:
+                provider = f"{', '.join(prov_names[:2])} Active Engine"
+                model_names = data.get('models_used') or []
+                if not model_names:
+                    model_names = [f"{p.lower()}-model" for p in prov_names]
+                model_version = f"Consensus ({', '.join(model_names[:2])})"
+                if len(model_version) > 95:
+                    model_version = model_version[:92] + "..."
+                ensemble_active = True
+                steps.append("[ENSEMBLE] Multi-Model Consensus active: dispatched parallel inference across analytical engines.")
+            else:
+                provider = "deterministic"
+                model_version = "BS 1881-203 / ASTM C597 v1"
+                ensemble_active = False
+                observations = deterministic_observations
             if peer_review and (getattr(peer_review, 'inspector_notes', None) or getattr(peer_review, 'inspector_verdict', None)):
                 insp_name = (peer_review.inspector_responded_by.get_full_name() or peer_review.inspector_responded_by.email
                              if peer_review.inspector_responded_by else 'Field Inspector')

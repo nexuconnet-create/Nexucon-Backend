@@ -579,6 +579,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             ('structural_element', 'structural_element'),
             ('device', 'device_id'),
             ('project', 'project_id'),
+            ('batch', 'batch_id'),
         ):
             value = self.request.query_params.get(param)
             if value:
@@ -804,6 +805,15 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             calibration=calibration,
         )
 
+        v_factor = request.data.get('velocity_correction_factor') or (request.data.get('params') or {}).get('velocity_correction_factor')
+        if v_factor is not None:
+            try:
+                vf = float(v_factor)
+                if 0.90 <= vf <= 1.15:
+                    params['velocity_correction_factor'] = vf
+            except (ValueError, TypeError):
+                pass
+
         design_strength_mpa = request.data.get('design_strength_mpa') or (
             calibration.design_strength_mpa if calibration else 25.0
         )
@@ -813,6 +823,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'params': params,
             'design_strength_mpa': float(design_strength_mpa),
             'calibration_id': str(calibration.id) if calibration else None,
+            'velocity_correction_factor': params.get('velocity_correction_factor', 1.00),
         }
 
         # Point the project at the curve this run used — but only write to the
@@ -918,7 +929,8 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                 defaults={
                     'element_count': len(tests),
                     'status': 'ANALYSIS_COMPLETE',
-                    'created_by': request.user if request.user.is_authenticated else None,
+                    'inspector': request.user if request.user.is_authenticated else None,
+                    'inspector_name': request.user.get_full_name() or request.user.email if request.user.is_authenticated else 'Government Lead',
                 }
             )
             PUNDITTest.objects.filter(project=project, batch__isnull=True).update(batch=batch)
@@ -3441,6 +3453,15 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
             from .strength_curves import resolve_analysis_curve
             _, params, _, _ = resolve_analysis_curve(
                 project, requested_type=curve_type)
+
+        v_factor = request.data.get('velocity_correction_factor') or (params or {}).get('velocity_correction_factor')
+        if v_factor is not None and isinstance(params, dict):
+            try:
+                vf = float(v_factor)
+                if 0.90 <= vf <= 1.15:
+                    params['velocity_correction_factor'] = vf
+            except (ValueError, TypeError):
+                pass
 
         design_strength_mpa = float(request.data.get('design_strength_mpa', 25.0))
         cube_points = request.data.get('cube_correlation_points') or request.data.get('cube_correlation_data', [])

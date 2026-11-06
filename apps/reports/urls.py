@@ -5,7 +5,7 @@ from .views import (
     ArchivedReportDownloadView, ArchivedReportListView,
     DownloadReportView, GenerateReportView, InspectionReportView,
     NCRReportView, NDTReportPreviewSectionsView, NDTReportPreviewView,
-    NDTReportPageQAView,
+    NDTReportPageQAView, NDTReportApplyAmendmentView,
     NDTReportView, NDTWordExportView, NDTOperatorsListView,
     NDTBuildingsListView,
     ProjectIntelligenceReportView, QualityReportListView,
@@ -76,6 +76,9 @@ urlpatterns = router.urls + [
     path('reports/projects/<uuid:project_id>/ndt-report-qa/',
          NDTReportPageQAView.as_view(),
          name='project-ndt-report-qa'),
+    path('reports/projects/<uuid:project_id>/ndt-report-qa/apply-amendment/',
+         NDTReportApplyAmendmentView.as_view(),
+         name='project-ndt-report-qa-apply-amendment'),
     path('reports/projects/<uuid:project_id>/branding/',
          ReportBrandingView.as_view(), name='project-report-branding'),
     # Approving-engineer COREN credentials on the sign-off (C11, 4 Sep).

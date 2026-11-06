@@ -351,22 +351,22 @@ def example_rows(sample_elements=None):
         # Format illustration only — this sheet is never imported. Pulse
         # velocity: consecutive rows -> ONE test with points A, B, C.
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'A', 120, 30.1, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny',
+         25, 'Direct', 'Grid B/4', 'Sunny', None,
          'EXAMPLE ONLY — copy the shape into READINGS, not the numbers'],
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'B', 120, 29.8, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny', None],
+         25, 'Direct', 'Grid B/4', 'Sunny', None, None],
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'C', 120, 30.3, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny', None],
+         25, 'Direct', 'Grid B/4', 'Sunny', None, None],
         # Crack depth: both the cracked AND uncracked transit times.
         [crack_name, 'First Floor', 'Crack Depth', 'A', 200, 52.1, 50.1, None,
-         25, 'Direct', 'Grid D/2', 'Sunny', 'Hairline crack mid-span'],
+         25, 'Direct', 'Grid D/2', 'Sunny', None, 'Hairline crack mid-span'],
         [crack_name, 'First Floor', 'Crack Depth', 'B', 200, 53.0, 50.2, None,
-         25, 'Direct', 'Grid D/2', 'Sunny', None],
+         25, 'Direct', 'Grid D/2', 'Sunny', None, None],
         # Surface quality: written condition instead of times.
         [surface_name, 'Ground Floor', 'Surface Quality', 'A', None, None, None,
-         'Smooth, no honeycombing', None, None, 'East elevation', 'Sunny', None],
+         'Smooth, no honeycombing', None, None, 'East elevation', 'Sunny', None, None],
         [surface_name, 'Ground Floor', 'Surface Quality', 'B', None, None, None,
-         'Minor voids near base', None, None, 'East elevation', 'Sunny', None],
+         'Minor voids near base', None, None, 'East elevation', 'Sunny', None, None],
     ]
 
 

@@ -78,14 +78,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
         # have visibility into the initial regulatory mock projects during the testing period.
         user = getattr(self.request, 'user', None)
         if user and user.is_authenticated:
-            # Multi-district data access control: separate divisions/districts cannot
-            # view unauthorized project files; only the overall director (or State HQ / superuser)
-            # has full cross-district project visibility.
-            from common.permissions import scoped_projects, user_is_state_hq, user_is_agency_head
-            if not (user.is_superuser or user_is_state_hq(user) or user_is_agency_head(user)):
-                scoped_ids = scoped_projects(user).values_list('id', flat=True)
-                queryset = queryset.filter(id__in=scoped_ids)
-
             user_email = (user.email or '').strip().lower()
             is_siteiq = (user_email == 'siteiq@nexucon.net')
             has_gov = hasattr(user, 'government_profile') and user.government_profile
@@ -114,6 +106,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
         qs = scoped_projects(user)
         if not user.is_superuser and not (hasattr(user, 'government_profile') and user.government_profile):
             qs = (qs | self.get_queryset()).distinct()
+        # Exclude draft, suspended, and cold-stored projects from assignment
+        qs = qs.filter(cold_storage=False).exclude(status__in=['DRAFT', 'SUSPENDED'])
         queryset = qs.order_by('name')
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
@@ -241,7 +235,33 @@ class ProjectViewSet(viewsets.ModelViewSet):
                         "is_current_user": False
                     })
 
-        return Response(results, status=status.HTTP_200_OK)
+    @action(detail=False, methods=['get'], url_path='latest-tag-number', permission_classes=[IsAuthenticated])
+    def latest_tag_number(self, request):
+        """
+        Returns the last issued sequential project tag reference and the next
+        available tag number (TAG-YYYY-NNNN) to guide agency head verification
+        and project registration per Nov 4 executive review.
+        """
+        import datetime
+        import re
+        from .models import generate_sequential_project_number
+        year = datetime.datetime.now().year
+        prefix = f"TAG-{year}-"
+        highest = 0
+        existing_tags = Project.objects.filter(project_number__startswith=prefix).values_list('project_number', flat=True)
+        for tag in existing_tags:
+            match = re.search(r'TAG-\d+-(\d+)', tag)
+            if match:
+                val = int(match.group(1))
+                if val > highest:
+                    highest = val
+        last_tag = f"{prefix}{highest:04d}" if highest > 0 else None
+        next_tag = generate_sequential_project_number()
+        return Response({
+            'year': year,
+            'last_project_number': last_tag or 'None registered yet for this year',
+            'next_project_number': next_tag,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], url_path='convert-coordinates', permission_classes=[AllowAny])
     def convert_coordinates(self, request):
