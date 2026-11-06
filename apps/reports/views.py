@@ -313,6 +313,45 @@ class ProjectIntelligenceReportView(APIView):
         return _pdf_response(pdf_bytes, f'intelligence_report_{project_id}.pdf')
 
 
+class ProjectAiDossierPdfView(APIView):
+    """
+    GET /api/v1/reports/projects/{project_id}/ai-dossier/
+    Streams the latest AI-Generated Acoustic Tomography & Inversion Dossier PDF for this project.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from apps.projects.models import Project
+        from apps.evidence.models import AIAnalysisRecord
+        from apps.digital_eye.models import PunditAnalysisReview
+        from .ai_reports import AIReportService
+
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            if request.user.is_superuser:
+                project = Project.objects.filter(pk=project_id).first()
+            if not project:
+                return Response({'detail': 'Project not found in your scope.'},
+                                status=status.HTTP_404_NOT_FOUND)
+
+        analysis = (AIAnalysisRecord.objects.filter(project=project, analysis_type='pundit')
+                    .order_by('-created_at').first())
+        if not analysis:
+            return Response({'detail': 'No PUNDIT AI analysis found for this project.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        review = PunditAnalysisReview.objects.filter(analysis=analysis).first()
+        try:
+            pdf_bytes = AIReportService.generate_pundit_ai_dossier_pdf(analysis, review, request.user)
+        except Exception as exc:
+            logger.exception('AI dossier generation failed')
+            return Response({'detail': f'AI dossier generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        safe_name = project.name.replace(' ', '_')[:30]
+        return _pdf_response(pdf_bytes, f'pundit_ai_dossier_{safe_name}.pdf')
+
+
 class InspectionReportView(APIView):
     """
     GET /api/v1/reports/inspections/{inspection_id}/report/

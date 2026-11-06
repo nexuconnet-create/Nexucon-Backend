@@ -3255,6 +3255,41 @@ class PunditAnalysisChatView(APIView):
             return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class PunditAnalysisPdfView(APIView):
+    """
+    GET /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/pdf/
+    Renders and streams the official AI-Generated Acoustic Tomography & Inversion Dossier PDF.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, analysis_id):
+        from apps.evidence.models import AIAnalysisRecord
+        from apps.digital_eye.models import PunditAnalysisReview
+        from apps.reports.ai_reports import AIReportService
+        from apps.reports.views import _pdf_response
+
+        allowed = scoped_projects(request.user)
+        analysis = (AIAnalysisRecord.objects.filter(project__in=allowed)
+                    .filter(pk=analysis_id).first())
+        if not analysis:
+            if request.user.is_superuser:
+                analysis = AIAnalysisRecord.objects.filter(pk=analysis_id).first()
+            if not analysis:
+                return Response({'detail': 'Analysis not found in your scope.'},
+                                status=status.HTTP_404_NOT_FOUND)
+
+        review = PunditAnalysisReview.objects.filter(analysis=analysis).first()
+        try:
+            pdf_bytes = AIReportService.generate_pundit_ai_dossier_pdf(analysis, review, request.user)
+        except Exception as exc:
+            logger.exception('PUNDIT AI dossier PDF generation failed')
+            return Response({'detail': f'PDF generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        filename = f"pundit_ai_dossier_{analysis.id.hex[:8]}.pdf"
+        return _pdf_response(pdf_bytes, filename)
+
+
 class PunditAnalysisCommentView(APIView):
     """
     GET  /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/comments/

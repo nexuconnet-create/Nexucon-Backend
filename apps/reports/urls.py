@@ -8,7 +8,7 @@ from .views import (
     NDTReportPageQAView, NDTReportApplyAmendmentView,
     NDTReportView, NDTWordExportView, NDTOperatorsListView,
     NDTBuildingsListView,
-    ProjectIntelligenceReportView, QualityReportListView,
+    ProjectIntelligenceReportView, ProjectAiDossierPdfView, QualityReportListView,
     ReportBrandingView, ReportCMSPasswordView, ReportCMSSectionView,
     ReportCMSSectionsView, ReportMapView, ReportSignOffView,
     ReportStructureCustomView, ReportStructureReorderView,
@@ -31,6 +31,8 @@ urlpatterns = router.urls + [
     # AI Report Generator (plan §5 Weeks 5–6)
     path('reports/projects/<uuid:project_id>/intelligence-report/',
          ProjectIntelligenceReportView.as_view(), name='project-intelligence-report'),
+    path('reports/projects/<uuid:project_id>/ai-dossier/',
+         ProjectAiDossierPdfView.as_view(), name='project-ai-dossier'),
     path('reports/projects/<uuid:project_id>/ndt-report/',
          NDTReportView.as_view(), name='project-ndt-report'),
     path('reports/projects/<uuid:project_id>/ndt-operators/',
