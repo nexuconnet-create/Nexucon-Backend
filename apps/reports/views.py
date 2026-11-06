@@ -1728,6 +1728,10 @@ class NDTReportPageQAView(APIView):
                             status=status.HTTP_404_NOT_FOUND)
 
         full_document = bool(request.data.get('full_document', False))
+        section_key = request.data.get('section_key')
+        section_label = request.data.get('section_label')
+        start_page_val = request.data.get('start_page')
+        end_page_val = request.data.get('end_page')
         page_number = int(request.data.get('page_number', 1))
         user_query = str(request.data.get('user_query', '')).strip()
         model_choice = str(request.data.get('model_provider', 'anthropic')).strip().lower()
@@ -1747,18 +1751,69 @@ class NDTReportPageQAView(APIView):
             return Response({'detail': f'Report render failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # 2. Extract page text (supports active single page or entire document)
+        sections = bundle.get('sections', []) if isinstance(bundle, dict) else []
+        is_section = bool(not full_document and (section_key or (start_page_val is not None and end_page_val is not None)))
+        start_page = int(start_page_val) if start_page_val is not None else None
+        end_page = int(end_page_val) if end_page_val is not None else None
+
+        if is_section and sections:
+            sorted_secs = sorted(sections, key=lambda x: x.get('page', 1))
+            if section_key:
+                sk_clean = str(section_key).strip().lower()
+                for idx, s in enumerate(sorted_secs):
+                    if (str(s.get('key', '')).strip().lower() == sk_clean
+                            or str(s.get('label', '')).strip().lower() == sk_clean):
+                        if start_page is None:
+                            start_page = s.get('page', 1)
+                        if end_page is None:
+                            if idx < len(sorted_secs) - 1:
+                                end_page = max(start_page, sorted_secs[idx + 1].get('page', 1) - 1)
+                            else:
+                                end_page = None  # will resolve after total_pages is known
+                        if not section_label:
+                            section_label = s.get('label')
+                        break
+            elif start_page is not None and not section_label:
+                for idx, s in enumerate(sorted_secs):
+                    if s.get('page', 1) == start_page:
+                        section_label = s.get('label')
+                        section_key = s.get('key')
+                        if end_page is None:
+                            if idx < len(sorted_secs) - 1:
+                                end_page = max(start_page, sorted_secs[idx + 1].get('page', 1) - 1)
+                            else:
+                                end_page = None
+                        break
+
+        # 2. Extract page text (supports active single page, target section range, or entire document)
         total_pages = 1
         active_page_text = ""
         try:
             import pypdf
             reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
             total_pages = len(reader.pages)
+            if is_section:
+                if start_page is None:
+                    start_page = max(1, min(page_number, total_pages))
+                if end_page is None or end_page < start_page:
+                    end_page = total_pages
+                start_page = max(1, min(start_page, total_pages))
+                end_page = max(start_page, min(end_page, total_pages))
+                page_number = start_page
+                if not section_label:
+                    section_label = f"Section (p.{start_page}–{end_page})"
+
             if full_document:
                 pages_list = []
                 for p_i in range(total_pages):
                     txt = (reader.pages[p_i].extract_text() or '').strip()
                     pages_list.append(f"=== PAGE {p_i + 1} OF {total_pages} ===\n{txt or '[GRAPHICAL EVIDENCE PLATE]'}")
+                active_page_text = "\n\n".join(pages_list)
+            elif is_section:
+                pages_list = []
+                for p_i in range(start_page - 1, end_page):
+                    txt = (reader.pages[p_i].extract_text() or '').strip()
+                    pages_list.append(f"=== PAGE {p_i + 1} OF {total_pages} ({section_label}) ===\n{txt or '[GRAPHICAL EVIDENCE PLATE]'}")
                 active_page_text = "\n\n".join(pages_list)
             elif 1 <= page_number <= total_pages:
                 active_page_text = reader.pages[page_number - 1].extract_text() or ''
@@ -1767,11 +1822,28 @@ class NDTReportPageQAView(APIView):
                 import PyPDF2
                 reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
                 total_pages = len(reader.pages)
+                if is_section:
+                    if start_page is None:
+                        start_page = max(1, min(page_number, total_pages))
+                    if end_page is None or end_page < start_page:
+                        end_page = total_pages
+                    start_page = max(1, min(start_page, total_pages))
+                    end_page = max(start_page, min(end_page, total_pages))
+                    page_number = start_page
+                    if not section_label:
+                        section_label = f"Section (p.{start_page}–{end_page})"
+
                 if full_document:
                     pages_list = []
                     for p_i in range(total_pages):
                         txt = (reader.pages[p_i].extract_text() or '').strip()
                         pages_list.append(f"=== PAGE {p_i + 1} OF {total_pages} ===\n{txt or '[GRAPHICAL EVIDENCE PLATE]'}")
+                    active_page_text = "\n\n".join(pages_list)
+                elif is_section:
+                    pages_list = []
+                    for p_i in range(start_page - 1, end_page):
+                        txt = (reader.pages[p_i].extract_text() or '').strip()
+                        pages_list.append(f"=== PAGE {p_i + 1} OF {total_pages} ({section_label}) ===\n{txt or '[GRAPHICAL EVIDENCE PLATE]'}")
                     active_page_text = "\n\n".join(pages_list)
                 elif 1 <= page_number <= total_pages:
                     active_page_text = reader.pages[page_number - 1].extract_text() or ''
@@ -1780,11 +1852,28 @@ class NDTReportPageQAView(APIView):
                     import fitz  # PyMuPDF
                     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                     total_pages = len(doc)
+                    if is_section:
+                        if start_page is None:
+                            start_page = max(1, min(page_number, total_pages))
+                        if end_page is None or end_page < start_page:
+                            end_page = total_pages
+                        start_page = max(1, min(start_page, total_pages))
+                        end_page = max(start_page, min(end_page, total_pages))
+                        page_number = start_page
+                        if not section_label:
+                            section_label = f"Section (p.{start_page}–{end_page})"
+
                     if full_document:
                         pages_list = []
                         for p_i in range(total_pages):
                             txt = (doc[p_i].get_text() or '').strip()
                             pages_list.append(f"=== PAGE {p_i + 1} OF {total_pages} ===\n{txt or '[GRAPHICAL EVIDENCE PLATE]'}")
+                        active_page_text = "\n\n".join(pages_list)
+                    elif is_section:
+                        pages_list = []
+                        for p_i in range(start_page - 1, end_page):
+                            txt = (doc[p_i].get_text() or '').strip()
+                            pages_list.append(f"=== PAGE {p_i + 1} OF {total_pages} ({section_label}) ===\n{txt or '[GRAPHICAL EVIDENCE PLATE]'}")
                         active_page_text = "\n\n".join(pages_list)
                     elif 1 <= page_number <= total_pages:
                         active_page_text = doc[page_number - 1].get_text() or ''
@@ -1792,7 +1881,7 @@ class NDTReportPageQAView(APIView):
                     return Response({'detail': 'No PDF parser installed (pypdf/fitz).'},
                                     status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        if not full_document and (page_number < 1 or page_number > total_pages):
+        if not full_document and not is_section and (page_number < 1 or page_number > total_pages):
             return Response({'detail': f'Page {page_number} is out of bounds (1..{total_pages}).'},
                             status=status.HTTP_400_BAD_REQUEST)
 
@@ -2022,6 +2111,16 @@ class NDTReportPageQAView(APIView):
                 "Appendices (Geo-referenced Grid & Floor Layout, Photographs, and Equipment Calibration Certificate). "
                 "Ensure that references, dates, coordinates, and calculated strengths are unified throughout."
             )
+        elif is_section:
+            range_str = f"Page {start_page}" if start_page == end_page else f"Pages {start_page}–{end_page}"
+            scope_prompt_line = f"Audit Scope: SECTION TARGET \"{section_label}\" ({range_str} of {total_pages})"
+            context_mode_directive = (
+                f"- Focused Section Target QA Scope: You are conducting a forensic engineering audit specifically for Section \"{section_label}\" "
+                f"spanning {range_str}. Evaluate all extracted page text across this section against the raw_json_payload and "
+                "relevant statutory engineering standards (BS 1881-203, BS EN 12504-4, ACI 228.2R, LASBCA Phase 10). "
+                "Verify internal consistency, numbers, station identifiers, dates, and nomenclature across all pages in this section. "
+                "If the user asks to fix an issue, output exact replacement text for this section."
+            )
         else:
             scope_prompt_line = f"Active Page Number: Page {page_number} of {total_pages} (Section: {active_sec_label})"
             context_mode_directive = (
@@ -2127,6 +2226,11 @@ class NDTReportPageQAView(APIView):
             'page_number': page_number,
             'total_pages': total_pages,
             'full_document': full_document,
+            'is_section': is_section,
+            'section_key': section_key,
+            'section_label': section_label,
+            'start_page': start_page if is_section else page_number,
+            'end_page': end_page if is_section else page_number,
             'provider_used': provider_used,
             'model_used': model_used,
             'verified': ai_res.get('verified', []),
