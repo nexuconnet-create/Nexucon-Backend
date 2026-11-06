@@ -35,7 +35,7 @@ def deploy():
         print("Upload complete.")
 
         print("Step 4/5: Extracting files into /opt/nexucon-backend...")
-        extract_cmd = f"tar -xzf {remote_archive} -C /opt/nexucon-backend && rm -f {remote_archive}"
+        extract_cmd = f"tar -xzf {remote_archive} -C /opt/nexucon-backend && rm -f {remote_archive} && find /opt/nexucon-backend -name '*.sh' -exec sed -i 's/\\r$//' {{}} + && chmod +x /opt/nexucon-backend/*.sh"
         stdin, stdout, stderr = client.exec_command(extract_cmd)
         exit_code = stdout.channel.recv_exit_status()
         if exit_code != 0:
@@ -48,6 +48,7 @@ def deploy():
             "cd /opt/nexucon-backend",
             "docker compose build web celery gateway",
             "docker compose up -d",
+            "sleep 5",
             "docker compose exec -T web python manage.py makemigrations",
             "docker compose exec -T web python manage.py migrate",
             "docker compose ps"
