@@ -227,54 +227,70 @@ class AIService:
         return getattr(settings, "GEMINI_MODEL", os.environ.get("GEMINI_MODEL", "gemini-flash-latest"))
 
     @staticmethod
-    def _get_anthropic_key():
-        # The Django setting first (which `config.settings.base` already fills
-        # from the environment, bare name preferred, at load time), then the
-        # NEXUCON_-namespaced variable. Never the bare name read live: that is
-        # what `_env` above exists to avoid.
-        return (
+    def _clean_key(val):
+        if not val:
+            return ""
+        return str(val).strip().strip('\'"')
+
+    @classmethod
+    def _get_anthropic_key(cls):
+        k = (
             getattr(settings, "ANTHROPIC_API_KEY", "")
             or AIService._env("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY", "")
         )
+        return cls._clean_key(k)
 
     @staticmethod
     def _get_anthropic_model():
-        # Claude Sonnet — advanced multi-modal vision and reasoning.
-        # Read at call time: can be overridden via `NEXUCON_ANTHROPIC_MODEL` in
-        # the environment, or `ANTHROPIC_MODEL` in .env (which the setting
-        # picks up at load time).
-        return (
+        m = (
             getattr(settings, "ANTHROPIC_MODEL", "")
-            or AIService._env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+            or AIService._env("ANTHROPIC_MODEL")
+            or os.environ.get("ANTHROPIC_MODEL", "")
         )
+        m = str(m).strip().strip('\'"') if m else ""
+        if not m or m in ("claude-sonnet-4-5", "claude-4-5", "default"):
+            return "claude-3-5-sonnet-20241022"
+        return m
 
     @staticmethod
     def _get_anthropic_base_url():
-        return (
+        u = (
             getattr(settings, "ANTHROPIC_BASE_URL", "")
-            or AIService._env("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+            or AIService._env("ANTHROPIC_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
         )
+        return str(u).strip().strip('\'"')
 
-    @staticmethod
-    def _get_deepseek_key():
-        return (
+    @classmethod
+    def _get_deepseek_key(cls):
+        k = (
             getattr(settings, "DEEPSEEK_API_KEY", "")
             or AIService._env("DEEPSEEK_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
         )
+        return cls._clean_key(k)
 
     @staticmethod
     def _get_deepseek_model():
-        return (
+        m = (
             getattr(settings, "DEEPSEEK_MODEL", "")
-            or AIService._env("DEEPSEEK_MODEL", "deepseek-flash")
+            or AIService._env("DEEPSEEK_MODEL")
+            or os.environ.get("DEEPSEEK_MODEL", "")
         )
+        m = str(m).strip().strip('\'"') if m else ""
+        if not m or m in ("deepseek-flash", "deepseek-v4-flash", "default"):
+            return "deepseek-chat"
+        return m
 
     @staticmethod
     def _get_deepseek_base_url():
-        return (
+        u = (
             getattr(settings, "DEEPSEEK_BASE_URL", "")
-            or AIService._env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+            or AIService._env("DEEPSEEK_BASE_URL")
+            or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
         )
+        return str(u).strip().strip('\'"')
 
     @staticmethod
     def _get_max_retries():
@@ -372,20 +388,30 @@ class AIService:
 
     @classmethod
     def _provider_order(cls, available, preferred=None):
-        """Deterministic provider order for one call.
+        """Deterministic provider order for one call with resilient fallback.
 
-        When a preferred provider is specified, it goes first. Otherwise,
-        the configured provider goes first, followed by AI_PROVIDER_ORDER
-        when set, else _CANONICAL_ORDER.
+        - If preferred is 'anthropic' / 'claude': Claude -> DeepSeek -> Gemini -> OpenAI
+        - If preferred is 'deepseek': DeepSeek -> Claude -> Gemini -> OpenAI
+        - If preferred is 'auto' (or not specified): Claude -> DeepSeek -> Gemini -> OpenAI
         """
+        pref_name = str(preferred).strip().lower() if preferred else ""
+        if pref_name in ("anthropic", "claude"):
+            base_order = ["anthropic", "deepseek", "gemini", "openai"]
+        elif pref_name == "deepseek":
+            base_order = ["deepseek", "anthropic", "gemini", "openai"]
+        elif pref_name == "auto":
+            base_order = ["anthropic", "deepseek", "gemini", "openai"]
+        else:
+            base_order = [cls._get_provider()] + list(_CANONICAL_ORDER)
+
         override = getattr(settings, "AI_PROVIDER_ORDER",
                            os.environ.get("AI_PROVIDER_ORDER", ""))
         if isinstance(override, str):
             override = [part.strip().lower() for part in override.split(",") if part.strip()]
         override = [str(part).strip().lower() for part in (override or [])]
 
-        pref_list = [str(preferred).strip().lower()] if preferred else []
-        candidates = pref_list + [cls._get_provider()] + override + list(_CANONICAL_ORDER)
+        pref_list = [pref_name] if pref_name and pref_name != "auto" else []
+        candidates = pref_list + base_order + override
         order = []
         for name in candidates:
             if name in order or name not in available:
@@ -640,13 +666,24 @@ class AIService:
             try:
                 logger.info("Sending request to DeepSeek (attempt %s/%s).", attempt + 1, max_retries + 1)
                 kwargs = {"model": model_name, "messages": messages}
-                if response_format:
+                if response_format and model_name == "deepseek-chat":
                     kwargs["response_format"] = {"type": "json_object"}
                 if max_tokens:
                     kwargs["max_tokens"] = max_tokens
 
                 response = client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content
+                if not response.choices:
+                    raise ValueError("DeepSeek returned no choices.")
+
+                msg = response.choices[0].message
+                content = getattr(msg, "content", None) or ""
+                # If content is empty but model reasoned (R1 / reasoner models)
+                if not content.strip() and hasattr(msg, "reasoning_content") and msg.reasoning_content:
+                    content = msg.reasoning_content
+
+                if not content.strip():
+                    raise ValueError("AI returned an empty response.")
+                return content
 
             except Exception as e:  # noqa: BLE001 — classified immediately below
                 if cls._is_deepseek_balance_exhausted(e):
@@ -668,7 +705,7 @@ class AIService:
                     continue
 
                 logger.error("DeepSeek request failed with error: %s", e)
-                raise AIServiceError("DeepSeek generation failed.") from e
+                raise AIServiceError(f"DeepSeek generation failed: {e}") from e
 
         raise AIServiceError("DeepSeek generation failed.")
 
@@ -1048,8 +1085,12 @@ class AIService:
     @classmethod
     def _run_text_deepseek(cls, prompt, max_tokens=None):
         client = cls._get_deepseek_client()
+        messages = [
+            {"role": "system", "content": "You are a professional engineering QA assistant. You must respond with a valid JSON object matching the requested schema."},
+            {"role": "user", "content": prompt}
+        ]
         raw = cls._generate_with_deepseek_retry(
-            client, [{"role": "user", "content": prompt}],
+            client, messages,
             response_format="json_object", max_tokens=max_tokens)
         return cls._parse_json_response(raw)
 
@@ -1456,6 +1497,28 @@ class AIService:
         if len(version_title) > 95:
             version_title = version_title[:92] + "..."
 
+        # For QA audits with verified / discrepancies / compliance_flags / narrative_feedback:
+        all_verified = []
+        all_discrepancies = []
+        all_compliance_flags = []
+        all_narratives = []
+
+        for prov, data in successful_results.items():
+            if isinstance(data, dict):
+                for v in data.get("verified", []):
+                    v_str = str(v).strip()
+                    if v_str and v_str not in all_verified:
+                        all_verified.append(v_str)
+                for d in data.get("discrepancies", []):
+                    if isinstance(d, dict) and d not in all_discrepancies:
+                        all_discrepancies.append(d)
+                for c in data.get("compliance_flags", []):
+                    c_str = str(c).strip()
+                    if c_str and c_str not in all_compliance_flags:
+                        all_compliance_flags.append(c_str)
+                if data.get("narrative_feedback"):
+                    all_narratives.append(f"[{prov.capitalize()} Findings]:\n{data['narrative_feedback']}")
+
         res_dict = {
             "observations": merged_observations,
             "successful_providers": list(successful_results.keys()),
@@ -1465,6 +1528,19 @@ class AIService:
             "version_label": version_title,
             "ensemble_active": len(successful_results) > 0,
         }
+        if all_verified:
+            res_dict["verified"] = all_verified
+        if all_discrepancies:
+            res_dict["discrepancies"] = all_discrepancies
+        elif "discrepancies" not in res_dict:
+            res_dict["discrepancies"] = []
+        if all_compliance_flags:
+            res_dict["compliance_flags"] = all_compliance_flags
+        elif "compliance_flags" not in res_dict:
+            res_dict["compliance_flags"] = []
+        if all_narratives:
+            res_dict["narrative_feedback"] = "\n\n".join(all_narratives)
+
         # Retain all top-level keys returned by any responding model
         for prov, data in successful_results.items():
             if isinstance(data, dict):
