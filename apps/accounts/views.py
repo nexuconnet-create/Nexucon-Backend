@@ -52,15 +52,15 @@ def send_username_update_email_to_user(user):
             portal_name = 'Stakeholder Portal'
     else:
         if any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
-            action_url = "https://inspector.nexucon.net/dashboard/profile?activate_username=true"
+            action_url = "https://inspector.nexucon.net/inspector/dashboard/profile?activate_username=true"
             settings_path = '/inspector/dashboard/profile?activate_username=true'
             portal_name = 'Inspector Terminal'
         elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
-            action_url = "https://government.nexucon.net/dashboard/settings/profile?activate_username=true"
+            action_url = "https://government.nexucon.net/government/dashboard/settings/profile?activate_username=true"
             settings_path = '/government/dashboard/settings/profile?activate_username=true'
             portal_name = 'Government Command Center'
         else:
-            action_url = "https://stakeholder.nexucon.net/profile?activate_username=true"
+            action_url = "https://stakeholder.nexucon.net/stakeholder/profile?activate_username=true"
             settings_path = '/stakeholder/profile?activate_username=true'
             portal_name = 'Stakeholder Portal'
 
