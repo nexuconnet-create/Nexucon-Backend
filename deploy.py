@@ -11,13 +11,16 @@ def deploy():
     archive_path = "deploy_archive.tar.gz"
     remote_archive = "/tmp/backend_deploy.tar.gz"
 
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    full_archive_path = os.path.join(backend_dir, archive_path)
+
     print("Step 1/5: Creating git archive from local 'main' branch...")
-    res = subprocess.run(["git", "archive", "--format=tar.gz", "-o", archive_path, "main"], capture_output=True, text=True)
+    res = subprocess.run(["git", "archive", "--format=tar.gz", "-o", full_archive_path, "main"], cwd=backend_dir, capture_output=True, text=True)
     if res.returncode != 0:
         print(f"Failed to create git archive: {res.stderr}")
         return
 
-    archive_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
+    archive_size_mb = os.path.getsize(full_archive_path) / (1024 * 1024)
     print(f"Archive created ({archive_size_mb:.2f} MB).")
 
     client = paramiko.SSHClient()
@@ -30,7 +33,7 @@ def deploy():
 
         print("Step 3/5: Uploading archive to VPS via SFTP...")
         sftp = client.open_sftp()
-        sftp.put(archive_path, remote_archive)
+        sftp.put(full_archive_path, remote_archive)
         sftp.close()
         print("Upload complete.")
 
@@ -67,8 +70,8 @@ def deploy():
         print(f"Error during deployment: {e}")
     finally:
         client.close()
-        if os.path.exists(archive_path):
-            os.remove(archive_path)
+        if os.path.exists(full_archive_path):
+            os.remove(full_archive_path)
 
 if __name__ == "__main__":
     deploy()
