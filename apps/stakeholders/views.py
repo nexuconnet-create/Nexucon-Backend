@@ -259,6 +259,14 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
         meeting = StakeholderService.schedule_meeting(self.request.data, self.request.user)
         serializer.instance = meeting
 
+    @action(detail=False, methods=['get'], url_path='available-participants')
+    def available_participants(self, request):
+        """Return all registered Stakeholders and Inspectors on the platform for meeting scheduling."""
+        search = request.query_params.get('search', '')
+        category = request.query_params.get('category', '')
+        roster = StakeholderService.get_available_meeting_participants(search=search, category=category)
+        return Response(roster, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'], url_path='start')
     def start_meeting(self, request, pk=None):
         try:

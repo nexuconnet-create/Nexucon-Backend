@@ -1347,7 +1347,7 @@ class SettingsService:
         }
 
     @classmethod
-    def accept_invitation(cls, email: str = None, token: str = None, password: str = None, full_name: str = None, invite_code: str = None, temp_password: str = None):
+    def accept_invitation(cls, email: str = None, token: str = None, password: str = None, full_name: str = None, invite_code: str = None, temp_password: str = None, username: str = None):
         """Finalize invite acceptance with strict verification of invite_code or temporary_password."""
         from django.db.models import Q
         email_clean = (email or '').strip().lower()
@@ -1411,9 +1411,27 @@ class SettingsService:
         last_name = name_parts[1] if len(name_parts) > 1 else ''
         user_email = invitation.email
 
+        from apps.accounts.serializers import validate_username_value, generate_unique_username
+        from rest_framework import serializers as drf_serializers
+
+        clean_username = (username or '').strip()
+        if clean_username:
+            try:
+                clean_username = validate_username_value(clean_username, exclude_user_id=user.id if user else None)
+            except drf_serializers.ValidationError as exc:
+                err_msg = exc.detail[0] if isinstance(exc.detail, list) and exc.detail else str(exc.detail)
+                return {"success": False, "message": str(err_msg)}
+        else:
+            clean_username = generate_unique_username(
+                base_name=full_name or invitation.name,
+                email=user_email,
+                role=invitation.role or 'Inspector',
+                exclude_user_id=user.id if user else None
+            )
+
         if not user:
             user = User.objects.create_user(
-                username=user_email,
+                username=clean_username,
                 email=user_email,
                 first_name=first_name,
                 last_name=last_name,
@@ -1424,6 +1442,7 @@ class SettingsService:
         else:
             if first_name: user.first_name = first_name
             if last_name: user.last_name = last_name
+            user.username = clean_username
             user.set_password(password)
             user.is_active = True
             user.is_verified = True

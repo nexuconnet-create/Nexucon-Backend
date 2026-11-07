@@ -26,6 +26,8 @@ class Notification(models.Model):
         ('GPR', 'Ground Penetrating Radar & Subsurface'),
         ('DOCUMENTS', 'Document Vault & Revisions'),
         ('MILESTONES', 'Construction Milestone Gates'),
+        ('MEETINGS', 'Council & Stakeholder Meetings'),
+        ('STAKEHOLDERS', 'Stakeholder Updates'),
         ('GENERAL', 'General System Notification'),
     )
 

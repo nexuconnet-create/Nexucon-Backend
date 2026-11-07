@@ -276,6 +276,7 @@ class StaffUserViewSet(viewsets.ViewSet):
         invite_code = request.data.get('invite_code') or request.data.get('code')
         temp_password = request.data.get('temp_password')
         full_name = request.data.get('name') or request.data.get('full_name')
+        username = request.data.get('username')
 
         if not email and not token and not invite_code:
             return Response({"error": "Email or invite code is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -286,7 +287,8 @@ class StaffUserViewSet(viewsets.ViewSet):
             password=password,
             full_name=full_name,
             invite_code=invite_code,
-            temp_password=temp_password
+            temp_password=temp_password,
+            username=username
         )
 
         if not result.get('success'):

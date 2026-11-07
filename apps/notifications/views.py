@@ -20,6 +20,14 @@ class NotificationViewSet(viewsets.ModelViewSet):
         priority = self.request.query_params.get('priority')
         is_read = self.request.query_params.get('is_read')
         is_ack = self.request.query_params.get('is_acknowledged')
+        scope = self.request.query_params.get('scope')
+
+        if scope == 'me' and user and user.is_authenticated:
+            qs = qs.filter(
+                Q(recipient=user) |
+                Q(metadata__recipient_email__iexact=user.email) |
+                Q(recipient__isnull=True)
+            )
 
         if category and category.lower() != 'all':
             qs = qs.filter(category__iexact=category)
@@ -117,6 +125,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
             "approvals": all_notifs.filter(category='APPROVALS', is_read=False).count(),
             "emergency": all_notifs.filter(category='EMERGENCY', is_read=False).count(),
             "overdue": all_notifs.filter(category='OVERDUE', is_read=False).count(),
+            "meetings": all_notifs.filter(category='MEETINGS', is_read=False).count(),
         }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get', 'post', 'put', 'patch'], url_path='preferences')

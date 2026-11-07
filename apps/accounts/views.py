@@ -10,15 +10,115 @@ from .serializers import (
     CustomTokenObtainPairSerializer, 
     UserRegistrationSerializer, 
     UserMeSerializer,
+    validate_username_value,
+    generate_unique_username,
+    generate_username_suggestions,
 )
 from .models import UserSession, EmailVerificationToken
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from django.conf import settings
 from django.utils import timezone
 from rest_framework_simplejwt.exceptions import TokenError
 from apps.notifications.email_service import EmailService
 
 User = get_user_model()
+
+
+def send_username_update_email_to_user(user):
+    """
+    Send an email and in-app notification to an existing user instructing them
+    to update or auto-generate their official username in Settings / Profile.
+    """
+    if not user or not getattr(user, 'email', None):
+        return {"sent": False, "error": "User has no email"}
+
+    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
+    role_data = UserMeSerializer(user).data
+    role_lower = (role_data.get('role_name') or '').lower()
+
+    if any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
+        settings_path = '/inspector/dashboard/settings'
+        portal_name = 'Inspector Terminal'
+    elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
+        settings_path = '/government/dashboard/settings/profile'
+        portal_name = 'Government Command Center'
+    else:
+        settings_path = '/stakeholder/settings'
+        portal_name = 'Stakeholder Portal'
+
+    action_url = f"{frontend_url}{settings_path}"
+    suggested = generate_unique_username(
+        base_name=user.get_full_name(),
+        email=user.email,
+        role=role_data.get('role_name') or '',
+        exclude_user_id=user.id
+    )
+    display_name = user.get_full_name() or user.first_name or user.email
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:580px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+      <div style="background:#0f172a;color:#ffffff;padding:20px 24px;">
+        <h2 style="margin:0;font-size:18px;">🔐 Nexucon Account Security Update: Username Login</h2>
+      </div>
+      <div style="padding:24px;color:#1e293b;line-height:1.6;">
+        <p style="font-size:15px;margin:0 0 12px;">Hello <b>{display_name}</b>,</p>
+        <p style="font-size:14px;margin:0 0 16px;">
+          Nexucon has upgraded platform authentication across all portals to use <b>unique usernames</b> for faster, more secure sign-in and meeting participant tagging.
+        </p>
+        <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin:16px 0;">
+          <p style="margin:0 0 6px;font-size:13px;color:#475569;"><b>Current Login Identifier:</b> {user.username}</p>
+          <p style="margin:0;font-size:13px;color:#0f766e;"><b>Suggested Available Username:</b> @{suggested}</p>
+        </div>
+        <p style="font-size:14px;margin:0 0 20px;">
+          Please visit your <b>{portal_name} Settings / Profile</b> page to set your custom username or click <b>Auto-Generate Username</b> with one click.
+        </p>
+        <p style="margin:24px 0;">
+          <a href="{action_url}" style="background:#0284c7;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:bold;display:inline-block;">
+            Update or Auto-Generate My Username →
+          </a>
+        </p>
+      </div>
+      <div style="background:#f1f5f9;padding:12px 24px;color:#64748b;font-size:12px;">
+        Nexucon Regulatory & Project Coordination Platform
+      </div>
+    </div>
+    """
+
+    text = (
+        f"Hello {display_name},\n\n"
+        f"Nexucon has upgraded platform authentication to use unique usernames for sign-in.\n"
+        f"Current Username: {user.username}\n"
+        f"Suggested Available Username: @{suggested}\n\n"
+        f"Please visit your {portal_name} Settings / Profile page to update or auto-generate your username:\n"
+        f"{action_url}\n"
+    )
+
+    email_res = EmailService.send_email(
+        to_email=user.email,
+        subject="Action Required: Update or Auto-Generate Your Nexucon Username",
+        html_content=html,
+        text_content=text
+    )
+
+    try:
+        from apps.notifications.models import Notification
+        Notification.objects.create(
+            recipient=user,
+            recipient_role=role_data.get('role_name') or 'All',
+            category='GENERAL',
+            event_type='USERNAME_UPDATE_REQUIRED',
+            title='Update or Auto-Generate Your Username',
+            message=f"Nexucon now uses usernames for login. Visit Settings/Profile to set your custom username or auto-generate one (e.g. @{suggested}).",
+            priority='High',
+            action_url=settings_path,
+            email_sent=bool(email_res.get('success')),
+            metadata={'suggested_username': suggested, 'portal': portal_name}
+        )
+    except Exception:
+        pass
+
+    return {"sent": bool(email_res.get("success")), "email": user.email, "suggested_username": suggested, "result": email_res}
 
 
 class CustomLoginView(TokenObtainPairView):
@@ -31,34 +131,38 @@ class CustomLoginView(TokenObtainPairView):
         from .models import TwoFactorSecret
         from .two_factor import verify_code
 
-        email = (request.data.get('email') or '').strip().lower()
-        if email:
+        identifier = (request.data.get('username') or request.data.get('email') or '').strip()
+        user_lookup = None
+        if identifier:
             User = get_user_model()
-            user = User.objects.filter(email__iexact=email).first()
-            if user and user.is_active:
-                two_factor = getattr(user, 'two_factor', None)
-                if two_factor and two_factor.is_enabled:
-                    code = request.data.get('totp_code')
-                    if not code:
-                        return Response({
-                            'success': False,
-                            'message': 'Two-factor authentication code required.',
-                            'data': {'mfa_required': True, 'mfa_method': 'totp'},
-                            'errors': [{'field': 'totp_code', 'message': 'Provide the 6-digit code from your authenticator app.'}],
-                        }, status=status.HTTP_400_BAD_REQUEST)
-                    if not verify_code(two_factor.secret, str(code),
-                                       last_used_counter=two_factor.last_used_counter):
-                        return Response({
-                            'success': False,
-                            'message': 'Invalid or expired two-factor code.',
-                            'data': {'mfa_required': True, 'mfa_method': 'totp'},
-                            'errors': [{'field': 'totp_code', 'message': 'Invalid or expired code.'}],
-                        }, status=status.HTTP_400_BAD_REQUEST)
-                    # Mark the step used so the code cannot be replayed.
-                    import time as _time
-                    two_factor.last_used_counter = int(_time.time()) // 30
+            user_lookup = User.objects.filter(
+                Q(username__iexact=identifier) | Q(email__iexact=identifier)
+            ).first()
+
+        email = (user_lookup.email if user_lookup else identifier).strip().lower()
+        if user_lookup and user_lookup.is_active:
+            two_factor = getattr(user_lookup, 'two_factor', None)
+            if two_factor and two_factor.is_enabled:
+                code = request.data.get('totp_code')
+                if not code:
+                    return Response({
+                        'success': False,
+                        'message': 'Two-factor authentication code required.',
+                        'data': {'mfa_required': True, 'mfa_method': 'totp'},
+                        'errors': [{'field': 'totp_code', 'message': 'Provide the 6-digit code from your authenticator app.'}],
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                if not verify_code(two_factor.secret, str(code),
+                                   last_used_counter=two_factor.last_used_counter):
+                    return Response({
+                        'success': False,
+                        'message': 'Invalid or expired two-factor code.',
+                        'data': {'mfa_required': True, 'mfa_method': 'totp'},
+                        'errors': [{'field': 'totp_code', 'message': 'Invalid or expired code.'}],
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                # Mark the step used so the code cannot be replayed.
+                import time as _time
+                two_factor.last_used_counter = int(_time.time()) // 30
         # Check if an invited inspector is providing their invite code or temporary passcode
-        email = (request.data.get('email') or '').strip().lower()
         password = request.data.get('password', '')
         if email and password:
             from apps.settings.models import UserInvitation
@@ -73,13 +177,13 @@ class CustomLoginView(TokenObtainPairView):
                         'success': False,
                         'requires_activation': True,
                         'message': 'Account activation required: You must establish your permanent password using your official invite credentials.',
-                        'email': email,
+                        'email': inv.email,
                         'invite_code': inv.invite_code,
                         'data': {
                             'requires_activation': True,
                             'name': inv.name,
                             'role': inv.role,
-                            'email': email,
+                            'email': inv.email,
                             'invite_code': inv.invite_code
                         }
                     }, status=status.HTTP_200_OK)
@@ -218,6 +322,19 @@ class CustomLoginView(TokenObtainPairView):
                 refresh_jti=jti
             )
 
+            # Automatically notify existing users whose username is still an email or unset
+            if user_data.get('needs_username_update'):
+                try:
+                    from apps.notifications.models import Notification
+                    already_notified = Notification.objects.filter(
+                        recipient=user,
+                        event_type='USERNAME_UPDATE_REQUIRED'
+                    ).exists()
+                    if not already_notified:
+                        send_username_update_email_to_user(user)
+                except Exception:
+                    pass
+
             res = Response({
                 'success': True,
                 'message': 'Login successful',
@@ -255,14 +372,32 @@ class UserRegistrationView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         email = (request.data.get('email') or '').strip().lower()
+        username = (request.data.get('username') or '').strip()
         password = request.data.get('password')
 
         # Check if user already exists or belongs to agency/inspector
+        existing_user = User.objects.filter(email__iexact=email).first() if email else None
+
+        # Validate username upfront — no user can register without a valid, unique username
+        from rest_framework import serializers as drf_serializers
+        try:
+            valid_username = validate_username_value(
+                username,
+                exclude_user_id=existing_user.id if (existing_user and not existing_user.is_verified) else None
+            )
+        except drf_serializers.ValidationError as exc:
+            err_msg = exc.detail[0] if isinstance(exc.detail, list) and exc.detail else str(exc.detail)
+            return Response({
+                'success': False,
+                'message': str(err_msg),
+                'data': None,
+                'errors': {'username': [str(err_msg)]}
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         if email:
             from apps.government.models import Profile
             from apps.settings.models import UserInvitation
 
-            existing_user = User.objects.filter(email__iexact=email).first()
             if existing_user:
                 has_gov = hasattr(existing_user, 'government_profile') and existing_user.government_profile
                 if has_gov or Profile.objects.filter(user=existing_user).exists():
@@ -319,6 +454,7 @@ class UserRegistrationView(generics.CreateAPIView):
                             existing_user.last_name = request.data.get('last_name')
                     if request.data.get('phone_number'):
                         existing_user.phone_number = request.data.get('phone_number')
+                    existing_user.username = valid_username
                     existing_user.save()
                     user = existing_user
 
@@ -625,6 +761,216 @@ class UserMeView(APIView):
             'message': 'User profile retrieved',
             'data': serializer.data,
             'errors': None
+        })
+
+
+class GenerateUsernameView(APIView):
+    """
+    GET/POST /api/v1/auth/generate-username/
+    Generates unique username suggestions or checks availability of a requested username.
+    """
+    permission_classes = (AllowAny,)
+
+    def _handle(self, request, params):
+        check_username = (params.get('check_username') or '').strip()
+        exclude_id = request.user.id if getattr(request, 'user', None) and request.user.is_authenticated else None
+
+        if check_username:
+            from rest_framework import serializers as drf_serializers
+            try:
+                clean = validate_username_value(check_username, exclude_user_id=exclude_id)
+                return Response({
+                    'success': True,
+                    'available': True,
+                    'username': clean,
+                    'message': f'@{clean} is available!'
+                })
+            except drf_serializers.ValidationError as exc:
+                err_msg = exc.detail[0] if isinstance(exc.detail, list) and exc.detail else str(exc.detail)
+                suggestions = generate_username_suggestions(
+                    base_name=params.get('name') or check_username,
+                    email=params.get('email') or '',
+                    role=params.get('role') or '',
+                    company_name=params.get('company_name') or '',
+                    exclude_user_id=exclude_id
+                )
+                return Response({
+                    'success': False,
+                    'available': False,
+                    'username': check_username,
+                    'message': str(err_msg),
+                    'suggestions': suggestions
+                })
+
+        base_name = (
+            params.get('name')
+            or params.get('full_name')
+            or (request.user.get_full_name() if exclude_id else '')
+            or ''
+        ).strip()
+        email = (
+            params.get('email')
+            or (request.user.email if exclude_id else '')
+            or ''
+        ).strip()
+        role = (params.get('role') or '').strip()
+        company_name = (params.get('company_name') or '').strip()
+
+        suggestions = generate_username_suggestions(
+            base_name=base_name,
+            email=email,
+            role=role,
+            company_name=company_name,
+            exclude_user_id=exclude_id,
+            count=4
+        )
+        return Response({
+            'success': True,
+            'username': suggestions[0],
+            'suggestions': suggestions,
+            'message': 'Available usernames generated.'
+        })
+
+    def get(self, request):
+        return self._handle(request, request.query_params)
+
+    def post(self, request):
+        return self._handle(request, request.data)
+
+
+class UpdateUsernameView(APIView):
+    """
+    POST/PATCH /api/v1/auth/update-username/
+    Allows an authenticated user to update or auto-generate their username,
+    validates uniqueness, and sends a confirmation email + in-app notification.
+    """
+    permission_classes = (IsAuthenticated,)
+
+    def _update(self, request):
+        user = request.user
+        auto_gen = bool(request.data.get('auto_generate'))
+        raw_username = (request.data.get('username') or '').strip()
+
+        role_info = UserMeSerializer(user).data
+        if auto_gen and not raw_username:
+            raw_username = generate_unique_username(
+                base_name=user.get_full_name(),
+                email=user.email,
+                role=role_info.get('role_name') or '',
+                exclude_user_id=user.id
+            )
+
+        from rest_framework import serializers as drf_serializers
+        try:
+            clean_username = validate_username_value(raw_username, exclude_user_id=user.id)
+        except drf_serializers.ValidationError as exc:
+            err_msg = exc.detail[0] if isinstance(exc.detail, list) and exc.detail else str(exc.detail)
+            return Response({
+                'success': False,
+                'message': str(err_msg),
+                'errors': {'username': [str(err_msg)]}
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_username = user.username
+        user.username = clean_username
+        user.save(update_fields=['username'])
+
+        # Dispatch confirmation email and in-app notification
+        display_name = user.get_full_name() or user.first_name or user.email
+        try:
+            EmailService.send_email(
+                to_email=user.email,
+                subject=f"✅ Your Nexucon Username Has Been Updated (@{clean_username})",
+                html_content=f"""
+                <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+                  <div style="background:#0f172a;color:#fff;padding:18px 24px;">
+                    <h2 style="margin:0;font-size:18px;">✅ Nexucon Username Updated</h2>
+                  </div>
+                  <div style="padding:24px;color:#1e293b;line-height:1.6;">
+                    <p>Hello <b>{display_name}</b>,</p>
+                    <p>Your official Nexucon login username has been updated.</p>
+                    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px;margin:16px 0;">
+                      <p style="margin:0;font-size:15px;color:#166534;"><b>New Username:</b> @{clean_username}</p>
+                    </div>
+                    <p style="font-size:13px;color:#475569;">You can now use <b>{clean_username}</b> to sign in across your Nexucon portal and be tagged directly in council meetings.</p>
+                  </div>
+                </div>
+                """,
+                text_content=f"Hello {display_name},\nYour Nexucon username has been updated to @{clean_username}. You can now sign in using this username."
+            )
+        except Exception:
+            pass
+
+        try:
+            from apps.notifications.models import Notification
+            Notification.objects.create(
+                recipient=user,
+                recipient_role=role_info.get('role_name') or 'All',
+                category='GENERAL',
+                event_type='USERNAME_UPDATED',
+                title='Username Updated Successfully',
+                message=f"Your Nexucon username is now @{clean_username} (previously {previous_username}).",
+                priority='Low',
+                is_read=False,
+                metadata={'username': clean_username, 'previous_username': previous_username}
+            )
+            # Mark any pending username-update-required notifications as read
+            Notification.objects.filter(
+                recipient=user,
+                event_type='USERNAME_UPDATE_REQUIRED',
+                is_read=False
+            ).update(is_read=True, read_at=timezone.now())
+        except Exception:
+            pass
+
+        user.refresh_from_db()
+        return Response({
+            'success': True,
+            'message': f'Username successfully updated to @{clean_username}',
+            'data': {
+                'username': clean_username,
+                'user': UserMeSerializer(user).data
+            }
+        })
+
+    def post(self, request):
+        return self._update(request)
+
+    def patch(self, request):
+        return self._update(request)
+
+
+class NotifyExistingUsersUsernameView(APIView):
+    """
+    POST /api/v1/auth/notify-username-update/
+    Dispatches an email notification to the current user (or all existing users
+    whose username still needs updating when requested with scope='all_existing')
+    prompting them to update or auto-generate their username in Settings/Profile.
+    """
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        scope = (request.data.get('scope') or 'self').strip().lower()
+        if scope == 'all_existing':
+            all_users = User.objects.filter(is_active=True)
+            notified = []
+            for u in all_users:
+                uname = (u.username or '').strip()
+                uemail = (u.email or '').strip()
+                if not uname or '@' in uname or (uemail and uname.lower() == uemail.lower()):
+                    res = send_username_update_email_to_user(u)
+                    notified.append({'email': u.email, 'sent': res.get('sent'), 'suggested_username': res.get('suggested_username')})
+            return Response({
+                'success': True,
+                'message': f'Username update notification dispatched to {len(notified)} existing user(s).',
+                'data': {'count': len(notified), 'results': notified}
+            })
+
+        res = send_username_update_email_to_user(request.user)
+        return Response({
+            'success': True,
+            'message': f'Username update instructions and auto-generated suggestion (@{res.get("suggested_username")}) sent to {request.user.email}.',
+            'data': res
         })
 
 class LogoutView(APIView):

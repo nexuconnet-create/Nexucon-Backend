@@ -8,28 +8,70 @@ from .models import (
 )
 
 class DeveloperSerializer(serializers.ModelSerializer):
+    email = serializers.SerializerMethodField()
+    username = serializers.SerializerMethodField()
+
     class Meta:
         model = Developer
         fields = '__all__'
         read_only_fields = ('id', 'developer_id', 'created_at', 'updated_at')
 
+    def get_email(self, obj):
+        if getattr(obj, 'primary_contact_email', None):
+            return obj.primary_contact_email
+        if getattr(obj, 'user', None) and obj.user.email:
+            return obj.user.email
+        return None
+
+    def get_username(self, obj):
+        if getattr(obj, 'user', None) and obj.user.username:
+            return obj.user.username
+        return None
+
 
 class ContractorSerializer(serializers.ModelSerializer):
+    email = serializers.SerializerMethodField()
+    username = serializers.SerializerMethodField()
+
     class Meta:
         model = Contractor
         fields = '__all__'
         read_only_fields = ('id', 'contractor_id', 'created_at', 'updated_at')
 
+    def get_email(self, obj):
+        if getattr(obj, 'user', None) and obj.user.email:
+            return obj.user.email
+        return None
+
+    def get_username(self, obj):
+        if getattr(obj, 'user', None) and obj.user.username:
+            return obj.user.username
+        return None
+
 
 class ConsultantSerializer(serializers.ModelSerializer):
+    email = serializers.SerializerMethodField()
+    username = serializers.SerializerMethodField()
+
     class Meta:
         model = Consultant
         fields = '__all__'
         read_only_fields = ('id', 'consultant_id', 'created_at', 'updated_at')
 
+    def get_email(self, obj):
+        if getattr(obj, 'user', None) and obj.user.email:
+            return obj.user.email
+        return None
+
+    def get_username(self, obj):
+        if getattr(obj, 'user', None) and obj.user.username:
+            return obj.user.username
+        return None
+
 
 class InspectorSerializer(serializers.ModelSerializer):
     email = serializers.SerializerMethodField()
+    username = serializers.SerializerMethodField()
     invite_code = serializers.SerializerMethodField()
     temporary_password = serializers.SerializerMethodField()
     invitation_status = serializers.SerializerMethodField()
@@ -38,6 +80,17 @@ class InspectorSerializer(serializers.ModelSerializer):
         model = Inspector
         fields = '__all__'
         read_only_fields = ('id', 'inspector_id', 'created_at', 'updated_at')
+
+    def get_username(self, obj):
+        if getattr(obj, 'user', None) and obj.user.username:
+            return obj.user.username
+        target_email = self._get_target_email(obj)
+        if target_email:
+            from django.contrib.auth import get_user_model
+            u = get_user_model().objects.filter(email__iexact=target_email).first()
+            if u and u.username:
+                return u.username
+        return None
 
     def _get_target_email(self, obj):
         if hasattr(obj, 'user') and obj.user and obj.user.email:
@@ -89,10 +142,23 @@ class InspectorSerializer(serializers.ModelSerializer):
 
 
 class LicensedProfessionalSerializer(serializers.ModelSerializer):
+    email = serializers.SerializerMethodField()
+    username = serializers.SerializerMethodField()
+
     class Meta:
         model = LicensedProfessional
         fields = '__all__'
         read_only_fields = ('id', 'license_id', 'created_at')
+
+    def get_email(self, obj):
+        if getattr(obj, 'user', None) and obj.user.email:
+            return obj.user.email
+        return None
+
+    def get_username(self, obj):
+        if getattr(obj, 'user', None) and obj.user.username:
+            return obj.user.username
+        return None
 
 
 class ProjectStakeholderTeamSerializer(serializers.ModelSerializer):

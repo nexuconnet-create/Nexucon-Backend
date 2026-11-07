@@ -68,24 +68,317 @@ class StakeholderService:
         return False
 
     @staticmethod
+    def get_available_meeting_participants(search: str = "", category: str = ""):
+        """
+        Return all registered Stakeholders (Developers, Contractors, Consultants,
+        Licensed Professionals, Stakeholder Users) and Inspectors (Field Inspectors,
+        Invited Inspectors, Government Officers) registered on the platform.
+        """
+        from django.contrib.auth import get_user_model
+        from apps.settings.models import UserInvitation
+
+        User = get_user_model()
+        participants = []
+        seen_keys = set()
+
+        def _add_participant(item: dict):
+            email_key = (item.get('email') or '').strip().lower()
+            uname_key = (item.get('username') or '').strip().lower()
+            name_key = (item.get('name') or '').strip().lower()
+            dedup_key = email_key or uname_key or f"{item.get('category')}:{name_key}"
+            if not dedup_key or dedup_key in seen_keys:
+                return
+            seen_keys.add(dedup_key)
+            participants.append(item)
+
+        # 1. Registered Inspectors from stakeholders.Inspector
+        for ins in Inspector.objects.filter(is_active=True).select_related('user'):
+            u = ins.user
+            target_email = u.email if (u and u.email) else None
+            if not target_email:
+                inv = UserInvitation.objects.filter(name__iexact=ins.name).first()
+                if inv:
+                    target_email = inv.email
+            if not u and target_email:
+                u = User.objects.filter(email__iexact=target_email).first()
+
+            _add_participant({
+                "id": str(ins.id),
+                "identifier": ins.inspector_id,
+                "user_id": str(u.id) if u else None,
+                "name": ins.name,
+                "username": u.username if u else None,
+                "email": target_email or "",
+                "role": ins.role_title or "Field Inspector",
+                "category": "inspector",
+                "entity_type": "Inspector",
+                "organization": f"Zone: {ins.assigned_zone}" if ins.assigned_zone else "Inspectorate Division",
+                "status": ins.availability_status or "Available",
+            })
+
+        # 2. Invited / Accredited Inspectors from UserInvitation
+        for inv in UserInvitation.objects.exclude(status='Revoked'):
+            role_lower = (inv.role or '').lower()
+            is_insp = any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
+            u = User.objects.filter(email__iexact=inv.email).first()
+            _add_participant({
+                "id": str(inv.id),
+                "identifier": inv.invite_code or "INV",
+                "user_id": str(u.id) if u else None,
+                "name": inv.name or (u.get_full_name() if u else inv.email),
+                "username": u.username if u else None,
+                "email": inv.email,
+                "role": inv.role or ("Field Inspector" if is_insp else "Agency Officer"),
+                "category": "inspector" if is_insp else "government",
+                "entity_type": "Inspector" if is_insp else "Government Official",
+                "organization": inv.department or "State Building Control Agency",
+                "status": inv.status,
+            })
+
+        # 3. Registered Developers
+        for dev in Developer.objects.filter(is_active=True).select_related('user'):
+            u = dev.user
+            email = dev.primary_contact_email or (u.email if u else "")
+            if not u and email:
+                u = User.objects.filter(email__iexact=email).first()
+            _add_participant({
+                "id": str(dev.id),
+                "identifier": dev.developer_id,
+                "user_id": str(u.id) if u else None,
+                "name": dev.primary_contact_name or dev.name,
+                "username": u.username if u else None,
+                "email": email or "",
+                "role": "Developer",
+                "category": "stakeholder",
+                "entity_type": "Developer",
+                "organization": dev.name,
+                "status": dev.status,
+            })
+
+        # 4. Registered Contractors
+        for con in Contractor.objects.filter(is_active=True).select_related('user'):
+            u = con.user
+            email = u.email if u else ""
+            _add_participant({
+                "id": str(con.id),
+                "identifier": con.contractor_id,
+                "user_id": str(u.id) if u else None,
+                "name": (u.get_full_name() if u and u.get_full_name() else con.name),
+                "username": u.username if u else None,
+                "email": email,
+                "role": con.contractor_type or "Contractor",
+                "category": "stakeholder",
+                "entity_type": "Contractor",
+                "organization": con.company_name or con.name,
+                "status": con.status,
+            })
+
+        # 5. Registered Consultants
+        for cns in Consultant.objects.filter(is_active=True).select_related('user'):
+            u = cns.user
+            email = u.email if u else ""
+            _add_participant({
+                "id": str(cns.id),
+                "identifier": cns.consultant_id,
+                "user_id": str(u.id) if u else None,
+                "name": (u.get_full_name() if u and u.get_full_name() else cns.name),
+                "username": u.username if u else None,
+                "email": email,
+                "role": cns.specialty or "Consultant",
+                "category": "stakeholder",
+                "entity_type": "Consultant",
+                "organization": cns.company_name or cns.name,
+                "status": cns.status,
+            })
+
+        # 6. Registered Licensed Professionals
+        for prof in LicensedProfessional.objects.all().select_related('user'):
+            u = prof.user
+            email = u.email if u else ""
+            _add_participant({
+                "id": str(prof.id),
+                "identifier": prof.license_id,
+                "user_id": str(u.id) if u else None,
+                "name": prof.name,
+                "username": u.username if u else None,
+                "email": email,
+                "role": f"{prof.role_title} ({prof.license_authority})",
+                "category": "stakeholder",
+                "entity_type": "Licensed Professional",
+                "organization": prof.firm_name or "Independent Practice",
+                "status": prof.license_status,
+            })
+
+        # 7. Remaining active Users in the database (Inspectors, Stakeholders, Government Officials)
+        for u in User.objects.filter(is_active=True):
+            role_label = "Client / Stakeholder"
+            cat = "stakeholder"
+            ent_type = "Stakeholder"
+            org = "Registered Platform Member"
+
+            if hasattr(u, 'government_profile') and u.government_profile:
+                r_name = u.government_profile.role.name if u.government_profile.role else "Agency Official"
+                role_label = r_name
+                if any(k in r_name.lower() for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
+                    cat = "inspector"
+                    ent_type = "Inspector"
+                else:
+                    cat = "government"
+                    ent_type = "Government Official"
+                if u.government_profile.agency:
+                    org = u.government_profile.agency.department_name or u.government_profile.agency.name
+            elif u.is_superuser or u.is_staff:
+                role_label = "Director / Agency Head"
+                cat = "government"
+                ent_type = "Government Official"
+                org = "Executive Directorate"
+
+            _add_participant({
+                "id": str(u.id),
+                "identifier": f"@{u.username}" if u.username else str(u.id)[:8],
+                "user_id": str(u.id),
+                "name": u.get_full_name() or u.username or u.email,
+                "username": u.username,
+                "email": u.email,
+                "role": role_label,
+                "category": cat,
+                "entity_type": ent_type,
+                "organization": org,
+                "status": "Active",
+            })
+
+        # Filter by category or search if provided
+        if category and category.lower() not in ('all', ''):
+            cat_lower = category.lower()
+            participants = [p for p in participants if p.get('category', '').lower() == cat_lower or p.get('entity_type', '').lower() == cat_lower]
+
+        if search:
+            q = search.strip().lower()
+            participants = [
+                p for p in participants
+                if q in (p.get('name') or '').lower()
+                or q in (p.get('username') or '').lower()
+                or q in (p.get('email') or '').lower()
+                or q in (p.get('role') or '').lower()
+                or q in (p.get('organization') or '').lower()
+                or q in (p.get('entity_type') or '').lower()
+            ]
+
+        return participants
+
+    @staticmethod
+    def _resolve_participant_details(raw_p: dict, roster_by_email: dict, roster_by_username: dict, roster_by_name: dict, roster_by_id: dict) -> dict:
+        """Enrich a participant dictionary with full platform user/stakeholder/inspector info."""
+        if not isinstance(raw_p, dict):
+            return {"name": str(raw_p), "role": "Participant", "status": "Invited"}
+
+        pid = str(raw_p.get('id') or raw_p.get('user_id') or '').strip()
+        pemail = (raw_p.get('email') or '').strip().lower()
+        puname = (raw_p.get('username') or '').strip().lstrip('@').lower()
+        pname = (raw_p.get('name') or '').strip().lower()
+
+        matched = (
+            (roster_by_id.get(pid) if pid else None)
+            or (roster_by_email.get(pemail) if pemail else None)
+            or (roster_by_username.get(puname) if puname else None)
+            or (roster_by_name.get(pname) if pname else None)
+        )
+
+        if matched:
+            return {
+                "id": matched.get("id"),
+                "user_id": matched.get("user_id"),
+                "name": raw_p.get("name") or matched.get("name"),
+                "username": raw_p.get("username") or matched.get("username"),
+                "email": raw_p.get("email") or matched.get("email"),
+                "role": raw_p.get("role") or matched.get("role") or "Stakeholder",
+                "category": raw_p.get("category") or matched.get("category") or "stakeholder",
+                "entity_type": raw_p.get("entity_type") or matched.get("entity_type") or "Stakeholder",
+                "organization": raw_p.get("organization") or matched.get("organization") or "",
+                "status": raw_p.get("status") or "Invited",
+            }
+
+        return {
+            "id": raw_p.get("id"),
+            "user_id": raw_p.get("user_id"),
+            "name": raw_p.get("name") or raw_p.get("username") or raw_p.get("email") or "Invited Participant",
+            "username": raw_p.get("username"),
+            "email": raw_p.get("email") or "",
+            "role": raw_p.get("role") or "Invited Participant",
+            "category": raw_p.get("category") or "stakeholder",
+            "entity_type": raw_p.get("entity_type") or "Participant",
+            "organization": raw_p.get("organization") or "",
+            "status": raw_p.get("status") or "Invited",
+        }
+
+    @staticmethod
     def schedule_meeting(data, user=None):
         """
-        Schedule an official stakeholder meeting or call session.
-        NOTE: Can ONLY be initiated by the Agency Head.
-
-        For Video/Audio calls a REAL Google Calendar event is created through the
-        configured service account and a real Google Meet link is attached when
-        the credentials/project allow it. No fabricated meet links are stored.
+        Schedule an official stakeholder/inspector meeting or call session.
+        Can be initiated from the Government Agency, Stakeholder, or Inspector dashboard.
+        Automatically notifies all selected Stakeholders and Inspectors via both
+        in-app notifications and email invitations.
         """
-        if user and getattr(user, 'is_authenticated', False) and not StakeholderService.is_agency_head(user):
-            if not data.get('bypass_agency_head_check'):
-                raise PermissionDenied("Only the Agency Head or Director General can initiate and schedule official stakeholder meetings.")
+        from django.contrib.auth import get_user_model
+        from apps.notifications.models import Notification
 
-        name = data.get('initiator_name') or (user.get_full_name() if getattr(user, 'is_authenticated', False) and user.get_full_name() else None)
-        role = data.get('initiator_role') or ('Agency Head / Director General' if user and getattr(user, 'is_authenticated', False) and StakeholderService.is_agency_head(user) else None)
+        User = get_user_model()
+        is_auth = bool(user and getattr(user, 'is_authenticated', False))
+
+        name = data.get('initiator_name') or (
+            (user.get_full_name() or user.username or user.email) if is_auth else 'Nexucon Coordinator'
+        )
+        role = data.get('initiator_role')
+        if not role:
+            if is_auth and StakeholderService.is_agency_head(user):
+                role = 'Agency Head / Director General'
+            elif is_auth:
+                from apps.accounts.serializers import UserMeSerializer
+                role = UserMeSerializer(user).data.get('role_name') or 'Platform Coordinator'
+            else:
+                role = 'Agency Head / Director General'
 
         meeting_type = data.get('meeting_type', 'Video Call')
-        participants = data.get('participants') or ([{"name": name, "role": role, "status": "Confirmed"}] if name else [])
+
+        # Build lookup maps from platform roster to enrich selected participants
+        roster = StakeholderService.get_available_meeting_participants()
+        roster_by_email = {(r.get('email') or '').lower(): r for r in roster if r.get('email')}
+        roster_by_username = {(r.get('username') or '').lower(): r for r in roster if r.get('username')}
+        roster_by_name = {(r.get('name') or '').lower(): r for r in roster if r.get('name')}
+        roster_by_id = {}
+        for r in roster:
+            if r.get('id'):
+                roster_by_id[str(r['id'])] = r
+            if r.get('user_id'):
+                roster_by_id[str(r['user_id'])] = r
+
+        raw_participants = data.get('participants') or []
+        enriched_participants = [
+            StakeholderService._resolve_participant_details(
+                p, roster_by_email, roster_by_username, roster_by_name, roster_by_id
+            )
+            for p in raw_participants
+        ]
+
+        # Ensure the meeting initiator is present in participants
+        initiator_email = (user.email if is_auth else '').lower()
+        has_initiator = any(
+            (initiator_email and (p.get('email') or '').lower() == initiator_email)
+            or (name and (p.get('name') or '').lower() == name.lower())
+            for p in enriched_participants
+        )
+        if not has_initiator and name:
+            enriched_participants.insert(0, {
+                "user_id": str(user.id) if is_auth else None,
+                "name": name,
+                "username": user.username if is_auth else None,
+                "email": user.email if is_auth else "",
+                "role": role,
+                "category": "government" if (is_auth and StakeholderService.is_agency_head(user)) else "stakeholder",
+                "status": "Confirmed"
+            })
+
+        participants = enriched_participants
 
         # ---- Real Google Calendar / Meet integration ----
         google_meet_url = ''
@@ -137,7 +430,7 @@ class StakeholderService:
             google_calendar_event_id=calendar_event_id,
             google_calendar_link=calendar_link,
             meet_link_status=meet_link_status,
-            initiated_by=user if getattr(user, 'is_authenticated', False) else None,
+            initiated_by=user if is_auth else None,
             initiator_name=name,
             initiator_role=role,
             participants=participants
@@ -156,18 +449,93 @@ class StakeholderService:
             }
         )
 
-        StakeholderService.send_notification(
-            user=user,
-            title="Official Stakeholder Meeting Scheduled",
-            message=f"Meeting '{meeting.title}' ({meeting.meeting_reference}) scheduled for {meeting.date} at {meeting.time_slot}.",
-            category="MEETINGS",
-            action_url="/government/dashboard/stakeholders/meetings"
-        )
+        # ---- Dispatch In-App Notifications to all invited Stakeholders & Inspectors ----
+        notified_user_ids = set()
+        for p in participants:
+            p_user = None
+            if p.get('user_id'):
+                p_user = User.objects.filter(id=p['user_id']).first()
+            if not p_user and p.get('email'):
+                p_user = User.objects.filter(email__iexact=p['email'].strip()).first()
+            if not p_user and p.get('username'):
+                p_user = User.objects.filter(username__iexact=p['username'].strip().lstrip('@')).first()
 
-        # Optional backend email invitations via Resend (opt-in to avoid
-        # duplicating the emails the frontend already sends itself).
-        if data.get('send_invite_emails'):
-            StakeholderService.send_meeting_invitations(meeting, user)
+            p_cat = (p.get('category') or '').lower()
+            p_role = (p.get('role') or '').lower()
+            is_insp = p_cat == 'inspector' or any(k in p_role for k in ['inspector', 'field officer', 'site officer', 'hse'])
+            is_gov = p_cat == 'government' or any(k in p_role for k in ['agency', 'director', 'admin', 'government'])
+
+            if is_insp:
+                portal_action_url = f"/inspector/dashboard/meetings/{meeting.id}/room"
+                meetings_hub_url = "/inspector/dashboard/meetings"
+            elif is_gov:
+                portal_action_url = f"/government/dashboard/stakeholders/meetings/{meeting.id}/room"
+                meetings_hub_url = "/government/dashboard/stakeholders/meetings"
+            else:
+                portal_action_url = f"/stakeholder/meetings/{meeting.id}/room"
+                meetings_hub_url = "/stakeholder/meetings"
+
+            if p_user and str(p_user.id) in notified_user_ids:
+                continue
+            if p_user:
+                notified_user_ids.add(str(p_user.id))
+
+            try:
+                Notification.objects.create(
+                    recipient=p_user,
+                    recipient_role=p.get('role') or 'Participant',
+                    category='MEETINGS',
+                    event_type='MEETING_SCHEDULED',
+                    title=f"📅 Meeting Scheduled: {meeting.title}",
+                    message=(
+                        f"You have been added to '{meeting.title}' ({meeting.meeting_reference}) "
+                        f"for project '{meeting.project_name or 'General Regulatory Review'}' on {meeting.date} at {meeting.time_slot}. "
+                        f"Initiated by {meeting.initiator_name} ({meeting.initiator_role})."
+                    ),
+                    snippet=f"{meeting.date} • {meeting.time_slot} • {meeting.meeting_type}",
+                    priority='High',
+                    severity='Normal',
+                    location=meeting.meeting_type,
+                    entity_type='StakeholderMeeting',
+                    entity_id=str(meeting.id),
+                    action_url=portal_action_url,
+                    action_required='Join or Review Meeting Agenda',
+                    metadata={
+                        "source": "StakeholdersService",
+                        "meeting_id": str(meeting.id),
+                        "meeting_reference": meeting.meeting_reference,
+                        "room_id": meeting.room_id,
+                        "project_name": meeting.project_name,
+                        "date": meeting.date,
+                        "time_slot": meeting.time_slot,
+                        "meeting_type": meeting.meeting_type,
+                        "initiator_name": meeting.initiator_name,
+                        "initiator_role": meeting.initiator_role,
+                        "recipient_email": (p.get('email') or (p_user.email if p_user else '')),
+                        "recipient_name": p.get('name'),
+                        "meetings_hub_url": meetings_hub_url,
+                        "room_url": portal_action_url,
+                    }
+                )
+            except Exception:
+                pass
+
+        # Ensure initiator also gets an in-app notification if not already created above
+        if is_auth and str(user.id) not in notified_user_ids:
+            StakeholderService.send_notification(
+                user=user,
+                title=f"📅 Meeting Scheduled: {meeting.title}",
+                message=f"Meeting '{meeting.title}' ({meeting.meeting_reference}) scheduled for {meeting.date} at {meeting.time_slot}.",
+                category="MEETINGS",
+                action_url="/government/dashboard/stakeholders/meetings"
+            )
+
+        # Dispatch email notifications to all invited stakeholders and inspectors by default
+        if data.get('send_invite_emails', True):
+            try:
+                StakeholderService.send_meeting_invitations(meeting, user)
+            except Exception:
+                pass
 
         return meeting
 
@@ -203,17 +571,29 @@ class StakeholderService:
     def send_meeting_invitations(meeting, user=None):
         """
         Email meeting invitations to participants via the Resend integration.
-        Only participants with valid email addresses are contacted.
+        Tailors room URLs for Government, Inspector, and Stakeholder portals and records EmailDelivery.
         """
-        recipients = extract_attendee_emails(meeting.participants or [])
+        participants_list = meeting.participants or []
+        recipients = extract_attendee_emails(participants_list)
         if not recipients:
             return {"sent": 0, "results": [], "error": "No participants with valid email addresses."}
 
         from apps.notifications.email_service import EmailService
+        from apps.notifications.models import Notification, EmailDelivery
+        from django.contrib.auth import get_user_model
         from django.conf import settings as django_settings
 
+        User = get_user_model()
         frontend_url = (getattr(django_settings, 'FRONTEND_URL', '') or 'http://localhost:3000').rstrip('/')
-        room_url = f"{frontend_url}/government/dashboard/stakeholders/meetings/{meeting.id}/room"
+        gov_room_url = f"{frontend_url}/government/dashboard/stakeholders/meetings/{meeting.id}/room"
+        stakeholder_room_url = f"{frontend_url}/stakeholder/meetings/{meeting.id}/room"
+        inspector_room_url = f"{frontend_url}/inspector/dashboard/meetings/{meeting.id}/room"
+
+        # Map email -> participant dict
+        participant_by_email = {}
+        for p in participants_list:
+            if isinstance(p, dict) and p.get('email'):
+                participant_by_email[p['email'].strip().lower()] = p
 
         meet_line = ''
         if meeting.google_meet_url:
@@ -228,56 +608,141 @@ class StakeholderService:
                 f'<td style="padding:8px 0;"><a href="{meeting.google_calendar_link}" style="color:#1a73e8;">Open in Google Calendar</a></td></tr>'
             )
 
-        html = f"""
-        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
-          <div style="background:#0f2a4a;color:#fff;padding:18px 24px;">
-            <h2 style="margin:0;font-size:18px;">🏛️ Nexucon Stakeholder Meeting</h2>
-          </div>
-          <div style="padding:24px;">
-            <p style="font-size:16px;margin:0 0 16px;">You are invited to an official stakeholder meeting.</p>
-            <table style="width:100%;font-size:14px;border-collapse:collapse;">
-              <tr><td style="padding:8px 0;color:#555;">Meeting</td><td style="padding:8px 0;"><b>{meeting.title}</b></td></tr>
-              <tr><td style="padding:8px 0;color:#555;">Reference</td><td style="padding:8px 0;">{meeting.meeting_reference}</td></tr>
-              <tr><td style="padding:8px 0;color:#555;">Project</td><td style="padding:8px 0;">{meeting.project_name}</td></tr>
-              <tr><td style="padding:8px 0;color:#555;">Date</td><td style="padding:8px 0;">{meeting.date}</td></tr>
-              <tr><td style="padding:8px 0;color:#555;">Time</td><td style="padding:8px 0;">{meeting.time_slot}</td></tr>
-              <tr><td style="padding:8px 0;color:#555;">Type</td><td style="padding:8px 0;">{meeting.meeting_type}</td></tr>
-              <tr><td style="padding:8px 0;color:#555;">Initiated by</td><td style="padding:8px 0;">{meeting.initiator_name} ({meeting.initiator_role})</td></tr>
-              {meet_line}
-              {calendar_line}
-            </table>
-            {'<p style="margin:16px 0 0;"><b>Agenda:</b><br>' + (meeting.agenda or '—') + '</p>' if meeting.agenda else ''}
-            <p style="margin:24px 0;">
-              <a href="{room_url}" style="background:#1a73e8;color:#fff;text-decoration:none;padding:12px 24px;border-radius:6px;display:inline-block;">Join the Nexucon Meeting Room</a>
-            </p>
-          </div>
-          <div style="background:#f7f7f7;padding:12px 24px;color:#888;font-size:12px;">
-            This is an official notification from the Nexucon Government Regulatory Platform.
-          </div>
-        </div>
-        """
-
-        text = (
-            f"Nexucon Stakeholder Meeting\n"
-            f"{meeting.title} ({meeting.meeting_reference})\n"
-            f"Project: {meeting.project_name}\n"
-            f"Date: {meeting.date} | Time: {meeting.time_slot}\n"
-            f"Type: {meeting.meeting_type}\n"
-            f"Initiated by: {meeting.initiator_name} ({meeting.initiator_role})\n"
-            + (f"Google Meet: {meeting.google_meet_url}\n" if meeting.google_meet_url else "")
-            + (f"Calendar: {meeting.google_calendar_link}\n" if meeting.google_calendar_link else "")
-            + f"Meeting room: {room_url}\n"
-        )
-
         results = []
         for email in recipients:
+            p_info = participant_by_email.get(email.lower(), {})
+            p_cat = (p_info.get('category') or '').lower()
+            p_role = (p_info.get('role') or '').lower()
+            p_name = p_info.get('name') or email
+
+            if p_cat == 'inspector' or any(k in p_role for k in ['inspector', 'field officer', 'site officer', 'hse']):
+                primary_room_url = inspector_room_url
+                portal_label = "Inspector Terminal"
+            elif p_cat == 'government' or any(k in p_role for k in ['agency', 'director', 'admin', 'government']):
+                primary_room_url = gov_room_url
+                portal_label = "Government Command Center"
+            else:
+                primary_room_url = stakeholder_room_url
+                portal_label = "Stakeholder Portal"
+
+            html = f"""
+            <div style="font-family:Arial,sans-serif;max-width:580px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+              <div style="background:#0f2a4a;color:#fff;padding:18px 24px;">
+                <h2 style="margin:0;font-size:18px;">🏛️ Nexucon Official Meeting Invitation</h2>
+              </div>
+              <div style="padding:24px;">
+                <p style="font-size:15px;margin:0 0 12px;">Hello <b>{p_name}</b>,</p>
+                <p style="font-size:15px;margin:0 0 16px;">You have been invited to an official Nexucon coordination meeting.</p>
+                <table style="width:100%;font-size:14px;border-collapse:collapse;">
+                  <tr><td style="padding:8px 0;color:#555;">Meeting</td><td style="padding:8px 0;"><b>{meeting.title}</b></td></tr>
+                  <tr><td style="padding:8px 0;color:#555;">Reference</td><td style="padding:8px 0;">{meeting.meeting_reference}</td></tr>
+                  <tr><td style="padding:8px 0;color:#555;">Project</td><td style="padding:8px 0;">{meeting.project_name or 'General Regulatory Review'}</td></tr>
+                  <tr><td style="padding:8px 0;color:#555;">Date</td><td style="padding:8px 0;"><b>{meeting.date}</b></td></tr>
+                  <tr><td style="padding:8px 0;color:#555;">Time</td><td style="padding:8px 0;"><b>{meeting.time_slot}</b></td></tr>
+                  <tr><td style="padding:8px 0;color:#555;">Format</td><td style="padding:8px 0;">{meeting.meeting_type}</td></tr>
+                  <tr><td style="padding:8px 0;color:#555;">Initiated by</td><td style="padding:8px 0;">{meeting.initiator_name} ({meeting.initiator_role})</td></tr>
+                  {meet_line}
+                  {calendar_line}
+                </table>
+                {'<p style="margin:16px 0 0;"><b>Agenda:</b><br>' + (meeting.agenda or '—') + '</p>' if meeting.agenda else ''}
+                <p style="margin:24px 0 12px;">
+                  <a href="{primary_room_url}" style="background:#1a73e8;color:#fff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:bold;display:inline-block;">
+                    Join Meeting Room ({portal_label}) →
+                  </a>
+                </p>
+                <p style="font-size:12px;color:#64748b;margin:8px 0 0;">
+                  Direct Portal Links:
+                  <a href="{stakeholder_room_url}" style="color:#1a73e8;">Stakeholder Room</a> •
+                  <a href="{inspector_room_url}" style="color:#1a73e8;">Inspector Room</a> •
+                  <a href="{gov_room_url}" style="color:#1a73e8;">Government Room</a>
+                </p>
+              </div>
+              <div style="background:#f7f7f7;padding:12px 24px;color:#888;font-size:12px;">
+                This is an official notification from the Nexucon Government Regulatory Platform.
+              </div>
+            </div>
+            """
+
+            text = (
+                f"Nexucon Official Meeting Invitation\n"
+                f"Hello {p_name},\n\n"
+                f"{meeting.title} ({meeting.meeting_reference})\n"
+                f"Project: {meeting.project_name or 'General Regulatory Review'}\n"
+                f"Date: {meeting.date} | Time: {meeting.time_slot}\n"
+                f"Type: {meeting.meeting_type}\n"
+                f"Initiated by: {meeting.initiator_name} ({meeting.initiator_role})\n"
+                + (f"Google Meet: {meeting.google_meet_url}\n" if meeting.google_meet_url else "")
+                + (f"Calendar: {meeting.google_calendar_link}\n" if meeting.google_calendar_link else "")
+                + f"Join Room ({portal_label}): {primary_room_url}\n"
+            )
+
+            subject = f"📅 Official Meeting Invitation: {meeting.title} ({meeting.date} @ {meeting.time_slot})"
             res = EmailService.send_email(
                 to_email=email,
-                subject=f"📅 Official Stakeholder Meeting: {meeting.title} - {meeting.date}",
+                subject=subject,
                 html_content=html,
                 text_content=text,
             )
-            results.append({"email": email, "success": bool(res.get("success")), "id": res.get("id"), "error": res.get("error")})
+            is_sent = bool(res.get("success"))
+            results.append({"email": email, "success": is_sent, "id": res.get("id"), "error": res.get("error")})
+
+            # Update Notification & EmailDelivery audit trail
+            try:
+                recipient_user = User.objects.filter(email__iexact=email).first()
+                notif = Notification.objects.filter(
+                    entity_id=str(meeting.id),
+                ).filter(
+                    Q(recipient=recipient_user) if recipient_user else Q(metadata__recipient_email__iexact=email)
+                ).first()
+
+                if not notif:
+                    notif = Notification.objects.create(
+                        recipient=recipient_user,
+                        recipient_role=p_info.get('role') or 'Participant',
+                        category='MEETINGS',
+                        event_type='MEETING_INVITATION_SENT',
+                        title=f"📅 Meeting Invitation: {meeting.title}",
+                        message=f"Meeting '{meeting.title}' ({meeting.meeting_reference}) on {meeting.date} at {meeting.time_slot}.",
+                        priority='High',
+                        entity_type='StakeholderMeeting',
+                        entity_id=str(meeting.id),
+                        action_url=primary_room_url.replace(frontend_url, ''),
+                        email_sent=is_sent,
+                        email_id=str(res.get('id') or ''),
+                        metadata={
+                            "meeting_id": str(meeting.id),
+                            "meeting_reference": meeting.meeting_reference,
+                            "recipient_email": email,
+                            "date": meeting.date,
+                            "time_slot": meeting.time_slot,
+                        }
+                    )
+                else:
+                    notif.email_sent = is_sent
+                    notif.email_id = str(res.get('id') or '')
+                    notif.save(update_fields=['email_sent', 'email_id'])
+
+                EmailDelivery.objects.create(
+                    notification=notif,
+                    recipient_email=email,
+                    recipient_user=recipient_user,
+                    template_key='meeting_invitation',
+                    subject=subject,
+                    status='SENT' if is_sent else 'FAILED',
+                    provider_message_id=str(res.get('id') or ''),
+                    attempt_count=1,
+                    last_attempt_at=timezone.now(),
+                    sent_at=timezone.now() if is_sent else None,
+                    failed_at=None if is_sent else timezone.now(),
+                    failure_reason=None if is_sent else str(res.get('error') or ''),
+                    metadata={
+                        "meeting_id": str(meeting.id),
+                        "meeting_reference": meeting.meeting_reference,
+                        "portal": portal_label
+                    }
+                )
+            except Exception:
+                pass
 
         sent = sum(1 for r in results if r["success"])
         StakeholderService.log_audit(

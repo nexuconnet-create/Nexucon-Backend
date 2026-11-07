@@ -1,10 +1,146 @@
+import re
+import random
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 User = get_user_model()
 
+
+def validate_username_value(value: str, exclude_user_id=None) -> str:
+    """
+    Validate a username for registration or profile update.
+    Enforces presence, length (3-35), allowed characters, no '@' symbol, and uniqueness.
+    """
+    clean = (value or '').strip()
+    if not clean:
+        raise serializers.ValidationError("Username is required. No user can register without a username.")
+    if len(clean) < 3:
+        raise serializers.ValidationError("Username must be at least 3 characters long.")
+    if len(clean) > 35:
+        raise serializers.ValidationError("Username cannot exceed 35 characters.")
+    if '@' in clean:
+        raise serializers.ValidationError("Username cannot be an email address or contain '@'. Please choose a unique handle or auto-generate one.")
+    if not re.match(r'^[a-zA-Z0-9_.-]+$', clean):
+        raise serializers.ValidationError("Username can only contain letters, numbers, underscores (_), dots (.), and hyphens (-).")
+
+    qs = User.objects.filter(username__iexact=clean)
+    if exclude_user_id:
+        qs = qs.exclude(id=exclude_user_id)
+    if qs.exists():
+        raise serializers.ValidationError("This username is already taken. Please choose another or click Auto-Generate.")
+    return clean
+
+
+def generate_unique_username(
+    base_name: str = "",
+    email: str = "",
+    role: str = "",
+    company_name: str = "",
+    exclude_user_id=None
+) -> str:
+    """
+    Generate a clean, available username based on user's name, company, role, or email prefix.
+    """
+    suggestions = generate_username_suggestions(
+        base_name=base_name,
+        email=email,
+        role=role,
+        company_name=company_name,
+        exclude_user_id=exclude_user_id,
+        count=1
+    )
+    return suggestions[0]
+
+
+def generate_username_suggestions(
+    base_name: str = "",
+    email: str = "",
+    role: str = "",
+    company_name: str = "",
+    exclude_user_id=None,
+    count: int = 4
+) -> list[str]:
+    def _slug(text: str) -> str:
+        s = re.sub(r'[^a-z0-9]+', '_', (text or '').strip().lower()).strip('_')
+        return s[:22]
+
+    name_parts = [re.sub(r'[^a-z0-9]', '', p.lower()) for p in (base_name or '').split() if re.sub(r'[^a-z0-9]', '', p.lower())]
+    email_prefix = _slug((email or '').split('@')[0])
+    comp_slug = _slug(company_name)
+    role_slug = _slug(role)
+
+    candidates = []
+    if len(name_parts) >= 2:
+        first, last = name_parts[0], name_parts[-1]
+        candidates.extend([
+            f"{first}_{last}",
+            f"{first}.{last}",
+            f"{first}{last}",
+            f"{first[0]}_{last}",
+        ])
+    elif len(name_parts) == 1:
+        first = name_parts[0]
+        candidates.extend([
+            first,
+            f"{first}_nxc",
+        ])
+
+    if comp_slug:
+        if name_parts:
+            candidates.append(f"{name_parts[0]}_{comp_slug[:10]}")
+        candidates.append(comp_slug)
+
+    if email_prefix and len(email_prefix) >= 3:
+        candidates.append(email_prefix)
+
+    if role_slug and name_parts:
+        short_role = 'insp' if 'inspector' in role_slug else ('gov' if 'agency' in role_slug or 'director' in role_slug else role_slug[:6])
+        candidates.append(f"{short_role}_{name_parts[0]}")
+
+    if not candidates:
+        candidates = ["nexucon_user", "nxc_member", "nxc_official"]
+
+    available = []
+    seen = set()
+
+    def _is_taken(u: str) -> bool:
+        qs = User.objects.filter(username__iexact=u)
+        if exclude_user_id:
+            qs = qs.exclude(id=exclude_user_id)
+        return qs.exists()
+
+    # First check clean candidates
+    for cand in candidates:
+        c = cand[:30].strip('._-')
+        if len(c) < 3:
+            c = f"{c}_nxc"
+        if c not in seen and not _is_taken(c):
+            seen.add(c)
+            available.append(c)
+            if len(available) >= count:
+                return available
+
+    # Append numeric suffixes until we have enough suggestions
+    base_seed = (candidates[0] if candidates else "nexucon_user")[:24].strip('._-')
+    if len(base_seed) < 3:
+        base_seed = "nxc_user"
+
+    attempts = 0
+    while len(available) < count and attempts < 40:
+        attempts += 1
+        suffix = random.randint(10, 999) if attempts > 3 else attempts + 1
+        cand = f"{base_seed}{suffix}" if attempts % 2 == 0 else f"{base_seed}_{suffix}"
+        if cand not in seen and not _is_taken(cand):
+            seen.add(cand)
+            available.append(cand)
+
+    return available or [f"nxc_user_{random.randint(1000, 9999)}"]
+
+
 class UserRegistrationSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(required=True, min_length=3, max_length=35)
     password = serializers.CharField(write_only=True, min_length=8)
     name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     stakeholder_type = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -20,11 +156,14 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = (
-            'id', 'email', 'first_name', 'last_name', 'phone_number', 'password',
+            'id', 'username', 'email', 'first_name', 'last_name', 'phone_number', 'password',
             'name', 'stakeholder_type', 'role_name', 'company_name',
             'registration_number', 'license_authority', 'license_number',
             'country', 'state_region', 'office_address'
         )
+
+    def validate_username(self, value):
+        return validate_username_value(value)
 
     def validate_email(self, value):
         clean_email = value.strip().lower()
@@ -63,8 +202,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         state_region = validated_data.pop('state_region', '').strip()
         office_address = validated_data.pop('office_address', '').strip()
 
+        raw_username = (validated_data.get('username') or '').strip()
+        if not raw_username:
+            raise serializers.ValidationError({'username': 'Username is required. No user can register without a username.'})
+
         user = User.objects.create_user(
-            username=validated_data['email'],
+            username=raw_username,
             email=validated_data['email'],
             password=validated_data['password'],
             first_name=first_name,
@@ -135,14 +278,22 @@ class UserMeSerializer(serializers.ModelSerializer):
     agency_code = serializers.SerializerMethodField()
     stakeholder_profile = serializers.SerializerMethodField()
     is_onboarded = serializers.SerializerMethodField()
+    needs_username_update = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
-            'id', 'email', 'first_name', 'last_name', 'phone_number',
-            'is_verified', 'is_onboarded', 'role_name', 'agency_code',
+            'id', 'username', 'email', 'first_name', 'last_name', 'phone_number',
+            'is_verified', 'is_onboarded', 'needs_username_update', 'role_name', 'agency_code',
             'stakeholder_profile', 'permissions'
         )
+
+    def get_needs_username_update(self, obj):
+        uname = (getattr(obj, 'username', '') or '').strip()
+        uemail = (getattr(obj, 'email', '') or '').strip()
+        if not uname or '@' in uname or (uemail and uname.lower() == uemail.lower()):
+            return True
+        return False
 
     def get_is_onboarded(self, obj):
         if getattr(obj, 'is_onboarded', False):
@@ -283,15 +434,24 @@ class UserMeSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    username = serializers.CharField(required=False, allow_blank=True, write_only=True)
+
     default_error_messages = {
-        'no_active_account': 'Incorrect email or password.'
+        'no_active_account': 'Incorrect username/email or password.'
     }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.username_field in self.fields:
+            self.fields[self.username_field].required = False
+            self.fields[self.username_field].allow_blank = True
 
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
         # Add custom claims
         token['email'] = user.email
+        token['username'] = user.username
         if hasattr(user, 'government_profile') and user.government_profile and user.government_profile.role:
             token['role'] = user.government_profile.role.name
             token['permissions'] = user.government_profile.role.permissions
@@ -314,14 +474,25 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
-        # Normalize email/username to handle case-insensitivity in PostgreSQL
-        raw_username = (attrs.get(self.username_field) or '').strip()
-        if raw_username:
-            user = User.objects.filter(email__iexact=raw_username).first()
-            if not user:
-                user = User.objects.filter(username__iexact=raw_username).first()
-            if user:
-                attrs[self.username_field] = getattr(user, self.username_field)
+        # Accept either 'username' or 'email' as login identifier
+        raw_identifier = (
+            attrs.get('username')
+            or attrs.get(self.username_field)
+            or (self.initial_data.get('username') if hasattr(self, 'initial_data') and isinstance(self.initial_data, dict) else '')
+            or (self.initial_data.get('email') if hasattr(self, 'initial_data') and isinstance(self.initial_data, dict) else '')
+            or ''
+        ).strip()
+
+        if not raw_identifier:
+            raise serializers.ValidationError({'username': 'Username or email is required to sign in.'})
+
+        user = User.objects.filter(
+            Q(username__iexact=raw_identifier) | Q(email__iexact=raw_identifier)
+        ).first()
+        if user:
+            attrs[self.username_field] = getattr(user, self.username_field)
+        else:
+            attrs[self.username_field] = raw_identifier
 
         data = super().validate(attrs)
         # Add extra responses here
