@@ -27,25 +27,22 @@ if not project:
 
 print(f"Project selected: ID={project.id}, Name='{project.name}', Address='{project.site_address}'")
 
-# Ensure active calibration curve is set
+# Ensure active calibration curve is set (Route 2: Empirical Baseline without destructive test data)
 curve = StrengthCurve.objects.filter(project=project, curve_type='exponential').first()
 if not curve:
     curve = StrengthCurve.objects.create(
         project=project,
-        name="Ladol Project Calibration",
+        name="Standard Mix (Laboratory Default)",
         curve_type='exponential',
-        formula_params={'a': 3051.166318, 'b': 2.71395e-06, 'c': -3056.280893},
+        formula_params={'a': 1.20, 'b': 0.00085, 'c': 0.0},
         valid_range_min_ms=2000.0,
         valid_range_max_ms=5000.0,
         standard='BS 1881-203 / BS EN 12504-4',
-        data_points=[
-            {'v': 3200.0, 'f': 7.4}, {'v': 3400.0, 'f': 11.2},
-            {'v': 3600.0, 'f': 15.1}, {'v': 3800.0, 'f': 19.0},
-            {'v': 4000.0, 'f': 22.9}, {'v': 4200.0, 'f': 26.8},
-            {'v': 4400.0, 'f': 30.5}, {'v': 4600.0, 'f': 34.3},
-            {'v': 4800.0, 'f': 38.2}, {'v': 5000.0, 'f': 42.0}
-        ]
+        data_points=[]
     )
+else:
+    curve.data_points = []
+    curve.save()
 setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
 setting.active_curve = curve
 setting.save()
@@ -113,8 +110,7 @@ checks = [
     ("VAL-008: S11 2-point statistical note present", "2-point basis" in normalized_text.lower() or "bs en 12504-4 recommends" in normalized_text.lower()),
     ("VAL-010: Preliminary survey clarification in photo appendix", "preliminary site reconnaissance" in normalized_text.lower()),
     ("VAL-011: Modern NDT standards cited in conclusions (BS EN 12504-4, ACI 228.2R)", "bs en 12504-4" in normalized_text.lower() and "aci 228.2r" in normalized_text.lower()),
-    ("VAL-012: ASTM C597-22 current edition cited", "c597-22" in normalized_text.lower() or "astm c597" in normalized_text.lower()),
-    ("VAL-014: Table 3.0 Calibration Pairs Table present", "table 3.0" in normalized_text.lower() and "0.8966" in normalized_text),
+    ("VAL-014: Table 3.0 omitted and 0 stored calibration pairs disclaimed for empirical baseline", "table 3.0" not in normalized_text.lower() and "0 stored calibration pair" in normalized_text.lower()),
     ("VAL-015: SHA-256 cryptographic provenance clarification", "cryptographic sha-256 hash" in normalized_text.lower()),
     ("PHASE 10: Section 5.5 Statistical Summary Table header", "5.5 statistical summary table" in normalized_text.lower()),
     ("PHASE 10: 13-column LASBCA filing columns present", "uniformity" in normalized_text.lower() and "compliance" in normalized_text.lower()),

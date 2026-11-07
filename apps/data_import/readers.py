@@ -169,6 +169,9 @@ def _apply(folded, raw_key):
       two would let an unaccounted column through.
     """
     key = normalise_key(raw_key)
+    if key not in folded:
+        if key in ('compressive_strength', 'strength', 'compr_strength', 'measured_strength', 'f_cu', 'fc'):
+            return ('compressive_strength_mpa', 1.0)
     return folded.get(key, (key, 1.0))
 
 
@@ -506,6 +509,84 @@ def _headers_from_json(content: bytes, sample_limit: int):
 # XLSX / Excel
 # ----------------------------------------------------------------------
 
+def infer_floor_from_name(name_or_element: str) -> str:
+    """Infer floor name from element or station name.
+    
+    Supports:
+    - Multi-storey standard: COL-10-C1, BM-20-B1, SL-15-S2, 10FC, 20FB, 15FS, 4F, 5F, etc.
+    - Multi-building standard: A-GF-GB, A-FF-GS, B-GF-GB, C-FF-GS, A-GFC1, A-FFB1, B-GFC2, C-FFS1
+    - Standard prefixes: GF (Ground Floor), FF (First Floor), SF (Second Floor), TF (Third Floor),
+      RF (Roof), B1 (Basement 1), B2 (Basement 2), BF (Basement), UF (Unrecorded)
+    - Combined acronyms: GFC, GFB, GFS, GFW, FFC, FFB, FFS, FFW, SFC, TFC, RFC, GCF (typo tolerance)
+    """
+    if not name_or_element:
+        return 'Ground Floor'
+    clean = str(name_or_element).strip().upper()
+
+    # 1. Multi-storey station codes: COL-10-C1, BM-20-B1, SL-15-S1, etc.
+    m = re.search(r'(?:^|[-_\s:/])(?:COL|BM|SL|BEAM|SLAB|WALL)[-_\s:/](\d+)[-_\s:/]', clean)
+    if m:
+        fl_num = int(m.group(1))
+        if fl_num == 0: return 'Ground Floor'
+        if fl_num == 1: return 'First Floor'
+        if fl_num == 2: return 'Second Floor'
+        if fl_num == 3: return 'Third Floor'
+        suffix = 'th'
+        if fl_num % 10 == 1 and fl_num % 100 != 11: suffix = 'st'
+        elif fl_num % 10 == 2 and fl_num % 100 != 12: suffix = 'nd'
+        elif fl_num % 10 == 3 and fl_num % 100 != 13: suffix = 'rd'
+        return f'{fl_num}{suffix} Floor'
+
+    # 2. Numbered floor combined acronyms: 10FC, 15FB, 20FS, 10F, 20F, 4F, 5F, etc.
+    m = re.search(r'(?:^|[-_\s:/])(\d+)F(?:[CBWSF]|\b|[-_\s:/0-9])', clean)
+    if m:
+        fl_num = int(m.group(1))
+        if fl_num == 0: return 'Ground Floor'
+        if fl_num == 1: return 'First Floor'
+        if fl_num == 2: return 'Second Floor'
+        if fl_num == 3: return 'Third Floor'
+        suffix = 'th'
+        if fl_num % 10 == 1 and fl_num % 100 != 11: suffix = 'st'
+        elif fl_num % 10 == 2 and fl_num % 100 != 12: suffix = 'nd'
+        elif fl_num % 10 == 3 and fl_num % 100 != 13: suffix = 'rd'
+        return f'{fl_num}{suffix} Floor'
+
+    # 3. First Floor: FF, 1F, FIRST, 1ST (e.g. A-FFB1, A-FFC1, A-FFS1, A-FF-GB, FFCW1, FFC1)
+    if re.search(r'(?:^|[-_\s:/])(?:FF|1F|FL1)(?:[CBWSF0-9\b]|[-_\s:/]|$)|(?:^|[-_\s:/])(?:FIRST|1ST)(?:[-_\s:/]|$)|FIRST\s+FLOOR', clean):
+        return 'First Floor'
+
+    # 4. Ground Floor: GF, 0F, GROUND, GCF (typo in test files) (e.g. A-GFB1, A-GFC1, A-GFS1, A-GF-GB, GFCW1, GFC1, A-GCF1)
+    if re.search(r'(?:^|[-_\s:/])(?:GF|GCF|0F|FL0)(?:[CBWSF0-9\b]|[-_\s:/]|$)|(?:^|[-_\s:/])GROUND(?:[-_\s:/]|$)|GROUND\s+FLOOR', clean):
+        return 'Ground Floor'
+
+    # 5. Second Floor: SF, 2F, SECOND, 2ND
+    if re.search(r'(?:^|[-_\s:/])(?:SF|2F|FL2)(?:[CBWSF0-9\b]|[-_\s:/]|$)|(?:^|[-_\s:/])(?:SECOND|2ND)(?:[-_\s:/]|$)|SECOND\s+FLOOR', clean):
+        return 'Second Floor'
+
+    # 6. Third Floor: TF, 3F, THIRD, 3RD
+    if re.search(r'(?:^|[-_\s:/])(?:TF|3F|FL3)(?:[CBWSF0-9\b]|[-_\s:/]|$)|(?:^|[-_\s:/])(?:THIRD|3RD)(?:[-_\s:/]|$)|THIRD\s+FLOOR', clean):
+        return 'Third Floor'
+
+    # 7. Roof: RF, ROOF, RFC, RFB, RFS, RFW
+    if re.search(r'(?:^|[-_\s:/])(?:RF)(?:[CBWSF0-9\b]|[-_\s:/]|$)|(?:^|[-_\s:/])ROOF(?:[-_\s:/]|$)', clean):
+        return 'Roof'
+
+    # 8. Basement: B1, B2, BF, BASEMENT
+    if re.search(r'(?:^|[-_\s:/])B1(?:[-_\s:/]|$)', clean):
+        return 'Basement 1'
+    if re.search(r'(?:^|[-_\s:/])B2(?:[-_\s:/]|$)', clean):
+        return 'Basement 2'
+    if re.search(r'(?:^|[-_\s:/])(?:BF|BASEMENT)(?:[-_\s:/]|$)', clean):
+        return 'Basement'
+
+    # 9. Explicit unrecorded: UF
+    if re.search(r'(?:^|[-_\s:/])UF(?:[-_\s:/]|$)', clean):
+        return 'Floor not recorded'
+
+    return 'Ground Floor'
+
+
+
 def _read_xlsx(content: bytes, folded=None):
     """Parse an Excel (.xlsx) file into (rows, skipped_blank_rows).
 
@@ -575,12 +656,16 @@ def _read_xlsx(content: bytes, folded=None):
 
             data = {}
             if '-' in name:
-                elem, pt = name.split('-', 1)
-                data['structural_element'] = elem.strip()
-                data['point'] = pt.strip()
+                parts = name.rsplit('-', 1)
+                if re.match(r'^(?:[0-9]+|[A-Za-z]|P[0-9]+)$', parts[1].strip()):
+                    data['structural_element'] = parts[0].strip()
+                    data['point'] = parts[1].strip()
+                else:
+                    data['structural_element'] = name.strip()
+                    data['point'] = ''
             else:
-                data['point'] = name
-                data['structural_element'] = str(sheet.title or 'Element').strip()
+                data['structural_element'] = name.strip()
+                data['point'] = ''
 
             for k, val in row_dict.items():
                 kl = k.lower()
@@ -612,9 +697,28 @@ def _read_xlsx(content: bytes, folded=None):
                             data['rebound_number'] = float(val)
                         except (ValueError, TypeError):
                             pass
+                elif 'result' in kl or 'compr' in kl or 'strength' in kl or 'f_cu' in kl or 'fc' in kl:
+                    if 'unit' in kl or 'curve' in kl or 'type' in kl:
+                        continue
+                    if val is not None and str(val).strip() not in ('', '--', 'n/a', 'none'):
+                        if isinstance(val, (int, float)) and not isinstance(val, bool):
+                            if 0 < float(val) <= 200.0:
+                                data['compressive_strength_mpa'] = round(float(val), 2)
+                        elif isinstance(val, str):
+                            val_str = val.strip()
+                            is_vel = any(u in val_str.lower() for u in ('m/s', 'km/s', 'm / s'))
+                            if not is_vel:
+                                try:
+                                    clean_str = re.sub(r'(?i)\s*(n/mm[²2]?|mpa|kpa)\b', '', val_str).replace('²', '').strip()
+                                    parsed_f = float(clean_str)
+                                    if 0 < parsed_f <= 200.0:
+                                        data['compressive_strength_mpa'] = round(parsed_f, 2)
+                                except (ValueError, TypeError):
+                                    pass
 
             data.setdefault('test_type', 'pulse_velocity')
-            data.setdefault('floor', 'Ground Floor')
+            inferred_floor = infer_floor_from_name(data.get('structural_element') or name)
+            data.setdefault('floor', inferred_floor)
             rows.append(SourceRow(row_number=r, data=data))
         return rows, skipped
 
@@ -647,6 +751,8 @@ def _read_xlsx(content: bytes, folded=None):
             if isinstance(val, str):
                 val = val.strip()
             data[key] = _scaled(val, scale)
+        if not data.get('floor') and data.get('structural_element'):
+            data['floor'] = infer_floor_from_name(data['structural_element'])
         if all(_blank(v) for v in data.values()):
             skipped += 1
             continue

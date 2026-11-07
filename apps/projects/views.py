@@ -106,6 +106,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         qs = scoped_projects(user)
         if not user.is_superuser and not (hasattr(user, 'government_profile') and user.government_profile):
             qs = (qs | self.get_queryset()).distinct()
+        # Exclude draft, suspended, abandoned, and cold-stored projects from assignment
         qs = qs.exclude(cold_storage=True).exclude(status__in=['DRAFT', 'SUSPENDED', 'ABANDONED'])
         queryset = qs.order_by('name')
         serializer = self.get_serializer(queryset, many=True)
@@ -234,7 +235,33 @@ class ProjectViewSet(viewsets.ModelViewSet):
                         "is_current_user": False
                     })
 
-        return Response(results, status=status.HTTP_200_OK)
+    @action(detail=False, methods=['get'], url_path='latest-tag-number', permission_classes=[IsAuthenticated])
+    def latest_tag_number(self, request):
+        """
+        Returns the last issued sequential project tag reference and the next
+        available tag number (TAG-YYYY-NNNN) to guide agency head verification
+        and project registration per Nov 4 executive review.
+        """
+        import datetime
+        import re
+        from .models import generate_sequential_project_number
+        year = datetime.datetime.now().year
+        prefix = f"TAG-{year}-"
+        highest = 0
+        existing_tags = Project.objects.filter(project_number__startswith=prefix).values_list('project_number', flat=True)
+        for tag in existing_tags:
+            match = re.search(r'TAG-\d+-(\d+)', tag)
+            if match:
+                val = int(match.group(1))
+                if val > highest:
+                    highest = val
+        last_tag = f"{prefix}{highest:04d}" if highest > 0 else None
+        next_tag = generate_sequential_project_number()
+        return Response({
+            'year': year,
+            'last_project_number': last_tag or 'None registered yet for this year',
+            'next_project_number': next_tag,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], url_path='convert-coordinates', permission_classes=[AllowAny])
     def convert_coordinates(self, request):

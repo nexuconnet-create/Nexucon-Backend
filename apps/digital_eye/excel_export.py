@@ -18,8 +18,10 @@ from apps.reports.ndt_reports import NDTReportService
 
 RESULT_COLUMNS = [
     'STRUCTURAL ELEMENT', 'FLOOR', 'POINT', 'PATH LENGTH (MM)',
-    'TRANSIT TIME (µS)', 'PULSE VELOCITY (M/S)', 'E.C.S (MPA)',
-    'AVERAGE COMPRESSIVE STRENGTH (MPA)', 'REMARK',
+    'TRANSIT TIME (µS)', 'PULSE VELOCITY (M/S)', 'E.C.S (MPA) [M OR C]',
+    'AVERAGE COMPRESSIVE STRENGTH (MPA) [M OR C]', 'REMARK',
+    'MEASURED E.C.S (MPA) [SUPPLIED]', 'CORRELATED E.C.S (MPA) [CURVE]',
+    'MEAN MEASURED (MPA) [ELEMENT]', 'MEAN CORRELATED (MPA) [ELEMENT]',
 ]
 
 CRACK_COLUMNS = [
@@ -31,8 +33,12 @@ CRACK_COLUMNS = [
 _COLUMN_WIDTHS = {
     'STRUCTURAL ELEMENT': 38, 'FLOOR': 16, 'POINT': 7,
     'PATH LENGTH (MM)': 16, 'TRANSIT TIME (µS)': 16,
-    'PULSE VELOCITY (M/S)': 18, 'E.C.S (MPA)': 12,
-    'AVERAGE COMPRESSIVE STRENGTH (MPA)': 32, 'REMARK': 14,
+    'PULSE VELOCITY (M/S)': 18, 'E.C.S (MPA) [M OR C]': 20,
+    'AVERAGE COMPRESSIVE STRENGTH (MPA) [M OR C]': 34, 'REMARK': 14,
+    'MEASURED E.C.S (MPA) [SUPPLIED]': 24,
+    'CORRELATED E.C.S (MPA) [CURVE]': 24,
+    'MEAN MEASURED (MPA) [ELEMENT]': 24,
+    'MEAN CORRELATED (MPA) [ELEMENT]': 24,
     'SPACING L (MM)': 14, 'T CRACKED (µS)': 14, 'T UNCRACKED (µS)': 15,
     'CRACK DEPTH (MM)': 15, 'MEAN DEPTH (MM)': 14,
 }
@@ -82,6 +88,23 @@ def _policy_note(element_data):
     return ''
 
 
+def _basis_note(element_data):
+    """The measured/correlated key for the strength columns, or '' when every
+    element in the project reads on one basis.
+
+    The 15 Oct meeting asked for measured and correlated strength to stay
+    separable for audit. The sheet already carries both figures side by side;
+    this states which suffix means which, so a reader of the workbook alone is
+    not left to infer it from column order.
+    """
+    sources = {e.get('strength_source') for e in element_data}
+    if 'measured' not in sources:
+        return ''
+    return (' [M] marks a strength that arrived with the imported data and is '
+            'reproduced as measured; [C] marks the figure the project '
+            'calibration curve derived from the mean pulse velocity.')
+
+
 def build_results_workbook(project):
     """
     .xlsx of the project's PUNDIT results, grouped floor -> member ->
@@ -112,7 +135,8 @@ def build_results_workbook(project):
         sheet, RESULT_COLUMNS,
         f'PUNDIT Test Results — {project.name}',
         'Values match the official NDT report Section 5.0 tables exactly '
-        '(velocities in m/s).' + _policy_note(element_data))
+        '(velocities in m/s).' + _policy_note(element_data)
+        + _basis_note(element_data))
 
     floors_present = sorted({e['floor_label'] for e in element_data})
     for floor in floors_present:
@@ -142,6 +166,18 @@ def build_results_workbook(project):
                            value=None if e['mean_ecs'] is None
                            else round(e['mean_ecs'], 1))
                 sheet.cell(row=row, column=9, value=remark)
+                sheet.cell(row=row, column=10,
+                           value=None if r.get('measured_ecs') is None
+                           else round(r['measured_ecs'], 1))
+                sheet.cell(row=row, column=11,
+                           value=None if r.get('correlated_ecs') is None
+                           else round(r['correlated_ecs'], 1))
+                sheet.cell(row=row, column=12,
+                           value=None if (i != 0 or e.get('mean_measured_ecs') is None)
+                           else round(e['mean_measured_ecs'], 1))
+                sheet.cell(row=row, column=13,
+                           value=None if (i != 0 or e.get('mean_correlated_ecs') is None)
+                           else round(e['mean_correlated_ecs'], 1))
                 row += 1
 
     if crack_tests:

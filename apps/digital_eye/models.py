@@ -661,7 +661,8 @@ class PUNDITTest(models.Model):
         Ordered per-point rows for this test — the single data path the
         report, charts and AI consume. Returns dicts:
             {label, path_mm, transit_us, velocity_km_s, ecs_mpa,
-             uncracked_us, crack_depth_mm, surface_condition}
+             measured_strength_mpa, uncracked_us, crack_depth_mm,
+             surface_condition, notes}
         Tests recorded through the multi-reading model return their real
         A/B/C… rows; legacy single-reading tests return their scalar
         measurement as one 'A' row (values never invented — missing
@@ -676,6 +677,7 @@ class PUNDITTest(models.Model):
                  'transit_us': r.transit_time_us,
                  'velocity_km_s': r.velocity_km_s,
                  'ecs_mpa': r.ecs_mpa,
+                 'measured_strength_mpa': r.measured_strength_mpa,
                  'uncracked_us': r.uncracked_transit_time_us if is_crack else None,
                  'crack_depth_mm': r.crack_depth_mm if is_crack else None,
                  'surface_condition': r.surface_condition,
@@ -685,7 +687,8 @@ class PUNDITTest(models.Model):
         from apps.digital_eye.adapters import PUNDITAdapter
         from apps.digital_eye.strength_curves import apply_active_curve
         row = {'label': 'A', 'path_mm': None, 'transit_us': None,
-               'velocity_km_s': None, 'ecs_mpa': None, 'uncracked_us': None,
+               'velocity_km_s': None, 'ecs_mpa': None,
+               'measured_strength_mpa': None, 'uncracked_us': None,
                'crack_depth_mm': None, 'surface_condition': None,
                'notes': self.notes or ''}
         if self.test_type == 'crack_depth':
@@ -717,28 +720,178 @@ class PUNDITTest(models.Model):
         return [row]
 
     def element_mean_velocity_km_s(self):
-        """Mean pulse velocity over this test's readings (the element verdict
-        basis per A1); None when no reading is computable."""
-        velocities = [row['velocity_km_s'] for row in self.reading_rows()
-                      if row['velocity_km_s'] is not None]
-        return (sum(velocities) / len(velocities)) if velocities else None
+        """Mean pulse velocity over this test's valid readings (the element verdict
+        basis per A1); excludes anomalous/failed readings. None when no valid reading is computable."""
+        rows = self.reading_rows()
+        valid_vs = [
+            row['velocity_km_s'] for row in rows
+            if row.get('velocity_km_s') is not None
+            and 0 < row['velocity_km_s'] <= 5.0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('ecs_mpa') is None or row['ecs_mpa'] > 0)
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        if valid_vs:
+            return sum(valid_vs) / len(valid_vs)
+        # Fall back to any computable velocity if no strictly filtered points
+        all_vs = [row['velocity_km_s'] for row in rows if row.get('velocity_km_s') is not None]
+        return (sum(all_vs) / len(all_vs)) if all_vs else None
+
+    def element_mean_compressive_strength_mpa(self):
+        """Arithmetic mean of the strengths stored on this element's valid test
+        points (excluding 0 MPa and anomalous readings).
+
+        This is the per-point audit figure — "the average of all the points on
+        the element". It is NOT the element verdict the report and the registry
+        print: that one is ``element_representative_strength()``, which prefers
+        a genuinely measured strength and otherwise applies the project's
+        active curve to the element mean velocity (the path the standard-error
+        margin is computed on).
+        """
+        rows = self.reading_rows()
+        valid_strengths = [
+            row['ecs_mpa'] for row in rows
+            if row.get('ecs_mpa') is not None
+            and row['ecs_mpa'] > 0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('velocity_km_s') is None or (0 < row['velocity_km_s'] <= 5.0))
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        if valid_strengths:
+            return round(sum(valid_strengths) / len(valid_strengths), 2)
+        return self.estimated_compressive_strength_mpa
+
+    def element_mean_measured_strength_mpa(self):
+        """Arithmetic mean of the MEASURED compressive strengths that arrived
+        with this element's points, or None when the data carried none.
+
+        Only ``measured_strength_mpa`` counts here — a figure the operator or
+        laboratory supplied with the readings (an imported COMPRESSIVE STRENGTH
+        column). The curve-derived ``ecs_mpa`` is deliberately excluded: it is
+        the platform's own conversion, and calling it measured would report a
+        correlated number as a destructive-test result. Rows that recorded no
+        measured strength contribute nothing, so the mean is over the measured
+        points only, never padded with zeros.
+        """
+        rows = self.reading_rows()
+        valid_measured = [
+            row['measured_strength_mpa'] for row in rows
+            if row.get('measured_strength_mpa') is not None
+            and row['measured_strength_mpa'] > 0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('velocity_km_s') is None or (0 < row['velocity_km_s'] <= 5.0))
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        return round(sum(valid_measured) / len(valid_measured), 2) if valid_measured else None
+
+    def is_calibrated(self):
+        """
+        True if this test's correlation model has been calibrated by the government:
+        - via its scan batch status ('CALIBRATED' or 'ANALYSIS_COMPLETE')
+        - or via an active CalibrationProfile for its batch or project
+        """
+        if self.batch_id:
+            batch = self.batch
+            if batch and batch.status in ('CALIBRATED', 'ANALYSIS_COMPLETE'):
+                return True
+            if batch and hasattr(batch, 'calibration_profiles') and batch.calibration_profiles.filter(is_active=True).exists():
+                return True
+        if self.project_id:
+            from .models import CalibrationProfile
+            if CalibrationProfile.objects.filter(project_id=self.project_id, is_active=True).exists():
+                return True
+            setting = getattr(self.project, 'curve_setting', None)
+            if setting is not None and not setting.prefer_measured_strength:
+                return True
+        return False
+
+    def element_correlated_strength_mpa(self):
+        """Strength derived from the active calibration curve and station mean velocity.
+        Only computed when the model has been calibrated by the government.
+        """
+        if not self.is_calibrated():
+            return None
+        from apps.digital_eye.strength_curves import apply_active_curve
+        mean_v = self.element_mean_velocity_km_s()
+        if mean_v is None or not (1.0 <= mean_v <= 6.0):
+            return None
+        fcu, _ = apply_active_curve(
+            self.project, mean_v,
+            rebound_number=self.rebound_number,
+            temperature_c=self.surface_temperature_c,
+            moisture_condition=getattr(self, 'moisture_condition', None),
+            n_points=self.element_point_count()
+        )
+        return round(fcu, 2) if fcu is not None else None
+
+    def prefers_measured_strength(self):
+        """Whether this element's figures report the measured strength when the
+        data carried one. If the government has calibrated the model, the calibrated
+        formula governs across all government views."""
+        if self.is_calibrated():
+            return False
+        setting = getattr(self.project, 'curve_setting', None)
+        if setting is None:
+            return True
+        return bool(setting.prefer_measured_strength)
+
+    def element_strength_source(self):
+        """'correlated' when calibrated, 'measured' when this element's points
+        carried measured strengths and not calibrated, None when neither exists yet.
+        """
+        if self.is_calibrated() and self.element_correlated_strength_mpa() is not None:
+            return 'correlated'
+        if self.prefers_measured_strength() \
+                and self.element_mean_measured_strength_mpa() is not None:
+            return 'measured'
+        if self.element_correlated_strength_mpa() is not None:
+            return 'correlated'
+        return None
+
+    def element_representative_strength(self):
+        """The (value, source) an element is reported by.
+
+        When the government executes calibration, the active calibrated mathematical
+        curve takes absolute precedence. Pre-calibration raw scan file values are only
+        used as fallback prior to government calibration.
+        """
+        if self.is_calibrated():
+            correlated = self.element_correlated_strength_mpa()
+            if correlated is not None:
+                return correlated, 'correlated'
+            if self.estimated_compressive_strength_mpa is not None and self.estimated_compressive_strength_mpa > 0:
+                return self.estimated_compressive_strength_mpa, 'correlated'
+
+        if self.prefers_measured_strength():
+            measured = self.element_mean_measured_strength_mpa()
+            if measured is not None:
+                return measured, 'measured'
+
+        correlated = self.element_correlated_strength_mpa()
+        if correlated is not None:
+            return correlated, 'correlated'
+        return None, None
 
     def element_point_count(self):
         """
-        How many test points contributed a computable velocity to this
+        How many test points contributed a valid velocity to this
         element's mean — the n in the curve's s/sqrt(n) confidence-margin
         divisor (15 Sep 2026: "three test points averaged", with the
         standard error factored into the post-velocity calculation).
-
-        The element verdict is the mean of these points, so its confidence
-        margin narrows as sqrt(n) of them — BS EN 13791 logic, where more
-        readings buy a tighter confidence on the in-situ estimate. A legacy
-        single-reading test, or one whose points yielded no velocity,
-        honestly counts as 1: the figure is then a single reading and earns
-        no averaging benefit.
         """
-        return max(1, len([row for row in self.reading_rows()
-                           if row['velocity_km_s'] is not None]))
+        rows = self.reading_rows()
+        valid_rows = [
+            row for row in rows
+            if row.get('velocity_km_s') is not None
+            and 0 < row['velocity_km_s'] <= 5.0
+            and (row.get('transit_us') is None or row['transit_us'] > 0)
+            and (row.get('ecs_mpa') is None or row['ecs_mpa'] > 0)
+            and ('anomalous' not in (row.get('notes') or '').lower())
+        ]
+        if valid_rows:
+            return len(valid_rows)
+        all_valid = [row for row in rows if row.get('velocity_km_s') is not None]
+        return max(1, len(all_valid))
 
     def element_mean_crack_depth_mm(self):
         """Mean crack depth over this test's readings (the element verdict
@@ -791,12 +944,19 @@ class PUNDITTest(models.Model):
                 (max(point_velocities) - min(point_velocities))
                 / mean_v * 100, 1)
 
-        # Legacy single-reading tests persist their element verdict here
-        # (the multi-reading serializer path already did): the same
-        # active-curve computation the report and serializer use, with the
-        # curve provenance snapshotted. Velocities outside the calibrated
-        # range keep a None strength — never extrapolated.
-        if self.estimated_compressive_strength_mpa is None and mean_v is not None:
+        # The element verdict: two-tier in the order minuted by the team:
+        # 1. When the scan data carried measured strength and the project prefers
+        #    measured strength (default True), the element reports the direct arithmetic
+        #    mean of the raw readings ("Without Calibration").
+        # 2. Otherwise, the project's active curve is applied to the element's mean velocity ONLY if calibrated by government.
+        if self.prefers_measured_strength():
+            measured = self.element_mean_measured_strength_mpa()
+            if measured is not None:
+                self.estimated_compressive_strength_mpa = measured
+        elif self.element_correlated_strength_mpa() is not None:
+            self.estimated_compressive_strength_mpa = self.element_correlated_strength_mpa()
+
+        if self.estimated_compressive_strength_mpa is None and mean_v is not None and self.is_calibrated():
             from .strength_curves import apply_active_curve
             self.estimated_compressive_strength_mpa, snapshot = apply_active_curve(
                 self.project, mean_v,
@@ -807,6 +967,8 @@ class PUNDITTest(models.Model):
                 n_points=len(point_velocities))
             if not isinstance(self.strength_curve_snapshot, dict):
                 self.strength_curve_snapshot = snapshot
+        elif not self.is_calibrated() and self.element_mean_measured_strength_mpa() is None:
+            self.estimated_compressive_strength_mpa = None
 
         # Standard error: prefer the provenance snapshot of the curve that
         # produced this value; fall back to the project's active curve
@@ -926,7 +1088,17 @@ class PUNDITReading(models.Model):
     velocity_km_s = models.FloatField(null=True, blank=True,
                                       help_text="Computed v = L/t (read-only; never operator-entered)")
     ecs_mpa = models.FloatField(null=True, blank=True,
-                                help_text="Computed E.C.S from the project's active calibration curve (read-only)")
+                               help_text="E.C.S this point was computed to carry through the "
+                                         "project's active calibration curve (read-only). This is a "
+                                         "CORRELATED figure — never the measured one; see "
+                                         "measured_strength_mpa")
+    measured_strength_mpa = models.FloatField(
+        null=True, blank=True,
+        help_text="Operator- or laboratory-measured compressive strength that arrived WITH this "
+                  "point's data (an imported COMPRESSIVE STRENGTH / MEASURED STRENGTH column). The "
+                  "platform never computes this and never overwrites it when supplied. None means "
+                  "the data carried no measured strength, and the point's strength is the "
+                  "correlated ecs_mpa instead.")
     strength_curve_snapshot = models.JSONField(
         null=True, blank=True,
         help_text="Provenance of the curve that produced this point's E.C.S (Nexucon Link)")
@@ -975,18 +1147,35 @@ class PUNDITReading(models.Model):
             self.velocity_km_s = self.path_length_mm / self.transit_time_us
         else:
             self.velocity_km_s = None
+        is_anomalous = (
+            (self.notes and 'anomalous' in self.notes.lower())
+            or (self.velocity_km_s is not None and self.velocity_km_s > 5.0)
+            or (self.transit_time_us is not None and self.transit_time_us <= 0)
+        )
+        if is_anomalous and not self.notes:
+            self.notes = 'Anomalous/failed reading - excluded from averages'
+
         test = self.test
         # SonReb combination curves need a rebound number: this point's own
         # reading, else the element-level reading on the test.
         rebound = self.rebound_number
         if rebound is None and test is not None:
             rebound = test.rebound_number
-        self.ecs_mpa, self.strength_curve_snapshot = apply_active_curve(
-            test.project if test is not None and test.project_id else None,
-            self.velocity_km_s,
-            rebound_number=rebound,
-            temperature_c=test.surface_temperature_c if test is not None else None,
-            moisture_condition=test.moisture_condition if test is not None else None)
+
+        if not is_anomalous:
+            curve_ecs, snapshot = apply_active_curve(
+                test.project if test is not None and test.project_id else None,
+                self.velocity_km_s,
+                rebound_number=rebound,
+                temperature_c=test.surface_temperature_c if test is not None else None,
+                moisture_condition=test.moisture_condition if test is not None else None)
+            if self.ecs_mpa is None or self.ecs_mpa <= 0:
+                self.ecs_mpa = curve_ecs
+            if snapshot:
+                self.strength_curve_snapshot = snapshot
+        else:
+            self.strength_curve_snapshot = None
+
         self.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
             self.path_length_mm, self.transit_time_us,
             self.uncracked_transit_time_us)
@@ -1494,6 +1683,12 @@ class ProjectCurveSetting(models.Model):
     active_curve = models.ForeignKey(StrengthCurve, on_delete=models.SET_NULL,
                                      null=True, blank=True,
                                      related_name='active_for_projects')
+    prefer_measured_strength = models.BooleanField(
+        default=True,
+        help_text="Report the element's MEASURED compressive strength when the injected data "
+                  "carried one, instead of the figure derived from the active curve. Off makes "
+                  "every figure in the project read on the single curve basis; the measured "
+                  "value stays on record either way and is never overwritten.")
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL,
                                    on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='curve_settings_updated')

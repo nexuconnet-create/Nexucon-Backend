@@ -13,6 +13,7 @@ Covers:
 """
 import hashlib
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -395,8 +396,11 @@ class PUNDITAPITestCase(DigitalEyeAPITestBase):
         self.assertEqual(row['test_location'], 'Grid D-7 Core Section')
         self.assertEqual(row['transducer_type'], 'direct')
         self.assertEqual(row['transducer_type_display'], 'Direct Transmission')
-        # 250 mm / 62.5 us = 4.0 km/s -> E.C.S = 8.961*4.0 - 7.97 = 27.874 N/mm2.
-        self.assertAlmostEqual(row['estimated_compressive_strength_mpa'], 27.874, places=3)
+        # 250 mm / 62.5 us = 4.0 km/s -> the documented default exponential
+        # f_cu = 1.20 * exp(0.00085 * V_ms) = 35.96 N/mm2, as the API rounds it.
+        self.assertAlmostEqual(row['estimated_compressive_strength_mpa'],
+                               round(1.20 * math.exp(0.00085 * 4000.0), 2),
+                               places=2)
 
     def test_ecs_is_none_outside_calibration_range(self):
         """The E.C.S curve is never extrapolated beyond its 2.0–5.0 km/s validity."""
@@ -850,7 +854,8 @@ class PunditExcelImportTestCase(DigitalEyeAPITestBase):
         self.assertAlmostEqual(column.pulse_velocity_ms, mean_v * 1000, places=0)
         self.assertEqual(column.quality_grade, 'good')
         self.assertAlmostEqual(column.estimated_compressive_strength_mpa,
-                               8.961 * mean_v - 7.97, places=2)
+                               1.20 * math.exp(0.00085 * (mean_v * 1000.0)),
+                               places=2)
 
         beam = PUNDITTest.objects.get(structural_element='BEAM-B2')
         self.assertIsNone(beam.velocity_km_s)  # a cracked path time is not a velocity
@@ -1618,7 +1623,7 @@ class PUNDITProjectAnalysisTestCase(TestCase):
         self.assertEqual(record.model_provider, 'deterministic')
         # Worst element risk wins (2.0 km/s -> 'poor' -> high).
         self.assertEqual(record.risk_level, 'high')
-        self.assertIn('1 graded good or better', record.observations[0])
+        self.assertTrue(any('1 graded good or better' in str(o) for o in record.observations))
         recs = [r['recommendation'] for r in record.recommendations]
         self.assertTrue(any('graded poor or very poor' in r for r in recs))
         # Per-element means appear in the reasoning log.
@@ -4005,7 +4010,7 @@ class PunditResultsExportTestCase(DigitalEyeAPITestBase):
         # Title (1) + subtitle (2) + header row (4) — data starts at row 5.
         headers = [cell.value for cell in sheet[4]]
         self.assertIn('PULSE VELOCITY (M/S)', headers)
-        self.assertIn('AVERAGE COMPRESSIVE STRENGTH (MPA)', headers)
+        self.assertTrue(any('AVERAGE COMPRESSIVE STRENGTH (MPA)' in str(h) for h in headers))
 
         from apps.reports.ndt_reports import NDTReportService
         element = NDTReportService._element_data([test])[0]
@@ -4075,11 +4080,18 @@ class NexuconLinkEngineTestCase(TestCase):
         self.assertAlmostEqual(
             apply_curve_params('exponential', {'a': 2.0, 'b': 0.0005, 'c': 1.0}, 4.0),
             2.0 * math.exp(2.0) + 1.0)
-        # SonReb: a * V^b * R^c — needs a rebound number.
+        # SonReb: a * V^b * R^c, with V in m/s — the domain the fitter fits in
+        # and formula_display prints. It needs a rebound number.
         self.assertAlmostEqual(
-            apply_curve_params('sonreb', {'a': 0.5, 'b': 1.2, 'c': 0.4}, 4.0,
+            apply_curve_params('sonreb', {'a': 0.0025, 'b': 1.0, 'c': 0.5}, 4.0,
                                rebound_number=36.0),
-            0.5 * (4000.0 ** 1.2) * (36.0 ** 0.4))
+            0.0025 * (4000.0 ** 1.0) * (36.0 ** 0.5))
+        # The same shape with parameters that would print 44,051 N/mm2 is
+        # refused outright: no concrete has that strength, so the curve
+        # produces nothing rather than a figure nobody could act on.
+        self.assertIsNone(apply_curve_params(
+            'sonreb', {'a': 0.5, 'b': 1.2, 'c': 0.4}, 4.0,
+            rebound_number=36.0))
         # Lookup: piecewise-linear between (3000, 15) and (4000, 25).
         self.assertAlmostEqual(
             apply_curve_params('lookup', {'points': [
@@ -4096,9 +4108,15 @@ class NexuconLinkEngineTestCase(TestCase):
         self.assertIsNone(apply_curve_params(
             'linear', {'m': 0.01, 'c': -20.0}, 5.5,
             valid_range_ms=[2000.0, 5000.0]))
-        # SonReb without a rebound number.
+        # SonReb without a rebound number: no curve to apply, and no invented
+        # rebound value substituted for the missing one. The parameters here
+        # would produce a real strength at this velocity, so the None is
+        # unambiguously the missing rebound and nothing else.
+        self.assertAlmostEqual(apply_curve_params(
+            'sonreb', {'a': 0.0025, 'b': 1.0, 'c': 0.5}, 4.0,
+            rebound_number=36.0), 60.0)
         self.assertIsNone(apply_curve_params(
-            'sonreb', {'a': 0.5, 'b': 1.2, 'c': 0.4}, 4.0))
+            'sonreb', {'a': 0.0025, 'b': 1.0, 'c': 0.5}, 4.0))
         # Lookup outside the table's span: no extrapolation, ever.
         self.assertIsNone(apply_curve_params(
             'lookup', {'points': [{'v': 3000.0, 'f': 15.0},
@@ -4140,7 +4158,7 @@ class NexuconLinkEngineTestCase(TestCase):
         self.assertIsNotNone(curve)
         self.assertTrue(curve.is_default)
         strength, snapshot = apply_active_curve(project, 4.0)
-        self.assertAlmostEqual(strength, 8.961 * 4.0 - 7.97)
+        self.assertAlmostEqual(strength, 1.20 * math.exp(0.00085 * 4000.0))
         self.assertEqual(snapshot['curve_id'], str(curve.id))
         self.assertIn('formula', snapshot)
         # A project setting overrides the platform default.
@@ -4276,11 +4294,19 @@ class NexuconLinkEngineTestCase(TestCase):
         # exception — but the value must never be rounded to a "0" it is not.
         for tiny in (1.2e-7, 1.2e-30):
             self.assertNotEqual(format_coefficient(tiny), '0')
-        # The formula as a whole carries the same guarantees.
+        # The formula as a whole carries the same guarantees. A zero constant
+        # is omitted rather than printed as a noise "+ 0".
         formula = formula_display('exponential',
                                   {'a': 0.0012, 'b': 0.0018, 'c': 0})
-        self.assertEqual(formula, 'f_cu = 0.0012 x exp(0.0018 x V) + 0')
+        self.assertEqual(formula, 'f_cu = 0.0012 x exp(0.0018 x V)')
         self.assertNotIn('e-', formula)
+        # A non-zero constant still shows, with its sign.
+        self.assertEqual(formula_display('exponential',
+                                         {'a': 0.0012, 'b': 0.0018, 'c': 4.5}),
+                         'f_cu = 0.0012 x exp(0.0018 x V) + 4.5')
+        self.assertEqual(formula_display('exponential',
+                                         {'a': 0.0012, 'b': 0.0018, 'c': -4.5}),
+                         'f_cu = 0.0012 x exp(0.0018 x V) - 4.5')
         # A coefficient below the standard's resolution is disclosed as the
         # value it is, not silently printed as zero.
         self.assertNotIn(' x exp(0 x V)', formula_display(
@@ -4301,7 +4327,7 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
         rows = response.data['results'] if isinstance(response.data, dict) \
             else response.data
         names = [row['name'] for row in rows]
-        self.assertIn('Platform default (laboratory linear)', names)
+        self.assertIn('Platform default (laboratory exponential)', names)
 
     def test_curve_create_validates_params_and_stores_provenance(self):
         response = self.client.post(self._curve_url(), {
@@ -4615,7 +4641,7 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
 
     def test_preview_computes_the_full_chain(self):
         url = reverse('strength-curve-preview')
-        # 120 mm / 30 us = 4000 m/s -> default curve: 0.008961*4000 - 7.97.
+        # 120 mm / 30 us = 4000 m/s -> the documented default exponential.
         response = self.client.post(url, {
             'project': str(self.project.id),
             'path_length_mm': 120.0, 'transit_time_us': 30.0,
@@ -4625,7 +4651,7 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
         self.assertEqual(response.data['velocity_m_s'], 4000.0)
         self.assertFalse(response.data['temperature_correction_applied'])
         self.assertAlmostEqual(response.data['f_cu_mpa'],
-                               0.008961 * 4000.0 - 7.97, places=2)
+                               1.20 * math.exp(0.00085 * 4000.0), places=2)
         self.assertEqual(response.data['status'], 'ok')
         self.assertIn('curve_snapshot', response.data)
 
@@ -4638,7 +4664,7 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
         self.assertTrue(response.data['temperature_correction_applied'])
         self.assertEqual(response.data['corrected_velocity_m_s'], 3856.0)
         self.assertAlmostEqual(response.data['f_cu_mpa'],
-                               0.008961 * 3856.0 - 7.97, places=2)
+                               1.20 * math.exp(0.00085 * 3856.0), places=2)
 
         # Outside the default curve's valid range: no invented strength.
         response = self.client.post(url, {
@@ -4673,14 +4699,23 @@ class NexuconLinkAPITestCase(DigitalEyeAPITestBase):
     def test_default_curve_cannot_be_edited_or_deleted(self):
         from .models import StrengthCurve
         default = StrengthCurve.objects.get(is_default=True)
+        # A well-formed parameter set for the default's own type, so the
+        # refusal being tested is the is_default guard and not a validation
+        # error further up the serializer.
+        self.assertEqual(default.curve_type, 'exponential')
         response = self.client.patch(
             reverse('strength-curve-detail', args=[default.id]),
-            {'formula_params': {'m': 0.02, 'c': -40.0}}, format='json')
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+            {'formula_params': {'a': 2.0, 'b': 0.0009, 'c': 0.0}},
+            format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN,
+                         msg=str(response.data))
         response = self.client.delete(
             reverse('strength-curve-detail', args=[default.id]))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(StrengthCurve.objects.filter(pk=default.id).exists())
+        # The stored parameters are untouched by the refused edit.
+        default.refresh_from_db()
+        self.assertEqual(default.formula_params['a'], 1.20)
 
     def test_a_typed_calibration_pair_may_not_carry_an_impossible_strength(self):
         """The manual curve form fits its pairs into the curve, so it is
@@ -5267,7 +5302,7 @@ class PunditMeasurementExportTestCase(DigitalEyeAPITestBase):
                          reading.strength_curve_snapshot['curve_id'])
         self.assertEqual(row['curve_name'],
                          reading.strength_curve_snapshot['name'])
-        self.assertEqual(row['curve_type'], 'linear')
+        self.assertEqual(row['curve_type'], 'exponential')
 
     def test_a_test_with_no_date_exports_a_null_date(self):
         row = self._rows(search='BEAM-B2')[0]
@@ -5291,7 +5326,7 @@ class PunditMeasurementExportTestCase(DigitalEyeAPITestBase):
         entry = payload['curves_used'][0]
         self.assertEqual(entry['curve_id'], snapshot['curve_id'])
         self.assertEqual(entry['curve_name'], snapshot['name'])
-        self.assertEqual(entry['curve_type'], 'linear')
+        self.assertEqual(entry['curve_type'], 'exponential')
 
     def test_curves_used_is_empty_when_no_row_has_a_curve(self):
         """Nothing recorded means an empty list, not a named curve."""
@@ -5545,6 +5580,8 @@ class NexuconLinkPlatformDefaultTestCase(DigitalEyeAPITestBase):
         """Provenance is immutable per record: a reading keeps the snapshot of
         the curve that produced it, so returning the project to the default
         rewrites no history."""
+        from .models import PUNDITTest
+
         self._activate()
         recorded = self._record_a_reading()
         # 120 mm / 30 us = 4000 m/s -> 0.012 * 4000 - 30 = 18 MPa.
@@ -5556,14 +5593,32 @@ class NexuconLinkPlatformDefaultTestCase(DigitalEyeAPITestBase):
         self.assertEqual(self._use_default().status_code, status.HTTP_200_OK)
         self.assertEqual(self._active_source()['source'], 'platform_default')
 
+        # What the record itself holds is untouched: the stored figure and the
+        # snapshot naming the curve that produced it.
+        stored = PUNDITTest.objects.get(pk=recorded['id'])
+        self.assertAlmostEqual(stored.estimated_compressive_strength_mpa,
+                               18.0, places=2)
+        self.assertEqual(stored.strength_curve_snapshot['curve_id'],
+                         str(self.curve.id))
+        self.assertAlmostEqual(stored.readings.first().ecs_mpa, 18.0, places=2)
+
         after = self.client.get(
             reverse('pundit-test-detail', args=[recorded['id']])).data
         self.assertEqual(after['strength_curve_snapshot']['curve_id'],
                          str(self.curve.id))
         self.assertEqual(after['strength_curve_snapshot']['name'],
                          'Lekki active calibration')
+        # The serialized element figure is the LIVE one by design — it follows
+        # whatever calibration the project is on now, so the registry, the
+        # report and the results sheet cannot drift apart after a recalibration.
+        # The project has just gone back to the platform default, so this reads
+        # the default exponential at 4000 m/s, not the 18 MPa recorded under
+        # the project's own curve.
         self.assertAlmostEqual(after['estimated_compressive_strength_mpa'],
-                               18.0, places=2)
+                               1.20 * math.exp(0.00085 * 4000.0), places=2)
+        self.assertEqual(after['strength_source'], 'correlated')
+        # The per-point figure likewise carries the snapshot of the curve that
+        # produced it at record time, not the project's current calibration.
         self.assertAlmostEqual(after['readings'][0]['ecs_mpa'], 18.0, places=2)
 
     def test_use_platform_default_is_director_only(self):
@@ -5597,3 +5652,265 @@ class NexuconLinkPlatformDefaultTestCase(DigitalEyeAPITestBase):
         self.assertIn('detail', response.data)
 
 
+
+
+# ======================================================================
+# Which strength a project REPORTS (15 Oct 2026 meeting).
+#
+# The injected data can carry a compressive strength of its own. That value
+# is never recalculated and never overwritten, and the calibration curve
+# still derives its own figure from the mean pulse velocity. This action is
+# how a user chooses which of the two the tables print — the meeting's
+# "users should choose which value to print or analyze".
+# ======================================================================
+
+class StrengthBasisChoiceTestCase(DigitalEyeAPITestBase):
+    """The measured/correlated reporting choice: readable, settable by a
+    Director, audited, and never destructive — switching it rewrites no
+    stored figure on either basis."""
+
+    def _url(self, project=None):
+        return (reverse('strength-curve-strength-basis')
+                + f'?project={project if project is not None else self.project.id}')
+
+    def _get(self, project=None):
+        return self.client.get(self._url(project))
+
+    def _post(self, payload):
+        return self.client.post(reverse('strength-curve-strength-basis'),
+                                payload, format='json')
+
+    def _sign_in_as_non_director(self, username):
+        """A signed-in non-Director who can SEE this project.
+
+        The role sits on the Profile, not on the user row. Being named on the
+        project as its inspector is what puts it in `scoped_projects` for a
+        non-Director, so the read paths answer 200 while every write still has
+        to pass IsDirector.
+        """
+        from apps.government.models import Profile, Role
+        from rest_framework_simplejwt.tokens import RefreshToken
+        staff = User.objects.create_user(
+            username=username, email=username, password='x')
+        role, _ = Role.objects.get_or_create(name='Inspector')
+        Profile.objects.create(user=staff, role=role)
+        self.project.assigned_inspector_user = staff
+        self.project.save(update_fields=['assigned_inspector_user'])
+        refresh = RefreshToken.for_user(staff)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+        return staff
+
+    def _record_two_points(self, measured=None):
+        readings = [{'transit_time_us': 30.0}, {'transit_time_us': 31.0}]
+        if measured is not None:
+            readings[0]['measured_strength_mpa'] = measured
+        response = self.client.post(reverse('pundit-test-list'), {
+            'project': str(self.project.id),
+            'test_type': 'pulse_velocity',
+            'structural_element': 'COL-BASIS-01', 'floor': 'Ground Floor',
+            'path_length_mm': 120.0,
+            'readings': readings,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED,
+                         msg=str(response.data))
+        return PUNDITTest.objects.get(pk=response.data['id'])
+
+    def test_a_project_with_no_setting_reports_on_measured(self):
+        """The default is stated, not implied: no ProjectCurveSetting row yet
+        still answers 'measured', and says how many measured points exist."""
+        from .models import ProjectCurveSetting
+        self.assertFalse(ProjectCurveSetting.objects.filter(
+            project=self.project).exists())
+
+        response = self._get()
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertTrue(response.data['prefer_measured_strength'])
+        self.assertEqual(response.data['reported_basis'], 'measured')
+        self.assertEqual(response.data['measured_points_on_record'], 0)
+        keys = [option['key'] for option in response.data['options']]
+        self.assertEqual(keys, ['measured', 'correlated'])
+
+    def test_the_choice_is_switched_and_persisted(self):
+        from .models import ProjectCurveSetting
+
+        response = self._post({'project': str(self.project.id),
+                               'prefer_measured_strength': False})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertFalse(response.data['prefer_measured_strength'])
+        self.assertEqual(response.data['reported_basis'], 'correlated')
+
+        setting = ProjectCurveSetting.objects.get(project=self.project)
+        self.assertFalse(setting.prefer_measured_strength)
+        # The read path agrees with the write path.
+        self.assertFalse(self._get().data['prefer_measured_strength'])
+
+        # And the element convention the report reads follows the setting.
+        test = self._record_two_points(measured=42.5)
+        self.assertFalse(test.prefers_measured_strength())
+        self.assertEqual(test.element_strength_source(), 'correlated')
+
+        self.assertEqual(self._post({'project': str(self.project.id),
+                                     'prefer_measured_strength': True}
+                                    ).status_code, status.HTTP_200_OK)
+        self.assertTrue(self._get().data['prefer_measured_strength'])
+        # Re-read the element: the setting lives on the project, and the copy
+        # held here still carries the relation it loaded before the switch.
+        test = PUNDITTest.objects.get(pk=test.pk)
+        self.assertTrue(test.prefers_measured_strength())
+        self.assertEqual(test.element_strength_source(), 'measured')
+
+    def test_switching_the_basis_rewrites_no_stored_figure(self):
+        """Both figures survive the switch: the measured value stays on the
+        reading and the correlated value stays on the element. Only the
+        reported basis moves."""
+        test = self._record_two_points(measured=42.5)
+        # Point A by its label, not by 'id': the primary key is a UUID, so
+        # ordering by it would pick a row at random.
+        reading = test.readings.get(point_label='A')
+        stored_measured = reading.measured_strength_mpa
+        stored_correlated = test.estimated_compressive_strength_mpa
+        self.assertEqual(stored_measured, 42.5)
+        self.assertIsNotNone(stored_correlated)
+        # The point that carried no strength keeps none — nothing was filled in
+        # from the element's other point.
+        self.assertIsNone(test.readings.get(point_label='B').measured_strength_mpa)
+
+        self._post({'project': str(self.project.id),
+                    'prefer_measured_strength': False})
+        self._post({'project': str(self.project.id),
+                    'prefer_measured_strength': True})
+
+        reading.refresh_from_db()
+        test.refresh_from_db()
+        self.assertEqual(reading.measured_strength_mpa, stored_measured)
+        self.assertEqual(test.estimated_compressive_strength_mpa,
+                         stored_correlated)
+
+    def test_the_measured_point_count_is_the_real_one(self):
+        self._record_two_points(measured=42.5)
+        self._record_two_points(measured=None)
+        response = self._get()
+        self.assertEqual(response.data['measured_points_on_record'], 1)
+
+    def test_the_setting_is_audited(self):
+        self._post({'project': str(self.project.id),
+                    'prefer_measured_strength': False})
+        self.assertTrue(AuditEvent.objects.filter(
+            action='digital_eye.strength_basis.set',
+            resource_id=str(self.project.id)).exists())
+
+    def test_a_missing_or_non_boolean_value_is_rejected(self):
+        first = self._post({'project': str(self.project.id)})
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        second = self._post({'project': str(self.project.id),
+                             'prefer_measured_strength': 'maybe'})
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        # Nothing was written by either attempt.
+        from .models import ProjectCurveSetting
+        self.assertFalse(ProjectCurveSetting.objects.filter(
+            project=self.project,
+            prefer_measured_strength=False).exists())
+
+    def test_a_string_boolean_is_accepted(self):
+        """A form post arrives as text; 'false' has to mean False, not
+        truthy-non-empty-string, or the control would do the opposite."""
+        response = self._post({'project': str(self.project.id),
+                               'prefer_measured_strength': 'false'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertFalse(response.data['prefer_measured_strength'])
+
+    def test_an_unknown_project_is_a_404(self):
+        import uuid
+        self.assertEqual(self._get(str(uuid.uuid4())).status_code,
+                         status.HTTP_404_NOT_FOUND)
+
+    def test_a_non_director_cannot_set_the_basis(self):
+        self._sign_in_as_non_director('basis-officer@example.com')
+        response = self._post({'project': str(self.project.id),
+                               'prefer_measured_strength': False})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(AuditEvent.objects.filter(
+            action='digital_eye.strength_basis.set').exists())
+
+    def test_a_non_director_reads_the_basis_but_cannot_write_it(self):
+        """The control is a read for the settings page and a write for the
+        Director. Gating the whole route would have hidden the read from the
+        people who need to know what the tables print."""
+        self._sign_in_as_non_director('basis-reader@example.com')
+
+        # Read: allowed, and it answers the same shape.
+        read = self._get()
+        self.assertEqual(read.status_code, status.HTTP_200_OK, msg=str(read.data))
+        self.assertIn('reported_basis', read.data)
+
+        # Write: refused, and nothing was recorded.
+        write = self._post({'project': str(self.project.id),
+                            'prefer_measured_strength': False})
+        self.assertEqual(write.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(AuditEvent.objects.filter(
+            action='digital_eye.strength_basis.set').exists())
+
+    def test_a_non_director_reads_the_preset_models_but_cannot_activate_one(self):
+        self._sign_in_as_non_director('preset-reader@example.com')
+
+        read = self.client.get(reverse('strength-curve-preset-models'))
+        self.assertEqual(read.status_code, status.HTTP_200_OK, msg=str(read.data))
+        self.assertIn('standard_mix', read.data['presets'])
+
+        write = self.client.post(reverse('strength-curve-preset-models'), {
+            'project': str(self.project.id), 'model_key': 'jones_equation',
+        }, format='json')
+        self.assertEqual(write.status_code, status.HTTP_403_FORBIDDEN)
+        from .models import ProjectCurveSetting
+        setting = ProjectCurveSetting.objects.filter(project=self.project).first()
+        self.assertTrue(setting is None or setting.active_curve_id is None)
+        self.assertFalse(AuditEvent.objects.filter(
+            action='digital_eye.strength_curve.activate_preset').exists())
+
+    def test_a_preset_model_can_be_activated_by_a_director(self):
+        """The meeting's three models are selectable, and the choice lands on
+        the project's own setting so the curve the strengths flow through is
+        the one that was chosen."""
+        from .models import ProjectCurveSetting
+        response = self.client.post(reverse('strength-curve-preset-models'), {
+            'project': str(self.project.id), 'model_key': 'jones_equation',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=str(response.data))
+        self.assertEqual(response.data['model_key'], 'jones_equation')
+
+        setting = ProjectCurveSetting.objects.get(project=self.project)
+        self.assertIsNotNone(setting.active_curve_id)
+        self.assertEqual(setting.active_curve.name, response.data['active_curve'])
+        self.assertIn('jones', setting.active_curve.name.lower())
+        self.assertTrue(AuditEvent.objects.filter(
+            action='digital_eye.strength_curve.activate_preset',
+            resource_id=str(self.project.id)).exists())
+
+        # And the active-curve read now answers with it, so the settings page
+        # shows the model it just chose rather than the previous one.
+        active = self.client.get(
+            reverse('strength-curve-active-curve')
+            + f'?project={self.project.id}').data
+        self.assertEqual(active['curve']['name'], response.data['active_curve'])
+
+    def test_an_unknown_preset_key_is_rejected(self):
+        response = self.client.post(reverse('strength-curve-preset-models'), {
+            'project': str(self.project.id), 'model_key': 'not_a_model',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_the_active_curve_answer_carries_the_basis_too(self):
+        """The settings page reads the active curve; it must not need a
+        second round trip to know which basis is being reported."""
+        data = self.client.get(
+            reverse('strength-curve-active-curve')
+            + f'?project={self.project.id}').data
+        self.assertTrue(data['prefer_measured_strength'])
+        self.assertEqual(
+            [option['key'] for option in data['strength_basis_options']],
+            ['measured', 'correlated'])

@@ -5203,8 +5203,8 @@ class NDTReportCalibrationConsistencyTests(NDTReportFixtureMixin, TestCase):
         self.curve = StrengthCurve.objects.create(
             project=self.project, name="Lekki project calibration",
             curve_type='exponential',
-            formula_params={'a': 3051.166318, 'b': 0.000003,
-                            'c': -3056.280893},
+            formula_params={'a': 0.07, 'b': 0.00140,
+                            'c': 0.0},
             valid_range_min_ms=2000.0, valid_range_max_ms=5000.0,
             standard='BS 1881-203 / BS EN 12504-4',
             data_points=[{'v': 3200.0, 'f': 7.4}, {'v': 3400.0, 'f': 11.2},
@@ -5256,7 +5256,7 @@ class NDTReportCalibrationConsistencyTests(NDTReportFixtureMixin, TestCase):
         flat = " ".join(_pdf_text(
             NDTReportService.generate_ndt_report(self.project)).split())
         # Section 3.0 discloses the project's formula ...
-        self.assertIn("3051.166318", flat)
+        self.assertIn("0.07", flat)
         # ... and Section 5.3 prints that formula's answer, not the
         # laboratory default's.
         self.assertIn(f"{expected_ecs:.1f}", flat)

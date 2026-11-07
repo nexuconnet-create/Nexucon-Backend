@@ -1069,3 +1069,34 @@ class ProjectZoneAssignmentTestCase(APITestCase):
         res = self.client.get(reverse('project-detail', args=[project.id]))
         self.assertEqual(res.data['district'], self.zone.id)
         self.assertEqual(res.data['district_name'], 'Eti-Osa')
+
+
+@override_settings(SECURE_SSL_REDIRECT=False)
+class ProjectTagNumberTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_superuser(
+            username='tagadmin', email='tagadmin@test.com', password='testpass')
+        refresh = RefreshToken.for_user(self.user)
+        self.token = str(refresh.access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token}')
+
+    def test_unauthenticated_request_is_rejected(self):
+        self.client.credentials()
+        res = self.client.get('/api/v1/projects/latest-tag-number/')
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_sequential_tag_number_generation(self):
+        res = self.client.get('/api/v1/projects/latest-tag-number/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('next_project_number', res.data)
+        self.assertIn('year', res.data)
+        year = res.data['year']
+        self.assertTrue(res.data['next_project_number'].startswith(f'TAG-{year}-'))
+
+        # Create a project with an explicit project number
+        Project.objects.create(name='Tagged Project', project_number=f'TAG-{year}-0042')
+        res2 = self.client.get('/api/v1/projects/latest-tag-number/')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data['last_project_number'], f'TAG-{year}-0042')
+        self.assertEqual(res2.data['next_project_number'], f'TAG-{year}-0043')

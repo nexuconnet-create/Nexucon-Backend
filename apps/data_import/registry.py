@@ -76,7 +76,11 @@ def _number(value, label):
     if isinstance(value, bool):
         return None, f'{label} must be a number, not a yes/no value.'
     try:
-        return float(str(value).strip()), None
+        import re
+        text = str(value).strip()
+        text = re.sub(r'(?i)\s*(n/mm[²2]?|mpa|kpa|µs|us|ms|mm|m|km/s|m/s)\b', '', text)
+        text = text.replace('²', '').strip()
+        return float(text), None
     except (TypeError, ValueError):
         return None, f'{label} must be a number — the file has {value!r}.'
 
@@ -181,7 +185,8 @@ UPV_COLUMNS = (
     'STRUCTURAL ELEMENT', 'FLOOR', 'TEST TYPE', 'POINT',
     'PATH LENGTH L (MM)', 'TRANSIT TIME T (US)', 'T UNCRACKED (US)',
     'SURFACE CONDITION', 'TRANSDUCER FREQUENCY (KHZ)', 'TRANSDUCER TYPE',
-    'TEST LOCATION', 'WEATHER CONDITION', 'REBOUND NUMBER', 'NOTES',
+    'TEST LOCATION', 'WEATHER CONDITION', 'REBOUND NUMBER',
+    'COMPRESSIVE STRENGTH (MPA)', 'NOTES',
 )
 UPV_REQUIRED = ('STRUCTURAL ELEMENT', 'TEST TYPE')
 
@@ -201,7 +206,8 @@ UPV_REQUIRED = ('STRUCTURAL ELEMENT', 'TEST TYPE')
 #: one importer that happened to need it first.
 UPV_MEASUREMENT_KEYS = frozenset({
     'point', 'path_length_l_mm', 'transit_time_t_us', 't_uncracked_us',
-    'surface_condition', 'rebound_number', 'notes',
+    'surface_condition', 'rebound_number', 'compressive_strength_mpa',
+    'notes',
 })
 UPV_CONTEXT_KEYS = frozenset({
     'structural_element', 'floor', 'test_type', 'test_location',
@@ -284,17 +290,36 @@ def _build_upv(rows, ctx):
             raise RowError(f'Row {row.row_number}: {error}')
         if rebound is not None:
             reading['rebound_number'] = rebound
+        # A strength that arrived with the data is a MEASURED figure: it goes
+        # into its own field and is reported exactly as supplied, never
+        # recomputed and never overwritten by a recalibration. Left blank, the
+        # point reads on the project's curve instead. Before this column
+        # existed the wizard dropped a supplied strength without saying so.
+        strength, error = _number(data.get('compressive_strength_mpa'),
+                                  'COMPRESSIVE STRENGTH (MPA)')
+        if error:
+            raise RowError(f'Row {row.row_number}: {error}')
+        if strength is not None:
+            reading['measured_strength_mpa'] = strength
         notes = _text(data.get('notes'))
         if notes:
             reading['notes'] = notes
 
         readings.append(reading)
 
+    elem_val = _text(first.get('structural_element'))
+    floor_val = _text(first.get('floor'))
+    from apps.data_import.readers import infer_floor_from_name
+    if not floor_val or floor_val.lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+        inferred = infer_floor_from_name(elem_val)
+        if inferred != 'Ground Floor' or not floor_val:
+            floor_val = inferred
+
     payload = {
         'project': ctx.project.id,
         'test_type': test_type,
-        'structural_element': _text(first.get('structural_element')),
-        'floor': _text(first.get('floor')),
+        'structural_element': elem_val,
+        'floor': floor_val,
         'test_location': _text(first.get('test_location')),
         'weather_condition': _text(first.get('weather_condition')),
         'readings': readings,
@@ -338,11 +363,19 @@ def group_upv_rows(rows):
     """
     groups = []
     seen = {}
+    from apps.data_import.readers import infer_floor_from_name
     for row in rows:
         data = row.data
-        key = (_text(data.get('structural_element')),
+        elem = _text(data.get('structural_element'))
+        floor = _text(data.get('floor'))
+        if not floor or floor.lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+            inferred = infer_floor_from_name(elem)
+            if inferred != 'Ground Floor' or not floor:
+                floor = inferred
+                data['floor'] = floor
+        key = (elem,
                _text(data.get('test_type')).lower(),
-               _text(data.get('floor')))
+               floor)
         if groups and groups[-1][0] == key:
             groups[-1][1].append(row)
             continue

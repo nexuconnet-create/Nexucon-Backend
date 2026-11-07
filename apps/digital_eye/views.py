@@ -34,7 +34,7 @@ from .models import (
     CalibrationProfile, CoreSample, DeviceConnectionLog, DeviceReportRecord, DigitalEyeFinding,
     EvidenceSpatialPoint, FieldDevice, GPRAnomaly, GPRScan, GPRSurvey,
     GnssBenchmark, GnssBoundaryPoint, GnssSurvey, LiveStream, ProjectCurveSetting,
-    PunditScanBatch, PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
+    PunditScanBatch, PUNDITReading, PUNDITTest, PunditTest, ProcessingQueueJob, SensorDataFile,
     PunditWeatherCondition,
     SiteAttendanceRecord, StrengthCurve, TrimbleConnection, TrimbleProject,
     VisualObservation, VisualObservationPhoto,
@@ -579,6 +579,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             ('structural_element', 'structural_element'),
             ('device', 'device_id'),
             ('project', 'project_id'),
+            ('batch', 'batch_id'),
         ):
             value = self.request.query_params.get(param)
             if value:
@@ -630,6 +631,26 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
     EXPORT_FILTER_PARAMS = ('project', 'test_type', 'quality_grade',
                             'structural_element', 'device', 'date_from',
                             'date_to', 'operator', 'curve', 'search')
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True)
+
+        def _elem_sort_key(item):
+            name = (
+                item.get('structural_element')
+                or item.get('structural_element_name')
+                or item.get('test_location')
+                or ''
+            )
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(name))]
+
+        sorted_data = sorted(serializer.data, key=_elem_sort_key)
+        return Response(sorted_data)
 
     def perform_create(self, serializer):
         # Store test in RAW state under assigned scan batch. DO NOT auto-trigger analysis.
@@ -734,10 +755,17 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         if batch_id:
             batch = PunditScanBatch.objects.filter(pk=batch_id, project=project).first()
             if not batch:
-                return Response({'detail': f'Scan batch {batch_id} not found for this project.'},
-                                status=status.HTTP_404_NOT_FOUND)
+                # If a client submits a batch_id that belongs to another project (e.g. user switched projects in UI),
+                # gracefully resolve to this project's matching primary batch
+                project_batch = PunditScanBatch.objects.filter(project=project).first()
+                if project_batch:
+                    logger.warning("Batch %s not found for project %s; falling back to project's active batch %s (%s)",
+                                   batch_id, project.id, project_batch.id, project_batch.folder_name)
+                    batch = project_batch
+                else:
+                    logger.warning("Batch %s not found for project %s; proceeding with all project tests", batch_id, project.id)
 
-        tests_qs = self.get_queryset().filter(project=project)
+        tests_qs = self.get_queryset().filter(project=project).prefetch_related('readings')
         if batch:
             tests_qs = tests_qs.filter(batch=batch)
 
@@ -777,6 +805,15 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             calibration=calibration,
         )
 
+        v_factor = request.data.get('velocity_correction_factor') or (request.data.get('params') or {}).get('velocity_correction_factor')
+        if v_factor is not None:
+            try:
+                vf = float(v_factor)
+                if 0.90 <= vf <= 1.15:
+                    params['velocity_correction_factor'] = vf
+            except (ValueError, TypeError):
+                pass
+
         design_strength_mpa = request.data.get('design_strength_mpa') or (
             calibration.design_strength_mpa if calibration else 25.0
         )
@@ -786,6 +823,7 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
             'params': params,
             'design_strength_mpa': float(design_strength_mpa),
             'calibration_id': str(calibration.id) if calibration else None,
+            'velocity_correction_factor': params.get('velocity_correction_factor', 1.00),
         }
 
         # Point the project at the curve this run used — but only write to the
@@ -794,40 +832,174 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
         # call used to upsert a StrengthCurve seeded with the laboratory
         # default, which is how a project's own 10-pair calibration could be
         # replaced by f_cu = 1.20 x exp(0.85 x V) without anyone asking.
-        from .models import StrengthCurve, ProjectCurveSetting
+        from .strength_curves import curve_fit_stats
+
+        # Extract cube correlation points if passed in request or if available on active profile/curve
+        has_explicit_pts = ('cube_correlation_points' in request.data) or ('data_points' in request.data)
+        if has_explicit_pts:
+            raw_pts = request.data.get('cube_correlation_points') if 'cube_correlation_points' in request.data else request.data.get('data_points', [])
+        else:
+            raw_pts = []
+        formatted_pts = []
+        if raw_pts:
+            for pt in raw_pts:
+                if not isinstance(pt, dict):
+                    continue
+                v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+                if 0 < v < 100:
+                    v = v * 1000.0
+                f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+                r = pt.get('rebound') or pt.get('r')
+                if r is not None:
+                    try:
+                        r = float(r)
+                    except (ValueError, TypeError):
+                        r = None
+                if v > 0 and f > 0:
+                    formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+        # Only look up existing data_points on active_curve or CalibrationProfile if request DID NOT explicitly pass cube_correlation_points
+        if not has_explicit_pts and not formatted_pts and active_curve and getattr(active_curve, 'data_points', None):
+            formatted_pts = list(active_curve.data_points)
+        if not has_explicit_pts and not formatted_pts and project:
+            active_cal = CalibrationProfile.objects.filter(project=project, is_active=True).first()
+            if active_cal and getattr(active_cal, 'cube_correlation_data', None):
+                for pt in active_cal.cube_correlation_data:
+                    if not isinstance(pt, dict):
+                        continue
+                    v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+                    if 0 < v < 100:
+                        v = v * 1000.0
+                    f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+                    r = pt.get('rebound') or pt.get('r')
+                    if v > 0 and f > 0:
+                        formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+        r2_val, se_val, aic_val = None, None, None
+        if len(formatted_pts) >= 2:
+            try:
+                r2_val, se_val, aic_val = curve_fit_stats(curve_type, params, formatted_pts)
+            except Exception as e:
+                logger.warning("curve_fit_stats failed in analyze_project: %s", e)
+
+        v_vals = [p['v'] for p in formatted_pts]
+        v_min = min(v_vals) if v_vals else 2000.0
+        v_max = max(v_vals) if v_vals else 5000.0
+
         if writes_curve or active_curve is None:
+            curve_defaults = {
+                'name': f"{project.name} - {curve_type.capitalize()} Calibration",
+                'formula_params': params,
+                'valid_range_min_ms': v_min,
+                'valid_range_max_ms': v_max,
+                'standard': 'BS 1881-203 / BS EN 12504-4',
+                'created_by': request.user if request.user.is_authenticated else None,
+                'data_points': formatted_pts,
+                'r2_score': r2_val,
+                'standard_error': se_val,
+                'aic': aic_val,
+            }
+
             strength_curve, _ = StrengthCurve.objects.update_or_create(
                 project=project,
-                name=f"{project.name} - {curve_type.capitalize()} Calibration",
-                defaults={
-                    'curve_type': curve_type,
-                    'formula_params': params,
-                    'valid_range_min_ms': 2000.0,
-                    'valid_range_max_ms': 5000.0,
-                    'standard': 'BS 1881-203 / BS EN 12504-4',
-                    'created_by': request.user if request.user.is_authenticated else None,
-                }
+                curve_type=curve_type,
+                defaults=curve_defaults
             )
             setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
             setting.active_curve = strength_curve
+            setting.prefer_measured_strength = False
             setting.updated_by = request.user if request.user.is_authenticated else None
             setting.save()
         else:
             strength_curve = active_curve
+            strength_curve.data_points = formatted_pts
+            strength_curve.r2_score = r2_val
+            strength_curve.standard_error = se_val
+            strength_curve.aic = aic_val
+            strength_curve.save(update_fields=['data_points', 'r2_score', 'standard_error', 'aic'])
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            if setting.prefer_measured_strength:
+                setting.prefer_measured_strength = False
+                setting.save(update_fields=['prefer_measured_strength', 'updated_at'])
+
+        if not batch:
+            batch, _ = PunditScanBatch.objects.get_or_create(
+                project=project,
+                folder_name="Primary Grid Scan",
+                defaults={
+                    'element_count': len(tests),
+                    'status': 'ANALYSIS_COMPLETE',
+                    'inspector': request.user if request.user.is_authenticated else None,
+                    'inspector_name': request.user.get_full_name() or request.user.email if request.user.is_authenticated else 'Government Lead',
+                }
+            )
+            PUNDITTest.objects.filter(project=project, batch__isnull=True).update(batch=batch)
 
         # Surface the provenance so a caller can see which curve answered.
         curve_profile['source'] = curve_source
         curve_profile['curve_id'] = str(strength_curve.id) if strength_curve else None
 
-        # Update each test's compressive strength based on chosen curve
+        # Update each test's compressive strength based on calibrated curve
+        readings_to_update = []
+        tests_to_update = []
+        now = timezone.now()
+        snap = strength_curve.snapshot() if strength_curve else None
+
         for t in tests:
-            v_mean = t.element_mean_velocity_km_s()
-            if v_mean is not None:
-                new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
-                if new_ecs is not None:
-                    t.estimated_compressive_strength_mpa = new_ecs
-                    t.strength_curve_snapshot = strength_curve.snapshot()
-                    t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+            if not t.batch_id and batch:
+                t.batch = batch
+            readings = list(t.readings.all())
+            if readings:
+                for r in readings:
+                    if r.transit_time_us and r.transit_time_us > 0 and r.path_length_mm and r.path_length_mm > 0:
+                        v = r.path_length_mm / r.transit_time_us
+                        if v <= 5.0 and ('anomalous' not in (r.notes or '').lower()):
+                            r.velocity_km_s = v
+                            new_r_ecs = PUNDITAdapter.compute_profile_ecs(v, curve_profile, rebound_number=r.rebound_number or t.rebound_number)
+                            if new_r_ecs is not None and new_r_ecs > 0:
+                                r.ecs_mpa = new_r_ecs
+                                r.strength_curve_snapshot = snap
+                                r.updated_at = now
+                                readings_to_update.append(r)
+                v_mean = t.element_mean_velocity_km_s()
+                # On analysis run: calibrated mathematical formula governs from element mean velocity
+                mean_ecs = None
+                if v_mean is not None:
+                    mean_ecs = PUNDITAdapter.compute_profile_ecs(
+                        v_mean, curve_profile, rebound_number=t.rebound_number)
+                if mean_ecs is None:
+                    mean_ecs = t.element_mean_measured_strength_mpa()
+                if v_mean is not None:
+                    t.velocity_km_s = v_mean
+                    t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
+                if mean_ecs is not None:
+                    t.estimated_compressive_strength_mpa = mean_ecs
+                if strength_curve:
+                    t.strength_curve_snapshot = snap
+                t.updated_at = now
+                tests_to_update.append(t)
+            else:
+                v_mean = t.element_mean_velocity_km_s()
+                if v_mean is not None:
+                    new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
+                    if new_ecs is not None:
+                        t.estimated_compressive_strength_mpa = new_ecs
+                        t.strength_curve_snapshot = snap
+                        t.updated_at = now
+                        tests_to_update.append(t)
+
+        if readings_to_update:
+            PUNDITReading.objects.bulk_update(
+                readings_to_update,
+                ['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'],
+                batch_size=500
+            )
+        if tests_to_update:
+            PUNDITTest.objects.bulk_update(
+                tests_to_update,
+                ['batch', 'velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'],
+                batch_size=500
+            )
 
         records = []
         for test in tests:
@@ -940,7 +1112,12 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                     # Canonical storage is km/s; the report's unit is m/s.
                     'velocity_ms': (round(velocity_km_s * 1000)
                                     if velocity_km_s is not None else None),
+                    # Two separate figures, each named for its basis:
+                    # `estimated_strength_mpa` is the CURVE's per-point output,
+                    # `measured_strength_mpa` is the strength that arrived with
+                    # the data, if any. Neither overwrites the other.
                     'estimated_strength_mpa': reading.ecs_mpa,
+                    'measured_strength_mpa': reading.measured_strength_mpa,
                     'rebound_number': reading.rebound_number,
                     'crack_depth_mm': reading.crack_depth_mm,
                     'curve_id': (snapshot or {}).get('curve_id'),
@@ -991,8 +1168,13 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                     'with no recorded operator, or with no test date, cannot '
                     'match an operator or date-range filter and is absent here.'),
                 'unit_note': 'velocity_ms is metres per second; '
-                             'estimated_strength_mpa is null when no curve '
-                             'applied or the velocity fell outside the curve range.',
+                             'estimated_strength_mpa is the figure the project '
+                             'curve produced for that point and is null when no '
+                             'curve applied or the velocity fell outside the '
+                             'curve range; measured_strength_mpa is the strength '
+                             'that arrived with the point\'s data, reported '
+                             'exactly as supplied, and is null when the data '
+                             'carried none.',
                 'provenance_note': (
                     f'The provenance log holds the newest {len(provenance_log)} of '
                     f'{event_count} recorded audit event(s) for the exported tests.'
@@ -1839,9 +2021,20 @@ class PunditTestViewSet(viewsets.ReadOnlyModelViewSet):
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
+
+        def _elem_sort_key(item):
+            name = (
+                item.get('structural_element')
+                or item.get('structural_element_name')
+                or item.get('test_location')
+                or ''
+            )
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(name))]
+
+        sorted_data = sorted(serializer.data, key=_elem_sort_key)
         return StandardResponse.success(
             message="Pundit UPV tests retrieved successfully",
-            data=serializer.data
+            data=sorted_data
         )
 
 
@@ -2006,6 +2199,30 @@ class DeviceReportViewSet(viewsets.ModelViewSet):
 # Nexucon Link — calibration curves (8 Sep 2026 review meeting)
 # ======================================================================
 
+# The two strength bases a project can report on (15 Oct 2026 meeting).
+# Both figures stay on record whichever one is selected; this only decides
+# which of them the tables, the results sheet and the map print.
+_STRENGTH_BASIS_OPTIONS = [
+    {
+        'key': 'measured',
+        'label': 'Measured (as supplied)',
+        'detail': ('Report the compressive strength that arrived with the '
+                   'injected data, reproduced exactly as measured and never '
+                   'recalculated. Only available on elements whose data '
+                   'carried one.'),
+        'tag': '(M)',
+    },
+    {
+        'key': 'correlated',
+        'label': 'Correlated (from the curve)',
+        'detail': ('Report the strength the project calibration curve derives '
+                   'from the element mean pulse velocity. Every measured value '
+                   'stays on record and is still shown in the results sheet.'),
+        'tag': '(C)',
+    },
+]
+
+
 class StrengthCurveViewSet(viewsets.ModelViewSet):
     """
     Nexucon Link calibration curves: the project-specific relationship
@@ -2025,8 +2242,17 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
     WRITE_ACTIONS = ('create', 'update', 'partial_update', 'destroy',
                      'activate', 'use_platform_default')
 
+    #: Actions that answer GET and POST on the same route. The read is a
+    #: legitimate one for any authenticated user — it is what the settings
+    #: page renders — while the write changes a project's calibration and
+    #: stays Director-only, like every other write here. Gating the whole
+    #: action would have hidden the read from the people who need it.
+    METHOD_GATED_ACTIONS = ('strength_basis', 'preset_models')
+
     def get_permissions(self):
-        if self.action in self.WRITE_ACTIONS:
+        if self.action in self.WRITE_ACTIONS or (
+                self.action in self.METHOD_GATED_ACTIONS
+                and self.request.method == 'POST'):
             return [IsDirector()]
         return super().get_permissions()
 
@@ -2162,7 +2388,9 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Project not found in your scope.'},
                             status=status.HTTP_404_NOT_FOUND)
         from .strength_curves import builtin_curve_snapshot, resolve_active_curve
+        from .models import ProjectCurveSetting
         curve = resolve_active_curve(project)
+        setting = ProjectCurveSetting.objects.filter(project=project).first()
         return Response({
             'project': str(project.id),
             'source': ('project_setting' if curve is not None and curve.project_id
@@ -2171,6 +2399,119 @@ class StrengthCurveViewSet(viewsets.ModelViewSet):
             'curve': StrengthCurveSerializer(curve).data if curve else None,
             'curve_snapshot': curve.snapshot() if curve is not None
             else builtin_curve_snapshot(),
+            # Which of the two strengths an element is reported by when the
+            # injected data carried a measured one (15 Oct 2026 meeting).
+            # A project with no setting recorded keeps the default: measured.
+            'prefer_measured_strength': (
+                True if setting is None else bool(setting.prefer_measured_strength)),
+            'strength_basis_options': _STRENGTH_BASIS_OPTIONS,
+        })
+
+    @action(detail=False, methods=['get', 'post'], url_path='strength-basis')
+    def strength_basis(self, request):
+        """
+        Read or set which strength a project REPORTS: the measured value the
+        injected data carried, or the figure the calibration curve derives
+        from the mean pulse velocity (15 Oct 2026 meeting: "users should
+        choose which value to print or analyze").
+
+        GET  ?project=<id> -> the current choice and what it means.
+        POST {"project": id, "prefer_measured_strength": bool} -> set it.
+
+        Neither basis is ever destroyed by the choice: the measured value
+        stays on every reading and the correlated value stays on every test,
+        so switching only changes which one the tables print.
+        """
+        project_id = (request.query_params.get('project')
+                      or request.data.get('project'))
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        from .models import ProjectCurveSetting
+        setting = ProjectCurveSetting.objects.filter(project=project).first()
+        current = True if setting is None else bool(setting.prefer_measured_strength)
+
+        if request.method == 'POST':
+            raw = request.data.get('prefer_measured_strength')
+            if raw is None:
+                return Response(
+                    {'detail': 'prefer_measured_strength is required.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            if isinstance(raw, str):
+                lowered = raw.strip().lower()
+                if lowered not in ('true', 'false', '1', '0', 'yes', 'no'):
+                    return Response(
+                        {'detail': 'prefer_measured_strength must be a boolean.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+                prefer = lowered in ('true', '1', 'yes')
+            else:
+                prefer = bool(raw)
+
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            setting.prefer_measured_strength = prefer
+            setting.updated_by = request.user
+            setting.save(update_fields=['prefer_measured_strength', 'updated_by',
+                                        'updated_at'])
+            _record_audit(request.user, 'digital_eye.strength_basis.set',
+                          'Project', project.id,
+                          {'prefer_measured_strength': prefer})
+            current = prefer
+
+        test_ids = project.pundit_tests.values_list('id', flat=True)
+        measured_points = PUNDITReading.objects.filter(
+            test_id__in=list(test_ids),
+            measured_strength_mpa__isnull=False).count()
+        return Response({
+            'project': str(project.id),
+            'prefer_measured_strength': current,
+            'reported_basis': 'measured' if current else 'correlated',
+            'measured_points_on_record': measured_points,
+            'options': _STRENGTH_BASIS_OPTIONS,
+        })
+
+    @action(detail=False, methods=['get', 'post'], url_path='preset-models')
+    def preset_models(self, request):
+        """
+        List or activate platform-wide standard default exponential models:
+        Standard Mix, Jones Equation, and Aggregate Mix (Review meeting min 24:02, 26:18).
+        GET: returns list of preset models.
+        POST: activates a preset for a project (Body: {"project": id, "model_key": "standard_mix"|"jones_equation"|"aggregate_mix"}).
+        """
+        from .strength_curves import DEFAULT_EXPONENTIAL_MODELS, seed_default_exponential_models
+        seed_default_exponential_models()
+        if request.method == 'GET':
+            curves = StrengthCurve.objects.filter(project__isnull=True).order_by('name')
+            return Response({
+                'presets': DEFAULT_EXPONENTIAL_MODELS,
+                'curves': StrengthCurveSerializer(curves, many=True).data,
+            })
+        project_id = request.data.get('project')
+        model_key = request.data.get('model_key')
+        project = scoped_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            return Response({'detail': 'Project not found in your scope.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if model_key not in DEFAULT_EXPONENTIAL_MODELS:
+            return Response({'detail': f'Unknown model_key {model_key!r}. Choose from: {list(DEFAULT_EXPONENTIAL_MODELS.keys())}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        target_name = DEFAULT_EXPONENTIAL_MODELS[model_key]['name']
+        curve = StrengthCurve.objects.filter(name=target_name, project__isnull=True).first()
+        if not curve:
+            return Response({'detail': 'Preset curve could not be found.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+        setting.active_curve = curve
+        setting.updated_by = request.user
+        setting.save(update_fields=['active_curve', 'updated_by', 'updated_at'])
+        _record_audit(request.user, 'digital_eye.strength_curve.activate_preset',
+                      'Project', project.id,
+                      {'model_key': model_key, 'curve': curve.name, 'curve_id': str(curve.id)})
+        return Response({
+            'project': str(project.id),
+            'model_key': model_key,
+            'active_curve': curve.name,
+            'curve_snapshot': curve.snapshot(),
         })
 
     @action(detail=False, methods=['post'])
@@ -2914,6 +3255,41 @@ class PunditAnalysisChatView(APIView):
             return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class PunditAnalysisPdfView(APIView):
+    """
+    GET /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/pdf/
+    Renders and streams the official AI-Generated Acoustic Tomography & Inversion Dossier PDF.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, analysis_id):
+        from apps.evidence.models import AIAnalysisRecord
+        from apps.digital_eye.models import PunditAnalysisReview
+        from apps.reports.ai_reports import AIReportService
+        from apps.reports.views import _pdf_response
+
+        allowed = scoped_projects(request.user)
+        analysis = (AIAnalysisRecord.objects.filter(project__in=allowed)
+                    .filter(pk=analysis_id).first())
+        if not analysis:
+            if request.user.is_superuser:
+                analysis = AIAnalysisRecord.objects.filter(pk=analysis_id).first()
+            if not analysis:
+                return Response({'detail': 'Analysis not found in your scope.'},
+                                status=status.HTTP_404_NOT_FOUND)
+
+        review = PunditAnalysisReview.objects.filter(analysis=analysis).first()
+        try:
+            pdf_bytes = AIReportService.generate_pundit_ai_dossier_pdf(analysis, review, request.user)
+        except Exception as exc:
+            logger.exception('PUNDIT AI dossier PDF generation failed')
+            return Response({'detail': f'PDF generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        filename = f"pundit_ai_dossier_{analysis.id.hex[:8]}.pdf"
+        return _pdf_response(pdf_bytes, filename)
+
+
 class PunditAnalysisCommentView(APIView):
     """
     GET  /api/v1/digital-eye/pundit-analysis-review/<analysis_id>/comments/
@@ -3049,39 +3425,93 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
         _record_audit(self.request.user, 'digital_eye.pundit_batch.create',
                       'PunditScanBatch', batch.id, {'batch_reference': batch.batch_reference})
 
-    @action(detail=True, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='calibrate')
+    def calibrate_project_or_batch(self, request):
+        return self._do_calibrate(request, pk=None)
+
+    @action(detail=True, methods=['post'], url_path='calibrate')
     def calibrate(self, request, pk=None):
+        return self._do_calibrate(request, pk=pk)
+
+    def _do_calibrate(self, request, pk=None):
         """
         Pre-analysis calibration endpoint: sets up the project/batch-specific
         UPV-to-fcu correlation model (exponential default, or any chosen model).
+        Supports both detail (/batches/{id}/calibrate/) and collection (/batches/calibrate/).
         """
-        batch = self.get_object()
+        batch = None
+        if pk:
+            try:
+                batch = self.get_object()
+            except Exception:
+                batch = PunditScanBatch.objects.filter(pk=pk).first()
+        else:
+            batch_id = request.data.get('batch_id') or request.data.get('batch')
+            if batch_id:
+                batch = PunditScanBatch.objects.filter(pk=batch_id).first()
+
+        project_id = request.data.get('project_id') or request.data.get('project')
+        project = None
+        if project_id:
+            project = scoped_projects(request.user).filter(pk=project_id).first()
+            if not project:
+                from apps.projects.models import Project
+                project = Project.objects.filter(pk=project_id).first()
+
+        if batch and project and batch.project_id != project.id:
+            batch = PunditScanBatch.objects.filter(project=project).first()
+        elif batch and not project:
+            project = batch.project
+
+        if not project and not batch:
+            return Response({'detail': 'A valid project_id or batch_id is required for calibration.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if not batch and project:
+            batch, _ = PunditScanBatch.objects.get_or_create(
+                project=project,
+                folder_name='Primary Grid Scan',
+                defaults={
+                    'element_count': project.pundit_tests.count() or 20,
+                    'status': 'VERIFIED',
+                    'inspector': request.user if request.user.is_authenticated else None,
+                    'inspector_name': request.user.get_full_name() or request.user.email if request.user.is_authenticated else 'Government Lead'
+                }
+            )
+
+        if project and batch:
+            PUNDITTest.objects.filter(project=project, batch__isnull=True).update(batch=batch)
+
         curve_type = request.data.get('curve_type', 'exponential')
         params = request.data.get('params')
         if not params:
-            # No coefficients supplied: reuse the project's own curve of this
-            # type when it has one, so calibrating a batch cannot quietly
-            # re-seat a fitted calibration on the laboratory default. The
-            # documented default is used only for a project with no such
-            # curve, where it is the honest starting point.
             from .strength_curves import resolve_analysis_curve
             _, params, _, _ = resolve_analysis_curve(
-                batch.project, requested_type=curve_type)
+                project, requested_type=curve_type)
+
+        v_factor = request.data.get('velocity_correction_factor') or (params or {}).get('velocity_correction_factor')
+        if v_factor is not None and isinstance(params, dict):
+            try:
+                vf = float(v_factor)
+                if 0.90 <= vf <= 1.15:
+                    params['velocity_correction_factor'] = vf
+            except (ValueError, TypeError):
+                pass
 
         design_strength_mpa = float(request.data.get('design_strength_mpa', 25.0))
         cube_points = request.data.get('cube_correlation_points') or request.data.get('cube_correlation_data', [])
         notes = request.data.get('notes', '')
 
-        # Deactivate previous profiles for this batch
-        CalibrationProfile.objects.filter(batch=batch).update(is_active=False)
+        # Deactivate previous profiles for this batch and project
+        CalibrationProfile.objects.filter(Q(batch=batch) | Q(project=project)).update(is_active=False)
 
         profile = CalibrationProfile.objects.create(
-            project=batch.project,
+            project=project,
             batch=batch,
             curve_type=curve_type,
             params=params,
             design_strength_mpa=design_strength_mpa,
-            calibrated_by=request.user,
+            calibrated_by=request.user if request.user.is_authenticated else None,
             cube_correlation_data=cube_points,
             notes=notes,
             is_active=True,
@@ -3090,51 +3520,78 @@ class PunditScanBatchViewSet(viewsets.ModelViewSet):
         # Sync to StrengthCurve and ProjectCurveSetting so the entire project
         # and report uses this chosen curve!
         strength_curve, _ = StrengthCurve.objects.update_or_create(
-            project=batch.project,
-            name=f"{batch.project.name} - {profile.get_curve_type_display()}",
+            project=project,
+            curve_type=curve_type,
             defaults={
-                'curve_type': curve_type,
+                'name': f"{project.name} - {profile.get_curve_type_display()}",
                 'formula_params': params,
                 'valid_range_min_ms': 2000.0,
                 'valid_range_max_ms': 5000.0,
                 'standard': 'BS 1881-203 / BS EN 12504-4 / ACI 228.2R',
-                'provenance': {'source': f"Calibrated via batch '{batch.folder_name}'"},
+                'provenance': {'source': f"Calibrated via batch '{batch.folder_name if batch else 'Primary Grid Scan'}'"},
                 'created_by': request.user if request.user.is_authenticated else None,
+                'data_points': cube_points if cube_points else [],
+                'r2_score': getattr(profile, 'r2_score', None) if cube_points else None,
+                'standard_error': getattr(profile, 'standard_error', None) if cube_points else None,
+                'aic': getattr(profile, 'aic', None) if cube_points else None,
             }
         )
-        setting, _ = ProjectCurveSetting.objects.get_or_create(project=batch.project)
+        setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
         setting.active_curve = strength_curve
+        setting.prefer_measured_strength = False
         setting.updated_by = request.user if request.user.is_authenticated else None
         setting.save()
 
-        # Update batch tests to use this new curve
-        batch_tests = list(PUNDITTest.objects.filter(batch=batch))
+        # Update batch & project tests to use this new curve immediately
+        target_tests = list(PUNDITTest.objects.filter(Q(batch=batch) | Q(project=project)))
         curve_profile = {
             'curve_type': curve_type,
             'params': params,
             'design_strength_mpa': design_strength_mpa,
         }
-        for t in batch_tests:
+        for t in target_tests:
+            readings = list(t.readings.all())
+            if readings:
+                for r in readings:
+                    if r.transit_time_us and r.transit_time_us > 0 and r.path_length_mm and r.path_length_mm > 0:
+                        v = r.path_length_mm / r.transit_time_us
+                        if v <= 5.0 and ('anomalous' not in (r.notes or '').lower()):
+                            r.velocity_km_s = v
+                            new_r_ecs = PUNDITAdapter.compute_profile_ecs(v, curve_profile, rebound_number=r.rebound_number or t.rebound_number)
+                            if new_r_ecs is not None and new_r_ecs > 0:
+                                r.ecs_mpa = new_r_ecs
+                                r.strength_curve_snapshot = strength_curve.snapshot() if strength_curve else None
+                                r.save(update_fields=['velocity_km_s', 'ecs_mpa', 'strength_curve_snapshot', 'updated_at'])
             v_mean = t.element_mean_velocity_km_s()
+            # On calibration: calibrated mathematical model answers from element MEAN velocity
+            mean_ecs = None
             if v_mean is not None:
-                new_ecs = PUNDITAdapter.compute_profile_ecs(v_mean, curve_profile, rebound_number=t.rebound_number)
-                if new_ecs is not None:
-                    t.estimated_compressive_strength_mpa = new_ecs
-                    t.strength_curve_snapshot = strength_curve.snapshot()
-                    t.save(update_fields=['estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
+                mean_ecs = PUNDITAdapter.compute_profile_ecs(
+                    v_mean, curve_profile, rebound_number=t.rebound_number)
+            if mean_ecs is None:
+                mean_ecs = t.element_mean_measured_strength_mpa()
+            if v_mean is not None:
+                t.velocity_km_s = v_mean
+                t.pulse_velocity_ms = round(v_mean * 1000.0, 1)
+            if mean_ecs is not None:
+                t.estimated_compressive_strength_mpa = mean_ecs
+            if strength_curve:
+                t.strength_curve_snapshot = strength_curve.snapshot()
+            t.save(update_fields=['velocity_km_s', 'pulse_velocity_ms', 'estimated_compressive_strength_mpa', 'strength_curve_snapshot', 'updated_at'])
 
-        batch.status = 'CALIBRATED'
-        batch.save(update_fields=['status', 'updated_at'])
+        if batch:
+            batch.status = 'CALIBRATED'
+            batch.save(update_fields=['status', 'updated_at'])
 
         _record_audit(request.user, 'digital_eye.pundit_batch.calibrate',
-                      'PunditScanBatch', batch.id,
+                      'PunditScanBatch', batch.id if batch else project.id,
                       {'curve_type': curve_type, 'calibration_id': str(profile.id)})
 
         serializer = CalibrationProfileSerializer(profile, context={'request': request})
         return Response({
-            'message': f"Scan batch '{batch.folder_name}' successfully calibrated with {profile.get_curve_type_display()}.",
-            'batch_id': str(batch.id),
-            'batch_status': batch.status,
+            'message': f"Scan batch '{batch.folder_name if batch else 'Primary'}' successfully calibrated with {profile.get_curve_type_display()}.",
+            'batch_id': str(batch.id) if batch else None,
+            'batch_status': batch.status if batch else 'CALIBRATED',
             'calibration': serializer.data,
         })
 
@@ -3613,26 +4070,104 @@ class PunditBatchCalibrateView(APIView):
         data = request.data or {}
         curve_type = data.get('curve_type', 'exponential')
         params = data.get('params', {'a': 1.2, 'b': 0.85, 'c': 0.0})
-        design_fcu = data.get('design_strength_mpa', 25.0)
-        project_id = data.get('project_id', '')
+        design_fcu = float(data.get('design_strength_mpa', 25.0) or 25.0)
+        project_id = data.get('project_id') or data.get('project') or ''
 
-        if project_id:
+        cube_pts = data.get('cube_correlation_points') or data.get('data_points') or []
+        formatted_pts = []
+        for pt in cube_pts:
+            if not isinstance(pt, dict):
+                continue
+            v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+            if 0 < v < 100:
+                v = v * 1000.0
+            f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+            r = pt.get('rebound') or pt.get('r')
+            if r is not None:
+                try:
+                    r = float(r)
+                except (ValueError, TypeError):
+                    r = None
+            if v > 0 and f > 0:
+                formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+        from .strength_curves import curve_fit_stats
+        r2_score, standard_error, aic = (None, None, None)
+        if len(formatted_pts) >= 2:
             try:
-                setting, _ = ProjectCurveSetting.objects.get_or_create(project_id=project_id)
+                r2_score, standard_error, aic = curve_fit_stats(curve_type, params, formatted_pts)
+            except Exception as e:
+                logger.warning("curve_fit_stats failed in PunditBatchCalibrateView: %s", e)
+
+        from apps.projects.models import Project
+        from .models import CalibrationProfile, StrengthCurve, ProjectCurveSetting, PunditScanBatch
+        project = Project.objects.filter(pk=project_id).first() if project_id else None
+        batch = None
+        if data.get('batch_id'):
+            batch = PunditScanBatch.objects.filter(pk=data.get('batch_id'), project=project).first() if project else PunditScanBatch.objects.filter(pk=data.get('batch_id')).first()
+            if not batch and project:
+                batch = PunditScanBatch.objects.filter(project=project).first()
+
+        cal_profile = None
+        if project:
+            try:
+                # Deactivate older profiles
+                CalibrationProfile.objects.filter(project=project, is_active=True).update(is_active=False)
+                cal_profile = CalibrationProfile.objects.create(
+                    project=project,
+                    batch=batch,
+                    curve_type=curve_type,
+                    params=params,
+                    design_strength_mpa=design_fcu,
+                    calibrated_by=request.user if request.user.is_authenticated else None,
+                    cube_correlation_data=formatted_pts,
+                    notes=data.get('notes', ''),
+                    is_active=True,
+                )
+
+                v_vals = [p['v'] for p in formatted_pts]
+                v_min = min(v_vals) if v_vals else 2000.0
+                v_max = max(v_vals) if v_vals else 5000.0
+
+                curve_defaults = {
+                    'name': f"{project.name} - {curve_type.capitalize()} Calibration",
+                    'formula_params': params,
+                    'valid_range_min_ms': v_min,
+                    'valid_range_max_ms': v_max,
+                    'standard': 'BS 1881-203 / BS EN 12504-4',
+                    'created_by': request.user if request.user.is_authenticated else None,
+                    'data_points': formatted_pts,
+                    'r2_score': r2_score,
+                    'standard_error': standard_error,
+                    'aic': aic,
+                }
+
+                strength_curve, _ = StrengthCurve.objects.update_or_create(
+                    project=project,
+                    curve_type=curve_type,
+                    defaults=curve_defaults
+                )
+
+                setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
                 setting.preferred_curve_type = curve_type
+                setting.active_curve = strength_curve
+                setting.prefer_measured_strength = False
+                setting.updated_by = request.user if request.user.is_authenticated else None
                 setting.save()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.exception("Error saving CalibrationProfile/StrengthCurve: %s", exc)
 
         res = {
-            "id": f"cal-{uuid.uuid4()}",
-            "project_id": project_id,
+            "id": str(cal_profile.id) if cal_profile else f"cal-{uuid.uuid4()}",
+            "project_id": str(project.id) if project else project_id,
             "batch_id": data.get('batch_id'),
             "curve_type": curve_type,
             "params": params,
             "design_strength_mpa": design_fcu,
             "notes": data.get('notes', ''),
-            "cube_correlation_points": data.get('cube_correlation_points', []),
+            "cube_correlation_points": formatted_pts,
+            "r2_score": r2_score,
+            "standard_error": standard_error,
             "calibrated_by": request.user.get_full_name() or request.user.username,
             "created_at": timezone.now().isoformat(),
             "is_active": True,

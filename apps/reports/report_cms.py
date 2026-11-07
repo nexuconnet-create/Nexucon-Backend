@@ -320,11 +320,11 @@ CMS_SECTIONS = {
 CMS_SECTION_KEYS = tuple(CMS_SECTIONS.keys())
 
 
-def get_cms_text(project, key, computed=None):
+def get_cms_text(project, key, computed=None, agency=None):
     """
     Resolve the effective body for a CMS section.
 
-    Precedence: project override > platform-wide override > the computed
+    Precedence: project override > agency override > platform-wide override > the computed
     generated body (generated-content sections, when ``computed`` supplies
     one) > the registry default. Returns ``(text, source)`` with source one
     of ``'project_override' | 'platform_override' | 'computed' | 'default'``.
@@ -340,8 +340,20 @@ def get_cms_text(project, key, computed=None):
         if row is not None:
             return row.body, 'project_override'
     if not CMS_SECTIONS[key].get('computed'):
+        # Check agency-level override first if agency is specified or can be inferred
+        target_agency = agency
+        if target_agency is None and project is not None:
+            inspector_user = getattr(project, 'assigned_inspector_user', None)
+            if inspector_user and hasattr(inspector_user, 'government_profile'):
+                target_agency = getattr(inspector_user.government_profile, 'agency', None)
+        if target_agency is not None:
+            row = (ReportSectionOverride.objects
+                   .filter(project__isnull=True, agency=target_agency, section_key=key).first())
+            if row is not None:
+                return row.body, 'platform_override'
+        # Fall back to global platform override (agency=None)
         row = (ReportSectionOverride.objects
-               .filter(project__isnull=True, section_key=key).first())
+               .filter(project__isnull=True, agency__isnull=True, section_key=key).first())
         if row is not None:
             return row.body, 'platform_override'
     if CMS_SECTIONS[key].get('computed'):

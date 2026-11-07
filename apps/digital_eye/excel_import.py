@@ -13,6 +13,7 @@ element-level means are persisted exactly as they are from the form.
 Nothing is committed unless every row validates (all-or-nothing): a statutory
 registry is never partially populated from a batch file.
 """
+import re
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
@@ -33,6 +34,7 @@ TEMPLATE_COLUMNS = [
     'TRANSDUCER TYPE',
     'TEST LOCATION',
     'WEATHER CONDITION',
+    'COMPRESSIVE STRENGTH (MPA)',
     'NOTES',
 ]
 REQUIRED_COLUMNS = [
@@ -44,6 +46,7 @@ COLUMN_WIDTHS = {
     'PATH LENGTH L (MM)': 14, 'TRANSIT TIME T (US)': 14, 'T UNCRACKED (US)': 14,
     'SURFACE CONDITION': 30, 'TRANSDUCER FREQUENCY (KHZ)': 14,
     'TRANSDUCER TYPE': 16, 'TEST LOCATION': 24, 'WEATHER CONDITION': 20,
+    'COMPRESSIVE STRENGTH (MPA)': 26,
     'NOTES': 30,
 }
 
@@ -73,8 +76,12 @@ def _number(value, row, header, errors):
         return None
     if isinstance(value, (int, float)):
         return float(value)
+    clean_val = str(value).strip()
+    # Strip common engineering unit suffixes (e.g. '29 N/mm²', '35 MPa', '150 mm', '33.9 µs')
+    clean_val = re.sub(r'(?i)\s*(n/mm[²2]|mpa|kpa|µs|us|ms|mm|m|km/s|m/s)\b', '', clean_val)
+    clean_val = clean_val.replace('²', '').strip()
     try:
-        return float(str(value).strip())
+        return float(clean_val)
     except ValueError:
         errors.append({'row': row,
                        'message': f'{header} must be a number — got {value!r}.'})
@@ -166,10 +173,16 @@ def parse_readings_workbook(file_obj):
             test_type = _test_type(cell(row_number, 'TEST TYPE'), row_number, errors)
             if test_type is None:
                 continue
+            raw_floor = _text(cell(row_number, 'FLOOR')) or ''
+            from apps.data_import.readers import infer_floor_from_name
+            if not raw_floor or raw_floor.strip().lower() in ('ground floor', 'unspecified', 'floor not recorded'):
+                inferred = infer_floor_from_name(element)
+                if inferred != 'Ground Floor' or not raw_floor:
+                    raw_floor = inferred
             parsed_rows.append({
                 'row': row_number,
                 'element': element,
-                'floor': _text(cell(row_number, 'FLOOR')) or '',
+                'floor': raw_floor,
                 'test_type': test_type,
                 'point': _text(cell(row_number, 'POINT')),
                 'path_length_mm': _number(cell(row_number, 'PATH LENGTH L (MM)'),
@@ -185,6 +198,18 @@ def parse_readings_workbook(file_obj):
                 'transducer_type': _transducer_type(cell(row_number, 'TRANSDUCER TYPE')),
                 'test_location': _text(cell(row_number, 'TEST LOCATION')) or '',
                 'weather_condition': _text(cell(row_number, 'WEATHER CONDITION')) or '',
+                'compressive_strength_mpa': _number(
+                    cell(row_number, 'COMPRESSIVE STRENGTH (MPA)')
+                    or cell(row_number, 'COMPRESSIVE STRENGTH')
+                    or cell(row_number, 'MEASURED STRENGTH (MPA)')
+                    or cell(row_number, 'MEASURED STRENGTH')
+                    or cell(row_number, 'RESULT')
+                    or cell(row_number, 'RESULT (N/MM²)')
+                    or cell(row_number, 'RESULT (MPA)')
+                    or cell(row_number, 'COMPR. STRENGTH')
+                    or cell(row_number, 'E.C.S (MPA)')
+                    or cell(row_number, 'STRENGTH'),
+                    row_number, 'COMPRESSIVE STRENGTH', errors),
                 'notes': (_text(cell(row_number, 'NOTES'))
                           or _text(cell(row_number, 'REMARK'))
                           or _text(cell(row_number, 'REMARKS'))
@@ -273,6 +298,12 @@ def parse_readings_workbook(file_obj):
                 reading['uncracked_transit_time_us'] = row['uncracked_transit_time_us']
             else:
                 reading['surface_condition'] = row['surface_condition']
+            if row.get('compressive_strength_mpa') is not None:
+                # A strength that arrived WITH the data is a MEASURED value.
+                # It goes into its own field, never into ecs_mpa (the
+                # platform's curve-derived figure), so the two are never
+                # confused downstream and recalibration cannot overwrite it.
+                reading['measured_strength_mpa'] = row['compressive_strength_mpa']
             if row['notes']:
                 reading['notes'] = row['notes']
             readings.append(reading)
@@ -320,22 +351,22 @@ def example_rows(sample_elements=None):
         # Format illustration only — this sheet is never imported. Pulse
         # velocity: consecutive rows -> ONE test with points A, B, C.
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'A', 120, 30.1, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny',
+         25, 'Direct', 'Grid B/4', 'Sunny', None,
          'EXAMPLE ONLY — copy the shape into READINGS, not the numbers'],
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'B', 120, 29.8, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny', None],
+         25, 'Direct', 'Grid B/4', 'Sunny', None, None],
         [pulse_name, 'Ground Floor', 'Pulse Velocity', 'C', 120, 30.3, None, None,
-         25, 'Direct', 'Grid B/4', 'Sunny', None],
+         25, 'Direct', 'Grid B/4', 'Sunny', None, None],
         # Crack depth: both the cracked AND uncracked transit times.
         [crack_name, 'First Floor', 'Crack Depth', 'A', 200, 52.1, 50.1, None,
-         25, 'Direct', 'Grid D/2', 'Sunny', 'Hairline crack mid-span'],
+         25, 'Direct', 'Grid D/2', 'Sunny', None, 'Hairline crack mid-span'],
         [crack_name, 'First Floor', 'Crack Depth', 'B', 200, 53.0, 50.2, None,
-         25, 'Direct', 'Grid D/2', 'Sunny', None],
+         25, 'Direct', 'Grid D/2', 'Sunny', None, None],
         # Surface quality: written condition instead of times.
         [surface_name, 'Ground Floor', 'Surface Quality', 'A', None, None, None,
-         'Smooth, no honeycombing', None, None, 'East elevation', 'Sunny', None],
+         'Smooth, no honeycombing', None, None, 'East elevation', 'Sunny', None, None],
         [surface_name, 'Ground Floor', 'Surface Quality', 'B', None, None, None,
-         'Minor voids near base', None, None, 'East elevation', 'Sunny', None],
+         'Minor voids near base', None, None, 'East elevation', 'Sunny', None, None],
     ]
 
 
@@ -405,11 +436,19 @@ def build_template_bytes(sample_elements=None):
         ('TRANSDUCER FREQUENCY (KHZ) / TRANSDUCER TYPE — optional; DIRECT is', False),
         ('   assumed when the type is blank.', False),
         ('TEST LOCATION / WEATHER CONDITION / NOTES — optional context.', False),
+        ('COMPRESSIVE STRENGTH (MPA) — optional, and only when the strength was', False),
+        ('   MEASURED (a laboratory or core result that came with the data). It is', False),
+        ('   kept as a measured figure and reported exactly as supplied — the', False),
+        ('   platform never recomputes or overwrites it. Leave it blank to have the', False),
+        ('   strength derived from pulse velocity through the project\'s active', False),
+        ('   calibration model instead.', False),
         ('', False),
         ('The import is all-or-nothing: if any row is rejected the file is rejected', False),
         ('with the row numbers and reasons, and nothing is written to the registry.', False),
-        ('Velocity, quality grade, compressive strength and crack depth are always', False),
-        ('computed by the platform — never typed into the sheet.', False),
+        ('Velocity, quality grade, crack depth and the CORRELATED compressive', False),
+        ('strength (the figure the calibration model produces) are always computed', False),
+        ('by the platform — never typed into the sheet. The only strength column', False),
+        ('the sheet accepts is a measured one.', False),
     ]
     for row_number, (text, bold) in enumerate(lines, start=1):
         cell = instructions.cell(row=row_number, column=1, value=text)

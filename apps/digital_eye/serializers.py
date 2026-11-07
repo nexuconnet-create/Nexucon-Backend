@@ -315,12 +315,21 @@ class PUNDITReadingSerializer(serializers.ModelSerializer):
     point_label = serializers.CharField(
         max_length=10, required=False, allow_blank=True, allow_null=True, default='',
     )
+    # The platform's curve-derived figure: read-only, because the server
+    # computes it through the project's active curve. A strength that arrived
+    # with the data is a MEASURED value and goes into its own field.
+    ecs_mpa = serializers.FloatField(read_only=True)
+    measured_strength_mpa = serializers.FloatField(required=False, allow_null=True)
+    measured_ecs_mpa = serializers.SerializerMethodField()
+    correlated_ecs_mpa = serializers.SerializerMethodField()
 
     class Meta:
         model = PUNDITReading
         fields = ['id', 'point_label', 'path_length_mm', 'transit_time_us',
                   'uncracked_transit_time_us', 'surface_condition',
                   'rebound_number', 'velocity_km_s', 'ecs_mpa',
+                  'measured_strength_mpa',
+                  'measured_ecs_mpa', 'correlated_ecs_mpa',
                   'strength_curve_snapshot', 'crack_depth_mm',
                   'notes', 'created_at', 'updated_at']
         read_only_fields = ['id', 'velocity_km_s', 'ecs_mpa',
@@ -331,6 +340,46 @@ class PUNDITReadingSerializer(serializers.ModelSerializer):
             # test_type — enforced there, not here.
             'transit_time_us': {'required': False, 'allow_null': True},
         }
+
+    def validate_measured_strength_mpa(self, value):
+        """The supplied strength must be a strength a concrete can have.
+
+        Same guard the calibration pairs use: a figure above the platform's
+        ceiling is almost always a mis-entry (a core dimension typed into the
+        strength field), and letting it through would put it into an element's
+        measured mean and from there into the report.
+        """
+        from apps.digital_eye.strength_curves import strength_plausibility_error
+        reason = strength_plausibility_error(value)
+        if reason:
+            raise serializers.ValidationError(reason)
+        if value is not None and value <= 0:
+            raise serializers.ValidationError(
+                'A measured compressive strength must be greater than zero.')
+        return value
+
+    def get_measured_ecs_mpa(self, obj):
+        """The MEASURED strength this point arrived with — never the curve's.
+
+        Previously this returned ``obj.ecs_mpa``, the platform's own
+        curve-derived figure, so an API field named "measured" reported a
+        correlated number. The two are now separate columns.
+        """
+        return obj.measured_strength_mpa
+
+    def get_correlated_ecs_mpa(self, obj):
+        if obj.velocity_km_s is None or obj.velocity_km_s <= 0 or obj.velocity_km_s > 5.0:
+            return None
+        from apps.digital_eye.strength_curves import apply_active_curve
+        test = obj.test
+        fcu, _ = apply_active_curve(
+            test.project if test else None,
+            obj.velocity_km_s,
+            rebound_number=obj.rebound_number or (test.rebound_number if test else None),
+            temperature_c=test.surface_temperature_c if test else None,
+            moisture_condition=getattr(test, 'moisture_condition', None) if test else None
+        )
+        return round(fcu, 2) if fcu is not None else None
 
     def validate_transit_time_us(self, value):
         if value is not None and value <= 0:
@@ -372,26 +421,52 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     def get_estimated_compressive_strength_mpa(self, obj):
         """
-        Estimated compressive strength (E.C.S) from pulse velocity through
-        the project's active Nexucon Link curve (strength_curves module —
-        the single f_cu path). Multi-reading tests carry the element-mean
-        E.C.S persisted at write time; legacy rows without one are computed
-        on read through the same active-curve path.
+        Element compressive strength:
+        When calibrated by the government, the calibrated model formula governs
+        and is returned live across all government views.
+        When uncalibrated, returns raw measured strength only if present, or
+        None so the UI renders an honest blank/dash.
         """
-        if obj.estimated_compressive_strength_mpa is not None:
-            return obj.estimated_compressive_strength_mpa
-        from apps.digital_eye.strength_curves import apply_active_curve
-        strength, _snapshot = apply_active_curve(
-            obj.project, obj.velocity_km_s,
-            rebound_number=obj.rebound_number,
-            temperature_c=obj.surface_temperature_c,
-            moisture_condition=obj.moisture_condition,
-            # obj.velocity_km_s is the element mean for a multi-reading test,
-            # so the confidence margin narrows as sqrt(n) of its points.
-            n_points=obj.element_point_count())
-        return strength
+        if obj.is_calibrated():
+            correlated = obj.element_correlated_strength_mpa()
+            if correlated is not None:
+                return correlated
+            value, _source = obj.element_representative_strength()
+            if value is not None:
+                return value
+            if obj.estimated_compressive_strength_mpa is not None and obj.estimated_compressive_strength_mpa > 0:
+                return obj.estimated_compressive_strength_mpa
+        measured = obj.element_mean_measured_strength_mpa()
+        if measured is not None and obj.prefers_measured_strength():
+            return measured
+        return None
+
+    def get_measured_compressive_strength_mpa(self, obj):
+        """The element's MEASURED strength — the mean of the strengths its
+        points arrived with, or None when the data carried none. Never the
+        curve's figure."""
+        return obj.element_mean_measured_strength_mpa()
+
+    def get_correlated_compressive_strength_mpa(self, obj):
+        """The element's curve-derived strength for the current calibration."""
+        if obj.is_calibrated():
+            return obj.element_correlated_strength_mpa()
+        return None
+
+    def get_strength_source(self, obj):
+        """'measured' or 'correlated' — which of the two figures above the
+        element fields are reporting, so a UI can label the number instead of
+        presenting a derived value as a test result."""
+        return obj.element_strength_source()
+
+    def get_is_calibrated(self, obj):
+        return obj.is_calibrated()
 
     estimated_compressive_strength_mpa = serializers.SerializerMethodField()
+    measured_compressive_strength_mpa = serializers.SerializerMethodField()
+    correlated_compressive_strength_mpa = serializers.SerializerMethodField()
+    strength_source = serializers.SerializerMethodField()
+    is_calibrated = serializers.SerializerMethodField()
 
     def get_file_count(self, obj):
         return obj.files.count()
@@ -412,6 +487,8 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'location_address',
             'velocity_km_s', 'pulse_velocity_ms', 'quality_grade', 'quality_grade_display',
             'concrete_quality_rating', 'estimated_compressive_strength_mpa',
+            'measured_compressive_strength_mpa', 'correlated_compressive_strength_mpa',
+            'strength_source', 'is_calibrated',
             'strength_curve_snapshot',
             'ai_ci_lower_mpa', 'ai_ci_upper_mpa', 'ai_pof_pct',
             'ai_data_quality', 'ai_reasoning_traces',
@@ -430,8 +507,18 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
     @staticmethod
     def _assign_labels(readings_data):
         """Auto-assign point labels A, B, C, ... to any reading that arrives
-        without one. Duplicate labels are rejected — each point on an element
-        must be distinct."""
+        without one. When duplicate raw point labels arrive (e.g. repeated 1, 2, 3
+        from field scans on an element), cleanly auto-sequence them A, B, C, D...
+        so each point is distinct and valid."""
+        raw_labels = [(r.get('point_label') or '').strip().upper() for r in readings_data]
+        non_empty = [l for l in raw_labels if l]
+        has_dupes = len(non_empty) != len(set(non_empty))
+
+        if has_dupes or not non_empty:
+            for idx, reading in enumerate(readings_data):
+                reading['point_label'] = chr(ord('A') + idx) if idx < 26 else f"P{idx + 1}"
+            return [r['point_label'] for r in readings_data]
+
         used_labels = set()
         for reading in readings_data:
             explicit = (reading.get('point_label') or '').strip().upper()
@@ -439,9 +526,6 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
                 if len(explicit) > 10:
                     raise serializers.ValidationError(
                         {'readings': f'Point label {explicit!r} is too long (max 10 characters).'})
-                if explicit in used_labels:
-                    raise serializers.ValidationError(
-                        {'readings': f'Duplicate test-point label {explicit!r} — each point on an element must be distinct.'})
                 used_labels.add(explicit)
 
         alphabet_idx = 0
@@ -478,23 +562,32 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
         mean_v = test.element_mean_velocity_km_s()
         test.velocity_km_s = mean_v
         test.pulse_velocity_ms = round(mean_v * 1000.0, 1) if mean_v is not None else None
-        # The element verdict's E.C.S flows through the project's active
-        # Nexucon Link curve, with the curve provenance snapshotted (8 Sep
-        # meeting — f_cu is the reason the Neural Link exists).
-        mean_ecs, curve_snap = apply_active_curve(
-            test.project, mean_v,
-            rebound_number=test.rebound_number,
-            temperature_c=test.surface_temperature_c,
-            moisture_condition=test.moisture_condition,
-            # mean_v is the mean of the points that yielded a velocity, so the
-            # divisor is that same set — the readings are computed above, so
-            # the count is now accurate. Not len(readings_data): a submitted
-            # point missing its path length or transit time stores a row but
-            # contributes nothing to mean_v, and counting it would claim a
-            # tighter margin than the averaged data supports.
-            n_points=test.element_point_count())
+
+        # The element verdict, two-tier, in the order the review meeting set:
+        #
+        # 1. a genuinely MEASURED strength that arrived with the points is
+        #    reported as-is — data injected with a compressive strength is not
+        #    re-derived behind the operator's back;
+        # 2. otherwise the project's active curve is applied to the element's
+        #    MEAN velocity, with the standard-error policy folded in (the
+        #    point count narrows the margin as sqrt(n)).
+        #
+        # The curve figure is recomputed here rather than read back from a
+        # stored per-point value, so re-calibrating the project moves this
+        # number instead of leaving yesterday's curve stamped on it.
+        mean_ecs = (test.element_mean_measured_strength_mpa()
+                    if test.prefers_measured_strength() else None)
+        curve_snap = None
+        if mean_ecs is None and mean_v is not None:
+            mean_ecs, curve_snap = apply_active_curve(
+                test.project, mean_v,
+                rebound_number=test.rebound_number,
+                temperature_c=test.surface_temperature_c,
+                moisture_condition=test.moisture_condition,
+                n_points=test.element_point_count())
         test.estimated_compressive_strength_mpa = mean_ecs
-        test.strength_curve_snapshot = curve_snap
+        if curve_snap:
+            test.strength_curve_snapshot = curve_snap
         test.quality_grade = PUNDITAdapter.grade_quality(mean_v)
         if test.test_type == 'crack_depth':
             mean_d = test.element_mean_crack_depth_mm()
@@ -525,11 +618,58 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
             self._sync_readings(test, readings_data)
         return test
 
+    # The fields on the TEST row that ARE the measurement for a legacy
+    # single-reading test (no child points). Correcting one of them changes
+    # what the record says, so its derived outputs have to follow.
+    LEGACY_MEASUREMENT_FIELDS = (
+        'path_length_mm', 'pulse_time_us', 'transit_time_us',
+        'crack_path_length_mm', 'crack_pulse_time_us', 'uncracked_pulse_time_us',
+    )
+
+    def _rederive_stored_outputs(self, test):
+        """Re-derive a corrected legacy record's own stored outputs.
+
+        A record with child points is re-derived by ``_sync_readings``. One
+        without them carries its measurement on the test row, so nothing else
+        recomputes when that row is edited — and the record would then render a
+        velocity and a grade belonging to the measurement it no longer holds.
+        The corrected values are saved first, then the row is saved once more so
+        the confidence metrics are computed from the new velocity rather than
+        the one it replaced.
+        """
+        from apps.digital_eye.adapters import PUNDITAdapter
+        if test.test_type == 'pulse_velocity':
+            test.velocity_km_s = PUNDITAdapter.compute_velocity_km_s(
+                test.path_length_mm, test.pulse_time_us or test.transit_time_us)
+            test.pulse_velocity_ms = (
+                round(test.velocity_km_s * 1000.0, 1)
+                if test.velocity_km_s is not None else None)
+            test.quality_grade = PUNDITAdapter.grade_quality(test.velocity_km_s)
+        elif test.test_type == 'crack_depth':
+            test.crack_depth_mm = PUNDITAdapter.compute_crack_depth_mm(
+                test.crack_path_length_mm, test.crack_pulse_time_us,
+                test.uncracked_pulse_time_us)
+            test.estimated_crack_depth_mm = test.crack_depth_mm
+        # The stored strength and its provenance belong to the measurement that
+        # was replaced. Cleared, so the save below recomputes both from this one
+        # through the project's active curve.
+        test.estimated_compressive_strength_mpa = None
+        test.strength_curve_snapshot = None
+        test.save()
+
     def update(self, instance, validated_data):
         readings_data = validated_data.pop('readings', None)
+        # Which measurements the operator actually changed, decided before the
+        # write — an edit that touches no measurement must not disturb the
+        # record's existing derived outputs.
+        corrected = [f for f in self.LEGACY_MEASUREMENT_FIELDS
+                     if f in validated_data
+                     and validated_data[f] != getattr(instance, f, None)]
         test = super().update(instance, validated_data)
         if readings_data is not None:
             self._sync_readings(test, readings_data)
+        elif corrected:
+            self._rederive_stored_outputs(test)
         return test
 
     def to_internal_value(self, data):
@@ -548,6 +688,14 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         test_type = attrs.get('test_type', getattr(self.instance, 'test_type', 'pulse_velocity'))
+        elem = attrs.get('structural_element') or (self.instance.structural_element if self.instance else '')
+        curr_floor = attrs.get('floor') or (self.instance.floor if self.instance else '')
+        if elem:
+            from apps.data_import.readers import infer_floor_from_name
+            inferred = infer_floor_from_name(elem)
+            if not curr_floor or str(curr_floor).strip().lower() in ('', 'ground floor', 'unspecified', 'floor not recorded'):
+                if inferred != 'Ground Floor' or not curr_floor:
+                    attrs['floor'] = inferred
         readings = attrs.get('readings')
         if test_type == 'pulse_velocity':
             if readings is not None:
@@ -627,9 +775,43 @@ class PUNDITTestSerializer(serializers.ModelSerializer):
 
 class PunditTestSerializer(serializers.ModelSerializer):
     file_count = serializers.SerializerMethodField()
+    estimated_compressive_strength_mpa = serializers.SerializerMethodField()
+    measured_compressive_strength_mpa = serializers.SerializerMethodField()
+    correlated_compressive_strength_mpa = serializers.SerializerMethodField()
+    strength_source = serializers.SerializerMethodField()
+    is_calibrated = serializers.SerializerMethodField()
 
     def get_file_count(self, obj):
         return obj.files.count()
+
+    def get_estimated_compressive_strength_mpa(self, obj):
+        if obj.is_calibrated():
+            correlated = obj.element_correlated_strength_mpa()
+            if correlated is not None:
+                return correlated
+            value, _source = obj.element_representative_strength()
+            if value is not None:
+                return value
+            if obj.estimated_compressive_strength_mpa is not None and obj.estimated_compressive_strength_mpa > 0:
+                return obj.estimated_compressive_strength_mpa
+        measured = obj.element_mean_measured_strength_mpa()
+        if measured is not None and obj.prefers_measured_strength():
+            return measured
+        return None
+
+    def get_measured_compressive_strength_mpa(self, obj):
+        return obj.element_mean_measured_strength_mpa()
+
+    def get_correlated_compressive_strength_mpa(self, obj):
+        if obj.is_calibrated():
+            return obj.element_correlated_strength_mpa()
+        return None
+
+    def get_strength_source(self, obj):
+        return obj.element_strength_source()
+
+    def get_is_calibrated(self, obj):
+        return obj.is_calibrated()
 
     class Meta:
         model = PUNDITTest
@@ -1092,7 +1274,8 @@ class ProjectCurveSettingSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProjectCurveSetting
-        fields = ['id', 'project', 'active_curve', 'updated_by', 'updated_at']
+        fields = ['id', 'project', 'active_curve', 'prefer_measured_strength',
+                  'updated_by', 'updated_at']
         read_only_fields = ['id', 'updated_by', 'updated_at']
 
 

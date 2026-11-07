@@ -11,6 +11,8 @@ urlpatterns = [
          name='telemetry-session-start'),
     path('session/from-file/', views.TelemetrySessionFromFileView.as_view(),
          name='telemetry-session-from-file'),
+    path('session/<uuid:session_id>/', views.TelemetrySessionDetailView.as_view(),
+         name='telemetry-session-detail'),
     path('session/<uuid:session_id>/data/', views.TelemetryPacketAppendView.as_view(),
          name='telemetry-session-data'),
     path('session/<uuid:session_id>/end/', views.TelemetrySessionEndView.as_view(),

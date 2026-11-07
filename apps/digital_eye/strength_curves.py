@@ -240,6 +240,26 @@ def strength_plausibility_error(f_mpa):
     return None
 
 
+def curve_output_is_plausible(value):
+    """Whether a curve's own output can be a concrete strength at all.
+
+    The same ceiling the calibration-pair guard uses, applied to the other end
+    of the same pipe: a curve is only ever allowed to produce a number a
+    concrete can have. A default or badly-conditioned parameter set that
+    evaluates to a negative, zero or absurd figure (a degree-2 polynomial with
+    fabricated coefficients yields -181 N/mm2 at 4.0 km/s) returns nothing
+    rather than printing that figure as a measured strength. None and
+    non-finite values are already "no strength".
+    """
+    if value is None:
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and 0.0 < number <= PLAUSIBLE_STRENGTH_MAX_MPA
+
+
 # ---------------------------------------------------------------------------
 # Built-in default (the laboratory's documented fixed curve — see
 # apps/reports/ndt_reports.py ECS_CALIBRATION_SOURCE for its provenance).
@@ -262,13 +282,22 @@ def _builtin_default_params():
     }
 
 
-BUILTIN_CURVE_NAME = 'Laboratory fixed calibration (built-in)'
+BUILTIN_CURVE_NAME = 'Jones Equation (Classic Baseline — A=2.8, B=0.53)'
 
 
-def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_condition=None):
+def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_condition=None,
+                           velocity_correction_factor=None):
     """Snapshot of the built-in fallback curve (used when no DB curve is
     seeded yet — identical maths to the seeded default)."""
     p = _builtin_default_params()
+    v_factor = 1.00
+    if velocity_correction_factor is not None:
+        try:
+            v_factor = float(velocity_correction_factor)
+        except (ValueError, TypeError):
+            v_factor = 1.00
+    m_factor = v_factor if v_factor != 1.00 else moisture_correction_factor(moisture_condition)
+
     return {
         'curve_id': None,
         'name': BUILTIN_CURVE_NAME,
@@ -279,13 +308,142 @@ def builtin_curve_snapshot(velocity_km_s=None, temperature_c=None, moisture_cond
         'valid_range_ms': p['valid_range_ms'],
         'r2_score': None,
         'standard_error': None,  # fixed curve: no regression, no error estimate
-        'provenance_source': 'Laboratory default exponential calibration curve (documented in report section 3.0)',
+        'provenance_source': 'Baseline Jones Equation (1962) exponential calibration curve (documented in report section 3.0)',
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
         'moisture_condition': moisture_condition or 'dry',
-        'moisture_correction_applied': moisture_correction_applied(moisture_condition),
-        'moisture_factor': moisture_correction_factor(moisture_condition),
+        'moisture_correction_applied': m_factor != 1.00,
+        'moisture_factor': m_factor,
+        'velocity_correction_factor': v_factor,
+        'velocity_correction_applied': v_factor != 1.00,
         'se_adjustment': None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Default Exponential Models Library (Review meeting item: 24:02, 26:18)
+# Enables projects without provided compressive strength to select the most
+# appropriate default exponential model: Standard Mix, Jones Equation, or
+# Aggregate Mix based on regional materials.
+# ---------------------------------------------------------------------------
+
+DEFAULT_EXPONENTIAL_MODELS = {
+    'standard_mix': {
+        'key': 'standard_mix',
+        'name': 'Standard Mix (Laboratory Default — A=1.20, B=0.85)',
+        'curve_type': 'exponential',
+        'standard': 'BS 1881-203 / ACI 228.2R',
+        'formula_params': {'a': 1.20, 'b': 0.00085, 'c': 0.0},
+        'valid_range_min_ms': 2000.0,
+        'valid_range_max_ms': 5000.0,
+        'description': 'Standard Portland cement normal-weight concrete mix baseline correlation without location-specific calibration.',
+    },
+    'jones_equation': {
+        'key': 'jones_equation',
+        'name': 'Jones Equation (Classic Baseline — A=2.8, B=0.53)',
+        'curve_type': 'exponential',
+        'standard': 'Jones (1962) / BS EN 12504-4',
+        'formula_params': {'a': 2.8, 'b': 0.00053, 'c': 0.0},
+        'valid_range_min_ms': 2000.0,
+        'valid_range_max_ms': 5000.0,
+        'description': 'Classic empirical exponential relationship for normal-weight structural concrete mixes (Jones 1962). Baseline model safe generic choice up to ~27.2 MPa when project-specific calibration data is missing.',
+    },
+    'aggregate_mix': {
+        'key': 'aggregate_mix',
+        'name': 'High-Volume Aggregate Mix (A=1.39, B=0.78)',
+        'curve_type': 'exponential',
+        'standard': 'BS 1881-203 Section 11',
+        'formula_params': {'a': 1.39, 'b': 0.00078, 'c': 0.0},
+        'valid_range_min_ms': 2000.0,
+        'valid_range_max_ms': 5000.0,
+        'description': 'Dense crushed rock / granite / large gravel aggregate mix model with elevated elastic modulus. Deployed when concrete contains high volumes of crushed dense stone.',
+    },
+}
+
+
+def recognize_model_factors(a, b, c=0.0):
+    """
+    Recognize specific formula factors (such as Jones equation and High-Aggregate mix model)
+    automatically based on their ABC values per client review meeting specification:
+      - A = 2.8, B = 0.53 (or 0.00053 in m/s), C = 0: Classic Jones Equation (1962) global baseline
+      - A = 1.39, B = 0.78 (or 0.00078 in m/s), C = 0: High-Volume Aggregate Mix Model
+      - A = 1.20, B = 0.85 (or 0.00085 in m/s), C = 0: Standard Mix Laboratory Default
+      - Otherwise: Project-specific calibrated regression model
+    """
+    try:
+        a_val = float(a)
+        b_val = float(b)
+        c_val = float(c or 0.0)
+    except (TypeError, ValueError):
+        return {
+            'model_key': 'custom',
+            'model_name': 'Custom Mathematical Model',
+            'literature_note': 'User-configured or project-specific calibration curve.',
+            'is_default_empirical': False,
+        }
+
+    # Normalize b: if provided in km/s (e.g. 0.53), convert to m/s for comparison (0.00053)
+    b_ms = b_val if b_val < 0.01 else (b_val / 1000.0)
+    c_zero = abs(c_val) < 0.05
+
+    # Check Jones Equation: a ~ 2.8, b_ms ~ 0.00053, c ~ 0
+    if abs(a_val - 2.8) < 0.15 and abs(b_ms - 0.00053) < 0.0001 and c_zero:
+        return {
+            'model_key': 'jones_equation',
+            'model_name': 'Classic Jones Equation (1962)',
+            'literature_note': 'Global baseline model and safe generic choice in the absence of project-specific calibration data, capturing concrete relationships up to ~27.2 MPa.',
+            'is_default_empirical': True,
+        }
+
+    # Check High-Volume Aggregate Mix: a ~ 1.39, b_ms ~ 0.00078, c ~ 0
+    if abs(a_val - 1.39) < 0.15 and abs(b_ms - 0.00078) < 0.0001 and c_zero:
+        return {
+            'model_key': 'aggregate_mix',
+            'model_name': 'High-Volume Aggregate Mix Model',
+            'literature_note': 'Deployed when concrete contains high volumes of crushed dense stone or large gravel with elevated elastic modulus.',
+            'is_default_empirical': True,
+        }
+
+    # Check Standard Mix: a ~ 1.20, b_ms ~ 0.00085, c ~ 0
+    if abs(a_val - 1.20) < 0.15 and abs(b_ms - 0.00085) < 0.0001 and c_zero:
+        return {
+            'model_key': 'standard_mix',
+            'model_name': 'Standard Mix (Laboratory Default)',
+            'literature_note': 'Portland cement baseline empirical model per ACI 228.2R and BS 1881-203.',
+            'is_default_empirical': True,
+        }
+
+    return {
+        'model_key': 'calibrated_project',
+        'model_name': 'Project-Specific Calibrated Correlation Model',
+        'literature_note': 'Project-specific model established through site trial / core sample destructive and non-destructive regression analysis.',
+        'is_default_empirical': False,
+    }
+
+
+def seed_default_exponential_models():
+    """Ensure Jones Equation, Standard Mix, and Aggregate Mix curves exist in the platform library.
+    Per executive engineering review, Jones Equation (1962) is the baseline default model."""
+    from .models import StrengthCurve
+    created_or_updated = []
+    # Clear is_default from existing curves before applying Jones Equation default
+    StrengthCurve.objects.filter(is_default=True).update(is_default=False)
+    for key, model_def in DEFAULT_EXPONENTIAL_MODELS.items():
+        is_default = (key == 'jones_equation')
+        curve, _ = StrengthCurve.objects.update_or_create(
+            name=model_def['name'],
+            project=None,
+            defaults={
+                'curve_type': model_def['curve_type'],
+                'standard': model_def['standard'],
+                'formula_params': model_def['formula_params'],
+                'valid_range_min_ms': model_def['valid_range_min_ms'],
+                'valid_range_max_ms': model_def['valid_range_max_ms'],
+                'is_default': is_default,
+                'provenance': {'model_key': key, 'description': model_def['description']},
+            }
+        )
+        created_or_updated.append(curve)
+    return created_or_updated
 
 
 # ---------------------------------------------------------------------------
@@ -326,10 +484,21 @@ MOISTURE_FACTORS = {
 
 
 def moisture_correction_factor(moisture_condition):
-    """Multiplicative factor for moisture condition: Dry=1.00, Damp=1.03, Saturated=1.05."""
+    """Multiplicative factor for moisture condition: Dry=1.00, Damp=1.03, Saturated=1.05.
+    Also accepts numeric float / user-selectable factors (e.g. 1.00, 1.01, 1.015, 1.02, 1.03, 1.05)."""
     if not moisture_condition:
         return 1.00
+    if isinstance(moisture_condition, (int, float)):
+        val = float(moisture_condition)
+        if 0.90 <= val <= 1.15:
+            return val
     norm = str(moisture_condition).lower().strip()
+    try:
+        val = float(norm)
+        if 0.90 <= val <= 1.15:
+            return val
+    except ValueError:
+        pass
     return MOISTURE_FACTORS.get(norm, 1.00)
 
 
@@ -353,49 +522,69 @@ def apply_curve_params(curve_type, params, velocity_km_s,
     """
     if velocity_km_s is None or velocity_km_s <= 0:
         return None
+
+    # Check for environmental/moisture velocity correction factor (clamped 0.90 - 1.15)
+    v_factor = 1.00
+    if isinstance(params, dict):
+        raw_factor = params.get('velocity_correction_factor') or params.get('moisture_factor')
+        if raw_factor is not None:
+            try:
+                rf = float(raw_factor)
+                if 0.90 <= rf <= 1.15:
+                    v_factor = rf
+            except (ValueError, TypeError):
+                pass
+
+    eff_velocity_km_s = velocity_km_s * v_factor if v_factor != 1.00 else velocity_km_s
+
     if valid_range_ms is not None:
         lo, hi = valid_range_ms
-        v_ms = velocity_km_s * 1000.0
+        v_ms = eff_velocity_km_s * 1000.0
         if not (lo <= v_ms <= hi):
             return None
     try:
         if curve_type == 'linear':
             m = params.get('m', params.get('a', 8.961))
             c = params.get('c', params.get('b', -7.97))
-            v_ms = velocity_km_s * 1000.0
+            v_ms = eff_velocity_km_s * 1000.0
             if abs(m) > 1.0:
-                return m * velocity_km_s + c
-            return m * v_ms + c
-        if curve_type == 'polynomial':
+                value = m * eff_velocity_km_s + c
+            else:
+                value = m * v_ms + c
+        elif curve_type == 'polynomial':
             coeffs = params.get('coeffs')
             if not coeffs and 'a' in params and 'b' in params and 'c' in params:
                 coeffs = [params['a'], params['b'], params['c']]
             if not coeffs:
                 return None
-            v_ms = velocity_km_s * 1000.0
+            v_ms = eff_velocity_km_s * 1000.0
             if len(coeffs) >= 3 and abs(float(coeffs[2])) > 1e-4:
-                v_use = velocity_km_s
+                v_use = eff_velocity_km_s
             else:
                 v_use = v_ms
             value = sum(float(co) * (v_use ** i) for i, co in enumerate(coeffs))
-            return value if math.isfinite(value) else None
-        if curve_type == 'exponential':
-            a = params.get('a', 1.20)
-            b = params.get('b', 0.85)
+        elif curve_type == 'exponential':
+            # Default to Jones equation baseline (A=2.80, B=0.53) if params not explicit
+            a = params.get('a', 2.80)
+            b = params.get('b', 0.53)
             c = params.get('c', 0.0) or 0.0
-            exp_arg = b * (velocity_km_s * 1000.0) if abs(b) < 0.01 else b * velocity_km_s
+            exp_arg = b * (eff_velocity_km_s * 1000.0) if abs(b) < 0.01 else b * eff_velocity_km_s
             value = a * math.exp(exp_arg) + c
-            return value if math.isfinite(value) else None
-        if curve_type == 'sonreb':
-            r = rebound_number if (rebound_number is not None and rebound_number > 0) else 32.0
+        elif curve_type == 'sonreb':
+            # SonReb needs both non-destructive readings. Without a rebound
+            # number there is no curve to apply — substituting a made-up
+            # rebound value would invent a strength, so return None instead.
+            if rebound_number is None or rebound_number <= 0:
+                return None
             a = params.get('a', 0.0286)
             b = params.get('b', 0.84)
             c = params.get('c', 0.35)
+            # The fitter (run_regression) fits and evaluates SonReb with V in
+            # m/s, and formula_display prints it that way. Evaluate in the same
+            # domain here, or a fitted curve would not reproduce its own fit.
             v_ms = velocity_km_s * 1000.0
-            v_use = v_ms if a < 0.1 else velocity_km_s
-            value = (a * (v_use ** b) * (r ** c))
-            return value if math.isfinite(value) else None
-        if curve_type == 'lookup':
+            value = (a * (v_ms ** b) * (rebound_number ** c))
+        elif curve_type == 'lookup':
             points = sorted(params['points'], key=lambda p: p['v'])
             if len(points) < 2:
                 return None
@@ -403,14 +592,23 @@ def apply_curve_params(curve_type, params, velocity_km_s,
             if v_ms < points[0]['v'] or v_ms > points[-1]['v']:
                 # Outside the table's span: no extrapolation, ever.
                 return None
+            value = None
             for i in range(len(points) - 1):
                 p1, p2 = points[i], points[i + 1]
                 if p1['v'] <= v_ms <= p2['v']:
                     if p2['v'] == p1['v']:
-                        return p1['f']
-                    return (p1['f'] + (p2['f'] - p1['f'])
-                            * (v_ms - p1['v']) / (p2['v'] - p1['v']))
-            return points[-1]['f']
+                        value = p1['f']
+                    else:
+                        value = (p1['f'] + (p2['f'] - p1['f'])
+                                 * (v_ms - p1['v']) / (p2['v'] - p1['v']))
+                    break
+            if value is None:
+                value = points[-1]['f']
+        else:
+            return None
+        # One gate for every curve type: a curve may only ever produce a
+        # number a concrete can have. Nothing is extrapolated past it.
+        return value if curve_output_is_plausible(value) else None
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
         return None
     return None
@@ -643,61 +841,137 @@ def validate_curve_params(curve_type, params):
 def resolve_active_curve(project):
     """
     The curve a project's strength computations use:
-    the project's activated curve when set, else the active CalibrationProfile,
+    the active CalibrationProfile (when calibrated by government),
+    else the project's activated curve when set,
     else the platform default (exponential), else None.
     """
     if project is not None:
+        from .models import CalibrationProfile, StrengthCurve, ProjectCurveSetting
+        cal = CalibrationProfile.objects.filter(project=project, is_active=True).order_by('-created_at').first()
+        if cal is not None:
+            sc = StrengthCurve.objects.filter(project=project, curve_type=cal.curve_type).first()
+            formatted_pts = []
+            if cal.cube_correlation_data:
+                for pt in cal.cube_correlation_data:
+                    if not isinstance(pt, dict):
+                        continue
+                    v = float(pt.get('v') or pt.get('velocity') or pt.get('velocity_ms') or 0.0)
+                    if 0 < v < 100:
+                        v = v * 1000.0
+                    f = float(pt.get('f') or pt.get('strength') or pt.get('f_cu') or pt.get('cube_strength_mpa') or 0.0)
+                    r = pt.get('rebound') or pt.get('r')
+                    if v > 0 and f > 0:
+                        formatted_pts.append({'v': v, 'f': f, 'r': r})
+
+            r2_val, se_val, aic_val = None, None, None
+            if len(formatted_pts) >= 2:
+                try:
+                    r2_val, se_val, aic_val = curve_fit_stats(cal.curve_type, cal.params or {}, formatted_pts)
+                except Exception:
+                    pass
+
+            v_vals = [p['v'] for p in formatted_pts]
+            v_min = min(v_vals) if v_vals else 2000.0
+            v_max = max(v_vals) if v_vals else 5000.0
+
+            if sc:
+                need_save = False
+                update_fields = []
+                if cal.params and sc.formula_params != cal.params:
+                    sc.formula_params = cal.params
+                    need_save = True
+                    update_fields.append('formula_params')
+                if formatted_pts and (not sc.data_points or len(sc.data_points) == 0):
+                    sc.data_points = formatted_pts
+                    sc.r2_score = r2_val
+                    sc.standard_error = se_val
+                    sc.aic = aic_val
+                    need_save = True
+                    update_fields.extend(['data_points', 'r2_score', 'standard_error', 'aic'])
+                if need_save:
+                    sc.save(update_fields=list(set(update_fields)))
+            else:
+                sc = StrengthCurve.objects.create(
+                    project=project,
+                    name=f"{project.name} - {cal.get_curve_type_display()}",
+                    curve_type=cal.curve_type,
+                    formula_params=cal.params,
+                    data_points=formatted_pts,
+                    r2_score=r2_val,
+                    standard_error=se_val,
+                    aic=aic_val,
+                    valid_range_min_ms=v_min,
+                    valid_range_max_ms=v_max,
+                    standard='BS 1881-203 / BS EN 12504-4',
+                )
+            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
+            if setting.active_curve_id != sc.id or setting.prefer_measured_strength:
+                setting.active_curve = sc
+                setting.prefer_measured_strength = False
+                setting.save(update_fields=['active_curve', 'prefer_measured_strength', 'updated_at'])
+            return sc
+
         setting = getattr(project, 'curve_setting', None)
         if setting is not None and setting.active_curve_id:
             curve = setting.active_curve
             if curve is not None:
                 return curve
 
-        from .models import CalibrationProfile, StrengthCurve
-        cal = CalibrationProfile.objects.filter(project=project, is_active=True).first()
-        if cal is not None:
-            sc = StrengthCurve.objects.filter(project=project, curve_type=cal.curve_type).first()
-            if sc:
-                return sc
-            sc = StrengthCurve.objects.create(
-                project=project,
-                name=f"{project.name} - {cal.get_curve_type_display()}",
-                curve_type=cal.curve_type,
-                formula_params=cal.params,
-                valid_range_min_ms=2000.0,
-                valid_range_max_ms=5000.0,
-                standard='BS 1881-203 / BS EN 12504-4',
-            )
-            from .models import ProjectCurveSetting
-            setting, _ = ProjectCurveSetting.objects.get_or_create(project=project)
-            setting.active_curve = sc
-            setting.save(update_fields=['active_curve', 'updated_at'])
-            return sc
-
     from .models import StrengthCurve
-    return StrengthCurve.objects.filter(is_default=True).first()
+    def_curve = StrengthCurve.objects.filter(is_default=True, project=None).first()
+    if def_curve and 'jones' in def_curve.name.lower():
+        return def_curve
+    jones = StrengthCurve.objects.filter(name__icontains='jones', project=None).first()
+    if jones:
+        return jones
+    return def_curve or StrengthCurve.objects.filter(is_default=True).first()
 
 
-# The documented laboratory coefficients for each curve type. These are the
-# published fallbacks, applied when a project has NO calibration curve of its
-# own — never a substitute for a curve the project has fitted.
+# The documented laboratory coefficients, applied when a project has NO
+# calibration curve of its own — never a substitute for a curve the project
+# has fitted (see ``resolve_analysis_curve``).
+#
+# Only two entries are honest. Both are the laboratory's own documented
+# curves, cited in report section 3.0 and in ``ndt_reports.ECS_CALIBRATION_SOURCE``:
+#
+#   exponential  f_cu = 1.20 x exp(0.85 x V_km_s)   (the ACI 228.2R form the
+#                client designated as the default curve type)
+#   linear       f_cu = 8.961 x V_km_s - 7.97       (the fixed curve the
+#                platform used before Nexucon Link existed)
+#
+# Polynomial and SonReb previously carried coefficients here that no source
+# documents — a degree-2 polynomial of [-12.5, 4.2, 1.8] evaluated to
+# -181.4 N/mm2 at 4.0 km/s, a tensile-magnitude number printed as a concrete
+# strength. This module's own honesty rule (see the module docstring) is that
+# no fabricated default parameters are invented for a curve type. A request
+# for a polynomial or SonReb curve with no fitted coefficients of its own is
+# therefore answered with the documented exponential, and the substitution is
+# reported in the snapshot's provenance rather than hidden.
 DOCUMENTED_DEFAULT_PARAMS = {
-    'exponential': {'a': 1.20, 'b': 0.85, 'c': 0.0},
+    'exponential': {'a': 2.80, 'b': 0.53, 'c': 0.0},
     'linear': {'m': 8.961, 'c': -7.97},
-    'polynomial': {'coeffs': [-12.5, 4.2, 1.8],
-                   'a': -12.5, 'b': 4.2, 'c': 1.8},
-    'sonreb': {'a': 0.0286, 'b': 0.84, 'c': 0.35},
 }
+
+# Curve types with no documented fallback of their own: they need real fitted
+# coefficients, and a bare request for one is served by the exponential.
+CURVE_TYPES_WITHOUT_DOCUMENTED_DEFAULT = ('polynomial', 'sonreb', 'lookup')
 
 
 def documented_default_params(curve_type):
-    """A copy of the published default coefficients for ``curve_type``.
+    """The documented coefficients for ``curve_type``, or the documented
+    exponential when that type has no documented fallback.
 
-    Read-only fallback: a project that has fitted its own curve must never be
-    handed these numbers instead of it (see ``resolve_analysis_curve``).
+    Read-only: a project that has fitted its own curve must never be handed
+    these numbers instead of it (see ``resolve_analysis_curve``).
     """
     return dict(DOCUMENTED_DEFAULT_PARAMS.get(curve_type)
                 or DOCUMENTED_DEFAULT_PARAMS['exponential'])
+
+
+def documented_default_is_a_substitute(curve_type):
+    """True when a bare request for ``curve_type`` is served by a different
+    documented model, so the caller can disclose the substitution."""
+    return curve_type in CURVE_TYPES_WITHOUT_DOCUMENTED_DEFAULT
 
 
 def resolve_analysis_curve(project, requested_type=None, requested_params=None,
@@ -724,8 +998,12 @@ def resolve_analysis_curve(project, requested_type=None, requested_params=None,
     yields 34.5.
 
     ``source`` is one of 'request', 'project_curve', 'calibration_profile',
-    'documented_default'; only 'request' authorises writing to the stored
-    curve.
+    'documented_default', 'documented_default_substituted'; only 'request'
+    authorises writing to the stored curve. The last value means the caller
+    asked for a curve type that has no documented fallback of its own
+    (polynomial / SonReb / lookup) and no fitted coefficients exist for it, so
+    the documented exponential answered instead — the substitution is named
+    rather than passed off as the requested model.
     """
     if isinstance(requested_params, dict) and requested_params:
         return (str(requested_type or 'exponential'), dict(requested_params),
@@ -749,16 +1027,34 @@ def resolve_analysis_curve(project, requested_type=None, requested_params=None,
         return curve_type, dict(curve.formula_params), 'project_curve', False
     if (calibration_type == curve_type and getattr(calibration, 'params', None)):
         return curve_type, dict(calibration.params), 'calibration_profile', False
+    if documented_default_is_a_substitute(curve_type):
+        return ('exponential', documented_default_params('exponential'),
+                'documented_default_substituted', False)
     return curve_type, documented_default_params(curve_type), \
         'documented_default', False
 
 
-def curve_snapshot(curve, temperature_c=None, moisture_condition=None):
+def curve_snapshot(curve, temperature_c=None, moisture_condition=None, velocity_correction_factor=None):
     """JSON snapshot of the curve that produced a strength value — the
     formula provenance stored on every reading/test (client spec §B.1
     formula_snapshot_json)."""
     if curve is None:
-        return builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition)
+        return builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition,
+                                      velocity_correction_factor=velocity_correction_factor)
+    v_factor = 1.00
+    if velocity_correction_factor is not None:
+        try:
+            v_factor = float(velocity_correction_factor)
+        except (ValueError, TypeError):
+            v_factor = 1.00
+    elif getattr(curve, 'formula_params', None) and isinstance(curve.formula_params, dict):
+        try:
+            v_factor = float(curve.formula_params.get('velocity_correction_factor', 1.00))
+        except (ValueError, TypeError):
+            v_factor = 1.00
+
+    m_factor = v_factor if v_factor != 1.00 else moisture_correction_factor(moisture_condition)
+
     return {
         'curve_id': str(curve.id),
         'name': curve.name,
@@ -772,8 +1068,10 @@ def curve_snapshot(curve, temperature_c=None, moisture_condition=None):
         'provenance_source': (curve.provenance or {}).get('source'),
         'temperature_correction_applied': temperature_correction_applied(temperature_c),
         'moisture_condition': moisture_condition or 'dry',
-        'moisture_correction_applied': moisture_correction_applied(moisture_condition),
-        'moisture_factor': moisture_correction_factor(moisture_condition),
+        'moisture_correction_applied': m_factor != 1.00,
+        'moisture_factor': m_factor,
+        'velocity_correction_factor': v_factor,
+        'velocity_correction_applied': v_factor != 1.00,
         'se_adjustment': None,
     }
 
@@ -862,7 +1160,8 @@ def apply_se_adjustment_at_velocity(velocity_km_s, curve, n_points=None,
 
 
 def apply_active_curve(project, velocity_km_s, rebound_number=None,
-                       temperature_c=None, moisture_condition=None, n_points=None):
+                       temperature_c=None, moisture_condition=None, n_points=None,
+                       velocity_correction_factor=None):
     """
     THE f_cu path: resolve the project's active curve, temperature-correct
     and moisture-correct the velocity (BS 1881-203 / ACI 228.2R band),
@@ -872,10 +1171,28 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
 
     corrected_v = temperature_corrected_velocity_km_s(velocity_km_s, temperature_c)
     m_factor = moisture_correction_factor(moisture_condition)
+    if velocity_correction_factor is not None:
+        try:
+            vf = float(velocity_correction_factor)
+            if 0.90 <= vf <= 1.15:
+                m_factor = vf
+        except (ValueError, TypeError):
+            pass
+
+    curve = resolve_active_curve(project)
+    if curve and getattr(curve, 'formula_params', None) and isinstance(curve.formula_params, dict):
+        saved_vf = curve.formula_params.get('velocity_correction_factor')
+        if saved_vf and velocity_correction_factor is None:
+            try:
+                vf = float(saved_vf)
+                if 0.90 <= vf <= 1.15 and vf != 1.00:
+                    m_factor = vf
+            except (ValueError, TypeError):
+                pass
+
     if corrected_v is not None and m_factor != 1.0:
         corrected_v = corrected_v * m_factor
 
-    curve = resolve_active_curve(project)
     if curve is None:
         p = _builtin_default_params()
         strength = apply_curve_params(
@@ -884,7 +1201,8 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
             valid_range_ms=p['valid_range_ms'])
         # The built-in laboratory curve carries no regression, so there is
         # no standard error to adjust by — disclosed, never assumed away.
-        snapshot = builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition)
+        snapshot = builtin_curve_snapshot(temperature_c=temperature_c, moisture_condition=moisture_condition,
+                                          velocity_correction_factor=m_factor)
         adjusted, disclosure = apply_se_adjustment(strength, None,
                                                    n_points=n_points)
         snapshot['se_adjustment'] = disclosure
@@ -897,7 +1215,8 @@ def apply_active_curve(project, velocity_km_s, rebound_number=None,
     # velocity, so the strength is not computed here first.
     adjusted, disclosure = apply_se_adjustment_at_velocity(
         corrected_v, curve, n_points=n_points, rebound_number=rebound_number)
-    snapshot = curve_snapshot(curve, temperature_c=temperature_c, moisture_condition=moisture_condition)
+    snapshot = curve_snapshot(curve, temperature_c=temperature_c, moisture_condition=moisture_condition,
+                              velocity_correction_factor=m_factor)
     snapshot['se_adjustment'] = disclosure
     return adjusted, snapshot
 

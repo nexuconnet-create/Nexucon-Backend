@@ -4,11 +4,33 @@ from django.core.validators import MinValueValidator
 import uuid
 import datetime
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
 def generate_project_ref():
     return f"NXC-GOV-{datetime.datetime.now().year}-{uuid.uuid4().hex[:4].upper()}"
+
+
+def generate_sequential_project_number():
+    """Generates sequential project tag reference TAG-YYYY-NNNN based on highest existing tag sequence."""
+    year = datetime.datetime.now().year
+    prefix = f"TAG-{year}-"
+    highest = 0
+    try:
+        existing_tags = Project.objects.filter(project_number__startswith=prefix).values_list('project_number', flat=True)
+        for tag in existing_tags:
+            match = re.search(r'TAG-\d+-(\d+)', tag)
+            if match:
+                val = int(match.group(1))
+                if val > highest:
+                    highest = val
+        if highest == 0:
+            highest = Project.objects.count()
+    except Exception:
+        highest = 0
+    next_num = highest + 1
+    return f"{prefix}{next_num:04d}"
 
 
 def resolve_inspector_user(wanted):
@@ -57,14 +79,18 @@ class Project(models.Model):
     )
 
     PROJECT_TYPE_CHOICES = (
-        ('Residential', 'Residential'),
         ('Commercial', 'Commercial'),
+        ('Industrial Layout', 'Industrial Layout / Warehouse'),
         ('Industrial', 'Industrial'),
-        ('Infrastructure', 'Infrastructure'),
-        ('Mixed-Use', 'Mixed-Use'),
-        ('Institutional', 'Institutional'),
-        ('Renovation', 'Renovation / Redevelopment'),
-        ('Other', 'Other'),
+        ('Hospital', 'Hospital / Medical Facility'),
+        ('Car Park', 'Car Park / Multi-Story Parking'),
+        ('Residential', 'Residential'),
+        ('Institutional', 'Institutional / Educational'),
+        ('Civic', 'Civic / Public Infrastructure'),
+        ('Infrastructure', 'Infrastructure / Laydown Area'),
+        ('Mixed-Use', 'Mixed-Use Development'),
+        ('Renovation', 'Structural Renovation / Retrofit'),
+        ('Other', 'Other Structure'),
     )
 
     PRIORITY_CHOICES = (
@@ -142,6 +168,8 @@ class Project(models.Model):
     construction_method = models.CharField(max_length=255, blank=True, null=True)
     structural_system = models.CharField(max_length=255, blank=True, null=True)
     special_requirements = models.TextField(blank=True, null=True)
+    floor_number_custom = models.CharField(max_length=150, blank=True, default='', help_text="Custom floor specification if Others was selected")
+    is_estimated_value_na = models.BooleanField(default=False, help_text="True if project estimated value is marked Not Applicable (N/A)")
 
     # 8. Government Assignment
     assigned_department = models.CharField(max_length=255, blank=True, null=True)
@@ -330,6 +358,11 @@ class Project(models.Model):
         touched = current != loaded or bool(
             named & {'assigned_inspector', 'assigned_inspector_user'})
 
+        if not self.project_number or not str(self.project_number).strip():
+            self.project_number = generate_sequential_project_number()
+            if update_fields is not None:
+                named.add('project_number')
+
         if touched:
             self.sync_assigned_inspector()
             if update_fields is not None:
@@ -337,7 +370,7 @@ class Project(models.Model):
                 # fields must not have that write silently dropped, so the pair
                 # is added rather than trusted to be listed.
                 kwargs['update_fields'] = list(
-                    named | {'assigned_inspector', 'assigned_inspector_user'})
+                    named | {'assigned_inspector', 'assigned_inspector_user', 'project_number'})
 
         super().save(*args, **kwargs)
 
