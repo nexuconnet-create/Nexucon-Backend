@@ -585,9 +585,14 @@ class StakeholderService:
 
         User = get_user_model()
         frontend_url = (getattr(django_settings, 'FRONTEND_URL', '') or 'http://localhost:3000').rstrip('/')
-        gov_room_url = f"{frontend_url}/government/dashboard/stakeholders/meetings/{meeting.id}/room"
-        stakeholder_room_url = f"{frontend_url}/stakeholder/meetings/{meeting.id}/room"
-        inspector_room_url = f"{frontend_url}/inspector/dashboard/meetings/{meeting.id}/room"
+        if 'localhost' in frontend_url or '127.0.0.1' in frontend_url:
+            gov_room_url = f"{frontend_url}/government/dashboard/stakeholders/meetings/{meeting.id}/room"
+            stakeholder_room_url = f"{frontend_url}/stakeholder/meetings/{meeting.id}/room"
+            inspector_room_url = f"{frontend_url}/inspector/dashboard/meetings/{meeting.id}/room"
+        else:
+            gov_room_url = f"https://government.nexucon.net/dashboard/stakeholders/meetings/{meeting.id}/room"
+            stakeholder_room_url = f"https://stakeholder.nexucon.net/meetings/{meeting.id}/room"
+            inspector_room_url = f"https://inspector.nexucon.net/dashboard/meetings/{meeting.id}/room"
 
         # Map email -> participant dict
         participant_by_email = {}

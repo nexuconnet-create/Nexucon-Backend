@@ -37,17 +37,33 @@ def send_username_update_email_to_user(user):
     role_data = UserMeSerializer(user).data
     role_lower = (role_data.get('role_name') or '').lower()
 
-    if any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
-        settings_path = '/inspector/dashboard/profile?activate_username=true'
-        portal_name = 'Inspector Terminal'
-    elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
-        settings_path = '/government/dashboard/settings/profile?activate_username=true'
-        portal_name = 'Government Command Center'
+    if 'localhost' in frontend_url or '127.0.0.1' in frontend_url:
+        if any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
+            action_url = f"{frontend_url}/inspector/dashboard/profile?activate_username=true"
+            settings_path = '/inspector/dashboard/profile?activate_username=true'
+            portal_name = 'Inspector Terminal'
+        elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
+            action_url = f"{frontend_url}/government/dashboard/settings/profile?activate_username=true"
+            settings_path = '/government/dashboard/settings/profile?activate_username=true'
+            portal_name = 'Government Command Center'
+        else:
+            action_url = f"{frontend_url}/stakeholder/profile?activate_username=true"
+            settings_path = '/stakeholder/profile?activate_username=true'
+            portal_name = 'Stakeholder Portal'
     else:
-        settings_path = '/stakeholder/profile?activate_username=true'
-        portal_name = 'Stakeholder Portal'
+        if any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
+            action_url = "https://inspector.nexucon.net/dashboard/profile?activate_username=true"
+            settings_path = '/inspector/dashboard/profile?activate_username=true'
+            portal_name = 'Inspector Terminal'
+        elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
+            action_url = "https://government.nexucon.net/dashboard/settings/profile?activate_username=true"
+            settings_path = '/government/dashboard/settings/profile?activate_username=true'
+            portal_name = 'Government Command Center'
+        else:
+            action_url = "https://stakeholder.nexucon.net/profile?activate_username=true"
+            settings_path = '/stakeholder/profile?activate_username=true'
+            portal_name = 'Stakeholder Portal'
 
-    action_url = f"{frontend_url}{settings_path}"
     suggested = generate_unique_username(
         base_name=user.get_full_name(),
         email=user.email,
