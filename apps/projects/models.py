@@ -90,7 +90,15 @@ class Project(models.Model):
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='DRAFT')
     development_category = models.CharField(max_length=100, blank=True, null=True)
     estimated_project_value = models.DecimalField(max_digits=15, decimal_places=2, blank=True, null=True)
+    is_estimated_value_na = models.BooleanField(
+        default=False,
+        help_text="True if project estimated value is marked Not Applicable (N/A)"
+    )
     number_of_floors = models.IntegerField(blank=True, null=True)
+    floor_number_custom = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text="Custom floor specification if Others was selected"
+    )
     start_date = models.DateField(null=True, blank=True)
     estimated_completion = models.DateField(null=True, blank=True)
 

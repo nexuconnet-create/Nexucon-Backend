@@ -106,6 +106,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         qs = scoped_projects(user)
         if not user.is_superuser and not (hasattr(user, 'government_profile') and user.government_profile):
             qs = (qs | self.get_queryset()).distinct()
+        qs = qs.exclude(cold_storage=True).exclude(status__in=['DRAFT', 'SUSPENDED', 'ABANDONED'])
         queryset = qs.order_by('name')
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)

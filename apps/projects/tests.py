@@ -455,6 +455,50 @@ class CoordinateConversionTestCase(APITestCase):
         self.assertEqual(res.data['corner_coordinates']['footprintAreaSqm'], 4420.5)
         self.assertEqual(res.data['professionals'][0]['role'], 'Others')
 
+    def test_convert_multi_point_coordinates_beyond_four_points(self):
+        """Allow multi-point boundary polygons with > 4 points (e.g. 6-point parcel)."""
+        url = '/api/v1/projects/convert-coordinates/'
+        data = {
+            'system': 'WGS84_DD',
+            'corners': [
+                {'id': 1, 'point_number': 'P1', 'label': 'Point 1 (NW)', 'lat': 6.4250, 'lng': 3.3850},
+                {'id': 2, 'point_number': 'P2', 'label': 'Point 2 (N)', 'lat': 6.4255, 'lng': 3.3855},
+                {'id': 3, 'point_number': 'P3', 'label': 'Point 3 (NE)', 'lat': 6.4250, 'lng': 3.3860},
+                {'id': 4, 'point_number': 'P4', 'label': 'Point 4 (SE)', 'lat': 6.4240, 'lng': 3.3860},
+                {'id': 5, 'point_number': 'P5', 'label': 'Point 5 (S)', 'lat': 6.4235, 'lng': 3.3855},
+                {'id': 6, 'point_number': 'P6', 'label': 'Point 6 (SW)', 'lat': 6.4240, 'lng': 3.3850},
+            ]
+        }
+        res = self.client.post(url, data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data['corners']), 6)
+        self.assertEqual(res.data['corners'][4]['point_number'], 'P5')
+        self.assertGreater(res.data['footprintAreaSqm'], 0)
+        self.assertGreater(res.data['perimeterMeters'], 0)
+
+    def test_create_project_with_not_applicable_estimated_value_and_custom_floors(self):
+        """Allow 'N/A' string for estimated value and custom floor notes."""
+        user = User.objects.create_superuser(username='naadmin', email='naadmin@test.com', password='password123')
+        token = str(RefreshToken.for_user(user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        payload = {
+            'name': 'Special Engineering Mega Complex',
+            'development_category': 'Special Engineering',
+            'estimated_project_value': 'N/A',
+            'is_estimated_value_na': True,
+            'number_of_floors': 18,
+            'floor_number_custom': 'Basement Level 2 + 18 Suspended Storeys + Rooftop Helipad',
+            'plot_number': '',  # optional
+        }
+        res = self.client.post('/api/v1/projects/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(res.data['is_estimated_value_na'])
+        self.assertIsNone(res.data['estimated_project_value'])
+        self.assertEqual(res.data['estimated_project_value_display'], 'Not Applicable')
+        self.assertEqual(res.data['development_category'], 'Special Engineering')
+        self.assertEqual(res.data['floor_number_custom'], 'Basement Level 2 + 18 Suspended Storeys + Rooftop Helipad')
+
 
 # ======================================================================
 # Step 7 — the `assigned_inspector` escalation: foreign key, backfill, and

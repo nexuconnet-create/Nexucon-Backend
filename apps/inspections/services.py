@@ -121,6 +121,37 @@ class InspectionService:
         return inspection
 
     @staticmethod
+    def reschedule_inspection(inspection, scheduled_date, reason=None, actor=None):
+        """Inspector or regulatory officer adjusts assigned inspection date and time."""
+        if not scheduled_date:
+            raise APIValidationError("A valid new scheduled date and time is required.")
+
+        if inspection.status in ('COMPLETED', 'FAILED', 'CANCELLED'):
+            raise APIValidationError(f"Cannot adjust schedule for an inspection with status '{inspection.status}'.")
+
+        previous_date = str(inspection.scheduled_date) if inspection.scheduled_date else "Unscheduled"
+        inspection.scheduled_date = scheduled_date
+        if inspection.status == 'REQUESTED':
+            inspection.status = 'SCHEDULED'
+        if reason:
+            actor_name = actor.get_full_name() if (actor and hasattr(actor, 'get_full_name') and actor.get_full_name()) else 'Inspector'
+            note_entry = f"[Rescheduled by {actor_name}: {reason}]"
+            inspection.summary_notes = (
+                f"{inspection.summary_notes}\n{note_entry}"
+                if inspection.summary_notes else note_entry
+            )
+        inspection.save()
+
+        InspectionService.log_audit(
+            user=actor,
+            action="INSPECTION_RESCHEDULED",
+            resource_id=inspection.id,
+            previous_state={"scheduled_date": previous_date},
+            new_state={"scheduled_date": str(inspection.scheduled_date), "reason": reason or ""}
+        )
+        return inspection
+
+    @staticmethod
     def check_in(inspection, lat, lng, actor):
         """GPS verified inspector check-in at construction site."""
         inspection.status = 'IN_PROGRESS'

@@ -4092,6 +4092,35 @@ class ReportVerifyEndpointTests(_HermeticMediaMixin, NDTReportFixtureMixin,
         self.assertNotIn('Marina', raw)          # project name
         self.assertNotIn('Lagos Island', raw)    # site address / LGA
 
+    def test_verify_resolves_unarchived_project_live_dossier(self):
+        # Create a second project with tests, but DO NOT archive it.
+        # When a user scans the QR code generated on preview, ReportVerifyView
+        # should dynamically resolve the live dossier, auto-archive it, and verify it.
+        p2 = self.make_project()
+        dev2 = self.make_device(p2)
+        self.make_test(p2, dev2, path_length_mm=250.0, pulse_time_us=62.5)
+        
+        tests = list(p2.pundit_tests.all())
+        r_no, _ = NDTReportService._effective_report_number(p2, tests)
+        digest = NDTReportService._statutory_digest(p2, tests, r_no)
+
+        # Confirm no ArchivedReport exists yet for p2
+        from apps.reports.models import ArchivedReport
+        self.assertEqual(ArchivedReport.objects.filter(project=p2).count(), 0)
+
+        # Call public verify endpoint with p2's ref and digest
+        response = self.client.get(
+            reverse('report-verify'),
+            {'ref': r_no, 'digest': digest}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['verified'])
+        self.assertEqual(response.data['report_reference'], r_no)
+        self.assertEqual(response.data['content_digest'], digest)
+
+        # Confirm ArchivedReport was created on the fly
+        self.assertEqual(ArchivedReport.objects.filter(project=p2).count(), 1)
+
     # ---- public download of the authentic original (12 Sep 2026) ----
     def test_download_original_with_valid_ref_and_digest_returns_403_without_auth(self):
         response = self.client.get(

@@ -46,7 +46,8 @@ class InspectionViewSet(viewsets.ModelViewSet):
         # district/state scope, clients only their own projects. Without this
         # every authenticated user could list every inspection.
         if self.request.user.is_authenticated and not self.request.user.is_superuser:
-            queryset = queryset.filter(project__in=scoped_projects(self.request.user))
+            scoped = scoped_projects(self.request.user)
+            queryset = queryset.filter(Q(project__in=scoped) | Q(inspector=self.request.user))
         status_param = self.request.query_params.get('status')
         project_param = self.request.query_params.get('project') or self.request.query_params.get('project_id')
         inspector_param = self.request.query_params.get('inspector')
@@ -229,6 +230,37 @@ class InspectionViewSet(viewsets.ModelViewSet):
             'message': f"Inspection assigned to {updated.inspector_name} and scheduled.",
             'data': InspectionSerializer(updated).data
         })
+
+    @action(detail=True, methods=['post', 'patch'], url_path='reschedule')
+    def reschedule(self, request, pk=None):
+        """Inspector or regulatory officer adjusts assigned inspection date and time."""
+        inspection = self.get_object()
+        scheduled_date = request.data.get('scheduled_date')
+        reason = request.data.get('reason') or request.data.get('notes') or request.data.get('reschedule_reason')
+
+        if not scheduled_date:
+            return Response({
+                'success': False,
+                'message': 'New scheduled date and time is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            updated = InspectionService.reschedule_inspection(
+                inspection=inspection,
+                scheduled_date=scheduled_date,
+                reason=reason,
+                actor=request.user
+            )
+            return Response({
+                'success': True,
+                'message': f"Inspection schedule successfully adjusted to {updated.scheduled_date}.",
+                'data': InspectionSerializer(updated).data
+            })
+        except Exception as e:
+            return Response({
+                'success': False,
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['post'], url_path='checkin')
     def checkin(self, request, pk=None):

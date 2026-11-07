@@ -196,8 +196,9 @@ def calculate_perimeter_meters(utm_points: List[Dict[str, float]]) -> float:
 
 def convert_four_corners(system: str, corners_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Transforms 4 building corners across systems (DD, DMS, UTM Zone 31N/32N WGS84 & Minna),
-    calculates center, area, and bounding perimeter.
+    Transforms multi-point boundary coordinates (4-corner, 6-point, 8-point, 12-point,
+    or arbitrary N-point polygons) across systems (DD, DMS, UTM Zone 31N/32N WGS84 & Minna),
+    calculating polygon centroid, footprint area (Shoelace formula), and bounding perimeter.
     """
     converted_corners = []
     utm_points = []
@@ -301,3 +302,6 @@ def convert_four_corners(system: str, corners_data: List[Dict[str, Any]]) -> Dic
         'perimeterMeters': perimeter,
         'googleMapsUrl': f"https://www.google.com/maps?q={center_lat},{center_lng}&t=k",
     }
+
+
+convert_corners = convert_four_corners

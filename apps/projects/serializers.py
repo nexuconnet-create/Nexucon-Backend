@@ -27,6 +27,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     # the lookup would miss and the project would read as unattached when it
     # is in fact still scoped to a zone.
     district_name = serializers.SerializerMethodField()
+    estimated_project_value_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
@@ -39,6 +40,26 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     def get_district_name(self, obj):
         return obj.district.name if obj.district_id else None
+
+    def get_estimated_project_value_display(self, obj):
+        if getattr(obj, 'is_estimated_value_na', False):
+            return "Not Applicable"
+        if obj.estimated_project_value is not None:
+            return f"{obj.estimated_project_value:,.2f}"
+        return None
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        val = data.get('estimated_project_value')
+        if isinstance(val, str) and val.strip().lower() in ('n/a', 'not applicable', 'not_applicable', 'na', 'none'):
+            data['estimated_project_value'] = None
+            data['is_estimated_value_na'] = True
+        elif data.get('is_estimated_value_na') in (True, 'true', 'True', 1, '1'):
+            data['estimated_project_value'] = None
+            data['is_estimated_value_na'] = True
+        elif val == '':
+            data['estimated_project_value'] = None
+        return super().to_internal_value(data)
 
     def create(self, validated_data):
         professionals_data = validated_data.pop('professionals', [])

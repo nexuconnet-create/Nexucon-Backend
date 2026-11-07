@@ -1027,6 +1027,111 @@ from django.utils.decorators import method_decorator
 from rest_framework.permissions import AllowAny
 
 
+def _resolve_verified_report(ref, digest):
+    """
+    Resolve an ArchivedReport matching a report reference and/or content digest.
+    Handles exact matches, normalized reference numbers, case-insensitive digests,
+    and falls back to resolving active project live dossiers and auto-archiving.
+    """
+    from .models import ArchivedReport
+    from .ndt_reports import NDTReportService
+    from apps.projects.models import Project
+    from apps.digital_eye.models import PUNDITTest
+
+    ref = (ref or '').strip()
+    digest = (digest or '').strip()
+    norm_query_ref = ''.join(c for c in ref if c.isalnum()).upper()
+    norm_digest = digest.lower()
+
+    report = None
+
+    # 1. Exact match
+    if ref and digest:
+        report = ArchivedReport.objects.filter(
+            report_reference=ref, content_key__iexact=digest
+        ).first()
+
+    # 2. Match by digest directly (handles whitespace or URL encoding variances in ref)
+    if report is None and digest:
+        cands = ArchivedReport.objects.filter(content_key__iexact=digest)
+        for cand in cands:
+            if not ref:
+                report = cand
+                break
+            norm_stored_ref = ''.join(c for c in cand.report_reference if c.isalnum()).upper()
+            if not norm_query_ref or not norm_stored_ref or norm_query_ref == norm_stored_ref or norm_query_ref in norm_stored_ref or norm_stored_ref in norm_query_ref:
+                report = cand
+                break
+
+    # 3. Match by live statutory digest on existing ArchivedReport candidate projects
+    if report is None and digest:
+        for cand in ArchivedReport.objects.select_related('project').all():
+            norm_stored_ref = ''.join(c for c in cand.report_reference if c.isalnum()).upper()
+            if not norm_query_ref or norm_query_ref == norm_stored_ref or norm_query_ref in norm_stored_ref or norm_stored_ref in norm_query_ref:
+                try:
+                    c_tests = list(
+                        PUNDITTest.objects.filter(project=cand.project)
+                        .select_related('device', 'operator')
+                        .prefetch_related('files', 'readings')
+                        .order_by('structural_element', 'test_date')
+                    )
+                    if c_tests:
+                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
+                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
+                        if c_digest.lower() == norm_digest:
+                            cand.content_key = digest
+                            cand.save(update_fields=['content_key'])
+                            report = cand
+                            break
+                except Exception:
+                    pass
+
+    # 4. Fallback: Search all platform Projects to resolve and auto-archive unarchived or previewed dossiers
+    if report is None:
+        for proj in Project.objects.all():
+            try:
+                c_tests = list(
+                    PUNDITTest.objects.filter(project=proj)
+                    .select_related('device', 'operator')
+                    .prefetch_related('files', 'readings')
+                    .order_by('structural_element', 'test_date')
+                )
+                if not c_tests:
+                    continue
+                r_no, _ = NDTReportService._effective_report_number(proj, c_tests)
+                c_digest = NDTReportService._statutory_digest(proj, c_tests, r_no)
+                norm_r_no = ''.join(c for c in r_no if c.isalnum()).upper()
+
+                matches_digest = bool(digest and c_digest.lower() == norm_digest)
+                matches_ref = bool(norm_query_ref and (norm_query_ref == norm_r_no or norm_query_ref in norm_r_no or norm_r_no in norm_query_ref))
+
+                if matches_digest or (matches_ref and not digest):
+                    pdf_bytes = NDTReportService.generate_ndt_report(proj)
+                    report = NDTReportService.archive_ndt_report(proj, None, pdf_bytes, notify=False)
+                    break
+
+                # Also check per-operator dossiers if applicable
+                distinct_ops = set(t.operator_name for t in c_tests if t.operator_name)
+                for op in distinct_ops:
+                    op_tests = [t for t in c_tests if t.operator_name == op]
+                    if op_tests:
+                        op_r_no, _ = NDTReportService._effective_report_number(proj, op_tests)
+                        op_digest = NDTReportService._statutory_digest(proj, op_tests, op_r_no)
+                        norm_op_r_no = ''.join(c for c in op_r_no if c.isalnum()).upper()
+                        op_matches_digest = bool(digest and op_digest.lower() == norm_digest)
+                        op_matches_ref = bool(norm_query_ref and (norm_query_ref == norm_op_r_no or norm_query_ref in norm_op_r_no or norm_op_r_no in norm_query_ref))
+                        if op_matches_digest or (op_matches_ref and not digest):
+                            pdf_bytes = NDTReportService.generate_ndt_report(proj, operator=op)
+                            report = NDTReportService.archive_ndt_report(proj, None, pdf_bytes, operator=op, notify=False)
+                            break
+                if report:
+                    break
+            except Exception:
+                pass
+
+    return report
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class ReportVerifyView(APIView):
     """
@@ -1039,8 +1144,6 @@ class ReportVerifyView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        from .models import ArchivedReport
-        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -1049,41 +1152,8 @@ class ReportVerifyView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
-        # 1. Exact match
-        report = (ArchivedReport.objects
-                  .filter(report_reference=ref, content_key=digest)
-                  .first())
-        # 2. Match by digest directly (handles whitespace or URL encoding variances in ref)
-        if report is None:
-            report = ArchivedReport.objects.filter(content_key=digest).first()
-            if report and ref:
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(report.report_reference.split())
-                if norm_query != norm_stored:
-                    report = None
-        # 3. If still None, check if any archived report's live statutory digest matches
-        if report is None:
-            for cand in ArchivedReport.objects.all():
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(cand.report_reference.split())
-                if not norm_query or norm_query == norm_stored:
-                    try:
-                        from apps.digital_eye.models import PUNDITTest
-                        c_tests = list(
-                            PUNDITTest.objects.filter(project=cand.project)
-                            .select_related('device', 'operator')
-                            .prefetch_related('files', 'readings')
-                            .order_by('structural_element', 'test_date')
-                        )
-                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
-                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
-                        if c_digest == digest:
-                            cand.content_key = digest
-                            cand.save(update_fields=['content_key'])
-                            report = cand
-                            break
-                    except Exception:
-                        pass
+
+        report = _resolve_verified_report(ref, digest)
         if report is None:
             return Response(
                 {'verified': False,
@@ -1120,8 +1190,6 @@ class ReportVerifyDownloadView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        from .models import ArchivedReport
-        from .ndt_reports import NDTReportService
         ref = (request.query_params.get('ref') or '').strip()
         digest = (request.query_params.get('digest') or '').strip()
         if not ref or not digest:
@@ -1130,41 +1198,8 @@ class ReportVerifyDownloadView(APIView):
                  'detail': 'Both a report reference and a content digest are '
                            'required (as encoded in the report QR code).'},
                 status=status.HTTP_400_BAD_REQUEST)
-        # 1. Exact match
-        report = (ArchivedReport.objects
-                  .filter(report_reference=ref, content_key=digest)
-                  .first())
-        # 2. Match by digest directly
-        if report is None:
-            report = ArchivedReport.objects.filter(content_key=digest).first()
-            if report and ref:
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(report.report_reference.split())
-                if norm_query != norm_stored:
-                    report = None
-        # 3. Live digest match fallback
-        if report is None:
-            for cand in ArchivedReport.objects.all():
-                norm_query = ''.join(ref.split())
-                norm_stored = ''.join(cand.report_reference.split())
-                if not norm_query or norm_query == norm_stored:
-                    try:
-                        from apps.digital_eye.models import PUNDITTest
-                        c_tests = list(
-                            PUNDITTest.objects.filter(project=cand.project)
-                            .select_related('device', 'operator')
-                            .prefetch_related('files', 'readings')
-                            .order_by('structural_element', 'test_date')
-                        )
-                        r_no, _ = NDTReportService._effective_report_number(cand.project, c_tests)
-                        c_digest = NDTReportService._statutory_digest(cand.project, c_tests, r_no)
-                        if c_digest == digest:
-                            cand.content_key = digest
-                            cand.save(update_fields=['content_key'])
-                            report = cand
-                            break
-                    except Exception:
-                        pass
+
+        report = _resolve_verified_report(ref, digest)
         if report is None:
             return Response(
                 {'verified': False,
@@ -1258,6 +1293,10 @@ class NDTReportPreviewView(APIView):
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         safe_op = f"_{operator.strip().replace(' ', '_')}" if operator and operator.strip() else ""
+        try:
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+        except Exception:
+            logger.exception('Failed to auto-archive previewed NDT report')
         return _pdf_response(pdf_bytes,
                              f'ndt_report_PREVIEW_{project_id}{safe_op}.pdf')
 
@@ -1292,6 +1331,10 @@ class NDTReportPreviewSectionsView(APIView):
             logger.exception('NDT report preview sections failed')
             return Response({'detail': f'Report preview failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        try:
+            NDTReportService.archive_ndt_report(project, request.user, pdf_bytes, operator=operator, notify=False)
+        except Exception:
+            logger.exception('Failed to auto-archive preview sections NDT report')
         return Response({
             'sections': bundle['sections'],
             'page_count': bundle['page_count'],

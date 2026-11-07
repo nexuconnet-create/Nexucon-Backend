@@ -914,6 +914,22 @@ class InspectionWorkflowActionsAPITestCase(InspectionViewTestBase):
         self.inspection_a.refresh_from_db()
         self.assertEqual(self.inspection_a.status, "REQUESTED")  # unchanged
 
+    def test_reschedule_inspection_action(self):
+        self.inspection_a.scheduled_date = "2026-10-01T09:00:00Z"
+        self.inspection_a.status = "SCHEDULED"
+        self.inspection_a.save()
+
+        new_time = "2026-10-05T14:30:00Z"
+        response = self.client.post(self.url + "reschedule/", {
+            "scheduled_date": new_time,
+            "reason": "Site heavy rain delay requested by contractor",
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['success'])
+        self.inspection_a.refresh_from_db()
+        self.assertEqual(self.inspection_a.scheduled_date.isoformat().replace("+00:00", "Z"), new_time)
+        self.assertIn("Site heavy rain delay", self.inspection_a.summary_notes)
+
     def test_gps_checkin(self):
         response = self.client.post(self.url + "checkin/", {
             "latitude": 6.4281, "longitude": 3.4219}, format="json")
