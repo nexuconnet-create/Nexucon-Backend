@@ -38,13 +38,13 @@ def send_username_update_email_to_user(user):
     role_lower = (role_data.get('role_name') or '').lower()
 
     if any(k in role_lower for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance']):
-        settings_path = '/inspector/dashboard/settings'
+        settings_path = '/inspector/dashboard/profile?activate_username=true'
         portal_name = 'Inspector Terminal'
     elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
-        settings_path = '/government/dashboard/settings/profile'
+        settings_path = '/government/dashboard/settings/profile?activate_username=true'
         portal_name = 'Government Command Center'
     else:
-        settings_path = '/stakeholder/settings'
+        settings_path = '/stakeholder/profile?activate_username=true'
         portal_name = 'Stakeholder Portal'
 
     action_url = f"{frontend_url}{settings_path}"
@@ -57,9 +57,9 @@ def send_username_update_email_to_user(user):
     display_name = user.get_full_name() or user.first_name or user.email
 
     html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:580px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
-      <div style="background:#0f172a;color:#ffffff;padding:20px 24px;">
-        <h2 style="margin:0;font-size:18px;">🔐 Nexucon Account Security Update: Username Login</h2>
+    <div style="font-family:Arial,sans-serif;max-width:580px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);">
+      <div style="background:#022C4F;color:#ffffff;padding:22px 24px;">
+        <h2 style="margin:0;font-size:18px;">🔐 Nexucon Account Security: Activate Your Username</h2>
       </div>
       <div style="padding:24px;color:#1e293b;line-height:1.6;">
         <p style="font-size:15px;margin:0 0 12px;">Hello <b>{display_name}</b>,</p>
@@ -68,19 +68,22 @@ def send_username_update_email_to_user(user):
         </p>
         <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin:16px 0;">
           <p style="margin:0 0 6px;font-size:13px;color:#475569;"><b>Current Login Identifier:</b> {user.username}</p>
-          <p style="margin:0;font-size:13px;color:#0f766e;"><b>Suggested Available Username:</b> @{suggested}</p>
+          <p style="margin:0;font-size:15px;color:#0369a1;"><b>Suggested Available Handle:</b> <span style="font-weight:bold;background:#e0f2fe;padding:2px 8px;border-radius:6px;">@{suggested}</span></p>
         </div>
         <p style="font-size:14px;margin:0 0 20px;">
-          Please visit your <b>{portal_name} Settings / Profile</b> page to set your custom username or click <b>Auto-Generate Username</b> with one click.
+          Click below to sign in. An <b>automatic setup popup</b> will appear immediately to activate your username with one click, or you can update it at any time in your <b>{portal_name} Profile</b> page.
         </p>
-        <p style="margin:24px 0;">
-          <a href="{action_url}" style="background:#0284c7;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:bold;display:inline-block;">
-            Update or Auto-Generate My Username →
+        <p style="margin:24px 0;text-align:center;">
+          <a href="{action_url}" style="background:#0284c7;color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:bold;font-size:15px;display:inline-block;box-shadow:0 2px 4px rgba(2,132,199,0.3);">
+            Activate My Username (@{suggested}) →
           </a>
         </p>
+        <p style="font-size:12px;color:#64748b;margin-top:20px;">
+          Direct link: <a href="{action_url}" style="color:#0284c7;">{action_url}</a>
+        </p>
       </div>
-      <div style="background:#f1f5f9;padding:12px 24px;color:#64748b;font-size:12px;">
-        Nexucon Regulatory & Project Coordination Platform
+      <div style="background:#f1f5f9;padding:14px 24px;color:#64748b;font-size:12px;text-align:center;">
+        Nexucon Regulatory &amp; Project Coordination Platform &bull; Multi-Tenant Architecture
       </div>
     </div>
     """
@@ -88,15 +91,16 @@ def send_username_update_email_to_user(user):
     text = (
         f"Hello {display_name},\n\n"
         f"Nexucon has upgraded platform authentication to use unique usernames for sign-in.\n"
-        f"Current Username: {user.username}\n"
-        f"Suggested Available Username: @{suggested}\n\n"
-        f"Please visit your {portal_name} Settings / Profile page to update or auto-generate your username:\n"
-        f"{action_url}\n"
+        f"Current Login: {user.username}\n"
+        f"Suggested Available Handle: @{suggested}\n\n"
+        f"Click the link below to sign in. An automatic popup modal will appear to activate your username:\n"
+        f"{action_url}\n\n"
+        f"You can also activate or change it at any time in your {portal_name} Profile page.\n"
     )
 
     email_res = EmailService.send_email(
         to_email=user.email,
-        subject="Action Required: Update or Auto-Generate Your Nexucon Username",
+        subject="Action Required: Activate Your Official Nexucon Username",
         html_content=html,
         text_content=text
     )
