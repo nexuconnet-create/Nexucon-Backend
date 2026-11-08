@@ -590,9 +590,9 @@ class StakeholderService:
             stakeholder_room_url = f"{frontend_url}/stakeholder/meetings/{meeting.id}/room"
             inspector_room_url = f"{frontend_url}/inspector/dashboard/meetings/{meeting.id}/room"
         else:
-            gov_room_url = f"https://government.nexucon.net/dashboard/stakeholders/meetings/{meeting.id}/room"
-            stakeholder_room_url = f"https://stakeholder.nexucon.net/meetings/{meeting.id}/room"
-            inspector_room_url = f"https://inspector.nexucon.net/dashboard/meetings/{meeting.id}/room"
+            gov_room_url = f"https://nexucon.net/government/dashboard/stakeholders/meetings/{meeting.id}/room"
+            stakeholder_room_url = f"https://stakeholder.nexucon.net/stakeholder/meetings/{meeting.id}/room"
+            inspector_room_url = f"https://inspector.nexucon.net/inspector/dashboard/meetings/{meeting.id}/room"
 
         # Map email -> participant dict
         participant_by_email = {}

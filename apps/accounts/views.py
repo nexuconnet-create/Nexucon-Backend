@@ -56,7 +56,7 @@ def send_username_update_email_to_user(user):
             settings_path = '/inspector/dashboard/profile?activate_username=true'
             portal_name = 'Inspector Terminal'
         elif any(k in role_lower for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator']) or user.is_superuser:
-            action_url = "https://government.nexucon.net/government/dashboard/settings/profile?activate_username=true"
+            action_url = "https://nexucon.net/government/dashboard/settings/profile?activate_username=true"
             settings_path = '/government/dashboard/settings/profile?activate_username=true'
             portal_name = 'Government Command Center'
         else:
@@ -280,7 +280,7 @@ class CustomLoginView(TokenObtainPairView):
                     err_msg = "Access Denied: You are attempting to sign in with an Inspector account. Please log in at the Inspector Terminal (https://inspector.nexucon.net)."
                     allowed_p = 'inspector'
                 else:
-                    err_msg = "Access Denied: Government Agency accounts cannot access the Stakeholder portal. Please log in at the Government Command Center (https://government.nexucon.net)."
+                    err_msg = "Access Denied: Government Agency accounts cannot access the Stakeholder portal. Please log in at the Government Command Center (https://nexucon.net/government/login)."
                     allowed_p = 'government'
 
                 return Response({
@@ -311,7 +311,7 @@ class CustomLoginView(TokenObtainPairView):
 
             if req_portal == 'inspector' and not is_inspector:
                 if is_government:
-                    err_msg = "Access Denied: Government Agency accounts cannot log in to the Inspector Terminal. Please log in at the Government Command Center (https://government.nexucon.net)."
+                    err_msg = "Access Denied: Government Agency accounts cannot log in to the Inspector Terminal. Please log in at the Government Command Center (https://nexucon.net/government/login)."
                     allowed_p = 'government'
                 else:
                     err_msg = "Access Denied: Stakeholder accounts cannot access the Inspector Terminal. Please log in at the Stakeholder Portal (https://stakeholder.nexucon.net)."
