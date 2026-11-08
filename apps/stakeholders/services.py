@@ -1301,6 +1301,97 @@ class StakeholderService:
         return team
 
     @staticmethod
+    def sync_developer_from_project(project):
+        """
+        Synchronize developer information from a Project instance into the Developer directory.
+        Creates or updates a Developer record and re-calculates project counts and portfolio values.
+        """
+        if not project:
+            return None
+
+        dev_org = (getattr(project, 'developer_organization', '') or '').strip()
+        dev_name = (getattr(project, 'developer_name', '') or '').strip()
+        dev_client = (getattr(project, 'client_name', '') or '').strip()
+        
+        # Primary identifier name
+        name = dev_org or dev_name or dev_client
+        if not name:
+            return None
+
+        dev_email = (getattr(project, 'developer_email', '') or '').strip() or None
+        dev_phone = (getattr(project, 'developer_phone', '') or '').strip() or None
+        dev_contact = (getattr(project, 'developer_contact_person', '') or '').strip() or dev_name or 'Lead Developer Representative'
+        dev_addr = (getattr(project, 'developer_address', '') or '').strip()
+        if not dev_addr:
+            dev_addr = getattr(project, 'site_address', '') or f"{getattr(project, 'lga', '') or ''}, {getattr(project, 'state', '') or 'Lagos'}".strip(', ') or "Lagos, Nigeria"
+
+        # Look up existing developer
+        developer = None
+        if dev_org:
+            developer = Developer.objects.filter(name__iexact=dev_org).first()
+        if not developer and dev_name:
+            developer = Developer.objects.filter(name__iexact=dev_name).first()
+        if not developer and dev_email:
+            developer = Developer.objects.filter(primary_contact_email__iexact=dev_email).first()
+
+        COLOR_THEMES = [
+            'bg-blue-600', 'bg-indigo-600', 'bg-emerald-600',
+            'bg-cyan-600', 'bg-violet-600', 'bg-amber-600'
+        ]
+
+        if not developer:
+            theme_idx = abs(hash(name)) % len(COLOR_THEMES)
+            developer = Developer.objects.create(
+                name=name,
+                hq_location=dev_addr,
+                primary_contact_name=dev_contact,
+                primary_contact_email=dev_email,
+                primary_contact_phone=dev_phone,
+                status='Verified',
+                color_theme=COLOR_THEMES[theme_idx]
+            )
+        else:
+            updated_fields = []
+            if not developer.primary_contact_email and dev_email:
+                developer.primary_contact_email = dev_email
+                updated_fields.append('primary_contact_email')
+            if not developer.primary_contact_phone and dev_phone:
+                developer.primary_contact_phone = dev_phone
+                updated_fields.append('primary_contact_phone')
+            if (not developer.primary_contact_name or developer.primary_contact_name == developer.name) and dev_contact:
+                developer.primary_contact_name = dev_contact
+                updated_fields.append('primary_contact_name')
+            if not developer.hq_location and dev_addr:
+                developer.hq_location = dev_addr
+                updated_fields.append('hq_location')
+            if updated_fields:
+                developer.save(update_fields=updated_fields)
+
+        # Re-calculate active_projects_count and portfolio_value
+        from apps.projects.models import Project
+        q = Q(developer_name__iexact=developer.name) | Q(developer_organization__iexact=developer.name)
+        if developer.primary_contact_email:
+            q |= Q(developer_email__iexact=developer.primary_contact_email)
+        dev_projects = Project.objects.filter(q).distinct()
+        
+        proj_count = dev_projects.count()
+        developer.active_projects_count = max(proj_count, developer.active_projects_count or 1)
+        
+        total_val = sum(p.estimated_project_value or 0 for p in dev_projects if p.estimated_project_value)
+        if total_val > 0:
+            if total_val >= 1_000_000_000:
+                developer.portfolio_value = f"₦{total_val / 1_000_000_000:.2f} Billion"
+            elif total_val >= 1_000_000:
+                developer.portfolio_value = f"₦{total_val / 1_000_000:.1f} Million"
+            else:
+                developer.portfolio_value = f"₦{total_val:,.2f}"
+        elif not developer.portfolio_value:
+            developer.portfolio_value = "Commercial Portfolio"
+            
+        developer.save(update_fields=['active_projects_count', 'portfolio_value'])
+        return developer
+
+    @staticmethod
     def add_team_member(team_id, role_key, member_data, user=None):
         """Add or update a stakeholder member in a project stakeholder team matrix."""
         team = ProjectStakeholderTeam.objects.get(id=team_id)

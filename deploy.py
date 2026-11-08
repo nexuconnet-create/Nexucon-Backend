@@ -54,6 +54,7 @@ def deploy():
             "sleep 5",
             "docker compose exec -T web python manage.py makemigrations",
             "docker compose exec -T web python manage.py migrate",
+            "docker compose exec -T web python manage.py sync_project_teams",
             "docker compose ps"
         ]
         cmd_str = " && ".join(commands)

@@ -10,6 +10,9 @@ from .models import (
 class DeveloperSerializer(serializers.ModelSerializer):
     email = serializers.SerializerMethodField()
     username = serializers.SerializerMethodField()
+    projects = serializers.SerializerMethodField()
+    active_projects_count = serializers.SerializerMethodField()
+    portfolio_value = serializers.SerializerMethodField()
 
     class Meta:
         model = Developer
@@ -27,6 +30,45 @@ class DeveloperSerializer(serializers.ModelSerializer):
         if getattr(obj, 'user', None) and obj.user.username:
             return obj.user.username
         return None
+
+    def _get_projects(self, obj):
+        from apps.projects.models import Project
+        from django.db.models import Q
+        q = Q(developer_name__iexact=obj.name) | Q(developer_organization__iexact=obj.name)
+        if obj.primary_contact_email:
+            q |= Q(developer_email__iexact=obj.primary_contact_email)
+        return Project.objects.filter(q).distinct()
+
+    def get_projects(self, obj):
+        projects = self._get_projects(obj)
+        res = []
+        for p in projects:
+            res.append({
+                "id": str(p.id),
+                "name": p.name,
+                "reference_number": p.reference_number,
+                "status": p.get_status_display() if hasattr(p, 'get_status_display') else p.status,
+                "location": p.site_address or f"{p.lga or ''}, {p.state or 'Lagos'}".strip(', ') or "Lagos, Nigeria",
+                "estimated_value": f"₦{p.estimated_project_value:,.2f}" if p.estimated_project_value else None,
+                "project_type": p.project_type or "Commercial",
+            })
+        return res
+
+    def get_active_projects_count(self, obj):
+        count = self._get_projects(obj).count()
+        return max(count, obj.active_projects_count or 0)
+
+    def get_portfolio_value(self, obj):
+        projects = self._get_projects(obj)
+        total = sum(p.estimated_project_value or 0 for p in projects if p.estimated_project_value)
+        if total > 0:
+            if total >= 1_000_000_000:
+                return f"₦{total / 1_000_000_000:.2f} Billion"
+            elif total >= 1_000_000:
+                return f"₦{total / 1_000_000:.1f} Million"
+            else:
+                return f"₦{total:,.2f}"
+        return obj.portfolio_value or "Commercial Portfolio"
 
 
 class ContractorSerializer(serializers.ModelSerializer):

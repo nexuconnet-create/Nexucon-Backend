@@ -10,8 +10,9 @@ def on_project_saved(sender, instance, created, **kwargs):
     try:
         from apps.stakeholders.services import StakeholderService
         StakeholderService.sync_project_team(instance)
+        StakeholderService.sync_developer_from_project(instance)
     except Exception as e:
-        logger.warning(f"Error syncing stakeholder team on project save ({getattr(instance, 'reference_number', '')}): {e}")
+        logger.warning(f"Error syncing stakeholder team/developer on project save ({getattr(instance, 'reference_number', '')}): {e}")
 
 @receiver(post_delete, sender=Project)
 def on_project_deleted(sender, instance, **kwargs):
@@ -38,3 +39,4 @@ def on_project_professional_deleted(sender, instance, **kwargs):
             StakeholderService.sync_project_team(instance.project)
     except Exception as e:
         logger.warning(f"Error syncing stakeholder team on professional delete: {e}")
+

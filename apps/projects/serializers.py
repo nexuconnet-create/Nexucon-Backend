@@ -71,6 +71,7 @@ class ProjectSerializer(serializers.ModelSerializer):
         try:
             from apps.stakeholders.services import StakeholderService
             StakeholderService.sync_project_team(project)
+            StakeholderService.sync_developer_from_project(project)
         except Exception:
             pass
             
@@ -91,6 +92,7 @@ class ProjectSerializer(serializers.ModelSerializer):
         try:
             from apps.stakeholders.services import StakeholderService
             StakeholderService.sync_project_team(instance)
+            StakeholderService.sync_developer_from_project(instance)
         except Exception:
             pass
                 

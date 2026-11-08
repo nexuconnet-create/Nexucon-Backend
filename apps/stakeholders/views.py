@@ -36,11 +36,41 @@ class DeveloperViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        try:
+            from apps.projects.models import Project
+            for p in Project.objects.all():
+                if p.developer_name or p.developer_organization or p.developer_email:
+                    StakeholderService.sync_developer_from_project(p)
+        except Exception:
+            pass
+
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         if search:
-            qs = qs.filter(Q(name__icontains=search) | Q(developer_id__icontains=search) | Q(hq_location__icontains=search))
+            qs = qs.filter(
+                Q(name__icontains=search) |
+                Q(developer_id__icontains=search) |
+                Q(hq_location__icontains=search) |
+                Q(primary_contact_name__icontains=search) |
+                Q(primary_contact_email__icontains=search)
+            )
         return qs
+
+    @action(detail=False, methods=['post'], url_path='sync-all')
+    def sync_all(self, request):
+        from apps.projects.models import Project
+        synced_count = 0
+        for p in Project.objects.all():
+            if p.developer_name or p.developer_organization or p.developer_email:
+                try:
+                    StakeholderService.sync_developer_from_project(p)
+                    synced_count += 1
+                except Exception:
+                    pass
+        return Response({
+            "message": f"Successfully synchronized developers from {synced_count} projects.",
+            "total_synced": synced_count
+        }, status=status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         dev = serializer.save()
