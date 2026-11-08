@@ -190,11 +190,39 @@ class ProjectStakeholderTeamViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        try:
+            from apps.projects.models import Project
+            existing_refs = set(ProjectStakeholderTeam.objects.values_list('project_reference', flat=True))
+            missing_projects = Project.objects.exclude(reference_number__in=existing_refs)
+            if missing_projects.exists():
+                for p in missing_projects:
+                    try:
+                        StakeholderService.sync_project_team(p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         qs = super().get_queryset()
         search = self.request.query_params.get('search')
         if search:
             qs = qs.filter(Q(project_name__icontains=search) | Q(project_reference__icontains=search) | Q(location__icontains=search))
         return qs
+
+    @action(detail=False, methods=['post'], url_path='sync-all')
+    def sync_all(self, request):
+        from apps.projects.models import Project
+        synced_count = 0
+        for project in Project.objects.all():
+            try:
+                StakeholderService.sync_project_team(project)
+                synced_count += 1
+            except Exception:
+                pass
+        return Response({
+            "message": f"Successfully synchronized {synced_count} project teams.",
+            "total_synced": synced_count
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='add-member')
     def add_member(self, request, pk=None):

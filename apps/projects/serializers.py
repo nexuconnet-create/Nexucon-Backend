@@ -67,6 +67,12 @@ class ProjectSerializer(serializers.ModelSerializer):
         
         for prof_data in professionals_data:
             ProjectProfessional.objects.create(project=project, **prof_data)
+
+        try:
+            from apps.stakeholders.services import StakeholderService
+            StakeholderService.sync_project_team(project)
+        except Exception:
+            pass
             
         return project
 
@@ -81,6 +87,12 @@ class ProjectSerializer(serializers.ModelSerializer):
             instance.professionals.all().delete()
             for prof_data in professionals_data:
                 ProjectProfessional.objects.create(project=instance, **prof_data)
+
+        try:
+            from apps.stakeholders.services import StakeholderService
+            StakeholderService.sync_project_team(instance)
+        except Exception:
+            pass
                 
         return instance
 

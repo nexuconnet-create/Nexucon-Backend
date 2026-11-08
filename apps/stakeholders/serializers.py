@@ -162,10 +162,27 @@ class LicensedProfessionalSerializer(serializers.ModelSerializer):
 
 
 class ProjectStakeholderTeamSerializer(serializers.ModelSerializer):
+    project_id = serializers.SerializerMethodField()
+    total_members = serializers.SerializerMethodField()
+
     class Meta:
         model = ProjectStakeholderTeam
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at')
+
+    def get_project_id(self, obj):
+        if not obj.project_reference:
+            return None
+        from apps.projects.models import Project
+        p = Project.objects.filter(reference_number=obj.project_reference).only('id').first()
+        if not p and obj.project_name:
+            p = Project.objects.filter(name=obj.project_name).only('id').first()
+        return str(p.id) if p else None
+
+    def get_total_members(self, obj):
+        if isinstance(obj.team_data, dict):
+            return len(obj.team_data)
+        return 0
 
 
 class BlacklistRecordSerializer(serializers.ModelSerializer):

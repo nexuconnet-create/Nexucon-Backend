@@ -1,4 +1,5 @@
 import uuid
+import re
 from django.utils import timezone
 from django.core.exceptions import PermissionDenied
 from django.conf import settings
@@ -1109,11 +1110,206 @@ class StakeholderService:
         return inspector
 
     @staticmethod
+    def compute_initials(name, default="ST"):
+        """Generate clean, capitalized 2-letter initials from a person or entity name."""
+        if not name or not str(name).strip():
+            return default
+        cleaned = re.sub(r'^(Engr\.?|Arc\.?|Dr\.?|Prof\.?|Mr\.?|Mrs\.?|Ms\.?)\s+', '', str(name).strip(), flags=re.IGNORECASE)
+        parts = [p for p in re.sub(r'[^a-zA-Z\s]', '', cleaned).split() if p]
+        if len(parts) >= 2:
+            return f"{parts[0][0]}{parts[1][0]}".upper()
+        elif len(parts) == 1:
+            if len(parts[0]) >= 2:
+                return parts[0][:2].upper()
+            return f"{parts[0][0]}X".upper()
+        return default
+
+    @staticmethod
+    def sync_project_team(project):
+        """
+        Synchronize a Project instance and its assigned professionals
+        with the Cross-Functional Project Stakeholder Matrix (ProjectStakeholderTeam).
+        Preserves custom team members added manually via the interface.
+        """
+        if not project or not getattr(project, 'reference_number', None):
+            return None
+
+        team = ProjectStakeholderTeam.objects.filter(project_reference=project.reference_number).first()
+        if not team and project.name:
+            team = ProjectStakeholderTeam.objects.filter(project_name=project.name).first()
+        if not team:
+            team = ProjectStakeholderTeam(project_reference=project.reference_number)
+
+        team.project_reference = project.reference_number
+        team.project_name = project.name or 'Untitled Project'
+        
+        # Format location
+        loc_parts = [
+            project.site_address,
+            project.ward_area if hasattr(project, 'ward_area') else '',
+            project.lga if hasattr(project, 'lga') else '',
+            project.state if hasattr(project, 'state') else ''
+        ]
+        formatted_loc = ", ".join([str(p).strip() for p in loc_parts if p and str(p).strip()])
+        team.location = formatted_loc or "Lagos, Nigeria"
+        
+        # Format status
+        proj_status = getattr(project, 'status', '') or ''
+        if proj_status.upper() == 'ACTIVE':
+            team.status = 'Active Construction'
+        elif hasattr(project, 'get_status_display'):
+            team.status = project.get_status_display()
+        else:
+            team.status = proj_status or 'Planning'
+
+        # Current team_data or empty dict
+        team_data = team.team_data or {}
+        if not isinstance(team_data, dict):
+            team_data = {}
+
+        # 1. Developer
+        dev_name = getattr(project, 'developer_name', None) or getattr(project, 'developer_organization', None) or getattr(project, 'client_name', None)
+        if dev_name and str(dev_name).strip():
+            team_data['developer'] = {
+                'name': str(dev_name).strip(),
+                'role': 'Master Property Developer',
+                'initials': StakeholderService.compute_initials(dev_name, 'MD'),
+                'email': getattr(project, 'developer_email', '') or '',
+                'phone': getattr(project, 'developer_phone', '') or '',
+                'source': 'project'
+            }
+        elif 'developer' in team_data and team_data['developer'].get('source') == 'project':
+            del team_data['developer']
+
+        # 2. Inspector
+        insp_name = getattr(project, 'assigned_inspector', None)
+        if not insp_name and getattr(project, 'assigned_inspector_user', None):
+            u = project.assigned_inspector_user
+            insp_name = u.get_full_name() or u.email
+        if insp_name and str(insp_name).strip():
+            team_data['inspector'] = {
+                'name': str(insp_name).strip(),
+                'role': 'Lead Structural Inspector',
+                'initials': StakeholderService.compute_initials(insp_name, 'IN'),
+                'source': 'project'
+            }
+        elif 'inspector' in team_data and team_data['inspector'].get('source') == 'project':
+            del team_data['inspector']
+
+        # 3. Supervising Officer
+        assigned_off = getattr(project, 'assigned_officer', None)
+        if assigned_off and str(assigned_off).strip():
+            team_data['supervising_officer'] = {
+                'name': str(assigned_off).strip(),
+                'role': 'Supervising Officer',
+                'initials': StakeholderService.compute_initials(assigned_off, 'SO'),
+                'source': 'project'
+            }
+        elif 'supervising_officer' in team_data and team_data['supervising_officer'].get('source') == 'project':
+            del team_data['supervising_officer']
+
+        # 4. Technical Reviewer
+        tech_rev = getattr(project, 'technical_reviewer', None)
+        if tech_rev and str(tech_rev).strip():
+            team_data['technical_reviewer'] = {
+                'name': str(tech_rev).strip(),
+                'role': 'Technical Reviewer',
+                'initials': StakeholderService.compute_initials(tech_rev, 'TR'),
+                'source': 'project'
+            }
+        elif 'technical_reviewer' in team_data and team_data['technical_reviewer'].get('source') == 'project':
+            del team_data['technical_reviewer']
+
+        # 5. Compliance Officer
+        comp_off = getattr(project, 'compliance_officer', None)
+        if comp_off and str(comp_off).strip():
+            team_data['compliance_officer'] = {
+                'name': str(comp_off).strip(),
+                'role': 'Compliance Officer',
+                'initials': StakeholderService.compute_initials(comp_off, 'CO'),
+                'source': 'project'
+            }
+        elif 'compliance_officer' in team_data and team_data['compliance_officer'].get('source') == 'project':
+            del team_data['compliance_officer']
+
+        # 6. Appointed Professionals (from ProjectProfessional)
+        # Clear previous professional entries so removals/renames stay synchronized
+        team_data = {k: v for k, v in team_data.items() if not (isinstance(v, dict) and v.get('source') == 'professional')}
+
+        ROLE_MAPPINGS = [
+            ('architect', 'Lead Architect', 'AR', 'architect'),
+            ('civil/structural engineer', 'Chief Structural Engineer', 'SE', 'structural_engineer'),
+            ('structural engineer', 'Chief Structural Engineer', 'SE', 'structural_engineer'),
+            ('mechanical engineer', 'MEP / Mechanical Consultant', 'ME', 'mechanical_engineer'),
+            ('electrical engineer', 'Electrical Engineering Consultant', 'EE', 'electrical_engineer'),
+            ('builder', 'Main Civil Contractor', 'GC', 'contractor'),
+            ('registered builder', 'Main Civil Contractor', 'GC', 'contractor'),
+            ('town planner', 'Urban & Town Planner', 'TP', 'town_planner'),
+            ('quantity surveyor', 'Quantity Surveyor', 'QS', 'quantity_surveyor'),
+            ('project manager', 'Project Manager', 'PM', 'project_manager'),
+            ('geotechnical', 'Geotechnical Advisory Firm', 'GT', 'geotech_consultant'),
+            ('land surveyor', 'Licensed Land Surveyor', 'LS', 'land_surveyor'),
+            ('environmental', 'Environmental Consultant', 'EC', 'environmental_consultant'),
+            ('health & safety', 'Site Safety Auditor', 'HS', 'hse_officer'),
+            ('hse', 'Site Safety Auditor', 'HS', 'hse_officer'),
+        ]
+
+        if hasattr(project, 'professionals'):
+            for prof in project.professionals.all():
+                if not prof.name or not str(prof.name).strip():
+                    continue
+
+                raw_role = (prof.role or '').strip()
+                role_lower = raw_role.lower()
+
+                matched_role_title = None
+                matched_initials = None
+                base_key = None
+
+                for needle, title, init, rkey in ROLE_MAPPINGS:
+                    if needle in role_lower:
+                        matched_role_title = title
+                        matched_initials = init
+                        base_key = rkey
+                        break
+
+                if not matched_role_title:
+                    matched_role_title = raw_role or 'Project Specialist'
+                    matched_initials = StakeholderService.compute_initials(prof.name, 'ST')
+                    sanitized_slug = re.sub(r'[^a-z0-9_]', '', role_lower.replace(' ', '_').replace('-', '_'))
+                    base_key = sanitized_slug or 'specialist'
+
+                key = base_key
+                counter = 1
+                while key in team_data:
+                    counter += 1
+                    key = f"{base_key}_{counter}"
+
+                team_data[key] = {
+                    'name': str(prof.name).strip(),
+                    'role': matched_role_title,
+                    'initials': StakeholderService.compute_initials(prof.name, matched_initials),
+                    'organization': getattr(prof, 'organization', '') or '',
+                    'license_number': getattr(prof, 'license_number', '') or '',
+                    'email': getattr(prof, 'email', '') or '',
+                    'phone': getattr(prof, 'phone', '') or '',
+                    'source': 'professional'
+                }
+
+        team.team_data = team_data
+        team.save()
+        return team
+
+    @staticmethod
     def add_team_member(team_id, role_key, member_data, user=None):
         """Add or update a stakeholder member in a project stakeholder team matrix."""
         team = ProjectStakeholderTeam.objects.get(id=team_id)
         team_data = team.team_data or {}
-        team_data[role_key] = member_data
+        data_to_store = dict(member_data)
+        data_to_store.setdefault('source', 'manual')
+        if not data_to_store.get('initials'):
+            data_to_store['initials'] = StakeholderService.compute_initials(data_to_store.get('name'), 'ST')
+        team_data[role_key] = data_to_store
         team.team_data = team_data
         team.save(update_fields=['team_data'])
 
