@@ -1093,24 +1093,33 @@ class PasswordResetRequestView(APIView):
     permission_classes = (AllowAny,)
 
     def post(self, request):
-        email = (request.data.get('email') or '').strip().lower()
-        if not email:
+        identifier = (request.data.get('email') or request.data.get('username') or '').strip().lower()
+        if not identifier:
             return Response({
                 'success': False,
-                'message': 'Official email address is required.'
+                'message': 'Official email address or username is required.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.filter(email__iexact=email).first()
+        user = User.objects.filter(email__iexact=identifier).first()
+        if not user:
+            user = User.objects.filter(username__iexact=identifier).first()
+
         if user and user.is_active:
             token = default_token_generator.make_token(user)
             uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
-            otp_token = EmailVerificationToken.generate_token(email, user=user, duration_minutes=60)
+            otp_token = EmailVerificationToken.generate_token(user.email, user=user, duration_minutes=60)
 
-            origin = request.headers.get('origin') or request.headers.get('referer') or ''
-            has_gov = hasattr(user, 'government_profile') and user.government_profile
-            is_agency_user = bool(has_gov and user.government_profile.role and 'inspector' not in user.government_profile.role.name.lower())
+            origin = (request.headers.get('origin') or request.headers.get('referer') or '').lower()
+            role_data, _ = get_user_role_and_permissions(user)
+            role_name = (role_data.get('role_name') or '').lower()
+            is_inspector_user = any(k in role_name for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
+            is_agency_user = any(k in role_name for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator'])
 
-            if 'government' in origin or is_agency_user:
+            if 'inspector' in origin or is_inspector_user:
+                base_url = 'https://inspector.nexucon.net'
+                reset_path = '/inspector/reset-password'
+                user_label = 'Field Inspector'
+            elif 'government' in origin or is_agency_user:
                 base_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
                 reset_path = '/government/reset-password'
                 user_label = 'Government Official'
@@ -1118,16 +1127,12 @@ class PasswordResetRequestView(APIView):
                 base_url = 'https://stakeholder.nexucon.net'
                 reset_path = '/stakeholder/reset-password'
                 user_label = 'Stakeholder Official'
-            elif 'inspector' in origin:
-                base_url = 'https://inspector.nexucon.net'
-                reset_path = '/inspector/reset-password'
-                user_label = 'Inspector'
             else:
                 base_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
                 reset_path = '/reset-password'
                 user_label = 'Nexucon Member'
 
-            reset_url = f"{base_url}{reset_path}?email={urllib.parse.quote(user.email)}&token={token}&uid={uidb64}"
+            reset_url = f"{base_url}{reset_path}?email={urllib.parse.quote(user.email)}&token={token}&uid={uidb64}&code={otp_token.code}"
 
             context = {
                 'name': user.get_full_name() or user.first_name or user_label,
@@ -1184,7 +1189,7 @@ class PasswordResetConfirmView(APIView):
                 user = None
 
         if not user and email:
-            user = User.objects.filter(email__iexact=email).first()
+            user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
 
         if not user or not user.is_active:
             return Response({'success': False, 'message': 'Invalid recovery request or user not found.'}, status=status.HTTP_400_BAD_REQUEST)
