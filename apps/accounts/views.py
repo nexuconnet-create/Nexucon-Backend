@@ -1110,7 +1110,7 @@ class PasswordResetRequestView(APIView):
             otp_token = EmailVerificationToken.generate_token(user.email, user=user, duration_minutes=60)
 
             origin = (request.headers.get('origin') or request.headers.get('referer') or '').lower()
-            role_data, _ = get_user_role_and_permissions(user)
+            role_data = UserMeSerializer(user).data
             role_name = (role_data.get('role_name') or '').lower()
             is_inspector_user = any(k in role_name for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
             is_agency_user = any(k in role_name for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator'])
