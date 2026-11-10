@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.db.models import Q
 from django.conf import settings
+from django.http import HttpResponse
 
 class StakeholderPermission(permissions.BasePermission):
     """
@@ -385,6 +386,28 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
         except ValueError as ex:
             return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(MeetingActionItemSerializer(item).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='end-meeting')
+    def end_meeting(self, request, pk=None):
+        """Conclude meeting session, generate certified PDF, and email to all participants."""
+        try:
+            res = StakeholderService.end_meeting_and_dispatch_minutes(pk, request.data, request.user)
+        except ValueError as ex:
+            return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='download-pdf')
+    def download_pdf(self, request, pk=None):
+        """Download branded PDF minutes of this meeting session."""
+        meeting = StakeholderService.get_meeting_instance(pk)
+        if not meeting:
+            return Response({"error": f"Meeting not found: {pk}"}, status=status.HTTP_404_NOT_FOUND)
+        from apps.stakeholders.meeting_pdf import generate_meeting_minutes_pdf
+        pdf_bytes = generate_meeting_minutes_pdf(meeting)
+        ref = meeting.meeting_reference or 'NXC-MTG'
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="Nexucon_Meeting_Report_{ref}.pdf"'
+        return response
 
 
 class StakeholderMessageViewSet(viewsets.ModelViewSet):

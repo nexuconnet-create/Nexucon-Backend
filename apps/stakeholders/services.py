@@ -903,6 +903,196 @@ class StakeholderService:
         return item
 
     @staticmethod
+    def end_meeting_and_dispatch_minutes(meeting_id, payload=None, user=None):
+        """
+        Conclude meeting, update minutes & transcript, generate branded PDF,
+        and automatically dispatch branded PDF and executive summary to all attendees.
+        """
+        payload = payload or {}
+        meeting = StakeholderService.get_meeting_instance(meeting_id)
+        if not meeting:
+            raise ValueError(f"Meeting not found: {meeting_id}")
+
+        from django.utils import timezone
+        import base64
+        from apps.stakeholders.meeting_pdf import generate_meeting_minutes_pdf
+        from apps.notifications.email_service import EmailService
+        from apps.notifications.models import Notification, EmailDelivery
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+
+        # 1. Update meeting fields
+        meeting.status = 'Completed'
+        meeting.ended_at = timezone.now()
+        
+        if 'notes' in payload:
+            meeting.minutes_notes = payload['notes']
+        if 'transcript' in payload:
+            meeting.transcript = payload['transcript']
+        if 'ai_summary' in payload:
+            meeting.ai_summary = payload['ai_summary']
+        if 'duration_seconds' in payload:
+            meeting.duration_seconds = int(payload.get('duration_seconds') or 0)
+
+        # Merge new participants if provided
+        live_participants = payload.get('participants')
+        if isinstance(live_participants, list) and live_participants:
+            existing_emails = {p.get('email', '').lower() for p in (meeting.participants or []) if isinstance(p, dict) and p.get('email')}
+            current_list = list(meeting.participants or [])
+            for lp in live_participants:
+                if isinstance(lp, dict):
+                    email = (lp.get('email') or '').lower().strip()
+                    if email and email not in existing_emails:
+                        current_list.append(lp)
+                        existing_emails.add(email)
+            meeting.participants = current_list
+
+        meeting.save()
+
+        # Create any new action items
+        new_items = payload.get('action_items') or []
+        for item in new_items:
+            if isinstance(item, dict) and item.get('title'):
+                MeetingActionItem.objects.create(
+                    meeting=meeting,
+                    title=item.get('title'),
+                    assignee_name=item.get('assignee_name', 'Project Lead'),
+                    due_date=item.get('due_date', 'Within 5 Business Days')
+                )
+
+        # 2. Generate Branded PDF
+        pdf_bytes = generate_meeting_minutes_pdf(meeting, payload)
+        pdf_b64 = base64.b64encode(pdf_bytes).decode('ascii')
+        ref = meeting.meeting_reference or 'NXC-MTG'
+        pdf_filename = f"Nexucon_Meeting_Report_{ref}.pdf"
+
+        # 3. Dispatch Email with PDF to all participants
+        should_send_email = payload.get('send_email', True)
+        emails_sent = 0
+        email_errors = []
+
+        if should_send_email:
+            recipients = set()
+            for p in (meeting.participants or []):
+                if isinstance(p, dict) and p.get('email'):
+                    e = p['email'].strip().lower()
+                    if '@' in e:
+                        recipients.add(e)
+            if meeting.initiated_by and meeting.initiated_by.email:
+                recipients.add(meeting.initiated_by.email.strip().lower())
+            if user and getattr(user, 'email', None):
+                recipients.add(user.email.strip().lower())
+
+            dur = meeting.duration_seconds
+            mins, secs = divmod(dur, 60)
+            hours, mins = divmod(mins, 60)
+            dur_str = f"{hours}h {mins}m {secs}s" if hours > 0 else f"{mins}m {secs}s"
+
+            for email in recipients:
+                p_match = next((p for p in (meeting.participants or []) if isinstance(p, dict) and (p.get('email') or '').lower() == email), None)
+                p_name = p_match.get('name') if p_match else email.split('@')[0].capitalize()
+
+                subject = f"🏛️ Nexucon Meeting Report & Certified Minutes: {meeting.title} ({ref})"
+                html = f"""
+                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);">
+                  <div style="background:#022C4F;color:#ffffff;padding:22px 26px;">
+                    <span style="font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#fed7aa;display:block;margin-bottom:4px;">NEXUCON REGULATORY FRAMEWORK</span>
+                    <h2 style="margin:0;font-size:20px;font-weight:bold;">🏛️ Official Council Meeting Minutes &amp; Report</h2>
+                  </div>
+                  <div style="padding:26px;color:#1e293b;line-height:1.6;">
+                    <p style="font-size:15px;margin:0 0 14px;">Hello <b>{p_name}</b>,</p>
+                    <p style="font-size:14px;margin:0 0 18px;color:#334155;">
+                      The official council session for <b>{meeting.title}</b> has concluded. The certified meeting minutes, attendance roll call, and verbatim transcript have been compiled into an official branded PDF attached to this transmission.
+                    </p>
+                    <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;padding:16px 20px;margin:18px 0;">
+                      <table style="width:100%;font-size:13px;border-collapse:collapse;">
+                        <tr><td style="padding:5px 0;color:#64748b;width:130px;"><b>Reference:</b></td><td style="padding:5px 0;font-family:monospace;font-weight:bold;color:#0284c7;">{ref}</td></tr>
+                        <tr><td style="padding:5px 0;color:#64748b;"><b>Project:</b></td><td style="padding:5px 0;font-weight:bold;color:#0f172a;">{meeting.project_name or 'General Infrastructure'}</td></tr>
+                        <tr><td style="padding:5px 0;color:#64748b;"><b>Session Date:</b></td><td style="padding:5px 0;">{meeting.date} ({meeting.time_slot})</td></tr>
+                        <tr><td style="padding:5px 0;color:#64748b;"><b>Total Duration:</b></td><td style="padding:5px 0;font-weight:bold;color:#16a34a;">{dur_str}</td></tr>
+                        <tr><td style="padding:5px 0;color:#64748b;"><b>Total Attendees:</b></td><td style="padding:5px 0;">{len(meeting.participants or [])} confirmed in roll call</td></tr>
+                      </table>
+                    </div>
+                    {f'<div style="background:#eff6ff;border-left:4px solid #3b82f6;padding:12px 16px;margin:16px 0;font-size:13px;border-radius:0 8px 8px 0;"><b style="color:#1e40af;">Executive Summary:</b><p style="margin:4px 0 0;color:#1e293b;">{meeting.ai_summary or meeting.minutes_notes or "Session proceedings officially certified."}</p></div>' if (meeting.ai_summary or meeting.minutes_notes) else ''}
+                    <p style="font-size:13px;color:#64748b;margin:20px 0 0;">
+                      📎 <b>Attached Document:</b> <span style="font-family:monospace;">{pdf_filename}</span> (Certified PDF including Roll Call, Minutes, Action Items, and Speech Transcript).
+                    </p>
+                  </div>
+                  <div style="background:#f1f5f9;padding:14px 26px;border-top:1px solid #e2e8f0;font-size:11px;color:#64748b;text-align:center;">
+                    Nexucon Government &amp; Construction Regulatory Framework • Official Statutory Record
+                  </div>
+                </div>
+                """
+
+                attachment_item = {
+                    "filename": pdf_filename,
+                    "content": pdf_b64
+                }
+
+                res = EmailService.send_email(
+                    to_email=email,
+                    subject=subject,
+                    html_content=html,
+                    attachments=[attachment_item]
+                )
+
+                if res.get("success"):
+                    emails_sent += 1
+                    try:
+                        EmailDelivery.objects.create(
+                            recipient=email,
+                            subject=subject,
+                            status='DELIVERED',
+                            provider_message_id=res.get("id") or "",
+                            entity_type='StakeholderMeeting',
+                            entity_id=meeting.id
+                        )
+                    except Exception:
+                        pass
+                else:
+                    email_errors.append({"email": email, "error": res.get("error")})
+
+            for p in (meeting.participants or []):
+                if isinstance(p, dict) and p.get('email'):
+                    u_match = User.objects.filter(email__iexact=p['email']).first()
+                    if u_match:
+                        try:
+                            Notification.objects.create(
+                                recipient=u_match,
+                                recipient_role=getattr(u_match, 'role_name', 'Stakeholder') or 'Stakeholder',
+                                category='GENERAL',
+                                event_type='MEETING_MINUTES_DISPATCHED',
+                                title=f"Meeting Minutes: {meeting.title}",
+                                message=f"The official minutes and branded PDF report for meeting {ref} have been generated and dispatched.",
+                                priority='Normal',
+                                is_read=False,
+                                metadata={'meeting_id': str(meeting.id), 'reference': ref}
+                            )
+                        except Exception:
+                            pass
+
+        StakeholderService.log_audit(
+            user=user,
+            action="MEETING_CONCLUDED_AND_MINUTES_DISPATCHED",
+            resource_id=meeting.id,
+            new_state={
+                "meeting_ref": ref,
+                "duration_seconds": meeting.duration_seconds,
+                "emails_sent": emails_sent
+            }
+        )
+
+        from apps.stakeholders.serializers import StakeholderMeetingSerializer
+        return {
+            "success": True,
+            "meeting": StakeholderMeetingSerializer(meeting).data,
+            "emails_sent": emails_sent,
+            "pdf_filename": pdf_filename,
+            "pdf_base64": pdf_b64
+        }
+
+    @staticmethod
     def upload_to_cloudflare_r2(data_or_file, file_name, folder_prefix="messages"):
         """
         Stream binary files or base64 data payloads directly into Cloudflare R2 storage bucket.

@@ -198,6 +198,10 @@ class StakeholderMeeting(models.Model):
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Scheduled')
     participants = models.JSONField(default=list)
     minutes_notes = models.TextField(blank=True, null=True)
+    transcript = models.TextField(blank=True, null=True, default='')
+    ai_summary = models.TextField(blank=True, null=True, default='')
+    duration_seconds = models.IntegerField(default=0)
+    ended_at = models.DateTimeField(blank=True, null=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
 

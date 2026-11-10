@@ -42,9 +42,9 @@ class EmailService:
         ).rstrip('/')
 
     @classmethod
-    def send_email(cls, to_email: str, subject: str, html_content: str, text_content: str = None, from_email: str = None) -> dict:
+    def send_email(cls, to_email: str, subject: str, html_content: str, text_content: str = None, from_email: str = None, attachments: list = None) -> dict:
         """
-        Send an email via the Resend REST API.
+        Send an email via the Resend REST API. Supports file attachments (e.g. PDFs).
         """
         api_key = cls.get_api_key()
         if not api_key:
@@ -60,6 +60,8 @@ class EmailService:
         }
         if text_content:
             payload["text"] = text_content
+        if attachments:
+            payload["attachments"] = attachments
 
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(
