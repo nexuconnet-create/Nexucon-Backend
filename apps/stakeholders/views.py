@@ -396,7 +396,7 @@ class StakeholderMeetingViewSet(viewsets.ModelViewSet):
             return Response({"error": str(ex)}, status=status.HTTP_404_NOT_FOUND)
         return Response(res, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['get'], url_path='download-pdf')
+    @action(detail=True, methods=['get'], url_path='download-pdf', permission_classes=[permissions.AllowAny])
     def download_pdf(self, request, pk=None):
         """Download branded PDF minutes of this meeting session."""
         meeting = StakeholderService.get_meeting_instance(pk)
