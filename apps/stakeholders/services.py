@@ -114,7 +114,7 @@ class StakeholderService:
                 "category": "inspector",
                 "entity_type": "Inspector",
                 "organization": f"Zone: {ins.assigned_zone}" if ins.assigned_zone else "Inspectorate Division",
-                "status": ins.availability_status or "Available",
+                "status": getattr(ins, 'availability_status', None) or ("Available" if getattr(ins, 'is_active', True) else "Inactive"),
             })
 
         # 2. Invited / Accredited Inspectors from UserInvitation
