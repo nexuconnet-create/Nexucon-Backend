@@ -1093,7 +1093,7 @@ class PasswordResetRequestView(APIView):
     permission_classes = (AllowAny,)
 
     def post(self, request):
-        identifier = (request.data.get('email') or request.data.get('username') or '').strip().lower()
+        identifier = (request.data.get('email') or request.data.get('username') or '').strip().lower().lstrip('@')
         if not identifier:
             return Response({
                 'success': False,
@@ -1104,26 +1104,36 @@ class PasswordResetRequestView(APIView):
         if not user:
             user = User.objects.filter(username__iexact=identifier).first()
 
-        if user and user.is_active:
+        if not user:
+            logger.info(f"Password reset requested for unregistered identifier: {identifier}")
+        elif not user.is_active:
+            logger.warning(f"Password reset requested for inactive account: {user.email}")
+        else:
             token = default_token_generator.make_token(user)
             uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
             otp_token = EmailVerificationToken.generate_token(user.email, user=user, duration_minutes=60)
 
+            portal = (request.data.get('portal') or '').strip().lower()
             origin = (request.headers.get('origin') or request.headers.get('referer') or '').lower()
             role_data = UserMeSerializer(user).data
             role_name = (role_data.get('role_name') or '').lower()
+            has_gov_profile = hasattr(user, 'government_profile') and user.government_profile is not None
             is_inspector_user = any(k in role_name for k in ['inspector', 'field officer', 'site officer', 'hse', 'surveillance'])
-            is_agency_user = any(k in role_name for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator'])
+            is_agency_user = (
+                user.is_superuser
+                or any(k in role_name for k in ['agency', 'director', 'executive', 'admin', 'ministry', 'regulator', 'government'])
+                or (has_gov_profile and not is_inspector_user)
+            )
 
-            if 'inspector' in origin or is_inspector_user:
+            if portal == 'inspector' or 'inspector' in origin or is_inspector_user:
                 base_url = 'https://inspector.nexucon.net'
                 reset_path = '/inspector/reset-password'
                 user_label = 'Field Inspector'
-            elif 'government' in origin or is_agency_user:
+            elif portal in ('government', 'agency') or 'government' in origin or is_agency_user:
                 base_url = getattr(settings, 'FRONTEND_URL', 'https://nexucon.net').rstrip('/')
                 reset_path = '/government/reset-password'
                 user_label = 'Government Official'
-            elif 'stakeholder' in origin:
+            elif portal == 'stakeholder' or 'stakeholder' in origin:
                 base_url = 'https://stakeholder.nexucon.net'
                 reset_path = '/stakeholder/reset-password'
                 user_label = 'Stakeholder Official'
@@ -1147,7 +1157,10 @@ class PasswordResetRequestView(APIView):
                     subject='Reset Your Nexucon Password',
                     html_content=html_body,
                 )
-                logger.info(f"Password reset email dispatched to {user.email}: {dispatch_res}")
+                if dispatch_res.get('success'):
+                    logger.info(f"Password reset email dispatched to {user.email}: {dispatch_res}")
+                else:
+                    logger.error(f"Password reset email failed to dispatch to {user.email}: {dispatch_res}")
             except Exception as e:
                 logger.error(f"Failed to dispatch password reset email to {user.email}: {e}")
 
@@ -1166,7 +1179,7 @@ class PasswordResetConfirmView(APIView):
     permission_classes = (AllowAny,)
 
     def post(self, request):
-        email = (request.data.get('email') or '').strip().lower()
+        email = (request.data.get('email') or '').strip().lower().lstrip('@')
         token = (request.data.get('token') or '').strip()
         code = (request.data.get('code') or '').strip()
         uidb64 = (request.data.get('uid') or '').strip()
@@ -1202,12 +1215,23 @@ class PasswordResetConfirmView(APIView):
                 email__iexact=user.email,
                 code=code,
                 is_used=False,
+                attempts__lt=5,
                 expires_at__gte=timezone.now()
             ).first()
             if ev_token:
                 is_token_valid = True
                 ev_token.is_used = True
                 ev_token.save(update_fields=['is_used'])
+            else:
+                # Increment attempt count on active reset tokens to enforce 5-attempt cap
+                latest_token = EmailVerificationToken.objects.filter(
+                    email__iexact=user.email,
+                    is_used=False,
+                    expires_at__gte=timezone.now()
+                ).first()
+                if latest_token:
+                    latest_token.attempts += 1
+                    latest_token.save(update_fields=['attempts'])
 
         if not is_token_valid:
             return Response({
