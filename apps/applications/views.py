@@ -30,7 +30,22 @@ class ApplicationViewSet(viewsets.ModelViewSet):
         # for projects within their scope (state HQ sees all, district staff
         # their district, clients their own projects).
         if self.request.user.is_authenticated and not self.request.user.is_superuser:
-            queryset = queryset.filter(project__in=scoped_projects(self.request.user))
+            user_email = (self.request.user.email or '').strip().lower()
+            if user_email == 'siteiq@nexucon.net':
+                queryset = queryset.filter(
+                    Q(project__in=scoped_projects(self.request.user)) |
+                    Q(applicant__email__iexact='siteiq@nexucon.net') |
+                    Q(applicant__email__iexact='nexucon@gmail.com')
+                )
+            else:
+                scoped = scoped_projects(self.request.user)
+                queryset = queryset.filter(
+                    Q(project__in=scoped) |
+                    Q(applicant=self.request.user)
+                ).exclude(
+                    Q(applicant__email__iexact='siteiq@nexucon.net') |
+                    Q(applicant__email__iexact='nexucon@gmail.com')
+                )
         status_param = self.request.query_params.get('status')
         project_param = self.request.query_params.get('project')
         priority_param = self.request.query_params.get('priority')
@@ -120,9 +135,28 @@ class ApplicationViewSet(viewsets.ModelViewSet):
     def stats(self, request):
         """Return counts for dashboard tabs and overview cards."""
         # Multi-tenant scoping: counts reflect only the user's scoped projects.
-        qs = Application.objects.all()
-        if request.user.is_authenticated and not request.user.is_superuser:
-            qs = qs.filter(project__in=scoped_projects(request.user))
+        if not request.user.is_authenticated:
+            return Response({'success': False, 'message': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        user_email = (request.user.email or '').strip().lower()
+        if request.user.is_superuser:
+            qs = Application.objects.all()
+        elif user_email == 'siteiq@nexucon.net':
+            qs = Application.objects.filter(
+                Q(project__in=scoped_projects(request.user)) |
+                Q(applicant__email__iexact='siteiq@nexucon.net') |
+                Q(applicant__email__iexact='nexucon@gmail.com')
+            )
+        else:
+            scoped = scoped_projects(request.user)
+            qs = Application.objects.filter(
+                Q(project__in=scoped) |
+                Q(applicant=request.user)
+            ).exclude(
+                Q(applicant__email__iexact='siteiq@nexucon.net') |
+                Q(applicant__email__iexact='nexucon@gmail.com')
+            )
+
         total = qs.count()
         submitted = qs.filter(status='SUBMITTED').count()
         under_review = qs.filter(status__in=['UNDER_REVIEW', 'REVIEW_COMPLETED', 'APPROVAL_REQUESTED']).count()

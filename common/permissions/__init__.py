@@ -85,55 +85,101 @@ def user_agency(user):
     return profile.agency if profile else None
 
 
+IN_HOUSE_MOCK_NAMES = [
+    'Eko Atlantic Marina Towers',
+    'Victoria Island Financial Center',
+    'Lekki Free Trade Zone Warehouse Complex',
+    'Ikoyi Imperial Heights Luxury Condominiums',
+    'Botanical Garden Road Ebute Metta, Lagos State.',
+    'Reinforce Concrete Floor Slab on Laydown Area (Scope 01)',
+    'Ladol Exxon Laydown Area',
+    'test gps',
+    'Lekki Horizon Tower',
+]
+
+
 def scoped_projects(user):
     """
-    Projects visible to `user` under the hierarchy:
-      State HQ / Director / Agency Head -> all projects
-      District staff      -> projects in their district
+    Projects visible to `user` under the multi-tenant hierarchy:
+      Superuser           -> global administrative access
+      SiteIQ in-house     -> in-house LASBCA / mock seed projects
+      Agency Head / Staff -> strictly projects belonging to their own Agency or created by them
+      District staff      -> projects in their district belonging to their agency
       Inspector           -> projects they are assigned to (`assigned_inspector_user`,
                              else a real inspection), else their district
       Client developer    -> projects linked to their developer organization
       Everyone else       -> none
     """
     from apps.projects.models import Project
+    from django.db.models import Q
 
     if user is None or not getattr(user, 'is_authenticated', False):
         return Project.objects.none()
-    if user.is_superuser or user_is_state_hq(user) or user_is_agency_head(user):
+
+    # Global superuser administrative view
+    if user.is_superuser:
         return Project.objects.all()
 
+    user_email = (user.email or '').strip().lower()
+    is_in_house_siteiq = (user_email == 'siteiq@nexucon.net')
+
     profile = get_profile(user)
-    district = profile.district if profile else None
+    agency = profile.agency if profile else None
     role = user_role_name(user)
+    role_lower = role.lower() if role else ''
 
-    if role == ROLE_INSPECTOR or (role and 'inspector' in role.lower()):
-        from django.db.models import Q
-        # The assignment is a foreign key, not a name match. Access follows the
-        # user, so it cannot be obtained by typing someone's name into a project
-        # and it does not move when a profile name is edited.
-        #
-        # `assigned_inspector` is deliberately NOT matched here, not even as a
-        # fallback. It is a display mirror of this very column
-        # (`Project.sync_assigned_inspector`), so matching it would restore the
-        # escalation for every row the mirror had not yet caught up with —
-        # exactly the rows an attacker would choose. Rows written before the
-        # backfill get their key from `manage.py
-        # backfill_project_assigned_inspector_user`.
-        q = Q(inspections__inspector=user) | Q(assigned_inspector_user=user)
-        if district:
-            q |= Q(district=district)
-        return Project.objects.filter(q).distinct()
+    # 1. In-house Nexucon account (siteiq@nexucon.net) - sees in-house LASBCA records and seed test projects
+    if is_in_house_siteiq:
+        q_siteiq = (
+            Q(client_contact__icontains='siteiq@nexucon.net') |
+            Q(developer_email__iexact='siteiq@nexucon.net') |
+            Q(created_by=user) |
+            Q(name__in=IN_HOUSE_MOCK_NAMES)
+        )
+        if agency:
+            q_siteiq |= Q(agency=agency) | Q(regulatory_authority__iexact=agency.name) | Q(regulatory_authority__iexact=agency.code)
+        else:
+            q_siteiq |= Q(agency__code='LASBCA') | Q(regulatory_authority__icontains='LASBCA')
+        return Project.objects.filter(q_siteiq).distinct()
 
-    # Client developer: projects tied to their developer record.
+    # 2. Government Agency Staff & Agency Heads (external/new agency accounts, e.g. skprojects7061@gmail.com)
+    # Strictly isolated per tenant agency — never leak in-house siteiq/LASBCA projects!
+    if profile:
+        q_agency = Q(created_by=user) | Q(client_contact__icontains=user.email) | Q(developer_email__iexact=user.email)
+        if agency:
+            q_agency |= Q(agency=agency)
+            if agency.code and agency.code != 'LASBCA':
+                q_agency |= Q(regulatory_authority__iexact=agency.code)
+            if agency.name and agency.code != 'LASBCA':
+                q_agency |= Q(regulatory_authority__iexact=agency.name)
+
+        if 'inspector' in role_lower:
+            q_agency |= Q(inspections__inspector=user) | Q(assigned_inspector_user=user)
+            if profile.district:
+                q_agency |= Q(district=profile.district)
+        elif profile.district and agency:
+            q_agency |= Q(district=profile.district, agency=agency)
+
+        # Exclude in-house mock seed projects and in-house LASBCA projects from external agency users
+        qs = Project.objects.filter(q_agency)
+        if not (agency and agency.code == 'LASBCA'):
+            qs = qs.exclude(
+                (Q(name__in=IN_HOUSE_MOCK_NAMES) & ~Q(created_by=user)) |
+                (Q(agency__code='LASBCA') & ~Q(created_by=user)) |
+                (Q(client_contact__icontains='siteiq@nexucon.net') & ~Q(created_by=user))
+            )
+        return qs.distinct()
+
+    # 3. Client developer: projects tied to their developer record.
     from apps.stakeholders.models import Developer
     developer = Developer.objects.filter(user=user).first()
     if developer:
         return Project.objects.filter(
-            developer_organization=developer.name,
+            Q(developer_organization__iexact=developer.name) |
+            Q(developer_name__iexact=developer.name) |
+            Q(developer_email__iexact=user.email)
         ).distinct()
 
-    if district:
-        return Project.objects.filter(district=district)
     return Project.objects.none()
 
 

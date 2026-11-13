@@ -107,6 +107,14 @@ class Project(models.Model):
         'government.District', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='projects', help_text="District office with jurisdiction over this project",
     )
+    agency = models.ForeignKey(
+        'government.Agency', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='projects', help_text="Government agency that owns/regulates this project"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_projects', help_text="User who created this project"
+    )
 
     # 1. Project Information
     name = models.CharField(max_length=255)

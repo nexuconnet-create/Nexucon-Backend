@@ -47,7 +47,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
-        queryset = Project.objects.select_related('district').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
+        queryset = Project.objects.select_related('district', 'agency', 'created_by').prefetch_related('scans', 'bim_models').all().order_by('-created_at')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated and not user.is_superuser:
+            from common.permissions import scoped_projects
+            scoped = scoped_projects(user)
+            queryset = queryset.filter(pk__in=scoped)
+
         status_param = self.request.query_params.get('status')
         search_param = self.request.query_params.get('search')
 
@@ -73,27 +79,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 Q(site_location__icontains=search_param) |
                 Q(developer_name__icontains=search_param)
             )
-
-        # Constrain mock seed projects: Only SiteIQ@nexucon.net and official inspectors
-        # have visibility into the initial regulatory mock projects during the testing period.
-        user = getattr(self.request, 'user', None)
-        if user and user.is_authenticated:
-            user_email = (user.email or '').strip().lower()
-            is_siteiq = (user_email == 'siteiq@nexucon.net')
-            has_gov = hasattr(user, 'government_profile') and user.government_profile
-            is_inspector = bool(has_gov and user.government_profile.role and 'inspector' in user.government_profile.role.name.lower())
-
-            if not is_siteiq and not is_inspector and not user.is_superuser:
-                mock_names = [
-                    'Eko Atlantic Marina Towers',
-                    'Victoria Island Financial Center',
-                    'Lekki Free Trade Zone Warehouse Complex',
-                    'Ikoyi Imperial Heights Luxury Condominiums'
-                ]
-                queryset = queryset.filter(
-                    Q(developer_email__iexact=user.email) |
-                    Q(client_contact__icontains=user.email)
-                ).exclude(name__in=mock_names)
 
         return queryset
 
@@ -336,11 +321,28 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        project = serializer.save(status='PLANNING')
+        user = self.request.user if (self.request.user and self.request.user.is_authenticated) else None
+        agency = None
+        if user and hasattr(user, 'government_profile') and user.government_profile:
+            agency = user.government_profile.agency
+
+        extra_kwargs = {'status': 'PLANNING'}
+        if user:
+            extra_kwargs['created_by'] = user
+            if not serializer.validated_data.get('client_contact'):
+                extra_kwargs['client_contact'] = user.email
+        if agency:
+            extra_kwargs['agency'] = agency
+            if not serializer.validated_data.get('regulatory_authority'):
+                extra_kwargs['regulatory_authority'] = agency.name or agency.code
+            if not serializer.validated_data.get('assigned_department'):
+                extra_kwargs['assigned_department'] = agency.department_name or agency.name
+
+        project = serializer.save(**extra_kwargs)
         # Automatically create an Application for this new project to appear in the review queue
         from django.contrib.auth import get_user_model
         UserModel = get_user_model()
-        applicant_user = self.request.user if (self.request.user and self.request.user.is_authenticated) else UserModel.objects.first()
+        applicant_user = user or UserModel.objects.first()
         if applicant_user:
             Application.objects.create(
                 project=project,

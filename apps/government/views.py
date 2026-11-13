@@ -79,18 +79,47 @@ class QuickActionsSummaryView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
-        applications_pending = Application.objects.filter(status__in=['SUBMITTED', 'UNDER_REVIEW']).count()
-        inspections_due = Inspection.objects.filter(status__in=['REQUESTED', 'SCHEDULED']).count()
+        from common.permissions import scoped_projects
+        from django.db.models import Q
+        user = request.user
+        user_email = (user.email or '').strip().lower()
+
+        if user.is_superuser:
+            app_qs = Application.objects.all()
+            insp_qs = Inspection.objects.all()
+        elif user_email == 'siteiq@nexucon.net':
+            allowed = scoped_projects(user)
+            app_qs = Application.objects.filter(
+                Q(project__in=allowed) |
+                Q(applicant__email__iexact='siteiq@nexucon.net') |
+                Q(applicant__email__iexact='nexucon@gmail.com')
+            )
+            insp_qs = Inspection.objects.filter(project__in=allowed)
+        else:
+            allowed = scoped_projects(user)
+            app_qs = Application.objects.filter(
+                Q(project__in=allowed) |
+                Q(applicant=user)
+            ).exclude(
+                Q(applicant__email__iexact='siteiq@nexucon.net') |
+                Q(applicant__email__iexact='nexucon@gmail.com')
+            )
+            insp_qs = Inspection.objects.filter(project__in=allowed)
+
+        applications_pending = app_qs.filter(status__in=['SUBMITTED', 'UNDER_REVIEW']).count()
+        inspections_due = insp_qs.filter(status__in=['REQUESTED', 'SCHEDULED']).count()
         
         try:
             from apps.monitoring.models import SiteVerification
-            site_verifications_pending = SiteVerification.objects.filter(status='PENDING_VERIFICATION').count()
+            sv_qs = SiteVerification.objects.all() if user.is_superuser else SiteVerification.objects.filter(project__in=scoped_projects(user))
+            site_verifications_pending = sv_qs.filter(status='PENDING_VERIFICATION').count()
         except Exception:
             site_verifications_pending = 0
 
         try:
             from apps.bim.models import BIMModel
-            bim_models_pending = BIMModel.objects.filter(status__in=['Under Review', 'PENDING', 'processing']).count()
+            bim_qs = BIMModel.objects.all() if user.is_superuser else BIMModel.objects.filter(project__in=scoped_projects(user))
+            bim_models_pending = bim_qs.filter(status__in=['Under Review', 'PENDING', 'processing']).count()
         except Exception:
             bim_models_pending = 0
 

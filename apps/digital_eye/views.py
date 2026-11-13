@@ -93,9 +93,33 @@ def _scoped_legacy_queryset(queryset, user):
     on either. Rows naming no project at all are withheld rather than shown —
     an unattributable statutory record must not leak across agencies.
     """
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return queryset.none()
+    if user.is_superuser:
+        return queryset
+
+    user_email = (user.email or '').strip().lower()
     allowed = scoped_projects(user)
     allowed_ids = [str(pk) for pk in allowed.values_list('pk', flat=True)]
-    return queryset.filter(Q(project__in=allowed) | Q(project_id_str__in=allowed_ids))
+
+    if user_email == 'siteiq@nexucon.net':
+        return queryset.filter(
+            Q(project__in=allowed) |
+            Q(project_id_str__in=allowed_ids)
+        ).distinct()
+
+    qs = queryset.filter(Q(project__in=allowed) | Q(project_id_str__in=allowed_ids))
+    model = getattr(queryset, 'model', None)
+    if model:
+        field_names = [f.name for f in model._meta.get_fields()]
+        if 'created_by' in field_names:
+            qs = qs.exclude(
+                Q(created_by__email__iexact='siteiq@nexucon.net') |
+                Q(created_by__email__iexact='nexucon@gmail.com') |
+                Q(created_by__email__iexact='abdullateefojugbele@gmail.com') |
+                Q(created_by__email__iexact='ojugbelelateef2006@gmail.com')
+            )
+    return qs.distinct()
 
 
 def _nexucon_link_settings(request):
@@ -156,11 +180,36 @@ class FieldDeviceViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = FieldDevice.objects.select_related('assigned_project', 'registered_by')
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return FieldDevice.objects.none()
+
+        user_email = (user.email or '').strip().lower()
+        if user.is_superuser:
+            pass
+        elif user_email == 'siteiq@nexucon.net':
+            allowed_pks = scoped_projects(user).values_list('pk', flat=True)
+            qs = qs.filter(
+                Q(assigned_project_id__in=allowed_pks) |
+                Q(registered_by=user) |
+                Q(registered_by__email__iexact='siteiq@nexucon.net') |
+                Q(registered_by__email__iexact='nexucon@gmail.com') |
+                Q(device_id='PUN-2026-0881')
+            )
+        else:
+            allowed_pks = scoped_projects(user).values_list('pk', flat=True)
+            qs = qs.filter(
+                Q(assigned_project_id__in=allowed_pks) |
+                Q(registered_by=user)
+            ).exclude(
+                Q(registered_by__email__iexact='siteiq@nexucon.net') |
+                Q(registered_by__email__iexact='nexucon@gmail.com') |
+                Q(device_id='PUN-2026-0881')
+            )
+
         project = self.request.query_params.get('project')
         if project:
-            allowed = scoped_projects(self.request.user).filter(pk=project)
-            if not allowed.exists():
-                return FieldDevice.objects.none()
+            qs = qs.filter(assigned_project_id=project)
         return qs
 
     def perform_create(self, serializer):
@@ -570,9 +619,32 @@ class PUNDITTestViewSet(viewsets.ModelViewSet):
                      'test_location', 'notes']
 
     def get_queryset(self):
-        queryset = PUNDITTest.objects.filter(
-            project__in=scoped_projects(self.request.user),
-        ).select_related('project', 'device', 'operator', 'created_by').prefetch_related('files', 'readings')
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return PUNDITTest.objects.none()
+
+        user_email = (user.email or '').strip().lower()
+        if user.is_superuser:
+            queryset = PUNDITTest.objects.all()
+        elif user_email == 'siteiq@nexucon.net':
+            queryset = PUNDITTest.objects.filter(
+                Q(project__in=scoped_projects(user)) |
+                Q(created_by__email__iexact='siteiq@nexucon.net') |
+                Q(created_by__email__iexact='nexucon@gmail.com')
+            )
+        else:
+            scoped = scoped_projects(user)
+            queryset = PUNDITTest.objects.filter(
+                Q(project__in=scoped) |
+                Q(created_by=user) |
+                Q(operator=user)
+            ).exclude(
+                Q(created_by__email__iexact='siteiq@nexucon.net') |
+                Q(created_by__email__iexact='nexucon@gmail.com') |
+                Q(created_by__email__iexact='abdullateefojugbele@gmail.com') |
+                Q(created_by__email__iexact='ojugbelelateef2006@gmail.com')
+            )
+        queryset = queryset.select_related('project', 'device', 'operator', 'created_by').prefetch_related('files', 'readings')
         for param, field in (
             ('test_type', 'test_type'),
             ('quality_grade', 'quality_grade'),
